@@ -2,16 +2,17 @@
 //!
 //! Vimscript value accessors and container operations. Function names,
 //! signatures, and control flow match the C source (PORT.md Rules A/B/4).
-#![allow(non_snake_case, non_upper_case_globals)]
+#![allow(non_snake_case, non_upper_case_globals, non_camel_case_types)]
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::ported::charset::{vim_str2nr, STR2NR_ALL};
 use crate::ported::eval::typval_defs_h::{
-    blob_T, dict_T, list_T, listitem_T, typval_T, typval_vval_union::*, varnumber_T, BoolVarValue::*,
-    VarLockStatus, VarType::*,
+    blob_T, dict_T, float_T, list_T, listitem_T, typval_T, typval_vval_union::*, varnumber_T,
+    BoolVarValue, BoolVarValue::*, SpecialVarValue::*, VarLockStatus, VarType::*,
 };
+use crate::ported::eval_h::{FAIL, OK};
 use crate::ported::message::{emsg, semsg};
 
 /// `static const char *const num_errors[]` from `Src/eval/typval.c` — the
@@ -253,6 +254,69 @@ pub fn tv_list_equal(l1: &Rc<RefCell<list_T>>, l2: &Rc<RefCell<list_T>>, ic: boo
         .all(|(a, b)| tv_equal(&a.li_tv, &b.li_tv, ic))
 }
 
+/// Port of `tv_list_uidx()` from `Src/eval/typval.h` (c:136) — normalize a
+/// possibly-negative index into `0..lv_len`, or -1 if out of range.
+pub fn tv_list_uidx(l: &list_T, n: i32) -> i32 {
+    let mut n = n;
+    // c: if (n < 0) n += tv_list_len(l);
+    if n < 0 {
+        n += tv_list_len(l);
+    }
+    // c: if (n < 0 || n >= tv_list_len(l)) return -1;
+    if n < 0 || n >= tv_list_len(l) {
+        return -1;
+    }
+    n
+}
+
+/// Port of `tv_list_find()` from `Src/eval/typval.c` (c:1612) — the item at
+/// index `n` (negative counts from the end), or `None` if out of range. The C
+/// linked-list walk and `lv_idx` cache are a perf detail; over the `Vec` model
+/// this is a direct index after `tv_list_uidx`.
+pub fn tv_list_find(l: &list_T, n: i32) -> Option<&listitem_T> {
+    let n = tv_list_uidx(l, n);
+    if n == -1 {
+        return None;
+    }
+    l.lv_items.get(n as usize)
+}
+
+/// Port of `tv_list_find_nr()` from `Src/eval/typval.c` (c:1684) — `l[n]` as a
+/// Number, or -1 (with `*ret_error = true`) when the index is out of range.
+pub fn tv_list_find_nr(l: &list_T, n: i32, ret_error: Option<&mut bool>) -> varnumber_T {
+    match tv_list_find(l, n) {
+        None => {
+            if let Some(e) = ret_error {
+                *e = true;
+            }
+            -1
+        }
+        Some(li) => tv_get_number_chk(&li.li_tv, ret_error),
+    }
+}
+
+/// Port of `tv_list_find_str()` from `Src/eval/typval.c` (c:1703) — `l[n]` as a
+/// string, or `None` (with an `emsg`) when the index is out of range.
+pub fn tv_list_find_str(l: &list_T, n: i32) -> Option<String> {
+    match tv_list_find(l, n) {
+        None => {
+            semsg(&format!("E684: list index out of range: {n}"));
+            None
+        }
+        Some(li) => Some(tv_get_string(&li.li_tv)),
+    }
+}
+
+/// Port of `tv_list_reverse()` from `Src/eval/typval.c` (c:1581) — reverse the
+/// list in place. (The C pointer swaps and `lv_idx` fix-up reduce to
+/// `Vec::reverse` here.)
+pub fn tv_list_reverse(l: &mut list_T) {
+    if tv_list_len(l) <= 1 {
+        return;
+    }
+    l.lv_items.reverse();
+}
+
 // ── dicts ──
 
 /// Port of `tv_dict_alloc()` from `Src/eval/typval.c`.
@@ -273,6 +337,363 @@ pub fn tv_dict_find<'d>(d: &'d dict_T, key: &str) -> Option<&'d typval_T> {
 /// Port of `tv_dict_add_tv()` from `Src/eval/typval.c` — set a key's value.
 pub fn tv_dict_add_tv(d: &mut dict_T, key: &str, tv: typval_T) {
     d.dv_hashtab.insert(key.to_string(), tv);
+}
+
+/// Port of `tv_dict_add()` from `Src/eval/typval.c` (c:2472) — add an item under
+/// `key`, returning `FAIL` if the key already exists (no overwrite — unlike
+/// [`tv_dict_add_tv`]). The dictitem here is the hashtab entry itself.
+/// (`tv_dict_wrong_func_name` only guards `VAR_FUNC` keys and is omitted —
+/// funcrefs-as-keys are not modeled.)
+pub fn tv_dict_add(d: &mut dict_T, key: &str, tv: typval_T) -> i32 {
+    if d.dv_hashtab.contains_key(key) {
+        return FAIL;
+    }
+    d.dv_hashtab.insert(key.to_string(), tv);
+    OK
+}
+
+/// Port of `tv_dict_add_nr()` from `Src/eval/typval.c` (c:2556).
+pub fn tv_dict_add_nr(d: &mut dict_T, key: &str, nr: varnumber_T) -> i32 {
+    tv_dict_add(
+        d,
+        key,
+        typval_T { v_type: VAR_NUMBER, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_number(nr) },
+    )
+}
+
+/// Port of `tv_dict_add_float()` from `Src/eval/typval.c` (c:2569).
+pub fn tv_dict_add_float(d: &mut dict_T, key: &str, nr: float_T) -> i32 {
+    tv_dict_add(
+        d,
+        key,
+        typval_T { v_type: VAR_FLOAT, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_float(nr) },
+    )
+}
+
+/// Port of `tv_dict_add_bool()` from `Src/eval/typval.c` (c:2593).
+pub fn tv_dict_add_bool(d: &mut dict_T, key: &str, val: BoolVarValue) -> i32 {
+    tv_dict_add(
+        d,
+        key,
+        typval_T { v_type: VAR_BOOL, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_bool(val) },
+    )
+}
+
+/// Port of `tv_dict_add_str()` from `Src/eval/typval.c` (c:2616) — adds a
+/// (copied) string entry. Delegates as in C through `tv_dict_add_str_len(…,-1)`.
+pub fn tv_dict_add_str(d: &mut dict_T, key: &str, val: &str) -> i32 {
+    tv_dict_add_allocated_str(d, key, val.to_string())
+}
+
+/// Port of `tv_dict_add_allocated_str()` from `Src/eval/typval.c` (c:2648) —
+/// adds `val` as a `VAR_STRING` entry, taking ownership of the string.
+pub fn tv_dict_add_allocated_str(d: &mut dict_T, key: &str, val: String) -> i32 {
+    tv_dict_add(
+        d,
+        key,
+        typval_T { v_type: VAR_STRING, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_string(val) },
+    )
+}
+
+/// Port of `tv_dict_has_key()` from `Src/eval/typval.c` (c:2270).
+pub fn tv_dict_has_key(d: &dict_T, key: &str) -> bool {
+    tv_dict_find(d, key).is_some()
+}
+
+/// Port of `tv_dict_get_number()` from `Src/eval/typval.c` (c:2299) — the Number
+/// value of `key`, or 0 if absent.
+pub fn tv_dict_get_number(d: &dict_T, key: &str) -> varnumber_T {
+    tv_dict_get_number_def(d, key, 0)
+}
+
+/// Port of `tv_dict_get_number_def()` from `Src/eval/typval.c` (c:2312) — the
+/// Number value of `key`, or `def` if absent.
+pub fn tv_dict_get_number_def(d: &dict_T, key: &str, def: varnumber_T) -> varnumber_T {
+    match tv_dict_find(d, key) {
+        None => def,
+        Some(di) => tv_get_number(di),
+    }
+}
+
+/// Port of `tv_dict_get_bool()` from `Src/eval/typval.c` (c:2322) — the boolean
+/// value of `key`, or `def` if absent.
+pub fn tv_dict_get_bool(d: &dict_T, key: &str, def: varnumber_T) -> varnumber_T {
+    match tv_dict_find(d, key) {
+        None => def,
+        Some(di) => tv_get_bool(di),
+    }
+}
+
+/// Port of `tv_dict_get_string()` from `Src/eval/typval.c` (c:2367) — the string
+/// value of `key` (numbers coerced), or `None` if the key does not exist.
+pub fn tv_dict_get_string(d: &dict_T, key: &str) -> Option<String> {
+    tv_dict_find(d, key).map(tv_get_string)
+}
+
+/// Port of `tv_get_number()` from `Src/eval/typval.c` (c:4188) — the Number
+/// value of `tv`, errors reported via `emsg` (discarded here).
+pub fn tv_get_number(tv: &typval_T) -> varnumber_T {
+    let mut error = false;
+    tv_get_number_chk(tv, Some(&mut error))
+}
+
+/// Port of `tv2bool()` from `Src/eval/typval.c` (c:4684) — truthiness of `tv`
+/// (used by `:if`/`:while` and the logical operators).
+pub fn tv2bool(tv: &typval_T) -> bool {
+    match (tv.v_type, &tv.vval) {
+        (VAR_NUMBER, v_number(n)) => *n != 0,
+        (VAR_FLOAT, v_float(f)) => *f != 0.0,
+        (VAR_FUNC, v_string(s)) | (VAR_STRING, v_string(s)) => !s.is_empty(),
+        (VAR_LIST, v_list(l)) => l.as_ref().is_some_and(|l| l.borrow().lv_len > 0),
+        (VAR_DICT, v_dict(d)) => d.as_ref().is_some_and(|d| !d.borrow().dv_hashtab.is_empty()),
+        (VAR_BOOL, v_bool(b)) => *b == kBoolVarTrue,
+        (VAR_SPECIAL, v_special(s)) => *s != kSpecialVarNull,
+        (VAR_BLOB, v_blob(b)) => b.as_ref().is_some_and(|b| !b.borrow().bv_ga.is_empty()),
+        // VAR_PARTIAL (not modeled) and VAR_UNKNOWN are falsy.
+        _ => false,
+    }
+}
+
+/// Port of `tv_copy()` from `Src/eval/typval.c` (c:3724) — copy `from` into `to`
+/// with the lock cleared. Rc-backed compound values (List/Dict/Blob) clone by
+/// reference-count bump (== `tv_list_ref` / `dv_refcount++` / `bv_refcount++`);
+/// strings clone by value (== `xstrdup`).
+pub fn tv_copy(from: &typval_T, to: &mut typval_T) {
+    *to = from.clone();
+    to.v_lock = VarLockStatus::VAR_UNLOCKED;
+}
+
+// ── argument / value type checks (Src/eval/typval.c) ──
+//
+// The C functions index a NUL-terminated `argvars` array, so an absent optional
+// argument reads as the `VAR_UNKNOWN` sentinel. Over the `&[typval_T]` slice an
+// absent argument is simply `idx >= len`, which these ports treat as
+// `VAR_UNKNOWN` (via `args.get(idx)`).
+
+/// Port of `tv_check_str_or_nr()` from `Src/eval/typval.c` (c:4051) — true if
+/// `tv` is a Number or String; otherwise `emsg` and false.
+pub fn tv_check_str_or_nr(tv: &typval_T) -> bool {
+    match tv.v_type {
+        VAR_NUMBER | VAR_STRING => true,
+        VAR_FLOAT => {
+            emsg("E805: Expected a Number or a String, Float found");
+            false
+        }
+        VAR_PARTIAL | VAR_FUNC => {
+            emsg("E703: Expected a Number or a String, Funcref found");
+            false
+        }
+        VAR_LIST => {
+            emsg("E745: Expected a Number or a String, List found");
+            false
+        }
+        VAR_DICT => {
+            emsg("E728: Expected a Number or a String, Dictionary found");
+            false
+        }
+        VAR_BLOB => {
+            emsg("E974: Expected a Number or a String, Blob found");
+            false
+        }
+        VAR_BOOL => {
+            emsg("E5299: Expected a Number or a String, Boolean found");
+            false
+        }
+        VAR_SPECIAL => {
+            emsg("E5300: Expected a Number or a String");
+            false
+        }
+        VAR_UNKNOWN => {
+            semsg("E685: Internal error: tv_check_str_or_nr(UNKNOWN)");
+            false
+        }
+    }
+}
+
+/// Port of `tv_check_num()` from `Src/eval/typval.c` (c:4110) — true if `tv` is
+/// a Number or coercible to one (Bool/Special/String); otherwise `emsg`/false.
+pub fn tv_check_num(tv: &typval_T) -> bool {
+    match tv.v_type {
+        VAR_NUMBER | VAR_BOOL | VAR_SPECIAL | VAR_STRING => true,
+        VAR_FUNC | VAR_PARTIAL => {
+            emsg("E703: Using a Funcref as a Number");
+            false
+        }
+        VAR_LIST => {
+            emsg("E745: Using a List as a Number");
+            false
+        }
+        VAR_DICT => {
+            emsg("E728: Using a Dictionary as a Number");
+            false
+        }
+        VAR_FLOAT => {
+            emsg("E805: Using a Float as a Number");
+            false
+        }
+        VAR_BLOB => {
+            emsg("E974: Using a Blob as a Number");
+            false
+        }
+        VAR_UNKNOWN => {
+            emsg("E685: using an invalid value as a Number");
+            false
+        }
+    }
+}
+
+/// Port of `tv_check_str()` from `Src/eval/typval.c` (c:4154) — true if `tv` is
+/// a String or coercible to one (Number/Bool/Special/Float); else `emsg`/false.
+pub fn tv_check_str(tv: &typval_T) -> bool {
+    match tv.v_type {
+        VAR_NUMBER | VAR_BOOL | VAR_SPECIAL | VAR_STRING | VAR_FLOAT => true,
+        VAR_PARTIAL | VAR_FUNC => {
+            emsg("E729: Using a Funcref as a String");
+            false
+        }
+        VAR_LIST => {
+            emsg("E730: Using a List as a String");
+            false
+        }
+        VAR_DICT => {
+            emsg("E731: Using a Dictionary as a String");
+            false
+        }
+        VAR_BLOB => {
+            emsg("E976: Using a Blob as a String");
+            false
+        }
+        VAR_UNKNOWN => {
+            emsg("E908: Using an invalid value as a String");
+            false
+        }
+    }
+}
+
+/// Port of `tv_check_for_string_arg()` from `Src/eval/typval.c` (c:4345).
+pub fn tv_check_for_string_arg(args: &[typval_T], idx: usize) -> i32 {
+    if args.get(idx).map(|a| a.v_type) != Some(VAR_STRING) {
+        semsg(&format!("E1174: String required for argument {}", idx + 1));
+        return FAIL;
+    }
+    OK
+}
+
+/// Port of `tv_check_for_nonempty_string_arg()` from `Src/eval/typval.c` (c:4356).
+pub fn tv_check_for_nonempty_string_arg(args: &[typval_T], idx: usize) -> i32 {
+    if tv_check_for_string_arg(args, idx) == FAIL {
+        return FAIL;
+    }
+    let empty = matches!(args.get(idx).map(|a| &a.vval), Some(v_string(s)) if s.is_empty());
+    if empty {
+        semsg(&format!("E1175: Non-empty string required for argument {}", idx + 1));
+        return FAIL;
+    }
+    OK
+}
+
+/// Port of `tv_check_for_opt_string_arg()` from `Src/eval/typval.c` (c:4370).
+pub fn tv_check_for_opt_string_arg(args: &[typval_T], idx: usize) -> i32 {
+    if args.get(idx).map_or(VAR_UNKNOWN, |a| a.v_type) == VAR_UNKNOWN
+        || tv_check_for_string_arg(args, idx) != FAIL
+    {
+        OK
+    } else {
+        FAIL
+    }
+}
+
+/// Port of `tv_check_for_number_arg()` from `Src/eval/typval.c` (c:4378).
+pub fn tv_check_for_number_arg(args: &[typval_T], idx: usize) -> i32 {
+    if args.get(idx).map(|a| a.v_type) != Some(VAR_NUMBER) {
+        semsg(&format!("E1210: Number required for argument {}", idx + 1));
+        return FAIL;
+    }
+    OK
+}
+
+/// Port of `tv_check_for_opt_number_arg()` from `Src/eval/typval.c` (c:4392).
+pub fn tv_check_for_opt_number_arg(args: &[typval_T], idx: usize) -> i32 {
+    if args.get(idx).map_or(VAR_UNKNOWN, |a| a.v_type) == VAR_UNKNOWN
+        || tv_check_for_number_arg(args, idx) != FAIL
+    {
+        OK
+    } else {
+        FAIL
+    }
+}
+
+/// Port of `tv_check_for_float_or_nr_arg()` from `Src/eval/typval.c` (c:4400).
+pub fn tv_check_for_float_or_nr_arg(args: &[typval_T], idx: usize) -> i32 {
+    let t = args.get(idx).map(|a| a.v_type);
+    if t != Some(VAR_FLOAT) && t != Some(VAR_NUMBER) {
+        semsg(&format!("E1219: Float or Number required for argument {}", idx + 1));
+        return FAIL;
+    }
+    OK
+}
+
+/// Port of `tv_check_for_bool_arg()` from `Src/eval/typval.c` (c:4408) — a Bool,
+/// or a Number that is 0 or 1.
+pub fn tv_check_for_bool_arg(args: &[typval_T], idx: usize) -> i32 {
+    let ok = match args.get(idx) {
+        Some(a) if a.v_type == VAR_BOOL => true,
+        Some(a) if a.v_type == VAR_NUMBER => {
+            matches!(&a.vval, v_number(n) if *n == 0 || *n == 1)
+        }
+        _ => false,
+    };
+    if !ok {
+        semsg(&format!("E1212: Bool required for argument {}", idx + 1));
+        return FAIL;
+    }
+    OK
+}
+
+/// Port of `tv_check_for_opt_bool_arg()` from `Src/eval/typval.c` (c:4426).
+pub fn tv_check_for_opt_bool_arg(args: &[typval_T], idx: usize) -> i32 {
+    if args.get(idx).map_or(VAR_UNKNOWN, |a| a.v_type) == VAR_UNKNOWN {
+        return OK;
+    }
+    tv_check_for_bool_arg(args, idx)
+}
+
+/// Port of `tv_check_for_blob_arg()` from `Src/eval/typval.c` (c:4433).
+pub fn tv_check_for_blob_arg(args: &[typval_T], idx: usize) -> i32 {
+    if args.get(idx).map(|a| a.v_type) != Some(VAR_BLOB) {
+        semsg(&format!("E1238: Blob required for argument {}", idx + 1));
+        return FAIL;
+    }
+    OK
+}
+
+/// Port of `tv_check_for_list_arg()` from `Src/eval/typval.c` (c:4444).
+pub fn tv_check_for_list_arg(args: &[typval_T], idx: usize) -> i32 {
+    if args.get(idx).map(|a| a.v_type) != Some(VAR_LIST) {
+        semsg(&format!("E1211: List required for argument {}", idx + 1));
+        return FAIL;
+    }
+    OK
+}
+
+/// Port of `tv_check_for_dict_arg()` from `Src/eval/typval.c` (c:4455).
+pub fn tv_check_for_dict_arg(args: &[typval_T], idx: usize) -> i32 {
+    if args.get(idx).map(|a| a.v_type) != Some(VAR_DICT) {
+        semsg(&format!("E1206: Dictionary required for argument {}", idx + 1));
+        return FAIL;
+    }
+    OK
+}
+
+/// Port of `tv_check_for_opt_dict_arg()` from `Src/eval/typval.c` (c:4478).
+pub fn tv_check_for_opt_dict_arg(args: &[typval_T], idx: usize) -> i32 {
+    if args.get(idx).map_or(VAR_UNKNOWN, |a| a.v_type) == VAR_UNKNOWN
+        || tv_check_for_dict_arg(args, idx) != FAIL
+    {
+        OK
+    } else {
+        FAIL
+    }
 }
 
 /// Port of `tv_dict_equal()` from `Src/eval/typval.c`.
@@ -307,4 +728,813 @@ pub fn tv_blob_equal(b1: &Rc<RefCell<blob_T>>, b2: &Rc<RefCell<blob_T>>) -> bool
         return true;
     }
     b1.borrow().bv_ga == b2.borrow().bv_ga
+}
+
+/// Port of `tv_blob_get()` from `Src/eval/typval.h` (h:263) — the byte at `idx`.
+pub fn tv_blob_get(b: &blob_T, idx: i32) -> u8 {
+    b.bv_ga[idx as usize]
+}
+
+/// Port of `tv_blob_set()` from `Src/eval/typval.h` (h:274) — store `c` at `idx`.
+pub fn tv_blob_set(blob: &mut blob_T, idx: i32, c: u8) {
+    blob.bv_ga[idx as usize] = c;
+}
+
+/// Port of `tv_blob_set_ret()` from `Src/eval/typval.h` (h:235) — point `tv` at
+/// blob `b` (the C `bv_refcount++` is the `Rc` clone the caller hands in).
+pub fn tv_blob_set_ret(tv: &mut typval_T, b: Rc<RefCell<blob_T>>) {
+    tv.v_type = VAR_BLOB;
+    tv.vval = v_blob(Some(b));
+}
+
+/// Port of `tv_blob_alloc_ret()` from `Src/eval/typval.c` (c:3374) — allocate a
+/// blob and set `ret_tv` to it.
+pub fn tv_blob_alloc_ret(ret_tv: &mut typval_T) -> Rc<RefCell<blob_T>> {
+    let b = tv_blob_alloc();
+    tv_blob_set_ret(ret_tv, b.clone());
+    b
+}
+
+/// Port of `tv_blob_copy()` from `Src/eval/typval.c` (c:3386) — deep-copy the
+/// bytes of `from` (NULL → an empty/NULL blob) into `to`.
+pub fn tv_blob_copy(from: Option<&Rc<RefCell<blob_T>>>, to: &mut typval_T) {
+    to.v_type = VAR_BLOB;
+    to.v_lock = VarLockStatus::VAR_UNLOCKED;
+    match from {
+        None => to.vval = v_blob(None),
+        Some(from) => {
+            let b = tv_blob_alloc_ret(to);
+            // c: xmemdup(from->bv_ga.ga_data, len); ga_len = ga_maxlen = len;
+            b.borrow_mut().bv_ga = from.borrow().bv_ga.clone();
+        }
+    }
+}
+
+/// Port of `tv_blob_set_range()` from `Src/eval/typval.c` (c:3075) — set bytes
+/// `n1..=n2` of `dest` from `src`; `FAIL` if the byte counts differ. (`src` is
+/// the blob directly here, not the wrapping typval.)
+pub fn tv_blob_set_range(dest: &mut blob_T, n1: varnumber_T, n2: varnumber_T, src: &blob_T) -> i32 {
+    if n2 - n1 + 1 != tv_blob_len(src) as varnumber_T {
+        emsg("E972: Blob value does not have the right number of bytes");
+        return FAIL;
+    }
+    let mut ir = 0;
+    for il in n1..=n2 {
+        tv_blob_set(dest, il as i32, tv_blob_get(src, ir));
+        ir += 1;
+    }
+    OK
+}
+
+/// Port of `tv_blob_set_append()` from `Src/eval/typval.c` (c:3090) — store
+/// `byte` at `idx`, appending one byte when `idx` is exactly the current length.
+pub fn tv_blob_set_append(blob: &mut blob_T, idx: i32, byte: u8) {
+    let ga_len = blob.bv_ga.len() as i32;
+    // c: setting a byte beyond the end (other than appending one) is ignored.
+    if idx <= ga_len {
+        if idx == ga_len {
+            blob.bv_ga.push(0);
+        }
+        tv_blob_set(blob, idx, byte);
+    }
+}
+
+// ── copy / extend / concat / slice / flatten / items (Src/eval/typval.c) ──
+//
+// The C linked-list walk + `copyID` cycle detection + `vimconv` reduce over the
+// `Vec`/`Rc` model: a shallow copy is `tv_copy` per item, a deep copy delegates
+// to `var_item_copy` (matching `f_copy`/`f_deepcopy`; `copyID` cycle detection is
+// not modeled, so self-referential containers are unsupported, as in the
+// existing `var_item_copy`).
+
+/// Port of `tv_list_copy()` from `Src/eval/typval.c` (c:591) — a new list with
+/// each item shallow- (`deep=false`) or deep-copied (`deep=true`).
+pub fn tv_list_copy(orig: &Rc<RefCell<list_T>>, deep: bool) -> Rc<RefCell<list_T>> {
+    let items: Vec<typval_T> = orig
+        .borrow()
+        .lv_items
+        .iter()
+        .map(|it| {
+            if deep {
+                crate::ported::eval::funcs::var_item_copy(&it.li_tv)
+            } else {
+                { let mut t = it.li_tv.clone(); t.v_lock = VarLockStatus::VAR_UNLOCKED; t }
+            }
+        })
+        .collect();
+    let copy = tv_list_alloc(items.len() as isize);
+    {
+        let mut c = copy.borrow_mut();
+        for tv in items {
+            tv_list_append_tv(&mut c, tv);
+        }
+    }
+    copy
+}
+
+/// Port of `tv_dict_copy()` from `Src/eval/typval.c` (c:2838) — a new dict with
+/// each value shallow- or deep-copied.
+pub fn tv_dict_copy(orig: &Rc<RefCell<dict_T>>, deep: bool) -> Rc<RefCell<dict_T>> {
+    let pairs: Vec<(String, typval_T)> = orig
+        .borrow()
+        .dv_hashtab
+        .iter()
+        .map(|(k, v)| {
+            let nv = if deep {
+                crate::ported::eval::funcs::var_item_copy(v)
+            } else {
+                { let mut t = v.clone(); t.v_lock = VarLockStatus::VAR_UNLOCKED; t }
+            };
+            (k.clone(), nv)
+        })
+        .collect();
+    let copy = tv_dict_alloc();
+    {
+        let mut c = copy.borrow_mut();
+        for (k, v) in pairs {
+            tv_dict_add(&mut c, &k, v);
+        }
+    }
+    copy
+}
+
+/// Port of `tv_list_extend()` from `Src/eval/typval.c` (c:868) — append (a copy
+/// of) every item of `l2` to `l1`, before index `bef` (or at the end when
+/// `None`). The C self-extend guard is unnecessary: `l1` and `l2` are distinct
+/// borrows here.
+pub fn tv_list_extend(l1: &mut list_T, l2: &list_T, bef: Option<usize>) {
+    let add: Vec<typval_T> = l2.lv_items.iter().map(|it| { let mut t = it.li_tv.clone(); t.v_lock = VarLockStatus::VAR_UNLOCKED; t }).collect();
+    match bef {
+        None => {
+            for tv in add {
+                tv_list_append_tv(l1, tv);
+            }
+        }
+        Some(mut i) => {
+            i = i.min(l1.lv_items.len());
+            for tv in add {
+                l1.lv_items.insert(i, listitem_T { li_tv: tv });
+                i += 1;
+            }
+            l1.lv_len = l1.lv_items.len() as i32;
+        }
+    }
+}
+
+/// Port of `tv_list_concat()` from `Src/eval/typval.c` (c:896) — set `tv` to a
+/// new list that is `l1` followed by `l2` (either may be a NULL list).
+pub fn tv_list_concat(
+    l1: Option<&Rc<RefCell<list_T>>>,
+    l2: Option<&Rc<RefCell<list_T>>>,
+    tv: &mut typval_T,
+) -> i32 {
+    tv.v_type = VAR_BLOB; // placeholder; set below
+    let l = match (l1, l2) {
+        (None, None) => None,
+        (None, Some(l2)) => Some(tv_list_copy(l2, false)),
+        (Some(l1), l2) => {
+            let copy = tv_list_copy(l1, false);
+            if let Some(l2) = l2 {
+                tv_list_extend(&mut copy.borrow_mut(), &l2.borrow(), None);
+            }
+            Some(copy)
+        }
+    };
+    tv.v_type = VAR_LIST;
+    tv.v_lock = VarLockStatus::VAR_UNLOCKED;
+    tv.vval = v_list(l);
+    OK
+}
+
+/// Port of `tv_list_slice()` from `Src/eval/typval.c` (c:921) — a new list of
+/// items `n1..=n2` (caller-validated indices).
+pub fn tv_list_slice(ol: &list_T, n1: varnumber_T, n2: varnumber_T) -> Rc<RefCell<list_T>> {
+    let l = tv_list_alloc((n2 - n1 + 1) as isize);
+    {
+        let mut lb = l.borrow_mut();
+        let mut i = n1;
+        while i <= n2 {
+            if let Some(it) = ol.lv_items.get(i as usize) {
+                tv_list_append_tv(&mut lb, { let mut t = it.li_tv.clone(); t.v_lock = VarLockStatus::VAR_UNLOCKED; t });
+            }
+            i += 1;
+        }
+    }
+    l
+}
+
+/// Port of `tv_list_flatten()` from `Src/eval/typval.c` (c:752) — replace nested
+/// List items (up to `maxdepth`) with their contents, in place.
+pub fn tv_list_flatten(list: &mut list_T, maxitems: i64, maxdepth: i64) {
+    if maxdepth == 0 {
+        return;
+    }
+    let mut i = 0usize;
+    let mut done: i64 = 0;
+    while i < list.lv_items.len() && done < maxitems {
+        let inner = match (list.lv_items[i].li_tv.v_type, &list.lv_items[i].li_tv.vval) {
+            (VAR_LIST, v_list(Some(inner))) => Some(inner.clone()),
+            _ => None,
+        };
+        if let Some(inner) = inner {
+            let mut sub: Vec<typval_T> =
+                inner.borrow().lv_items.iter().map(|it| { let mut t = it.li_tv.clone(); t.v_lock = VarLockStatus::VAR_UNLOCKED; t }).collect();
+            if maxdepth > 0 {
+                let tmp = tv_list_alloc(0);
+                tmp.borrow_mut().lv_items = sub.into_iter().map(|tv| listitem_T { li_tv: tv }).collect();
+                tmp.borrow_mut().lv_len = tmp.borrow().lv_items.len() as i32;
+                tv_list_flatten(&mut tmp.borrow_mut(), inner.borrow().lv_len as i64, maxdepth - 1);
+                sub = tmp.borrow().lv_items.iter().map(|it| it.li_tv.clone()).collect();
+            }
+            list.lv_items.remove(i);
+            for tv in sub {
+                list.lv_items.insert(i, listitem_T { li_tv: tv });
+                i += 1;
+            }
+            list.lv_len = list.lv_items.len() as i32;
+        } else {
+            i += 1;
+        }
+        done += 1;
+    }
+}
+
+/// Port of `tv_dict_alloc_lock()` from `Src/eval/typval.c` (c:3232).
+pub fn tv_dict_alloc_lock(lock: VarLockStatus) -> Rc<RefCell<dict_T>> {
+    let d = tv_dict_alloc();
+    d.borrow_mut().dv_lock = lock;
+    d
+}
+
+/// Port of `enum DictListType` from `Src/eval/typval.c` — what `tv_dict2list`
+/// extracts.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DictListType {
+    kDict2ListKeys,
+    kDict2ListValues,
+    kDict2ListItems,
+}
+use DictListType::*;
+
+/// Port of `tv_dict2list()` from `Src/eval/typval.c` (c:3258) — turn a Dict into
+/// a List of keys, values, or `[key, value]` pairs.
+pub fn tv_dict2list(argvars: &[typval_T], rettv: &mut typval_T, what: DictListType) {
+    if tv_check_for_dict_arg(argvars, 0) == FAIL {
+        tv_list_alloc_ret(rettv, 0);
+        return;
+    }
+    let (VAR_DICT, v_dict(d)) = (argvars[0].v_type, &argvars[0].vval) else {
+        tv_list_alloc_ret(rettv, 0);
+        return;
+    };
+    let Some(d) = d else {
+        tv_list_alloc_ret(rettv, 0);
+        return;
+    };
+    let pairs: Vec<(String, typval_T)> =
+        d.borrow().dv_hashtab.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let out = tv_list_alloc_ret(rettv, pairs.len() as isize);
+    let mut ob = out.borrow_mut();
+    for (k, v) in pairs {
+        match what {
+            kDict2ListKeys => tv_list_append_string(&mut ob, &k),
+            kDict2ListValues => tv_list_append_tv(&mut ob, { let mut t = v.clone(); t.v_lock = VarLockStatus::VAR_UNLOCKED; t }),
+            kDict2ListItems => {
+                let sub = tv_list_alloc(2);
+                {
+                    let mut sb = sub.borrow_mut();
+                    tv_list_append_string(&mut sb, &k);
+                    tv_list_append_tv(&mut sb, v);
+                }
+                tv_list_append_list(&mut ob, sub);
+            }
+        }
+    }
+}
+
+/// Port of `tv_blob2items()` from `Src/eval/typval.c` (c:798) — a Blob as a List
+/// of `[index, byte]` pairs.
+pub fn tv_blob2items(argvars: &[typval_T], rettv: &mut typval_T) {
+    let bytes: Vec<u8> = match (argvars[0].v_type, &argvars[0].vval) {
+        (VAR_BLOB, v_blob(Some(b))) => b.borrow().bv_ga.clone(),
+        _ => Vec::new(),
+    };
+    let out = tv_list_alloc_ret(rettv, bytes.len() as isize);
+    let mut ob = out.borrow_mut();
+    for (i, byte) in bytes.iter().enumerate() {
+        let l2 = tv_list_alloc(2);
+        {
+            let mut lb = l2.borrow_mut();
+            tv_list_append_number(&mut lb, i as varnumber_T);
+            tv_list_append_number(&mut lb, *byte as varnumber_T);
+        }
+        tv_list_append_list(&mut ob, l2);
+    }
+}
+
+/// Port of `tv_list2items()` from `Src/eval/typval.c` (c:820) — a List as a List
+/// of `[index, value]` pairs.
+pub fn tv_list2items(argvars: &[typval_T], rettv: &mut typval_T) {
+    let items: Vec<typval_T> = match (argvars[0].v_type, &argvars[0].vval) {
+        (VAR_LIST, v_list(Some(l))) => l.borrow().lv_items.iter().map(|it| it.li_tv.clone()).collect(),
+        _ => Vec::new(),
+    };
+    let out = tv_list_alloc_ret(rettv, items.len() as isize);
+    let mut ob = out.borrow_mut();
+    for (idx, tv) in items.into_iter().enumerate() {
+        let l2 = tv_list_alloc(2);
+        {
+            let mut lb = l2.borrow_mut();
+            tv_list_append_number(&mut lb, idx as varnumber_T);
+            tv_list_append_tv(&mut lb, tv);
+        }
+        tv_list_append_list(&mut ob, l2);
+    }
+}
+
+/// Port of `tv_dict2items()` from `Src/eval/typval.c` (c:813).
+pub fn tv_dict2items(argvars: &[typval_T], rettv: &mut typval_T) {
+    tv_dict2list(argvars, rettv, kDict2ListItems);
+}
+
+/// Port of `tv_string2items()` from `Src/eval/typval.c` (c:841) — a String as a
+/// List of `[char-index, character]` pairs.
+pub fn tv_string2items(argvars: &[typval_T], rettv: &mut typval_T) {
+    let s = match (argvars[0].v_type, &argvars[0].vval) {
+        (VAR_STRING, v_string(s)) => s.clone(),
+        _ => String::new(),
+    };
+    let out = tv_list_alloc_ret(rettv, 0);
+    let mut ob = out.borrow_mut();
+    for (idx, ch) in s.chars().enumerate() {
+        let l2 = tv_list_alloc(2);
+        {
+            let mut lb = l2.borrow_mut();
+            tv_list_append_number(&mut lb, idx as varnumber_T);
+            tv_list_append_string(&mut lb, &ch.to_string());
+        }
+        tv_list_append_list(&mut ob, l2);
+    }
+}
+
+/// Port of `tv_dict_set_keys_readonly()` from `Src/eval/typval.c` (c:2896) —
+/// mark every key read-only. No-op: per-item `di_flags` (RO/FIXED) are not
+/// modeled here.
+pub fn tv_dict_set_keys_readonly(_dict: &mut dict_T) {}
+
+// ── reference counting / freeing (Rc-managed) ──
+//
+// The C reference counting and `xfree` chains are handled by `Rc<RefCell<…>>`
+// here: dropping the last `Rc` frees. These ports keep the C names and update
+// the (now vestigial) `*_refcount` fields, but actual lifetime is the `Rc`'s.
+
+/// Port of `tv_list_ref()` — increment the reference count. (Appending an `Rc`
+/// clone is itself the reference, so callers that push need not also call this.)
+pub fn tv_list_ref(l: &mut list_T) {
+    l.lv_refcount += 1;
+}
+
+/// Port of `tv_list_unref()` from `Src/eval/typval.c` (c:329) — decrement;
+/// the `Rc` frees the list when the last reference drops.
+pub fn tv_list_unref(l: &mut list_T) {
+    l.lv_refcount -= 1;
+}
+
+/// Port of `tv_list_free_contents()` from `Src/eval/typval.c` (c:270) — clear
+/// every item (each value's `Rc`s drop here).
+pub fn tv_list_free_contents(l: &mut list_T) {
+    l.lv_items.clear();
+    l.lv_len = 0;
+}
+
+/// Port of `tv_list_free_list()` from `Src/eval/typval.c` (c:290) — free the
+/// list struct itself. No-op: the `Rc` frees it (no GC list to unlink).
+pub fn tv_list_free_list(_l: &mut list_T) {}
+
+/// Port of `tv_list_free()` from `Src/eval/typval.c` (c:313) — free a list and
+/// its items.
+pub fn tv_list_free(l: &mut list_T) {
+    tv_list_free_contents(l);
+    tv_list_free_list(l);
+}
+
+/// Port of `tv_dict_unref()` from `Src/eval/typval.c` (c:2233).
+pub fn tv_dict_unref(d: &mut dict_T) {
+    d.dv_refcount -= 1;
+}
+
+/// Port of `tv_dict_free_contents()` from `Src/eval/typval.c` (c:2164).
+pub fn tv_dict_free_contents(d: &mut dict_T) {
+    d.dv_hashtab.clear();
+}
+
+/// Port of `tv_dict_free()` from `Src/eval/typval.c` (c:2217).
+pub fn tv_dict_free(d: &mut dict_T) {
+    tv_dict_free_contents(d);
+}
+
+/// Port of `tv_blob_unref()` from `Src/eval/typval.c` — decrement; `Rc` frees.
+pub fn tv_blob_unref(b: &mut blob_T) {
+    b.bv_refcount -= 1;
+}
+
+/// Port of `tv_blob_free()` from `Src/eval/typval.c` — free a blob (`Rc`-managed).
+pub fn tv_blob_free(b: &mut blob_T) {
+    b.bv_ga.clear();
+}
+
+// ── list append / dict ops ──
+
+/// Port of `tv_list_append_list()` from `Src/eval/typval.c` (c:500) — append
+/// `itemlist` to `l` as a single List item (the `Rc` clone is the reference).
+pub fn tv_list_append_list(l: &mut list_T, itemlist: Rc<RefCell<list_T>>) {
+    tv_list_append_tv(
+        l,
+        typval_T { v_type: VAR_LIST, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_list(Some(itemlist)) },
+    );
+}
+
+/// Port of `tv_list_append_dict()` from `Src/eval/typval.c` (c:515) — append
+/// `dict` to `l` as a single Dict item.
+pub fn tv_list_append_dict(l: &mut list_T, dict: Rc<RefCell<dict_T>>) {
+    tv_list_append_tv(
+        l,
+        typval_T { v_type: VAR_DICT, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_dict(Some(dict)) },
+    );
+}
+
+/// Port of `tv_list_append_allocated_string()` from `Src/eval/typval.c` (c:555)
+/// — append `str` as a String item, taking ownership.
+pub fn tv_list_append_allocated_string(l: &mut list_T, str: String) {
+    tv_list_append_tv(
+        l,
+        typval_T { v_type: VAR_STRING, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_string(str) },
+    );
+}
+
+/// Port of `tv_dict_clear()` from `Src/eval/typval.c` (c:2700) — remove every
+/// entry, leaving a valid empty Dict.
+pub fn tv_dict_clear(d: &mut dict_T) {
+    d.dv_hashtab.clear();
+}
+
+/// Port of `tv_dict_extend()` from `Src/eval/typval.c` (c:2723) — merge `d2`
+/// into `d1` per `action`: `"error"`/`e` (duplicate key → E737), `"force"`/`f`
+/// (d2 overrides), other/`"keep"` (duplicate d2 keys ignored). (The `move`
+/// optimization, watchers and scope-name validation are not modeled.)
+pub fn tv_dict_extend(d1: &mut dict_T, d2: &dict_T, action: &str) {
+    let act = action.as_bytes().first().copied().unwrap_or(b'f');
+    let pairs: Vec<_> = d2.dv_hashtab.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    for (k, v) in pairs {
+        if d1.dv_hashtab.contains_key(&k) {
+            match act {
+                b'e' => {
+                    semsg(&format!("E737: Key already exists: {k}"));
+                    break;
+                }
+                b'f' => {
+                    d1.dv_hashtab.insert(k, v);
+                }
+                _ => {} // keep: ignore duplicate
+            }
+        } else {
+            d1.dv_hashtab.insert(k, v);
+        }
+    }
+}
+
+/// Port of `tv_dict_add_list()` from `Src/eval/typval.c` (c:2489) — add `list`
+/// under `key` as a List entry; `FAIL` if the key exists.
+pub fn tv_dict_add_list(d: &mut dict_T, key: &str, list: Rc<RefCell<list_T>>) -> i32 {
+    tv_dict_add(
+        d,
+        key,
+        typval_T { v_type: VAR_LIST, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_list(Some(list)) },
+    )
+}
+
+/// Port of `tv_dict_add_dict()` from `Src/eval/typval.c` (c:2532) — add `dict`
+/// under `key` as a Dict entry; `FAIL` if the key exists.
+pub fn tv_dict_add_dict(d: &mut dict_T, key: &str, dict: Rc<RefCell<dict_T>>) -> i32 {
+    tv_dict_add(
+        d,
+        key,
+        typval_T { v_type: VAR_DICT, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_dict(Some(dict)) },
+    )
+}
+
+/// Port of `tv_dict_add_str_len()` from `Src/eval/typval.c` (c:2632) — add the
+/// first `len` bytes of `val` (or all of it when `len < 0`) under `key`.
+pub fn tv_dict_add_str_len(d: &mut dict_T, key: &str, val: &str, len: i32) -> i32 {
+    let s = if len < 0 {
+        val.to_string()
+    } else {
+        val.chars().take(len as usize).collect()
+    };
+    tv_dict_add_allocated_str(d, key, s)
+}
+
+/// Port of `tv_dict_get_string_buf()` from `Src/eval/typval.c` (c:2387) — the
+/// string value of `key` (numbers coerced), or `None` if the key is absent.
+pub fn tv_dict_get_string_buf(d: &dict_T, key: &str) -> Option<String> {
+    tv_dict_find(d, key).map(tv_get_string)
+}
+
+/// Port of `tv_dict_get_string_buf_chk()` from `Src/eval/typval.c` (c:2409) —
+/// `def` when the key is absent, `None` on a type error, the string otherwise.
+pub fn tv_dict_get_string_buf_chk(d: &dict_T, key: &str, def: Option<String>) -> Option<String> {
+    match tv_dict_find(d, key) {
+        None => def,
+        Some(di) => tv_get_string_buf_chk(di),
+    }
+}
+
+/// Port of `tv_dict_get_tv()` from `Src/eval/typval.c` (c:2282) — copy `key`'s
+/// value into `rettv`; `OK` on success, `FAIL` if the key is absent.
+pub fn tv_dict_get_tv(d: &dict_T, key: &str, rettv: &mut typval_T) -> i32 {
+    match tv_dict_find(d, key) {
+        None => FAIL,
+        Some(di) => {
+            let di = di.clone();
+            tv_copy(&di, rettv);
+            OK
+        }
+    }
+}
+
+/// Port of `tv_dict_to_env()` from `Src/eval/typval.c` (c:2334) — render the
+/// dict as `KEY=VALUE` environment strings.
+pub fn tv_dict_to_env(denv: &dict_T) -> Vec<String> {
+    denv.dv_hashtab.iter().map(|(k, v)| format!("{k}={}", tv_get_string(v))).collect()
+}
+
+// ── clear / free / get ──
+
+/// Port of `tv_clear()` from `Src/eval/typval.c` (c:3655) — free the value held
+/// by `tv` and reset it to an unlocked `VAR_UNKNOWN` (compound `Rc`s drop here).
+pub fn tv_clear(tv: &mut typval_T) {
+    if tv.v_type == VAR_UNKNOWN {
+        return;
+    }
+    *tv = typval_T { v_type: VAR_UNKNOWN, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_number(0) };
+}
+
+/// Port of `tv_free()` from `Src/eval/typval.c` (c:3677) — free `tv` and the
+/// value inside it. (`Rc`-managed: dropping the value releases it.)
+pub fn tv_free(tv: &mut typval_T) {
+    tv_clear(tv);
+}
+
+/// Port of `tv_islocked()` from `Src/eval/typval.c` (c:3859) — true if the value
+/// is locked itself or refers to a locked List/Dict container.
+pub fn tv_islocked(tv: &typval_T) -> bool {
+    if tv.v_lock == VarLockStatus::VAR_LOCKED {
+        return true;
+    }
+    match (tv.v_type, &tv.vval) {
+        (VAR_LIST, v_list(Some(l))) => l.borrow().lv_lock == VarLockStatus::VAR_LOCKED,
+        (VAR_DICT, v_dict(Some(d))) => d.borrow().dv_lock == VarLockStatus::VAR_LOCKED,
+        _ => false,
+    }
+}
+
+/// Port of `tv_get_bool_chk()` from `Src/eval/typval.c` (c:4248) — alias for
+/// `tv_get_number_chk` (Bool is a thin wrapper over Number).
+pub fn tv_get_bool_chk(tv: &typval_T, ret_error: Option<&mut bool>) -> varnumber_T {
+    tv_get_number_chk(tv, ret_error)
+}
+
+/// Port of `tv_get_string_chk()` from `Src/eval/typval.c` (c:4628) — the string
+/// value, or `None` on a type error. (Our owned `String` avoids the C single
+/// static buffer; `tv_get_string_buf_chk` is the same here.)
+pub fn tv_get_string_chk(tv: &typval_T) -> Option<String> {
+    tv_get_string_buf_chk(tv)
+}
+
+/// Port of `tv_get_string_buf()` from `Src/eval/typval.c` (c:4673) — like
+/// `tv_get_string_chk` but a type error yields "" instead of `None`.
+pub fn tv_get_string_buf(tv: &typval_T) -> String {
+    tv_get_string_buf_chk(tv).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn nr(n: varnumber_T) -> typval_T {
+        typval_T { v_type: VAR_NUMBER, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_number(n) }
+    }
+
+    #[test]
+    fn dict_add_fails_on_existing_key_but_add_tv_overwrites() {
+        let d = tv_dict_alloc();
+        let mut db = d.borrow_mut();
+        // tv_dict_add: first insert OK, duplicate FAIL with the original kept.
+        assert_eq!(tv_dict_add_nr(&mut db, "a", 1), OK);
+        assert_eq!(tv_dict_add_nr(&mut db, "a", 2), FAIL);
+        assert_eq!(tv_dict_get_number(&db, "a"), 1);
+        // tv_dict_add_tv overwrites unconditionally.
+        tv_dict_add_tv(&mut db, "a", nr(9));
+        assert_eq!(tv_dict_get_number(&db, "a"), 9);
+    }
+
+    #[test]
+    fn dict_typed_getters_and_defaults() {
+        let d = tv_dict_alloc();
+        let mut db = d.borrow_mut();
+        tv_dict_add_str(&mut db, "s", "hi");
+        tv_dict_add_bool(&mut db, "b", kBoolVarTrue);
+        assert!(tv_dict_has_key(&db, "s"));
+        assert!(!tv_dict_has_key(&db, "missing"));
+        assert_eq!(tv_dict_get_string(&db, "s"), Some("hi".to_string()));
+        assert_eq!(tv_dict_get_string(&db, "missing"), None);
+        assert_eq!(tv_dict_get_number_def(&db, "missing", 7), 7);
+        assert_eq!(tv_dict_get_bool(&db, "b", 0), 1);
+        assert_eq!(tv_dict_get_bool(&db, "missing", 0), 0);
+    }
+
+    #[test]
+    fn list_find_uidx_reverse_and_copy() {
+        let l = tv_list_alloc(0);
+        {
+            let mut lb = l.borrow_mut();
+            tv_list_append_number(&mut lb, 10);
+            tv_list_append_number(&mut lb, 20);
+            tv_list_append_number(&mut lb, 30);
+        }
+        let lb = l.borrow();
+        // uidx: negative counts from the end, out-of-range -> -1.
+        assert_eq!(tv_list_uidx(&lb, 0), 0);
+        assert_eq!(tv_list_uidx(&lb, -1), 2);
+        assert_eq!(tv_list_uidx(&lb, 3), -1);
+        assert_eq!(tv_list_uidx(&lb, -4), -1);
+        // find_nr by index (incl. negative).
+        assert_eq!(tv_list_find_nr(&lb, 1, None), 20);
+        assert_eq!(tv_list_find_nr(&lb, -1, None), 30);
+        let mut err = false;
+        assert_eq!(tv_list_find_nr(&lb, 9, Some(&mut err)), -1);
+        assert!(err);
+        // find_str coerces; out-of-range -> None.
+        assert_eq!(tv_list_find_str(&lb, 0), Some("10".to_string()));
+        assert_eq!(tv_list_find_str(&lb, 9), None);
+        drop(lb);
+        // reverse in place.
+        tv_list_reverse(&mut l.borrow_mut());
+        assert_eq!(tv_list_find_nr(&l.borrow(), 0, None), 30);
+        assert_eq!(tv_list_find_nr(&l.borrow(), 2, None), 10);
+        // tv_copy clears the lock and shares the Rc (refcount bump).
+        let src = typval_T {
+            v_type: VAR_LIST,
+            v_lock: VarLockStatus::VAR_LOCKED,
+            vval: v_list(Some(l.clone())),
+        };
+        let mut dst = nr(0);
+        tv_copy(&src, &mut dst);
+        assert_eq!(dst.v_type, VAR_LIST);
+        assert_eq!(dst.v_lock, VarLockStatus::VAR_UNLOCKED);
+        if let v_list(Some(d)) = &dst.vval {
+            assert!(Rc::ptr_eq(d, &l));
+        } else {
+            panic!("expected shared list");
+        }
+    }
+
+    fn str_tv(s: &str) -> typval_T {
+        typval_T {
+            v_type: VAR_STRING,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_string(s.to_string()),
+        }
+    }
+
+    #[test]
+    fn arg_type_checks_required_and_optional() {
+        let args = [nr(5), str_tv("hi")];
+        // required: right type OK, wrong type FAIL.
+        assert_eq!(tv_check_for_number_arg(&args, 0), OK);
+        assert_eq!(tv_check_for_string_arg(&args, 1), OK);
+        assert_eq!(tv_check_for_string_arg(&args, 0), FAIL);
+        assert_eq!(tv_check_for_number_arg(&args, 1), FAIL);
+        // missing required arg (idx past end == VAR_UNKNOWN sentinel) -> FAIL.
+        assert_eq!(tv_check_for_string_arg(&args, 5), FAIL);
+        // optional: absent (past end) -> OK; present wrong type -> FAIL.
+        assert_eq!(tv_check_for_opt_string_arg(&args, 5), OK);
+        assert_eq!(tv_check_for_opt_string_arg(&args, 1), OK);
+        assert_eq!(tv_check_for_opt_number_arg(&args, 1), FAIL);
+        // bool: a Number 0/1 passes, other numbers fail.
+        assert_eq!(tv_check_for_bool_arg(&[nr(1)], 0), OK);
+        assert_eq!(tv_check_for_bool_arg(&[nr(0)], 0), OK);
+        assert_eq!(tv_check_for_bool_arg(&[nr(2)], 0), FAIL);
+        // non-empty string.
+        assert_eq!(tv_check_for_nonempty_string_arg(&[str_tv("x")], 0), OK);
+        assert_eq!(tv_check_for_nonempty_string_arg(&[str_tv("")], 0), FAIL);
+        // single-value checks.
+        assert!(tv_check_str_or_nr(&nr(1)));
+        assert!(tv_check_str(&nr(1)));
+        assert!(tv_check_num(&str_tv("3")));
+    }
+
+    #[test]
+    fn blob_get_set_copy_and_ranges() {
+        let b = tv_blob_alloc();
+        {
+            let mut bb = b.borrow_mut();
+            // set_append grows by one when idx == len; ignores idx past end+1.
+            tv_blob_set_append(&mut bb, 0, 0xde);
+            tv_blob_set_append(&mut bb, 1, 0xad);
+            tv_blob_set_append(&mut bb, 2, 0xbe);
+            tv_blob_set_append(&mut bb, 9, 0xff); // idx > len -> ignored
+            assert_eq!(tv_blob_len(&bb), 3);
+            assert_eq!(tv_blob_get(&bb, 0), 0xde);
+            tv_blob_set(&mut bb, 0, 0x00);
+            assert_eq!(tv_blob_get(&bb, 0), 0x00);
+        }
+        // copy duplicates the bytes into a fresh blob (not the same Rc).
+        let mut dst = nr(0);
+        tv_blob_copy(Some(&b), &mut dst);
+        if let v_blob(Some(d)) = &dst.vval {
+            assert!(!Rc::ptr_eq(d, &b));
+            assert_eq!(d.borrow().bv_ga, b.borrow().bv_ga);
+        } else {
+            panic!("expected blob");
+        }
+        // NULL source -> empty/NULL blob.
+        let mut dst2 = nr(0);
+        tv_blob_copy(None, &mut dst2);
+        assert!(matches!(dst2.vval, v_blob(None)));
+        // set_range: length must match, else FAIL.
+        let src = tv_blob_alloc();
+        src.borrow_mut().bv_ga = vec![1, 2];
+        assert_eq!(tv_blob_set_range(&mut b.borrow_mut(), 0, 1, &src.borrow()), OK);
+        assert_eq!(b.borrow().bv_ga[..2], [1, 2]);
+        assert_eq!(tv_blob_set_range(&mut b.borrow_mut(), 0, 2, &src.borrow()), FAIL);
+    }
+
+    #[test]
+    fn dict_extend_clear_env_and_tv_clear() {
+        let d1 = tv_dict_alloc();
+        let d2 = tv_dict_alloc();
+        {
+            let mut a = d1.borrow_mut();
+            tv_dict_add_nr(&mut a, "x", 1);
+            let mut b = d2.borrow_mut();
+            tv_dict_add_nr(&mut b, "x", 2);
+            tv_dict_add_str(&mut b, "y", "hi");
+        }
+        // keep: existing key kept; new key added.
+        tv_dict_extend(&mut d1.borrow_mut(), &d2.borrow(), "keep");
+        assert_eq!(tv_dict_get_number(&d1.borrow(), "x"), 1);
+        assert!(tv_dict_has_key(&d1.borrow(), "y"));
+        // force: existing key overridden.
+        tv_dict_extend(&mut d1.borrow_mut(), &d2.borrow(), "force");
+        assert_eq!(tv_dict_get_number(&d1.borrow(), "x"), 2);
+        // to_env renders KEY=VALUE.
+        let env = tv_dict_to_env(&d1.borrow());
+        assert!(env.contains(&"y=hi".to_string()));
+        // clear empties it.
+        tv_dict_clear(&mut d1.borrow_mut());
+        assert_eq!(tv_dict_len(&d1.borrow()), 0);
+        // tv_clear resets to VAR_UNKNOWN.
+        let mut t = str_tv("gone");
+        tv_clear(&mut t);
+        assert_eq!(t.v_type, VAR_UNKNOWN);
+        // islocked reflects the container lock.
+        let l = tv_list_alloc(0);
+        l.borrow_mut().lv_lock = VarLockStatus::VAR_LOCKED;
+        let tv = typval_T {
+            v_type: VAR_LIST,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_list(Some(l)),
+        };
+        assert!(tv_islocked(&tv));
+    }
+
+    #[test]
+    fn tv2bool_matches_vim_truthiness() {
+        assert!(!tv2bool(&nr(0)));
+        assert!(tv2bool(&nr(5)));
+        assert!(!tv2bool(&typval_T {
+            v_type: VAR_STRING,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_string(String::new()),
+        }));
+        assert!(tv2bool(&typval_T {
+            v_type: VAR_STRING,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_string("x".to_string()),
+        }));
+        // Empty list is falsy; a one-item list is truthy.
+        let l = tv_list_alloc(0);
+        assert!(!tv2bool(&typval_T {
+            v_type: VAR_LIST,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_list(Some(l.clone())),
+        }));
+        tv_list_append_number(&mut l.borrow_mut(), 1);
+        assert!(tv2bool(&typval_T {
+            v_type: VAR_LIST,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_list(Some(l)),
+        }));
+    }
 }

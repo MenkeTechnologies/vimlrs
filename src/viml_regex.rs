@@ -574,6 +574,19 @@ pub fn regex_matchend(pat: &str, subject: &str, ic: bool) -> i64 {
         .map_or(-1, |c| c.whole().1 as i64)
 }
 
+/// `matchstrpos`: `(matched substring, start char index, end char index)`, or
+/// `("", -1, -1)` if there is no match.
+pub fn regex_matchstrpos(pat: &str, subject: &str, ic: bool) -> (String, i64, i64) {
+    let chars: Vec<char> = subject.chars().collect();
+    match Regex::compile(pat).find(&chars, ic) {
+        Some(caps) => {
+            let (s, e) = caps.whole();
+            (chars[s..e].iter().collect(), s as i64, e as i64)
+        }
+        None => (String::new(), -1, -1),
+    }
+}
+
 /// `matchlist`: `[whole, submatch1, …]` (empty strings for groups that didn't
 /// participate), or an empty list if there is no match.
 pub fn regex_matchlist(pat: &str, subject: &str, ic: bool) -> Vec<String> {

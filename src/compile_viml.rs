@@ -66,6 +66,13 @@ pub fn compile_program(stmts: &[Stmt]) -> Result<CompiledProgram, VimlError> {
         }
     }
     let mut c = Compiler::new(false, exc);
+    // Slot provably-Number top-level locals so a script-level numeric loop
+    // JIT-traces too. Sound: `slot_plan` bails on function calls/dynamic and
+    // drops any bare name whose `g:`-alias is referenced (a bare script-level
+    // name IS `g:name`). Disabled when exceptions add per-statement unwinds.
+    if !exc {
+        c.slots = slot_plan(&top);
+    }
     c.unwind.push(Vec::new());
     c.compile_stmts(&top)?;
     let frame = c.unwind.pop().expect("top unwind frame");
@@ -89,6 +96,12 @@ pub fn compile_program(stmts: &[Stmt]) -> Result<CompiledProgram, VimlError> {
 /// exception unwinds to the same end (the call returns with it still pending).
 fn compile_function_body(body: &[Stmt], exc: bool) -> Result<fusevm::Chunk, VimlError> {
     let mut c = Compiler::new(true, exc);
+    // Slot-allocate provably-Number locals so a numeric loop body lowers to
+    // native ops the JIT can trace. (Exceptions add per-statement unwind
+    // CallBuiltins that would break a native loop, so only when `!exc`.)
+    if !exc {
+        c.slots = slot_plan(body);
+    }
     c.unwind.push(Vec::new());
     c.compile_stmts(body)?;
     let frame = c.unwind.pop().expect("fn unwind frame");
@@ -99,6 +112,16 @@ fn compile_function_body(body: &[Stmt], exc: bool) -> Result<fusevm::Chunk, Viml
     for j in frame {
         c.b.patch_jump(j, end);
     }
+    Ok(c.b.build())
+}
+
+/// Compile a single expression to a chunk that leaves its value on the VM stack
+/// (no result-capture builtin). A pure-numeric expression therefore lowers to a
+/// fully native-op chunk (`LoadInt`/`Add`/…), which fusevm's JIT compiles to
+/// machine code; the value is read from `VMResult::Ok`.
+pub fn compile_expr_only(e: &Expr) -> Result<fusevm::Chunk, VimlError> {
+    let mut c = Compiler::new(false, false);
+    c.expr(e)?;
     Ok(c.b.build())
 }
 
@@ -154,6 +177,242 @@ struct Compiler {
     /// Stack of pending exception-unwind jump sites, one frame per exception
     /// boundary (function body, `:try` body, top level); top is innermost.
     unwind: Vec<Vec<usize>>,
+    /// Bare function-local variables proven always-Number, mapped to fusevm
+    /// slot indices. Their reads/writes lower to native `Op::GetSlot`/`SetSlot`
+    /// (instead of `VIML_GETVAR`/`SETVAR` builtins) so a numeric loop body is
+    /// CallBuiltin-free and the tracing JIT can compile it. Only populated for
+    /// function bodies, where bare names are `l:` locals that don't alias `g:`.
+    slots: std::collections::HashMap<String, u16>,
+}
+
+/// Decide which bare function-local variables can live in fusevm slots.
+///
+/// Sound & conservative: returns empty (so nothing is slotted and behaviour is
+/// unchanged) unless the whole body is free of anything that could reach a
+/// variable by name dynamically — function/method calls (the callee may read a
+/// global), `:execute`/`:set`, nested `:function`, `:try`, `:for`, or any
+/// `:let` target other than a bare name. A name is slotted only if *every*
+/// assignment to it provably evaluates to a Number (fixed-point over the set,
+/// so `let s = s + i` keeps `s` a slot only while `i` is one too).
+fn slot_plan(stmts: &[Stmt]) -> std::collections::HashMap<String, u16> {
+    use std::collections::{HashMap, HashSet};
+
+    fn is_bare(name: &str) -> bool {
+        !name.is_empty() && !name.contains(':') && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    }
+
+    fn walk_expr(e: &Expr, bail: &mut bool) {
+        match e {
+            // A callee can read/modify any global; slotting would hide the var.
+            Expr::Call { .. } | Expr::Method { .. } => *bail = true,
+            Expr::Arith { lhs, rhs, .. } | Expr::Compare { lhs, rhs, .. } => {
+                walk_expr(lhs, bail);
+                walk_expr(rhs, bail);
+            }
+            Expr::Unary { expr, .. } => walk_expr(expr, bail),
+            Expr::And(a, b) | Expr::Or(a, b) | Expr::Coalesce(a, b) => {
+                walk_expr(a, bail);
+                walk_expr(b, bail);
+            }
+            Expr::Ternary { cond, then, otherwise } => {
+                walk_expr(cond, bail);
+                walk_expr(then, bail);
+                walk_expr(otherwise, bail);
+            }
+            Expr::Index { base, index } => {
+                walk_expr(base, bail);
+                walk_expr(index, bail);
+            }
+            Expr::Slice { base, from, to } => {
+                walk_expr(base, bail);
+                if let Some(f) = from {
+                    walk_expr(f, bail);
+                }
+                if let Some(t) = to {
+                    walk_expr(t, bail);
+                }
+            }
+            Expr::List(items) => items.iter().for_each(|i| walk_expr(i, bail)),
+            Expr::Dict(pairs) => pairs.iter().for_each(|(k, v)| {
+                walk_expr(k, bail);
+                walk_expr(v, bail);
+            }),
+            _ => {}
+        }
+    }
+
+    fn walk(stmts: &[Stmt], assigns: &mut HashMap<String, Vec<Expr>>, bail: &mut bool) {
+        for s in stmts {
+            if *bail {
+                return;
+            }
+            match s {
+                Stmt::Function { .. } | Stmt::Execute(_) | Stmt::Set(_) | Stmt::Try { .. } => {
+                    *bail = true
+                }
+                // `for BARE in range(...)` keeps its var slottable (range yields
+                // Numbers); the body is recursed. Any other for-loop bails.
+                Stmt::For { vars: ForVars::One(name), iter, body }
+                    if is_bare(name)
+                        && matches!(iter, Expr::Call { name: f, .. } if f == "range") =>
+                {
+                    if let Expr::Call { args, .. } = iter {
+                        args.iter().for_each(|a| walk_expr(a, bail));
+                    }
+                    assigns.entry(name.clone()).or_default().push(Expr::Number(0));
+                    walk(body, assigns, bail);
+                }
+                Stmt::For { .. } => *bail = true,
+                Stmt::Let { target: LetTarget::Var(name), expr } => {
+                    walk_expr(expr, bail);
+                    if is_bare(name) {
+                        assigns.entry(name.clone()).or_default().push(expr.clone());
+                    }
+                }
+                Stmt::Let { .. } => *bail = true, // non-bare target: be safe
+                Stmt::Echo(es) | Stmt::Echon(es) => es.iter().for_each(|e| walk_expr(e, bail)),
+                Stmt::Call(e) | Stmt::Expr(e) | Stmt::Throw(e) => walk_expr(e, bail),
+                Stmt::Return(Some(e)) => walk_expr(e, bail),
+                Stmt::While { cond, body } => {
+                    walk_expr(cond, bail);
+                    walk(body, assigns, bail);
+                }
+                Stmt::If { arms, else_body } => {
+                    for (c, b) in arms {
+                        walk_expr(c, bail);
+                        walk(b, assigns, bail);
+                    }
+                    if let Some(b) = else_body {
+                        walk(b, assigns, bail);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut assigns: HashMap<String, Vec<Expr>> = HashMap::new();
+    let mut bail = false;
+    walk(stmts, &mut assigns, &mut bail);
+    if bail || assigns.is_empty() {
+        return HashMap::new();
+    }
+
+    // A literal/arith/unary tree is a Number when every leaf is an int literal
+    // or a (still-candidate) slot var.
+    fn rhs_is_int(e: &Expr, set: &HashSet<String>) -> bool {
+        match e {
+            Expr::Number(_) => true,
+            Expr::Var(n) => set.contains(n),
+            Expr::Arith { op, lhs, rhs } => {
+                !matches!(op, ArithOp::Concat) && rhs_is_int(lhs, set) && rhs_is_int(rhs, set)
+            }
+            Expr::Unary { op: UnaryOp::Neg | UnaryOp::Plus, expr } => rhs_is_int(expr, set),
+            _ => false,
+        }
+    }
+
+    // Fixed-point: drop any name with a non-int assignment until stable.
+    let mut int: HashSet<String> = assigns.keys().cloned().collect();
+    loop {
+        let mut changed = false;
+        for name in int.iter().cloned().collect::<Vec<_>>() {
+            if !assigns[&name].iter().all(|rhs| rhs_is_int(rhs, &int)) {
+                int.remove(&name);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    // A bare name at script level IS `g:name`; in a function it IS `l:name`.
+    // If any scoped alias of a candidate is referenced, slotting it would
+    // desync the dict-backed form — drop those candidates.
+    fn scoped_e(e: &Expr, out: &mut HashSet<String>) {
+        match e {
+            Expr::Var(n) => {
+                if let Some((_, suf)) = n.rsplit_once(':') {
+                    out.insert(suf.to_string());
+                }
+            }
+            Expr::Arith { lhs, rhs, .. } | Expr::Compare { lhs, rhs, .. } => {
+                scoped_e(lhs, out);
+                scoped_e(rhs, out);
+            }
+            Expr::Unary { expr, .. } => scoped_e(expr, out),
+            Expr::And(a, b) | Expr::Or(a, b) | Expr::Coalesce(a, b) => {
+                scoped_e(a, out);
+                scoped_e(b, out);
+            }
+            Expr::Ternary { cond, then, otherwise } => {
+                scoped_e(cond, out);
+                scoped_e(then, out);
+                scoped_e(otherwise, out);
+            }
+            Expr::Index { base, index } => {
+                scoped_e(base, out);
+                scoped_e(index, out);
+            }
+            Expr::Slice { base, from, to } => {
+                scoped_e(base, out);
+                if let Some(f) = from {
+                    scoped_e(f, out);
+                }
+                if let Some(t) = to {
+                    scoped_e(t, out);
+                }
+            }
+            Expr::List(xs) => xs.iter().for_each(|x| scoped_e(x, out)),
+            Expr::Dict(ps) => ps.iter().for_each(|(k, v)| {
+                scoped_e(k, out);
+                scoped_e(v, out);
+            }),
+            Expr::Call { args, .. } => args.iter().for_each(|a| scoped_e(a, out)),
+            _ => {}
+        }
+    }
+    fn scoped_s(stmts: &[Stmt], out: &mut HashSet<String>) {
+        for s in stmts {
+            match s {
+                Stmt::Let { target: LetTarget::Var(n), expr } => {
+                    if let Some((_, suf)) = n.rsplit_once(':') {
+                        out.insert(suf.to_string());
+                    }
+                    scoped_e(expr, out);
+                }
+                Stmt::Echo(es) | Stmt::Echon(es) => es.iter().for_each(|e| scoped_e(e, out)),
+                Stmt::Call(e) | Stmt::Expr(e) | Stmt::Throw(e) => scoped_e(e, out),
+                Stmt::Return(Some(e)) => scoped_e(e, out),
+                Stmt::While { cond, body } => {
+                    scoped_e(cond, out);
+                    scoped_s(body, out);
+                }
+                Stmt::For { iter, body, .. } => {
+                    scoped_e(iter, out);
+                    scoped_s(body, out);
+                }
+                Stmt::If { arms, else_body } => {
+                    for (c, b) in arms {
+                        scoped_e(c, out);
+                        scoped_s(b, out);
+                    }
+                    if let Some(b) = else_body {
+                        scoped_s(b, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut scoped = HashSet::new();
+    scoped_s(stmts, &mut scoped);
+    int.retain(|n| !scoped.contains(n));
+
+    let mut names: Vec<String> = int.into_iter().collect();
+    names.sort();
+    names.into_iter().enumerate().map(|(i, n)| (n, i as u16)).collect()
 }
 
 impl Compiler {
@@ -166,6 +425,7 @@ impl Compiler {
             returns: Vec::new(),
             exc,
             unwind: Vec::new(),
+            slots: std::collections::HashMap::new(),
         }
     }
 
@@ -367,8 +627,7 @@ impl Compiler {
     ) -> Result<(), VimlError> {
         let mut end_jumps = Vec::new();
         for (cond, body) in arms {
-            self.expr(cond)?;
-            self.emit(Op::CallBuiltin(h::VIML_TRUTHY, 1));
+            self.cond(cond)?;
             let jf = self.emit(Op::JumpIfFalse(0));
             self.compile_stmts(body)?;
             end_jumps.push(self.emit(Op::Jump(0)));
@@ -387,21 +646,27 @@ impl Compiler {
 
     /// `:while {cond} … :endwhile`.
     fn while_stmt(&mut self, cond: &Expr, body: &[Stmt]) -> Result<(), VimlError> {
-        let l_cond = self.b.current_pos();
-        self.expr(cond)?;
-        self.emit(Op::CallBuiltin(h::VIML_TRUTHY, 1));
-        let jf = self.emit(Op::JumpIfFalse(0));
+        // Loop rotation: enter at the test, put the body first, and make the
+        // condition the CONDITIONAL BACKEDGE (`JumpIfTrue` back to the body).
+        // This is semantically identical to a top-tested `while` (the initial
+        // jump checks the condition before the first iteration), but the only
+        // backward branch is the test itself — the shape fusevm's tracing JIT
+        // records (no mid-body forward side-exit to abort the trace).
+        let to_test = self.emit(Op::Jump(0));
+        let l_body = self.b.current_pos();
         self.loops.push(LoopCtx::default());
         self.compile_stmts(body)?;
         let ctx = self.loops.pop().expect("loop ctx");
-        self.emit(Op::Jump(l_cond));
+        let l_test = self.b.current_pos();
+        self.b.patch_jump(to_test, l_test);
+        self.cond(cond)?;
+        self.emit(Op::JumpIfTrue(l_body));
         let l_end = self.b.current_pos();
-        self.b.patch_jump(jf, l_end);
         for j in ctx.breaks {
             self.b.patch_jump(j, l_end);
         }
         for j in ctx.continues {
-            self.b.patch_jump(j, l_cond);
+            self.b.patch_jump(j, l_test);
         }
         Ok(())
     }
@@ -409,7 +674,101 @@ impl Compiler {
     /// `:for {var} in {list} … :endfor`. Compiled as an index loop over the
     /// evaluated list, using hidden globals for the list + index (control-char
     /// names that cannot collide with user variables).
+    /// Allocate a fresh hidden fusevm slot (after the named slots).
+    fn alloc_slot(&mut self) -> u16 {
+        let idx = self.slots.len() as u16;
+        self.slots.insert(format!("\u{1}slot_{idx}"), idx);
+        idx
+    }
+
+    /// `range(...)` arguments if `iter` is a `range()` call with provably-Number
+    /// arguments, else `None`. Used to fire the native integer induction loop.
+    fn range_int_args<'a>(&self, iter: &'a Expr) -> Option<&'a [Expr]> {
+        if let Expr::Call { name, args } = iter {
+            if name == "range" && (1..=3).contains(&args.len()) && args.iter().all(|a| self.expr_is_int(a)) {
+                return Some(args);
+            }
+        }
+        None
+    }
+
+    /// Emit `for VAR in range(...)` as a native integer counter loop (rotated
+    /// for the tracing JIT). `range()` is evaluated once: the bound is hoisted
+    /// into a hidden slot, as Vim materializes the list a single time.
+    fn for_range_native(
+        &mut self,
+        slot: u16,
+        args: &[Expr],
+        step: i64,
+        body: &[Stmt],
+    ) -> Result<(), VimlError> {
+        // 1 arg: `0 .. n-1` (test `i < n`). 2+ args: `a .. b` inclusive (`i <= b`).
+        let (start, bound, cmp) = if args.len() == 1 {
+            (None, &args[0], Op::NumLt)
+        } else {
+            (Some(&args[0]), &args[1], Op::NumLe)
+        };
+        match start {
+            None => {
+                self.emit(Op::LoadInt(0));
+            }
+            Some(e) => {
+                self.expr(e)?;
+            }
+        }
+        self.emit(Op::SetSlot(slot)); // i = start
+        let bound_slot = self.alloc_slot();
+        self.expr(bound)?;
+        self.emit(Op::SetSlot(bound_slot)); // bound = <expr> (once)
+
+        let to_test = self.emit(Op::Jump(0));
+        let l_body = self.b.current_pos();
+        self.loops.push(LoopCtx::default());
+        self.compile_stmts(body)?;
+        let ctx = self.loops.pop().expect("loop ctx");
+        let l_incr = self.b.current_pos(); // continue target
+        self.emit(Op::GetSlot(slot));
+        self.emit(Op::LoadInt(step));
+        self.emit(Op::Add);
+        self.emit(Op::SetSlot(slot)); // i += step
+        let l_test = self.b.current_pos();
+        self.b.patch_jump(to_test, l_test);
+        self.emit(Op::GetSlot(slot));
+        self.emit(Op::GetSlot(bound_slot));
+        self.emit(cmp);
+        self.emit(Op::JumpIfTrue(l_body)); // backedge = the loop test
+        let l_end = self.b.current_pos();
+        for j in ctx.breaks {
+            self.b.patch_jump(j, l_end);
+        }
+        for j in ctx.continues {
+            self.b.patch_jump(j, l_incr);
+        }
+        Ok(())
+    }
+
     fn for_stmt(&mut self, vars: &ForVars, iter: &Expr, body: &[Stmt]) -> Result<(), VimlError> {
+        // Native fast path: `for VAR in range(...)` with a slotted VAR and
+        // integer bounds compiles to a native counter loop — no list is
+        // materialized, the body is CallBuiltin-free, and the loop is rotated
+        // so fusevm's tracing JIT compiles it. Matches Vim's `range()`: 1 arg →
+        // `0..n-1`; 2 args → `a..b` inclusive; 3 args → step (positive literal).
+        if let ForVars::One(name) = vars {
+            if let Some(&slot) = self.slots.get(name) {
+                if let Some(args) = self.range_int_args(iter) {
+                    // step must be a positive literal so the compare direction
+                    // is known at compile time; anything else falls through.
+                    let step = match args.get(2) {
+                        None => Some(1),
+                        Some(Expr::Number(s)) if *s > 0 => Some(*s),
+                        _ => None,
+                    };
+                    if let Some(step) = step {
+                        return self.for_range_native(slot, args, step, body);
+                    }
+                }
+            }
+        }
         let n = self.hidden;
         self.hidden += 1;
         let list_var = format!("\u{1}for_list_{n}");
@@ -492,15 +851,25 @@ impl Compiler {
         self.b.patch_jump(cont, here);
     }
 
-    /// Emit a get of a (possibly scoped) variable by name.
+    /// Emit a get of a (possibly scoped) variable by name. A slotted local
+    /// reads natively via `Op::GetSlot`.
     fn get_var(&mut self, name: &str) {
+        if let Some(&slot) = self.slots.get(name) {
+            self.emit(Op::GetSlot(slot));
+            return;
+        }
         self.load_str(name);
         self.emit(Op::CallBuiltin(h::VIML_GETVAR, 1));
     }
 
     /// Emit a set of a variable from the value on top of the stack, leaving the
-    /// stack balanced.
+    /// stack balanced. A slotted local writes natively via `Op::SetSlot` (which
+    /// consumes the value).
     fn set_var(&mut self, name: &str) {
+        if let Some(&slot) = self.slots.get(name) {
+            self.emit(Op::SetSlot(slot));
+            return;
+        }
         self.load_str(name);
         self.emit(Op::CallBuiltin(h::VIML_SETVAR, 2));
         self.emit(Op::Pop);
@@ -520,9 +889,7 @@ impl Compiler {
         match target {
             LetTarget::Var(name) => {
                 self.expr(expr)?;
-                self.load_str(name);
-                self.emit(Op::CallBuiltin(h::VIML_SETVAR, 2));
-                self.emit(Op::Pop);
+                self.set_var(name);
                 Ok(())
             }
             LetTarget::Env(name) => {
@@ -561,6 +928,61 @@ impl Compiler {
         }
     }
 
+    /// Conservative static type inference: `true` only when `e` provably
+    /// evaluates to a VimL Number (never Float/String/List/…), so its `+`/`-`/`*`
+    /// may lower to native `Op::Add`/`Sub`/`Mul`. Integer literals are Numbers;
+    /// `+ - * / %` of Numbers are Numbers (`/`,`%` are integer ops in VimL);
+    /// unary `-`/`+` of a Number is a Number. Anything else is rejected, so the
+    /// dynamic builtin path is used and correctness is never at risk.
+    fn expr_is_int(&self, e: &Expr) -> bool {
+        match e {
+            Expr::Number(_) => true,
+            // A slotted local is proven always-Number by `slot_plan`.
+            Expr::Var(name) => self.slots.contains_key(name),
+            Expr::Arith { op, lhs, rhs } => {
+                !matches!(op, ArithOp::Concat) && self.expr_is_int(lhs) && self.expr_is_int(rhs)
+            }
+            Expr::Unary { op: UnaryOp::Neg | UnaryOp::Plus, expr } => self.expr_is_int(expr),
+            _ => false,
+        }
+    }
+
+    /// fusevm-native comparison op for an integer compare, or `None` for the
+    /// dynamic ops (`=~`/`!~`/`is`/`isnot`) that have no numeric form. The
+    /// result is a `Value::Bool` — correct only when consumed by a jump
+    /// (condition position), so this is used solely for `:if`/`:while` tests.
+    fn native_cmp(op: CmpOp) -> Option<Op> {
+        Some(match op {
+            CmpOp::Equal => Op::NumEq,
+            CmpOp::NotEqual => Op::NumNe,
+            CmpOp::Less => Op::NumLt,
+            CmpOp::LessEqual => Op::NumLe,
+            CmpOp::Greater => Op::NumGt,
+            CmpOp::GreaterEqual => Op::NumGe,
+            _ => return None,
+        })
+    }
+
+    /// Emit a condition that leaves a truthiness flag on the stack for a
+    /// following `JumpIf*`. An integer comparison lowers to a native compare op
+    /// (no `VIML_TRUTHY` builtin), keeping a numeric loop/if test JIT-eligible;
+    /// anything else falls back to the dynamic `expr` + `VIML_TRUTHY` path.
+    fn cond(&mut self, e: &Expr) -> Result<(), VimlError> {
+        if let Expr::Compare { op, lhs, rhs, .. } = e {
+            if let Some(nop) = Self::native_cmp(*op) {
+                if self.expr_is_int(lhs) && self.expr_is_int(rhs) {
+                    self.expr(lhs)?;
+                    self.expr(rhs)?;
+                    self.emit(nop);
+                    return Ok(());
+                }
+            }
+        }
+        self.expr(e)?;
+        self.emit(Op::CallBuiltin(h::VIML_TRUTHY, 1));
+        Ok(())
+    }
+
     fn expr(&mut self, e: &Expr) -> Result<(), VimlError> {
         match e {
             Expr::Number(n) => {
@@ -571,8 +993,7 @@ impl Compiler {
             }
             Expr::Str(s) => self.load_str(s),
             Expr::Var(name) => {
-                self.load_str(name);
-                self.emit(Op::CallBuiltin(h::VIML_GETVAR, 1));
+                self.get_var(name);
             }
             Expr::Option(name) => {
                 self.load_str(name);
@@ -611,6 +1032,29 @@ impl Compiler {
                 self.emit(Op::CallBuiltin(id, 1));
             }
             Expr::Arith { op, lhs, rhs } => {
+                // JIT fast path: integer `+`/`-`/`*` lower to fusevm-NATIVE ops
+                // (`Op::Add`/`Sub`/`Mul`) so the chunk stays eligible for the
+                // 3-tier Cranelift JIT. Sound because `Value::Int` <-> Number
+                // typval is transparent at the VM-stack boundary (fusevm_bridge
+                // `tv_to_value`/`value_to_tv`), and i64 wrap matches VimL's
+                // `varnumber_T` arithmetic. `/`/`%` keep the builtin (VimL's
+                // div-by-zero semantics differ from `sdiv`/`srem` traps);
+                // `Concat` is a string op; non-int operands keep the dynamic
+                // builtin (`b_add` etc.) which is also the JIT deopt fallback.
+                let native = match op {
+                    ArithOp::Add => Some(Op::Add),
+                    ArithOp::Sub => Some(Op::Sub),
+                    ArithOp::Mul => Some(Op::Mul),
+                    _ => None,
+                };
+                if let Some(nop) = native {
+                    if self.expr_is_int(lhs) && self.expr_is_int(rhs) {
+                        self.expr(lhs)?;
+                        self.expr(rhs)?;
+                        self.emit(nop);
+                        return Ok(());
+                    }
+                }
                 self.expr(lhs)?;
                 self.expr(rhs)?;
                 let id = match op {
@@ -808,6 +1252,17 @@ fn builtin_fn_id(name: &str) -> Option<u16> {
         "sort" => h::VIML_FN_SORT,
         "call" => h::VIML_FN_CALL,
         "function" => h::VIML_FN_FUNCTION,
+        "json_encode" => h::VIML_FN_JSON_ENCODE,
+        "json_decode" => h::VIML_FN_JSON_DECODE,
+        "strgetchar" => h::VIML_FN_STRGETCHAR,
+        "strcharpart" => h::VIML_FN_STRCHARPART,
+        "byteidx" => h::VIML_FN_BYTEIDX,
+        "charidx" => h::VIML_FN_CHARIDX,
+        "matchstrpos" => h::VIML_FN_MATCHSTRPOS,
+        "extendnew" => h::VIML_FN_EXTENDNEW,
+        "getenv" => h::VIML_FN_GETENV,
+        "setenv" => h::VIML_FN_SETENV,
+        "shellescape" => h::VIML_FN_SHELLESCAPE,
         "sqrt" => h::VIML_FN_SQRT,
         "floor" => h::VIML_FN_FLOOR,
         "ceil" => h::VIML_FN_CEIL,

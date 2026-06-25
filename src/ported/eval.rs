@@ -16,6 +16,8 @@ pub mod typval_defs_h;
 pub mod typval;
 /// Port of `eval/encode.c`.
 pub mod encode;
+/// Port of `eval/decode.c`.
+pub mod decode;
 /// Port of `eval/funcs.c`.
 pub mod funcs;
 /// Port of `eval/vars.c`.
@@ -289,6 +291,28 @@ fn mb_strcmp_ic(ic: bool, s1: &str, s2: &str) -> i32 {
 /// (it replaces the C engine's bytecode-program matcher).
 fn pattern_match(pat: &str, subject: &str, ic: bool) -> bool {
     // `'ignorecase'` makes a plain `=~` match case-insensitively.
-    let ic = ic || crate::ported::option::get_option_bool("ignorecase");
+    let ic = ic || crate::ported::eval::typval::tv_get_bool(&crate::ported::option::get_option_value("ignorecase")) != 0;
     crate::viml_regex::regex_match(pat, subject, ic)
+}
+
+/// `AUTOLOAD_CHAR` from `Src/eval.h` (c:136) — the `#` separator in autoload
+/// names (`foo#bar#baz`).
+pub const AUTOLOAD_CHAR: u8 = b'#';
+
+/// Port of `eval_isnamec1()` from `Src/eval.c` (c:5761) — true if `c` may begin
+/// a variable or function name (a letter or `_`).
+pub fn eval_isnamec1(c: u8) -> bool {
+    c.is_ascii_alphabetic() || c == b'_'
+}
+
+/// Port of `eval_isnamec()` from `Src/eval.c` (c:5754) — true if `c` may appear
+/// within a variable or function name (`[A-Za-z0-9_:#]`).
+pub fn eval_isnamec(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || c == b'_' || c == b':' || c == AUTOLOAD_CHAR
+}
+
+/// Port of `eval_isdictc()` from `Src/eval.c` (c:5768) — true if `c` may appear
+/// in an unquoted dictionary key (`[A-Za-z0-9_]`).
+pub fn eval_isdictc(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || c == b'_'
 }

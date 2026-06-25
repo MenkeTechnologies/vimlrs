@@ -96,7 +96,9 @@ pub fn parse_program_lines(src: &str) -> Result<Vec<(u32, Stmt)>, VimlError> {
             return Err(VimlError::msg(format!("E580: `:{cmd}` without matching block opener")));
         }
         let lineno = cur.line_no();
-        out.push((lineno, parse_one(&mut cur)?));
+        for s in parse_one(&mut cur)? {
+            out.push((lineno, s));
+        }
     }
     Ok(out)
 }
@@ -141,36 +143,116 @@ impl<'a> Lines<'a> {
     }
 }
 
-/// Parse exactly one statement (leaf or block) starting at the cursor.
-fn parse_one(cur: &mut Lines) -> Result<Stmt, VimlError> {
+/// Parse the statement(s) on the line at the cursor. A block opener yields one
+/// `Stmt`; a leaf line yields one statement per `|`-separated command (Vim's
+/// `do_one_cmd` bar split), so `let l = [1] | echo l` is two statements.
+fn parse_one(cur: &mut Lines) -> Result<Vec<Stmt>, VimlError> {
     let line = cur.peek().expect("parse_one called at EOF");
     let (cmd, rest) = cmd_word(line);
     match cmd {
         "if" => {
             cur.bump();
-            parse_if(cur, rest)
+            Ok(vec![parse_if(cur, rest)?])
         }
         "while" => {
             cur.bump();
-            parse_while(cur, rest)
+            Ok(vec![parse_while(cur, rest)?])
         }
         "for" => {
             cur.bump();
-            parse_for(cur, rest)
+            Ok(vec![parse_for(cur, rest)?])
         }
         "try" => {
             cur.bump();
-            parse_try(cur)
+            Ok(vec![parse_try(cur)?])
         }
         "function" | "func" => {
             cur.bump();
-            parse_function(cur, rest)
+            Ok(vec![parse_function(cur, rest)?])
         }
         _ => {
             cur.bump();
-            parse_stmt(line)
+            let mut out = Vec::new();
+            for seg in split_commands(line) {
+                if seg.trim().is_empty() {
+                    continue;
+                }
+                out.push(parse_stmt(seg)?);
+            }
+            Ok(out)
         }
     }
+}
+
+/// Split a command line into its `|`-separated commands, the way Vim's
+/// `do_one_cmd` does. A `|` ends a command except when it is inside a string,
+/// part of the `||` operator, backslash-escaped, or after a `"` line comment.
+fn split_commands(line: &str) -> Vec<&str> {
+    let bytes = line.as_bytes();
+    let mut segs = Vec::new();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    let mut sq = false; // inside a single-quoted string ('' is an escaped quote)
+    let mut dq = false; // inside a double-quoted string (\ escapes)
+    while i < bytes.len() {
+        let c = bytes[i];
+        if sq {
+            if c == b'\'' {
+                if bytes.get(i + 1) == Some(&b'\'') {
+                    i += 2;
+                    continue;
+                }
+                sq = false;
+            }
+            i += 1;
+            continue;
+        }
+        if dq {
+            if c == b'\\' {
+                i += 2;
+                continue;
+            }
+            if c == b'"' {
+                dq = false;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            b'\'' => sq = true,
+            b'"' => {
+                // A `"` with only whitespace before it in this command is a
+                // line comment → ignore the rest of the line.
+                if line[start..i].trim().is_empty() {
+                    let seg = &line[start..i];
+                    if !seg.trim().is_empty() {
+                        segs.push(seg);
+                    }
+                    return segs;
+                }
+                dq = true;
+            }
+            b'|' => {
+                if bytes.get(i + 1) == Some(&b'|') {
+                    i += 2; // `||` logical-or, not a separator
+                    continue;
+                }
+                if i > 0 && bytes[i - 1] == b'\\' {
+                    i += 1; // escaped bar
+                    continue;
+                }
+                segs.push(&line[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let tail = &line[start..];
+    if !tail.trim().is_empty() {
+        segs.push(tail);
+    }
+    segs
 }
 
 /// Parse statements until a terminator in `terms`. Returns the body and the
@@ -190,7 +272,7 @@ fn parse_block(cur: &mut Lines, terms: &[&str]) -> Result<(Vec<Stmt>, Option<(St
         if is_block_terminator(cmd) {
             return Err(VimlError::msg(format!("E580: unexpected `:{cmd}`")));
         }
-        stmts.push(parse_one(cur)?);
+        stmts.extend(parse_one(cur)?);
     }
 }
 

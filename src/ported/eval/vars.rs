@@ -48,11 +48,6 @@ thread_local! {
     pub static tabpage_vars: RefCell<dict_T> = RefCell::new(dict_T::default());
 }
 
-/// Whether a user function is currently executing (so bare names are `l:`).
-pub fn in_function() -> bool {
-    funccal_stack.with(|s| !s.borrow().is_empty())
-}
-
 /// Port of `set_var()` from `Src/eval/vars.c:2805`.
 ///
 /// Set variable `name` to `tv`, resolving the scope prefix: `g:`/bare-at-script

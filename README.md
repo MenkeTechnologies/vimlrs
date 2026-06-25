@@ -37,11 +37,15 @@ Early / in development.
 
 | Component | State |
 |---|---|
-| Value layer — `typval`, `list`, insertion-ordered `dict`, `blob` | Ported |
+| Value layer — `typval`, `list`, insertion-ordered `dict` (typed `tv_dict_get_*`/`tv_dict_add_*`, `tv_dict_add` fail-on-dup), `blob` | Ported |
 | Coercions + `typval_compare` + `num_divide`/`num_modulus` | Ported |
 | `string()` / `:echo` rendering (`encode_tv2string`/`encode_tv2echo`) | Ported |
 | Lexer / parser → AST (the `eval1`…`eval7` grammar) | Working |
 | AST → fusevm bytecode lowering | Working |
+| Runs on fusevm's 3-tier Cranelift JIT | Working — JIT enabled; integer `+`/`-`/`*` → native `Op::Add`/`Sub`/`Mul`, integer compares → `Op::NumLt`/…; an integer expression **block-JIT-compiles** to machine code, and a function's numeric `while` loop (provably-Number `l:` locals → `Op::GetSlot`/`SetSlot`, loop rotated so the condition is the backedge) **trace-JIT-compiles** to native code — both verified by tests. Dynamic ops stay `CallBuiltin` (the deopt fallback). |
+| Idiomatic `for i in range(N)` → native integer counter loop (no list built) that **trace-JIT-compiles** | Working (1/2/3-arg `range()`; verified) |
+| Numeric loops trace-JIT at **both function and script (top-level) scope** | Working — `slot_plan` slots provably-Number locals, guarded so a `g:`/`l:`-aliased name stays dict-backed |
+| Native `Op::ReturnValue` (whole function bodies block-compile) + per-loop (not per-chunk) slot scoping | In progress (next) |
 | Expression engine — arithmetic, comparison, logic, ternary, index/slice, lists/dicts | Working |
 | Builtin function surface | Partial (`len`/`type`/`string`/`empty`/`abs`/`str2nr`/`str2float`/`float2nr`; full `funcs.c` pending) |
 | Standalone `vimlrs` binary (`-e` / `-c` / file / REPL) | Working |
@@ -52,17 +56,25 @@ Early / in development.
 | DAP debugger (`--dap`) — breakpoints, stepping, variables, evaluate | Working |
 | Control flow — `:if`/`:elseif`/`:else`, `:while`, `:for`, `:break`/`:continue` | Working |
 | `:execute`, `:let [a, b; rest] = …` & `:for [k, v] in …` destructuring | Working |
+| `\|` command separator (`let l = [1] \| echo l`) — strings/`\|\|`/`\\\|`/comment-aware | Working |
 | User functions — `:function`/`:return`, recursion, `a:`/`l:` scopes | Working |
 | Variable scopes — `g:`/`s:`/`b:`/`w:`/`t:`/`v:` + `:set`/`&opt` (`'ignorecase'` wired into regex) | Working |
 | `:try`/`:catch`/`:finally`/`:throw` exceptions, `v:exception` | Working |
-| `funcs.c` builtin table | In progress (~84 ported: string/list/dict, float math, bitwise, regex, `eval`/`execute`, …) |
+| `funcs.c` builtin table | In progress (~95 ported: string/list/dict, char-indexed string ops, float math, bitwise, regex, `eval`/`execute`, `json_encode`/`json_decode`, env (`getenv`/`setenv`), `shellescape`, …) |
 | `map`/`filter`/`sort`/`reduce`/`call` (lists **and** dicts; string-expr + funcref) | Working |
 | `eval()` / `execute()` (run-string metaprogramming) | Working |
 | Regex engine — Vim magic dialect, backing `=~`/`matchstr`/`match`/`substitute`/`split`/`:catch` | Working |
-| `s:`/`b:`/`w:`/`t:` scopes, autoload, `:execute` | Planned |
+| autoload (`foo#bar`), one-line block bars (`if … \| … \| endif`), `:source`/`:command`/`:autocmd` | Planned |
+
+The full interpreter C surface is scaffolded: `scripts/gen_port_stubs.sh`
+generates one stub per not-yet-ported Neovim C function (real name +
+`csrc/<file>:<line>` citation) under `src/ported/stubs/`, so the remaining work
+is enumerated and the drift gate covers it. Functions drop out of the stub tree
+as they are faithfully ported.
 
 Porting discipline (exact C names, `// c:NNN` citations, two-zone `src/ported/`
-vs crate-root carve-out layout) is documented in [`docs/PORT.md`](docs/PORT.md).
+vs crate-root carve-out layout, the stub surface) is documented in
+[`docs/PORT.md`](docs/PORT.md).
 
 ## Building
 

@@ -1,0 +1,60 @@
+# fake_fn_allowlist.txt — sanctioned `fn` names under src/ported/ that are NOT
+# in the csrc-derived list (docs/nvim_c_functions.txt).
+#
+# Ported from zshrs's tests/data/fake_fn_allowlist.txt + ported_fn_names_match_c.
+# The test `tests/ported_fn_names_match_c.rs` rejects any fn under src/ported/
+# whose name is neither in docs/nvim_c_functions.txt NOR listed here NOR a
+# trait-impl / #[test] exemption. Adding a name here is the audit trail for an
+# exception — keep each justified.
+#
+# Every entry below is a REAL Neovim function whose defining C file is not
+# vendored under csrc/ (only the eval/ tree is). They are faithful ports of real
+# Vim builtins/helpers, cited to their home file — analogous to the already-
+# recognized extern deps emsg/vim_str2nr (those appear as calls in the eval tree,
+# so they land in the generated list; these do not). There are NO synthesis
+# adapters here: those have been inlined or expressed as `From`/trait impls.
+# When math.c / strings.c / option.c get vendored, move their names out of this
+# file and the generator will recognize them.
+
+# ── math.c (not vendored) ──
+float_op
+f_sqrt
+f_floor
+f_ceil
+f_round
+f_trunc
+f_log
+f_log10
+f_exp
+f_sin
+f_cos
+f_tan
+f_atan
+f_asin
+f_acos
+f_sinh
+f_cosh
+f_tanh
+
+# ── strings.c (not vendored) ──
+f_string
+f_strlen
+f_strchars
+f_strgetchar
+f_strcharpart
+f_byteidx
+f_charidx
+f_strpart
+f_stridx
+f_strridx
+f_tolower
+f_toupper
+f_tr
+f_trim
+f_str2nr
+f_str2list
+
+# ── option.c (not vendored) ──
+do_set
+findoption
+set_option_value

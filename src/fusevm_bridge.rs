@@ -22,6 +22,8 @@ use crate::ported::eval::funcs::{
     f_abs, f_add, f_and, f_ceil, f_char2nr, f_copy, f_cos, f_count, f_empty, f_exists, f_exp,
     f_extend, f_float2nr, f_floor, f_function, f_get, f_has, f_has_key, f_index, f_insert, f_invert,
     f_acos, f_asin, f_atan, f_atan2, f_cosh, f_deepcopy, f_escape, f_flatten, f_fmod, f_items,
+    f_json_decode, f_json_encode, f_strgetchar, f_strcharpart, f_byteidx, f_charidx,
+    f_matchstrpos, f_extendnew, f_getenv, f_setenv, f_shellescape,
     f_join, f_keys, f_len, f_list2str, f_log, f_log10, f_match, f_matchend, f_matchlist, f_matchstr,
     f_max, f_min, f_nr2char, f_or, f_pow, f_printf, f_range, f_remove, f_repeat, f_reverse, f_round,
     f_sin, f_sinh, f_split, f_sqrt, f_str2float, f_str2list, f_str2nr, f_strchars, f_stridx,
@@ -300,6 +302,28 @@ pub const VIML_FN_LOG10: u16 = 3183;
 pub const VIML_EXEC_STMT: u16 = 3184;
 /// `:set` statement: pop the argument string, apply via `option::do_set`.
 pub const VIML_SET: u16 = 3185;
+/// `json_encode()`
+pub const VIML_FN_JSON_ENCODE: u16 = 3186;
+/// `json_decode()`
+pub const VIML_FN_JSON_DECODE: u16 = 3187;
+/// `strgetchar()`
+pub const VIML_FN_STRGETCHAR: u16 = 3188;
+/// `strcharpart()`
+pub const VIML_FN_STRCHARPART: u16 = 3189;
+/// `byteidx()`
+pub const VIML_FN_BYTEIDX: u16 = 3190;
+/// `charidx()`
+pub const VIML_FN_CHARIDX: u16 = 3191;
+/// `matchstrpos()`
+pub const VIML_FN_MATCHSTRPOS: u16 = 3192;
+/// `extendnew()`
+pub const VIML_FN_EXTENDNEW: u16 = 3193;
+/// `getenv()`
+pub const VIML_FN_GETENV: u16 = 3194;
+/// `setenv()`
+pub const VIML_FN_SETENV: u16 = 3195;
+/// `shellescape()`
+pub const VIML_FN_SHELLESCAPE: u16 = 3196;
 /// Debug line marker: pop a line number → notify the DAP `check_line` hook
 /// (emitted before each statement only in debug-compiled chunks).
 pub const VIML_SET_LINENO: u16 = 3070;
@@ -1104,7 +1128,7 @@ fn b_getopt(vm: &mut VM, _: u8) -> Value {
     let name = tv_get_string(&pop_tv(vm));
     // The option name may carry a `&l:`/`&g:` scope prefix; strip it.
     let name = name.strip_prefix("l:").or_else(|| name.strip_prefix("g:")).unwrap_or(&name);
-    tv_to_value(crate::ported::option::get_option(name))
+    tv_to_value(crate::ported::option::get_option_value(name))
 }
 
 fn b_set(vm: &mut VM, _: u8) -> Value {
@@ -1366,6 +1390,12 @@ pub fn reset_run() {
 
 /// Register every `VIML_*` builtin on a fresh VM before `vm.run()`.
 pub fn install(vm: &mut VM) {
+    // Turn on fusevm's tiered Cranelift JIT (Linear/Block/Tracing). Without
+    // this the JIT never engages — `VM::new` defaults it off and the whole
+    // tier dispatch is gated on it. Safe: only CallBuiltin-free chunks/loop
+    // bodies are eligible; everything else runs on the interpreter exactly as
+    // before, and the tracing tier deopts back to it on a slot-type guard miss.
+    vm.enable_tracing_jit();
     vm.register_builtin(VIML_GETVAR, b_getvar);
     vm.register_builtin(VIML_SETVAR, b_setvar);
     vm.register_builtin(VIML_SETENV, b_setenv);
@@ -1478,6 +1508,17 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FN_LOG10, |vm, n| call_func(vm, n, f_log10));
     vm.register_builtin(VIML_EXEC_STMT, b_exec_stmt);
     vm.register_builtin(VIML_SET, b_set);
+    vm.register_builtin(VIML_FN_JSON_ENCODE, |vm, n| call_func(vm, n, f_json_encode));
+    vm.register_builtin(VIML_FN_JSON_DECODE, |vm, n| call_func(vm, n, f_json_decode));
+    vm.register_builtin(VIML_FN_STRGETCHAR, |vm, n| call_func(vm, n, f_strgetchar));
+    vm.register_builtin(VIML_FN_STRCHARPART, |vm, n| call_func(vm, n, f_strcharpart));
+    vm.register_builtin(VIML_FN_BYTEIDX, |vm, n| call_func(vm, n, f_byteidx));
+    vm.register_builtin(VIML_FN_CHARIDX, |vm, n| call_func(vm, n, f_charidx));
+    vm.register_builtin(VIML_FN_MATCHSTRPOS, |vm, n| call_func(vm, n, f_matchstrpos));
+    vm.register_builtin(VIML_FN_EXTENDNEW, |vm, n| call_func(vm, n, f_extendnew));
+    vm.register_builtin(VIML_FN_GETENV, |vm, n| call_func(vm, n, f_getenv));
+    vm.register_builtin(VIML_FN_SETENV, |vm, n| call_func(vm, n, f_setenv));
+    vm.register_builtin(VIML_FN_SHELLESCAPE, |vm, n| call_func(vm, n, f_shellescape));
     vm.register_builtin(VIML_SET_LINENO, b_set_lineno);
     vm.register_builtin(VIML_CALL_USER, b_call_user);
     vm.register_builtin(VIML_SET_RETURN, b_set_return);
@@ -1583,6 +1624,195 @@ mod tests {
         capture_begin();
         eval_source(src).unwrap();
         capture_take()
+    }
+
+    /// Proof that a vimlrs numeric loop runs on fusevm's tracing JIT: a
+    /// function with a constant-bound integer `while` loop lowers to a
+    /// CallBuiltin-free native loop body (slots + compare + arith + jumps), and
+    /// fusevm records and compiles a trace for it.
+    #[test]
+    fn numeric_loop_traces_on_jit() {
+        use crate::compile_viml::compile_program;
+        use crate::viml_parser::parse_program;
+        use fusevm::Op;
+
+        let src = "function! Count()\n  let i = 0\n  while i < 1000\n    let i = i + 1\n  endwhile\n  return i\nendfunction";
+        let prog = compile_program(&parse_program(src).unwrap()).unwrap();
+        let chunk = prog.funcs.iter().find(|f| f.name == "Count").unwrap().chunk.clone();
+
+        // The loop lowers to native slot/compare/arith ops.
+        assert!(chunk.ops.iter().any(|o| matches!(o, Op::GetSlot(_))), "slotted reads");
+        assert!(chunk.ops.iter().any(|o| matches!(o, Op::SetSlot(_))), "slotted writes");
+        assert!(chunk.ops.iter().any(|o| matches!(o, Op::NumLt)), "native compare");
+        assert!(chunk.ops.iter().any(|o| matches!(o, Op::Add)), "native add");
+
+        // The loop body (loop header .. backedge) is CallBuiltin-free → trace-eligible.
+        let backedge = chunk
+            .ops
+            .iter()
+            .enumerate()
+            .find_map(|(i, o)| match o {
+                Op::Jump(t) | Op::JumpIfTrue(t) | Op::JumpIfFalse(t) if (*t as usize) < i => {
+                    Some((*t as usize, i))
+                }
+                _ => None,
+            })
+            .expect("loop backedge");
+        let (header, back) = backedge;
+        assert!(
+            !chunk.ops[header..=back]
+                .iter()
+                .any(|o| matches!(o, Op::CallBuiltin(..) | Op::Extended(..))),
+            "loop body must be CallBuiltin-free, got {:?}",
+            &chunk.ops[header..=back]
+        );
+
+        assert!(
+            matches!(chunk.ops[back], Op::JumpIfTrue(t) if t as usize == header),
+            "loop closes with a conditional backward branch to the header"
+        );
+
+        // Drive the native loop hot in a single run (1000 backedges >> the
+        // threshold of 50) and confirm fusevm records and compiles a trace for
+        // it — vimlrs numeric loops execute as native machine code.
+        let mut vm = VM::new(chunk.clone());
+        install(&mut vm); // registers VIML_SET_RETURN + enables the JIT
+        while vm.frames.last().unwrap().slots.len() < 1 {
+            vm.frames.last_mut().unwrap().slots.push(fusevm::Value::Int(0));
+        }
+        let _ = vm.run();
+        assert!(
+            fusevm::JitCompiler::new().trace_is_compiled(&chunk, header),
+            "fusevm must compile a trace for the native loop at header {header}"
+        );
+    }
+
+    /// Proof that the idiomatic `for i in range(N)` loop runs on the tracing
+    /// JIT: it compiles to a native integer counter loop (no list is built),
+    /// and fusevm records and compiles a trace for it.
+    #[test]
+    fn range_for_traces_on_jit() {
+        use crate::compile_viml::compile_program;
+        use crate::viml_parser::parse_program;
+        use fusevm::Op;
+
+        let src = "function! S()\n  let s = 0\n  for i in range(1000)\n    let s = s + i\n  endfor\n  return s\nendfunction";
+        let prog = compile_program(&parse_program(src).unwrap()).unwrap();
+        let chunk = prog.funcs.iter().find(|f| f.name == "S").unwrap().chunk.clone();
+
+        // No list materialization — range() never calls VIML_FN_RANGE/VIML_INDEX.
+        assert!(
+            !chunk.ops.iter().any(|o| matches!(o, Op::CallBuiltin(id, _)
+                if *id == VIML_FN_RANGE || *id == VIML_INDEX || *id == VIML_FN_LEN)),
+            "range-for must not build a list"
+        );
+        let (header, back) = chunk
+            .ops
+            .iter()
+            .enumerate()
+            .find_map(|(i, o)| match o {
+                Op::JumpIfTrue(t) if (*t as usize) < i => Some((*t as usize, i)),
+                _ => None,
+            })
+            .expect("loop backedge");
+        assert!(
+            !chunk.ops[header..=back]
+                .iter()
+                .any(|o| matches!(o, Op::CallBuiltin(..) | Op::Extended(..))),
+            "range-for loop body must be CallBuiltin-free, got {:?}",
+            &chunk.ops[header..=back]
+        );
+
+        let mut vm = VM::new(chunk.clone());
+        install(&mut vm);
+        while vm.frames.last().unwrap().slots.len() < 2 {
+            vm.frames.last_mut().unwrap().slots.push(fusevm::Value::Int(0));
+        }
+        let _ = vm.run();
+        assert!(
+            fusevm::JitCompiler::new().trace_is_compiled(&chunk, header),
+            "fusevm must compile a trace for the native range-for loop"
+        );
+    }
+
+    /// Proof that a SCRIPT-LEVEL (top-level, no function) numeric loop runs on
+    /// the tracing JIT — the common shape of real `.vim` scripts.
+    #[test]
+    fn script_level_loop_traces_on_jit() {
+        use crate::compile_viml::compile_program;
+        use crate::viml_parser::parse_program;
+        use fusevm::Op;
+
+        let src = "let s = 0\nfor i in range(1000)\n  let s = s + i\nendfor";
+        let chunk = compile_program(&parse_program(src).unwrap()).unwrap().main;
+
+        let (header, back) = chunk
+            .ops
+            .iter()
+            .enumerate()
+            .find_map(|(i, o)| match o {
+                Op::JumpIfTrue(t) if (*t as usize) < i => Some((*t as usize, i)),
+                _ => None,
+            })
+            .expect("loop backedge");
+        assert!(
+            !chunk.ops[header..=back]
+                .iter()
+                .any(|o| matches!(o, Op::CallBuiltin(..) | Op::Extended(..))),
+            "script-level loop body must be CallBuiltin-free, got {:?}",
+            &chunk.ops[header..=back]
+        );
+
+        let mut vm = VM::new(chunk.clone());
+        install(&mut vm);
+        while vm.frames.last().unwrap().slots.len() < 3 {
+            vm.frames.last_mut().unwrap().slots.push(fusevm::Value::Int(0));
+        }
+        let _ = vm.run();
+        assert!(
+            fusevm::JitCompiler::new().trace_is_compiled(&chunk, header),
+            "fusevm must compile a trace for the script-level loop"
+        );
+    }
+
+    /// Proof that vimlrs bytecode actually runs on fusevm's Cranelift JIT:
+    /// an integer expression lowers to a CallBuiltin-free native-op chunk, and
+    /// fusevm block-JIT-compiles it to machine code after the warm-up threshold.
+    #[test]
+    fn integer_expr_runs_on_jit() {
+        use crate::compile_viml::compile_expr_only;
+        use crate::viml_parser::parse_expr;
+
+        let e = parse_expr("2 + 3 * 4 - 1").unwrap();
+        let chunk = compile_expr_only(&e).unwrap();
+
+        // 1. The chunk is fully native — no builtin/extended dispatch, so it is
+        //    eligible for every JIT tier.
+        assert!(
+            !chunk
+                .ops
+                .iter()
+                .any(|op| matches!(op, fusevm::Op::CallBuiltin(..) | fusevm::Op::Extended(..))),
+            "integer expr must lower to native ops only, got {:?}",
+            chunk.ops
+        );
+
+        // 2. It computes the right value, and fusevm block-JIT compiles it after
+        //    the 10-invocation warm-up (install() enables the JIT).
+        let mut compiled = false;
+        let mut last = Value::Undef;
+        for _ in 0..15 {
+            let mut vm = VM::new(chunk.clone());
+            install(&mut vm);
+            if let fusevm::VMResult::Ok(v) = vm.run() {
+                last = v;
+            }
+            if fusevm::JitCompiler::new().block_jit_is_compiled(&chunk) {
+                compiled = true;
+            }
+        }
+        assert_eq!(last, Value::Int(13), "2 + 3*4 - 1 = 13");
+        assert!(compiled, "fusevm must block-JIT-compile the native chunk");
     }
 
     #[test]

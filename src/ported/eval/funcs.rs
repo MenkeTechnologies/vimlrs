@@ -11,16 +11,18 @@
 use crate::ported::charset::{vim_str2nr, STR2NR_ALL};
 use crate::ported::eval::encode::encode_tv2string;
 use crate::ported::eval::typval::{
-    tv_blob_len, tv_dict_add_tv, tv_dict_find, tv_dict_len, tv_equal, tv_get_float,
+    tv_blob_len, tv_get_bool, tv_dict_add_tv, tv_dict_find, tv_dict_len, tv_equal, tv_get_float,
     tv_get_number_chk, tv_get_string, tv_list_alloc_ret, tv_list_append_number,
     tv_list_append_string, tv_list_append_tv, tv_list_len,
 };
 use crate::ported::eval::typval_defs_h::{
-    typval_T, typval_vval_union::*, varnumber_T, BoolVarValue::*, VarType::*, VAR_TYPE_BLOB,
+    typval_T, typval_vval_union::*, varnumber_T, BoolVarValue::*, SpecialVarValue::*, VarType::*,
+    VAR_TYPE_BLOB,
     VAR_TYPE_BOOL, VAR_TYPE_DICT, VAR_TYPE_FLOAT, VAR_TYPE_FUNC, VAR_TYPE_LIST, VAR_TYPE_NUMBER,
     VAR_TYPE_SPECIAL, VAR_TYPE_STRING,
 };
 use crate::ported::message::emsg;
+use crate::ported::option::get_option_value;
 
 /// Port of `f_len()` from `Src/eval/funcs.c`.
 ///
@@ -204,7 +206,7 @@ pub fn f_split(argvars: &[typval_T], rettv: &mut typval_T) {
     let keepempty = argvars.get(2).map_or(false, |t| tv_get_number_chk(t, None) != 0);
     let pat = argvars.get(1).map(tv_get_string).filter(|p| !p.is_empty());
     let parts: Vec<String> = match pat {
-        Some(p) => crate::viml_regex::regex_split(&s, &p, crate::ported::option::get_option_bool("ignorecase"), keepempty),
+        Some(p) => crate::viml_regex::regex_split(&s, &p, tv_get_bool(&get_option_value("ignorecase")) != 0, keepempty),
         None => s.split_whitespace().map(String::from).collect(),
     };
     let l = tv_list_alloc_ret(rettv, parts.len() as isize);
@@ -220,7 +222,7 @@ pub fn f_matchstr(argvars: &[typval_T], rettv: &mut typval_T) {
     let s = tv_get_string(&argvars[0]);
     let pat = tv_get_string(&argvars[1]);
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(crate::viml_regex::regex_matchstr(&pat, &s, crate::ported::option::get_option_bool("ignorecase")));
+    rettv.vval = v_string(crate::viml_regex::regex_matchstr(&pat, &s, tv_get_bool(&get_option_value("ignorecase")) != 0));
 }
 
 /// Port of `f_match()` from `Src/eval/funcs.c` — the char index of the first
@@ -228,7 +230,7 @@ pub fn f_matchstr(argvars: &[typval_T], rettv: &mut typval_T) {
 pub fn f_match(argvars: &[typval_T], rettv: &mut typval_T) {
     let s = tv_get_string(&argvars[0]);
     let pat = tv_get_string(&argvars[1]);
-    rettv.vval = v_number(crate::viml_regex::regex_match_index(&pat, &s, crate::ported::option::get_option_bool("ignorecase")));
+    rettv.vval = v_number(crate::viml_regex::regex_match_index(&pat, &s, tv_get_bool(&get_option_value("ignorecase")) != 0));
 }
 
 /// Port of `f_substitute()` from `Src/eval/funcs.c` — replace matches of `{pat}`
@@ -353,24 +355,20 @@ pub fn f_has_key(argvars: &[typval_T], rettv: &mut typval_T) {
 
 /// Port of `f_keys()` from `Src/eval/funcs.c` — a List of a Dict's keys.
 pub fn f_keys(argvars: &[typval_T], rettv: &mut typval_T) {
-    let l = tv_list_alloc_ret(rettv, 0);
-    if let (VAR_DICT, v_dict(Some(d))) = (argvars[0].v_type, &argvars[0].vval) {
-        let mut lb = l.borrow_mut();
-        for k in d.borrow().dv_hashtab.keys() {
-            tv_list_append_string(&mut lb, k);
-        }
-    }
+    crate::ported::eval::typval::tv_dict2list(
+        argvars,
+        rettv,
+        crate::ported::eval::typval::DictListType::kDict2ListKeys,
+    );
 }
 
 /// Port of `f_values()` from `Src/eval/funcs.c` — a List of a Dict's values.
 pub fn f_values(argvars: &[typval_T], rettv: &mut typval_T) {
-    let l = tv_list_alloc_ret(rettv, 0);
-    if let (VAR_DICT, v_dict(Some(d))) = (argvars[0].v_type, &argvars[0].vval) {
-        let mut lb = l.borrow_mut();
-        for v in d.borrow().dv_hashtab.values() {
-            tv_list_append_tv(&mut lb, v.clone());
-        }
-    }
+    crate::ported::eval::typval::tv_dict2list(
+        argvars,
+        rettv,
+        crate::ported::eval::typval::DictListType::kDict2ListValues,
+    );
 }
 
 /// Port of `f_max()` from `Src/eval/funcs.c`.
@@ -788,33 +786,16 @@ pub fn f_copy(argvars: &[typval_T], rettv: &mut typval_T) {
     }
 }
 
-/// Port of `f_items()` from `Src/eval/funcs.c` — `[[key, value], …]` of a Dict.
+/// Port of `f_items()` from `Src/eval/funcs.c` — `[index/key, value]` pairs of a
+/// String/List/Blob/Dict.
 pub fn f_items(argvars: &[typval_T], rettv: &mut typval_T) {
-    let out = tv_list_alloc_ret(rettv, 0);
-    if let (VAR_DICT, v_dict(Some(d))) = (argvars[0].v_type, &argvars[0].vval) {
-        let pairs: Vec<_> = d
-            .borrow()
-            .dv_hashtab
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        let mut ob = out.borrow_mut();
-        for (k, v) in pairs {
-            let pair = crate::ported::eval::typval::tv_list_alloc(2);
-            {
-                let mut pb = pair.borrow_mut();
-                tv_list_append_string(&mut pb, &k);
-                tv_list_append_tv(&mut pb, v);
-            }
-            tv_list_append_tv(
-                &mut ob,
-                typval_T {
-                    v_type: VAR_LIST,
-                    v_lock: crate::ported::eval::typval_defs_h::VarLockStatus::VAR_UNLOCKED,
-                    vval: v_list(Some(pair)),
-                },
-            );
-        }
+    use crate::ported::eval::typval::{tv_blob2items, tv_dict2items, tv_list2items, tv_string2items};
+    match argvars[0].v_type {
+        VAR_STRING => tv_string2items(argvars, rettv),
+        VAR_LIST => tv_list2items(argvars, rettv),
+        VAR_BLOB => tv_blob2items(argvars, rettv),
+        VAR_DICT => tv_dict2items(argvars, rettv),
+        _ => emsg("E1225: List, Dictionary, Blob or String required for argument 1"),
     }
 }
 
@@ -836,7 +817,7 @@ pub fn f_uniq(argvars: &[typval_T], rettv: &mut typval_T) {
 pub fn f_matchlist(argvars: &[typval_T], rettv: &mut typval_T) {
     let s = tv_get_string(&argvars[0]);
     let pat = tv_get_string(&argvars[1]);
-    let parts = crate::viml_regex::regex_matchlist(&pat, &s, crate::ported::option::get_option_bool("ignorecase"));
+    let parts = crate::viml_regex::regex_matchlist(&pat, &s, tv_get_bool(&get_option_value("ignorecase")) != 0);
     let l = tv_list_alloc_ret(rettv, parts.len() as isize);
     let mut lb = l.borrow_mut();
     for p in &parts {
@@ -849,7 +830,7 @@ pub fn f_matchlist(argvars: &[typval_T], rettv: &mut typval_T) {
 pub fn f_matchend(argvars: &[typval_T], rettv: &mut typval_T) {
     let s = tv_get_string(&argvars[0]);
     let pat = tv_get_string(&argvars[1]);
-    rettv.vval = v_number(crate::viml_regex::regex_matchend(&pat, &s, crate::ported::option::get_option_bool("ignorecase")));
+    rettv.vval = v_number(crate::viml_regex::regex_matchend(&pat, &s, tv_get_bool(&get_option_value("ignorecase")) != 0));
 }
 
 /// Port of `f_strridx()` from `Src/eval/funcs.c` — byte index of the LAST
@@ -954,13 +935,13 @@ pub fn f_flatten(argvars: &[typval_T], rettv: &mut typval_T) {
 
 // ── batch 5: deepcopy + more float math (Src/eval/funcs.c) ──
 
-/// Port of `item_copy()` from `Src/eval/typval.c` — a deep copy of `from`
+/// Port of `var_item_copy()` from `Src/eval/typval.c` — a deep copy of `from`
 /// (Lists/Dicts copied recursively into fresh handles).
-fn item_copy(from: &typval_T) -> typval_T {
+pub(crate) fn var_item_copy(from: &typval_T) -> typval_T {
     match (from.v_type, &from.vval) {
         (VAR_LIST, v_list(Some(l))) => {
             let items: Vec<typval_T> =
-                l.borrow().lv_items.iter().map(|it| item_copy(&it.li_tv)).collect();
+                l.borrow().lv_items.iter().map(|it| var_item_copy(&it.li_tv)).collect();
             let out = crate::ported::eval::typval::tv_list_alloc(items.len() as isize);
             {
                 let mut ob = out.borrow_mut();
@@ -979,7 +960,7 @@ fn item_copy(from: &typval_T) -> typval_T {
                 .borrow()
                 .dv_hashtab
                 .iter()
-                .map(|(k, v)| (k.clone(), item_copy(v)))
+                .map(|(k, v)| (k.clone(), var_item_copy(v)))
                 .collect();
             let out = crate::ported::eval::typval::tv_dict_alloc();
             {
@@ -1000,7 +981,7 @@ fn item_copy(from: &typval_T) -> typval_T {
 
 /// Port of `f_deepcopy()` from `Src/eval/funcs.c` — a recursive copy of `{expr}`.
 pub fn f_deepcopy(argvars: &[typval_T], rettv: &mut typval_T) {
-    *rettv = item_copy(&argvars[0]);
+    *rettv = var_item_copy(&argvars[0]);
 }
 
 /// Port of `f_fmod()` from `Src/eval/funcs.c` — floating-point remainder.
@@ -1046,4 +1027,190 @@ pub fn f_tanh(argvars: &[typval_T], rettv: &mut typval_T) {
 /// Port of `f_log10()` from `Src/eval/funcs.c`.
 pub fn f_log10(argvars: &[typval_T], rettv: &mut typval_T) {
     float_op(argvars, rettv, f64::log10);
+}
+
+// ── json (Src/eval/funcs.c → encode.c / decode.c) ──
+
+/// Port of `f_json_encode()` from `Src/eval/funcs.c` — the JSON text of `{expr}`.
+pub fn f_json_encode(argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.v_type = VAR_STRING;
+    rettv.vval = v_string(crate::ported::eval::encode::encode_tv2json(&argvars[0]));
+}
+
+/// Port of `f_json_decode()` from `Src/eval/funcs.c` — the value of JSON text.
+pub fn f_json_decode(argvars: &[typval_T], rettv: &mut typval_T) {
+    let s = tv_get_string(&argvars[0]);
+    match crate::ported::eval::decode::json_decode_string(&s) {
+        Some(v) => *rettv = v,
+        None => emsg("E491: JSON decode error"),
+    }
+}
+
+// ── batch 5: char-indexed string ops (Src/strings.c), regex pos, env, paths ──
+
+/// Port of `f_strgetchar()` from `Src/strings.c` — the decimal codepoint of the
+/// `{index}`'th character (0-based) of `{str}`, or -1 if out of range.
+pub fn f_strgetchar(argvars: &[typval_T], rettv: &mut typval_T) {
+    let s = tv_get_string(&argvars[0]);
+    let idx = tv_get_number_chk(&argvars[1], None);
+    rettv.vval = v_number(if idx < 0 {
+        -1
+    } else {
+        s.chars().nth(idx as usize).map_or(-1, |c| c as varnumber_T)
+    });
+}
+
+/// Port of `f_strcharpart()` from `Src/strings.c` — a substring of `{src}` by
+/// CHARACTER index: `{start}` chars in, `{len}` chars long (to end if omitted).
+/// A negative `{start}` counts toward `{len}` (matching Vim).
+pub fn f_strcharpart(argvars: &[typval_T], rettv: &mut typval_T) {
+    let chars: Vec<char> = tv_get_string(&argvars[0]).chars().collect();
+    let mut start = tv_get_number_chk(&argvars[1], None);
+    let has_len = argvars.len() >= 3;
+    let mut len = if has_len {
+        tv_get_number_chk(&argvars[2], None)
+    } else {
+        chars.len() as varnumber_T - start
+    };
+    if start < 0 {
+        len += start; // chars before 0 are skipped but still consume {len}
+        start = 0;
+    }
+    let start = (start as usize).min(chars.len());
+    let len = len.max(0) as usize;
+    let end = (start + len).min(chars.len());
+    rettv.v_type = VAR_STRING;
+    rettv.vval = v_string(chars[start..end].iter().collect());
+}
+
+/// Port of `f_byteidx()` from `Src/strings.c` — the byte index of the `{nr}`'th
+/// character of `{expr}`. `nr == strcharlen` yields the byte length; `nr` past
+/// the end yields -1.
+pub fn f_byteidx(argvars: &[typval_T], rettv: &mut typval_T) {
+    let s = tv_get_string(&argvars[0]);
+    let nr = tv_get_number_chk(&argvars[1], None);
+    rettv.vval = v_number(if nr < 0 {
+        -1
+    } else {
+        match s.char_indices().nth(nr as usize) {
+            Some((b, _)) => b as varnumber_T,
+            None if nr as usize == s.chars().count() => s.len() as varnumber_T,
+            None => -1,
+        }
+    });
+}
+
+/// Port of `f_charidx()` from `Src/strings.c` — the character index of the byte
+/// at `{idx}` in `{string}`, or -1 if `{idx}` is out of range.
+pub fn f_charidx(argvars: &[typval_T], rettv: &mut typval_T) {
+    let s = tv_get_string(&argvars[0]);
+    let idx = tv_get_number_chk(&argvars[1], None);
+    rettv.vval = v_number(if idx < 0 || idx as usize >= s.len() {
+        -1
+    } else {
+        s[..idx as usize].chars().count() as varnumber_T
+    });
+}
+
+/// Port of `f_matchstrpos()` from `Src/eval/funcs.c` — `[match, start, end]`
+/// (character indices) of the first match of `{pat}` in `{expr}`, or `['', -1,
+/// -1]`. (c: `find_some_match(argvars, rettv, kSomeMatchStrPos)`.)
+pub fn f_matchstrpos(argvars: &[typval_T], rettv: &mut typval_T) {
+    let s = tv_get_string(&argvars[0]);
+    let pat = tv_get_string(&argvars[1]);
+    let (m, start, end) = crate::viml_regex::regex_matchstrpos(
+        &pat,
+        &s,
+        tv_get_bool(&get_option_value("ignorecase")) != 0,
+    );
+    let l = tv_list_alloc_ret(rettv, 3);
+    let mut lb = l.borrow_mut();
+    tv_list_append_string(&mut lb, &m);
+    tv_list_append_number(&mut lb, start);
+    tv_list_append_number(&mut lb, end);
+}
+
+/// Port of `f_extendnew()` from `Src/eval/list.c` — like `extend()` but returns
+/// a NEW List/Dict, leaving the arguments unchanged. (c: `extend(..., true)`.)
+pub fn f_extendnew(argvars: &[typval_T], rettv: &mut typval_T) {
+    match (argvars[0].v_type, &argvars[0].vval) {
+        (VAR_LIST, v_list(Some(l1))) => {
+            let mut items: Vec<_> =
+                l1.borrow().lv_items.iter().map(|it| it.li_tv.clone()).collect();
+            if let (VAR_LIST, v_list(Some(l2))) = (argvars[1].v_type, &argvars[1].vval) {
+                items.extend(l2.borrow().lv_items.iter().map(|it| it.li_tv.clone()));
+            }
+            let out = tv_list_alloc_ret(rettv, items.len() as isize);
+            let mut ob = out.borrow_mut();
+            for tv in items {
+                tv_list_append_tv(&mut ob, tv);
+            }
+        }
+        (VAR_DICT, v_dict(Some(d1))) => {
+            let mut pairs: Vec<_> = d1
+                .borrow()
+                .dv_hashtab
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            if let (VAR_DICT, v_dict(Some(d2))) = (argvars[1].v_type, &argvars[1].vval) {
+                pairs.extend(d2.borrow().dv_hashtab.iter().map(|(k, v)| (k.clone(), v.clone())));
+            }
+            let out = crate::ported::eval::typval::tv_dict_alloc_ret(rettv);
+            let mut ob = out.borrow_mut();
+            for (k, v) in pairs {
+                tv_dict_add_tv(&mut ob, &k, v); // later (expr2) keys override
+            }
+        }
+        _ => *rettv = argvars[0].clone(),
+    }
+}
+
+/// Port of `f_getenv()` from `Src/eval/funcs.c` — the value of environment
+/// variable `{name}`, or `v:null` if it is not set.
+pub fn f_getenv(argvars: &[typval_T], rettv: &mut typval_T) {
+    let name = tv_get_string(&argvars[0]);
+    // c: char *p = vim_getenv(...); if (p == NULL) { v:null } else { string }
+    match std::env::var(&name) {
+        Ok(p) => {
+            rettv.v_type = VAR_STRING;
+            rettv.vval = v_string(p);
+        }
+        Err(_) => {
+            rettv.v_type = VAR_SPECIAL;
+            rettv.vval = v_special(kSpecialVarNull);
+        }
+    }
+}
+
+/// Port of `f_setenv()` from `Src/eval/funcs.c` — set environment variable
+/// `{name}` to `{value}`, or unset it when `{value}` is `v:null`.
+pub fn f_setenv(argvars: &[typval_T], _rettv: &mut typval_T) {
+    let name = tv_get_string(&argvars[0]);
+    if argvars[1].v_type == VAR_SPECIAL {
+        // c: vim_unsetenv_ext(name)
+        std::env::remove_var(&name);
+    } else {
+        // c: vim_setenv_ext(name, tv_get_string_buf(&argvars[1], valbuf))
+        std::env::set_var(&name, tv_get_string(&argvars[1]));
+    }
+}
+
+/// Port of `f_shellescape()` from `Src/eval/funcs.c` — quote `{string}` so it
+/// can be used safely as a single shell word. (c: `vim_strsave_shellescape`,
+/// default `do_special=false`: wrap in single quotes, `'` → `'\''`.)
+pub fn f_shellescape(argvars: &[typval_T], rettv: &mut typval_T) {
+    let s = tv_get_string(&argvars[0]);
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    rettv.v_type = VAR_STRING;
+    rettv.vval = v_string(out);
 }

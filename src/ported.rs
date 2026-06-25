@@ -15,3 +15,7 @@ pub mod eval_h;
 pub mod eval;
 /// Port of `src/nvim/option.c` (subset: the option table, `&opt`, `:set`).
 pub mod option;
+/// Generated not-yet-ported surface: one stub per vendored C function
+/// definition (real name + `csrc/<file>:<line>` citation). Regenerate with
+/// `scripts/gen_port_stubs.sh`; ported functions drop out automatically.
+pub mod stubs;

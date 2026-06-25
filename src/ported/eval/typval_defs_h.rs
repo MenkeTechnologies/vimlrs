@@ -156,6 +156,29 @@ impl Default for typval_T {
     }
 }
 
+impl From<varnumber_T> for typval_T {
+    /// A `VAR_NUMBER` value (the C `rettv->v_type = VAR_NUMBER; rettv->vval
+    /// .v_number = n;` pattern, as a Rust constructor).
+    fn from(n: varnumber_T) -> Self {
+        typval_T {
+            v_type: VarType::VAR_NUMBER,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: typval_vval_union::v_number(n),
+        }
+    }
+}
+
+impl From<String> for typval_T {
+    /// A `VAR_STRING` value.
+    fn from(s: String) -> Self {
+        typval_T {
+            v_type: VarType::VAR_STRING,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: typval_vval_union::v_string(s),
+        }
+    }
+}
+
 /// `struct listitem_S { listitem_T *li_next; listitem_T *li_prev; typval_T
 /// li_tv; }` — an item of a list. (c:167) The `li_next`/`li_prev` chain is
 /// replaced by the owning `Vec` (see file-header RUST-PORT NOTE); `li_tv` is

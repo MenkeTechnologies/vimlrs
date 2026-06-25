@@ -42,12 +42,27 @@ pub fn encode_vim_to_string(tv: &typval_T) -> String {
     match (tv.v_type, &tv.vval) {
         // TYPVAL_ENCODE_CONV_NUMBER
         (VAR_NUMBER, v_number(n)) => n.to_string(),
-        // TYPVAL_ENCODE_CONV_FLOAT — "%g", then append ".0" if no '.'/'e'.
-        (VAR_FLOAT, v_float(f)) => conv_float(*f),
+        // TYPVAL_ENCODE_CONV_FLOAT — "%g", then append ".0" if no '.'/'e' (so
+        // string(3.0) is "3.0", not "3"). RUST-PORT NOTE: `{f}` stands in for
+        // printf "%g".
+        (VAR_FLOAT, v_float(f)) => {
+            if f.is_infinite() {
+                if *f < 0.0 { "-inf" } else { "inf" }.to_string()
+            } else if f.is_nan() {
+                "nan".to_string()
+            } else {
+                let s = format!("{f}");
+                if s.contains(['.', 'e', 'E']) {
+                    s
+                } else {
+                    format!("{s}.0")
+                }
+            }
+        }
         // TYPVAL_ENCODE_CONV_STRING — single-quoted, embedded quotes doubled.
-        (VAR_STRING, v_string(s)) => quote_string(s),
+        (VAR_STRING, v_string(s)) => format!("'{}'", s.replace('\'', "''")),
         // TYPVAL_ENCODE_CONV_FUNC_START — function('name').
-        (VAR_FUNC, v_string(s)) => format!("function({})", quote_string(s)),
+        (VAR_FUNC, v_string(s)) => format!("function('{}')", s.replace('\'', "''")),
         (VAR_BOOL, v_bool(b)) => {
             if *b == kBoolVarTrue { "v:true" } else { "v:false" }.to_string()
         }
@@ -78,7 +93,7 @@ pub fn encode_vim_to_string(tv: &typval_T) -> String {
                     if i > 0 {
                         out.push_str(", ");
                     }
-                    out.push_str(&quote_string(k));
+                    out.push_str(&format!("'{}'", k.replace('\'', "''")));
                     out.push_str(": ");
                     out.push_str(&encode_vim_to_string(v));
                 }
@@ -111,35 +126,90 @@ pub fn encode_vim_to_echo(tv: &typval_T) -> String {
     encode_vim_to_string(tv)
 }
 
-/// `TYPVAL_ENCODE_CONV_FLOAT` (`encode.c` / `typval_encode.c.h`): `%g`, with a
-/// trailing `.0` when the result has no `.`/`e`/inf/nan, so `string(3.0)` is
-/// `3.0` not `3`.
-fn conv_float(f: f64) -> String {
-    if f.is_infinite() {
-        return if f < 0.0 { "-inf" } else { "inf" }.to_string();
+/// Port of `encode_tv2json()` from `Src/eval/encode.c:921` — the `json_encode()`
+/// rendering of a value.
+pub fn encode_tv2json(tv: &typval_T) -> String {
+    encode_vim_to_json(tv)
+}
+
+/// Port of `convert_to_json_string()` from `Src/eval/encode.c:621` — a
+/// double-quoted, JSON-escaped string.
+fn convert_to_json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            '\x08' => out.push_str("\\b"),
+            '\x0c' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
     }
-    if f.is_nan() {
-        return "nan".to_string();
-    }
-    let s = format!("{f}"); // RUST-PORT NOTE: stands in for printf "%g".
-    if s.contains('.') || s.contains('e') || s.contains('E') {
-        s
-    } else {
-        format!("{s}.0")
+    out.push('"');
+    out
+}
+
+/// Port of the `encode_vim_to_json` instantiation of the encode template — JSON
+/// render. Strings/keys are double-quoted+escaped, `v:true`/`v:false`/`v:null`
+/// become `true`/`false`/`null`.
+pub fn encode_vim_to_json(tv: &typval_T) -> String {
+    match (tv.v_type, &tv.vval) {
+        (VAR_NUMBER, v_number(n)) => n.to_string(),
+        (VAR_FLOAT, v_float(f)) => {
+            if f.is_finite() {
+                let s = format!("{f}");
+                if s.contains(['.', 'e', 'E']) {
+                    s
+                } else {
+                    format!("{s}.0")
+                }
+            } else {
+                "null".to_string() // JSON has no NaN/Inf
+            }
+        }
+        (VAR_STRING, v_string(s)) => convert_to_json_string(s),
+        (VAR_BOOL, v_bool(b)) => {
+            if *b == kBoolVarTrue { "true" } else { "false" }.to_string()
+        }
+        (VAR_SPECIAL, _) => "null".to_string(),
+        (VAR_LIST, v_list(l)) => match l {
+            None => "[]".to_string(),
+            Some(l) => {
+                let l = l.borrow();
+                let mut out = String::from("[");
+                for (i, it) in l.lv_items.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    out.push_str(&encode_vim_to_json(&it.li_tv));
+                }
+                out.push(']');
+                out
+            }
+        },
+        (VAR_DICT, v_dict(d)) => match d {
+            None => "{}".to_string(),
+            Some(d) => {
+                let d = d.borrow();
+                let mut out = String::from("{");
+                for (i, (k, v)) in d.dv_hashtab.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    out.push_str(&convert_to_json_string(k));
+                    out.push(':');
+                    out.push_str(&encode_vim_to_json(v));
+                }
+                out.push('}');
+                out
+            }
+        },
+        _ => "null".to_string(),
     }
 }
 
-/// `TYPVAL_ENCODE_CONV_STRING`: wrap in single quotes, doubling embedded single
-/// quotes (Vim's literal-string escaping).
-fn quote_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('\'');
-    for ch in s.chars() {
-        if ch == '\'' {
-            out.push('\'');
-        }
-        out.push(ch);
-    }
-    out.push('\'');
-    out
-}

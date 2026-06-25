@@ -12,9 +12,8 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use crate::ported::eval::typval_defs_h::{
-    typval_T, typval_vval_union::*, varnumber_T, VarLockStatus, VarType::*,
-};
+use crate::ported::eval::typval::tv_get_bool;
+use crate::ported::eval::typval_defs_h::{typval_T, varnumber_T};
 
 /// Option kind, for parsing `:set` values.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -53,52 +52,32 @@ thread_local! {
     static option_values: RefCell<HashMap<String, typval_T>> = RefCell::new(HashMap::new());
 }
 
-/// Resolve an option name or abbreviation to its `OPTIONS` row.
-fn lookup(name: &str) -> Option<&'static (&'static str, &'static str, Kind, varnumber_T)> {
+/// Port of `findoption()` (`option.c`) — resolve an option name or abbreviation
+/// to its `OPTIONS` row.
+fn findoption(name: &str) -> Option<&'static (&'static str, &'static str, Kind, varnumber_T)> {
     OPTIONS.iter().find(|(n, abbr, _, _)| *n == name || *abbr == name)
 }
 
-fn num_tv(n: varnumber_T) -> typval_T {
-    typval_T {
-        v_type: VAR_NUMBER,
-        v_lock: VarLockStatus::VAR_UNLOCKED,
-        vval: v_number(n),
-    }
-}
-
-fn str_tv(s: String) -> typval_T {
-    typval_T {
-        v_type: VAR_STRING,
-        v_lock: VarLockStatus::VAR_UNLOCKED,
-        vval: v_string(s),
-    }
+/// Port of `set_option_value()` (`option.c`) reduced — store option `canon`'s
+/// value.
+fn set_option_value(canon: &str, tv: typval_T) {
+    option_values.with(|m| {
+        m.borrow_mut().insert(canon.to_string(), tv);
+    });
 }
 
 /// Port of `get_option_value()` (`option.c`) reduced — the value of `&name` (or
 /// its abbreviation). Unknown options yield "" (the empty string).
-pub fn get_option(name: &str) -> typval_T {
-    let Some((canon, _, kind, default)) = lookup(name) else {
-        return str_tv(String::new());
+pub fn get_option_value(name: &str) -> typval_T {
+    let Some((canon, _, kind, default)) = findoption(name) else {
+        return typval_T::from(String::new());
     };
     option_values.with(|m| {
         m.borrow().get(*canon).cloned().unwrap_or_else(|| match kind {
-            Kind::String => str_tv(String::new()),
-            _ => num_tv(*default),
+            Kind::String => typval_T::from(String::new()),
+            _ => typval_T::from(*default),
         })
     })
-}
-
-/// The boolean value of option `name` (0 default). Used to seed regex
-/// ignore-case from `'ignorecase'`.
-pub fn get_option_bool(name: &str) -> bool {
-    crate::ported::eval::typval::tv_get_bool(&get_option(name)) != 0
-}
-
-/// Store option `name`'s value (canonicalizing the name).
-fn store(canon: &str, tv: typval_T) {
-    option_values.with(|m| {
-        m.borrow_mut().insert(canon.to_string(), tv);
-    });
 }
 
 /// Port of `do_set()` (`option.c`) — parse and apply a `:set` argument string:
@@ -108,20 +87,20 @@ pub fn do_set(args: &str) {
     for part in args.split_whitespace() {
         // `opt=val` / `opt:val`.
         if let Some((name, val)) = part.split_once(['=', ':']) {
-            if let Some((canon, _, kind, _)) = lookup(name) {
+            if let Some((canon, _, kind, _)) = findoption(name) {
                 let tv = match kind {
-                    Kind::String => str_tv(val.to_string()),
-                    _ => num_tv(val.trim().parse().unwrap_or(0)),
+                    Kind::String => typval_T::from(val.to_string()),
+                    _ => typval_T::from(val.trim().parse().unwrap_or(0)),
                 };
-                store(canon, tv);
+                set_option_value(canon, tv);
             }
             continue;
         }
         // `opt!` (toggle a bool) / `opt?` (query — no-op here).
         if let Some(name) = part.strip_suffix('!') {
-            if let Some((canon, _, Kind::Bool, _)) = lookup(name) {
-                let cur = get_option_bool(canon);
-                store(canon, num_tv(varnumber_T::from(!cur)));
+            if let Some((canon, _, Kind::Bool, _)) = findoption(name) {
+                let cur = tv_get_bool(&get_option_value(canon)) != 0;
+                set_option_value(canon, typval_T::from(varnumber_T::from(!cur)));
             }
             continue;
         }
@@ -130,21 +109,21 @@ pub fn do_set(args: &str) {
         }
         // `noopt` / `invopt` (bool off / invert).
         if let Some(name) = part.strip_prefix("no") {
-            if let Some((canon, _, Kind::Bool, _)) = lookup(name) {
-                store(canon, num_tv(0));
+            if let Some((canon, _, Kind::Bool, _)) = findoption(name) {
+                set_option_value(canon, typval_T::from(0));
                 continue;
             }
         }
         if let Some(name) = part.strip_prefix("inv") {
-            if let Some((canon, _, Kind::Bool, _)) = lookup(name) {
-                let cur = get_option_bool(canon);
-                store(canon, num_tv(varnumber_T::from(!cur)));
+            if let Some((canon, _, Kind::Bool, _)) = findoption(name) {
+                let cur = tv_get_bool(&get_option_value(canon)) != 0;
+                set_option_value(canon, typval_T::from(varnumber_T::from(!cur)));
                 continue;
             }
         }
         // Bare `opt` — turn a boolean on (number/string forms are queries).
-        if let Some((canon, _, Kind::Bool, _)) = lookup(part) {
-            store(canon, num_tv(1));
+        if let Some((canon, _, Kind::Bool, _)) = findoption(part) {
+            set_option_value(canon, typval_T::from(1));
         }
     }
 }
@@ -155,15 +134,16 @@ mod tests {
 
     #[test]
     fn set_and_get_bool_and_number() {
+        let ic = || tv_get_bool(&get_option_value("ignorecase")) != 0;
         do_set("ignorecase");
-        assert!(get_option_bool("ignorecase"));
+        assert!(ic());
         do_set("noic"); // abbreviation + no-prefix
-        assert!(!get_option_bool("ignorecase"));
+        assert!(!ic());
         do_set("ic!"); // toggle
-        assert!(get_option_bool("ignorecase"));
+        assert!(ic());
         do_set("tabstop=4");
         assert_eq!(
-            crate::ported::eval::typval::tv_get_number_chk(&get_option("ts"), None),
+            crate::ported::eval::typval::tv_get_number_chk(&get_option_value("ts"), None),
             4
         );
     }

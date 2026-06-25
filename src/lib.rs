@@ -29,6 +29,7 @@ pub mod fusevm_disasm;
 pub mod lsp;
 pub mod script_cache;
 pub mod viml_ast;
+pub mod viml_json;
 pub mod viml_lexer;
 pub mod viml_parser;
 pub mod viml_regex;
