@@ -1,0 +1,1812 @@
+//! ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//! EXTENSION — NO `csrc/` COUNTERPART. The vimlrs analogue of zshrs's
+//! `src/fusevm_bridge.rs`: pure fusevm plumbing, no operator logic. It only
+//!   1. converts between [`typval_T`] and `fusevm::Value` (the refpool smuggle),
+//!   2. holds the per-run bridge state (refpool, last result, echo sink),
+//!   3. registers the `VIML_*` builtin handlers, each of which pops operands and
+//!      calls the CANONICAL PORTS in `crate::ported::*` (never reimplementing
+//!      VimL semantics here).
+//!
+//! Where a handler reconstructs logic the bytecode replaced (the `eval5`/`eval6`
+//! arithmetic dispatch, the `eval7_leader` unary application, the `eval_index`
+//! subscripts) it cites the `eval.c` lines, since those tree-walkers are not
+//! ported (vimlrs replaces them with bytecode).
+//! ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+use std::cell::RefCell;
+
+use fusevm::{Value, VM};
+
+use crate::ported::eval::encode::encode_tv2echo;
+use crate::ported::eval::funcs::{
+    f_abs, f_add, f_and, f_ceil, f_char2nr, f_copy, f_cos, f_count, f_empty, f_exists, f_exp,
+    f_extend, f_float2nr, f_floor, f_function, f_get, f_has, f_has_key, f_index, f_insert, f_invert,
+    f_acos, f_asin, f_atan, f_atan2, f_cosh, f_deepcopy, f_escape, f_flatten, f_fmod, f_items,
+    f_join, f_keys, f_len, f_list2str, f_log, f_log10, f_match, f_matchend, f_matchlist, f_matchstr,
+    f_max, f_min, f_nr2char, f_or, f_pow, f_printf, f_range, f_remove, f_repeat, f_reverse, f_round,
+    f_sin, f_sinh, f_split, f_sqrt, f_str2float, f_str2list, f_str2nr, f_strchars, f_stridx,
+    f_string, f_strlen, f_strpart, f_strridx, f_substitute, f_tan, f_tanh, f_tolower, f_toupper,
+    f_tr, f_trim, f_trunc, f_type, f_uniq, f_values, f_xor,
+};
+use crate::ported::eval::typval::{
+    tv_get_float, tv_get_number_chk, tv_get_string, tv_list_alloc, tv_list_append_tv,
+};
+use crate::ported::eval::typval_defs_h::{
+    blob_T, listitem_T, typval_T, typval_vval_union::*, varnumber_T, SpecialVarValue::*,
+    VarLockStatus::VAR_UNLOCKED, VarType::*,
+};
+use crate::ported::eval::vars::{eval_variable, set_var};
+use crate::ported::eval_h::exprtype_T::{self, *};
+use crate::compile_viml::compile_program;
+use crate::ported::message;
+use crate::viml_ast::Stmt;
+use crate::viml_lexer::{CaseFlag, CmpOp, VimlError};
+use crate::viml_parser::parse_expr;
+
+// ── small typval_T constructors (carve-out helpers; not ported C) ──
+
+fn tv_num(n: varnumber_T) -> typval_T {
+    typval_T {
+        v_type: VAR_NUMBER,
+        v_lock: VAR_UNLOCKED,
+        vval: v_number(n),
+    }
+}
+fn tv_flt(f: f64) -> typval_T {
+    typval_T {
+        v_type: VAR_FLOAT,
+        v_lock: VAR_UNLOCKED,
+        vval: v_float(f),
+    }
+}
+fn tv_str(s: String) -> typval_T {
+    typval_T {
+        v_type: VAR_STRING,
+        v_lock: VAR_UNLOCKED,
+        vval: v_string(s),
+    }
+}
+fn tv_special() -> typval_T {
+    typval_T {
+        v_type: VAR_SPECIAL,
+        v_lock: VAR_UNLOCKED,
+        vval: v_special(kSpecialVarNull),
+    }
+}
+
+// ── builtin op IDs (fusevm CallBuiltin space; AWK uses 1000–2999, VimL 3000+) ──
+
+/// `getvar`: pop name → value.
+pub const VIML_GETVAR: u16 = 3000;
+/// `setvar`: pop name, value → store.
+pub const VIML_SETVAR: u16 = 3001;
+/// `truthy`: pop value → `Bool`.
+pub const VIML_TRUTHY: u16 = 3002;
+/// `boolnum`: pop value → `Int(0/1)`.
+pub const VIML_BOOLNUM: u16 = 3003;
+/// `+`
+pub const VIML_ADD: u16 = 3010;
+/// `-`
+pub const VIML_SUB: u16 = 3011;
+/// `*`
+pub const VIML_MUL: u16 = 3012;
+/// `/`
+pub const VIML_DIV: u16 = 3013;
+/// `%`
+pub const VIML_MOD: u16 = 3014;
+/// `.` / `..`
+pub const VIML_CONCAT: u16 = 3015;
+/// unary `-`
+pub const VIML_NEG: u16 = 3016;
+/// unary `+`
+pub const VIML_UPLUS: u16 = 3017;
+/// unary `!`
+pub const VIML_NOT: u16 = 3018;
+/// comparison id base; per-operator offset via [`cmp_id`].
+pub const VIML_CMP_BASE: u16 = 3020;
+const VIML_CMP_IC_OFFSET: u16 = 0x20;
+/// list constructor (argc = element count).
+pub const VIML_MAKE_LIST: u16 = 3050;
+/// dict constructor (argc = 2 × pairs).
+pub const VIML_MAKE_DICT: u16 = 3051;
+/// `base[index]`
+pub const VIML_INDEX: u16 = 3052;
+/// `base[from:to]`
+pub const VIML_SLICE: u16 = 3053;
+/// `:echo`
+pub const VIML_ECHO: u16 = 3060;
+/// `:echon`
+pub const VIML_ECHON: u16 = 3061;
+/// store the bare-expression result.
+pub const VIML_SET_RESULT: u16 = 3062;
+/// `$ENV`
+pub const VIML_GETENV: u16 = 3063;
+/// `&option`
+pub const VIML_GETOPT: u16 = 3064;
+/// `@reg`
+pub const VIML_GETREG: u16 = 3065;
+/// `:let $ENV = …`
+pub const VIML_SETENV: u16 = 3066;
+/// `len()`
+pub const VIML_FN_LEN: u16 = 3100;
+/// `type()`
+pub const VIML_FN_TYPE: u16 = 3101;
+/// `string()`
+pub const VIML_FN_STRING: u16 = 3102;
+/// `empty()`
+pub const VIML_FN_EMPTY: u16 = 3103;
+/// `abs()`
+pub const VIML_FN_ABS: u16 = 3104;
+/// `str2nr()`
+pub const VIML_FN_STR2NR: u16 = 3105;
+/// `str2float()`
+pub const VIML_FN_STR2FLOAT: u16 = 3106;
+/// `float2nr()`
+pub const VIML_FN_FLOAT2NR: u16 = 3107;
+/// Second builtin-function batch (`funcs.c`): ids `3108..=3129`.
+pub const VIML_FN_STRLEN: u16 = 3108;
+/// `tolower()`
+pub const VIML_FN_TOLOWER: u16 = 3109;
+/// `toupper()`
+pub const VIML_FN_TOUPPER: u16 = 3110;
+/// `char2nr()`
+pub const VIML_FN_CHAR2NR: u16 = 3111;
+/// `nr2char()`
+pub const VIML_FN_NR2CHAR: u16 = 3112;
+/// `repeat()`
+pub const VIML_FN_REPEAT: u16 = 3113;
+/// `split()`
+pub const VIML_FN_SPLIT: u16 = 3114;
+/// `join()`
+pub const VIML_FN_JOIN: u16 = 3115;
+/// `range()`
+pub const VIML_FN_RANGE: u16 = 3116;
+/// `add()`
+pub const VIML_FN_ADD: u16 = 3117;
+/// `reverse()`
+pub const VIML_FN_REVERSE: u16 = 3118;
+/// `get()`
+pub const VIML_FN_GET: u16 = 3119;
+/// `has_key()`
+pub const VIML_FN_HAS_KEY: u16 = 3120;
+/// `keys()`
+pub const VIML_FN_KEYS: u16 = 3121;
+/// `values()`
+pub const VIML_FN_VALUES: u16 = 3122;
+/// `max()`
+pub const VIML_FN_MAX: u16 = 3123;
+/// `min()`
+pub const VIML_FN_MIN: u16 = 3124;
+/// `count()`
+pub const VIML_FN_COUNT: u16 = 3125;
+/// `index()`
+pub const VIML_FN_INDEX: u16 = 3126;
+/// `has()`
+pub const VIML_FN_HAS: u16 = 3127;
+/// `exists()`
+pub const VIML_FN_EXISTS: u16 = 3128;
+/// `printf()`
+pub const VIML_FN_PRINTF: u16 = 3129;
+/// `map()` — callback per element (string expr binds `v:val`/`v:key`, or funcref).
+pub const VIML_FN_MAP: u16 = 3130;
+/// `filter()` — keep elements whose callback is truthy.
+pub const VIML_FN_FILTER: u16 = 3131;
+/// `sort()` — default string sort, `'n'` numeric.
+pub const VIML_FN_SORT: u16 = 3132;
+/// `call()` — invoke a funcref/name with an argument list.
+pub const VIML_FN_CALL: u16 = 3133;
+/// `function()` — a Funcref to a named function.
+pub const VIML_FN_FUNCTION: u16 = 3134;
+/// Third builtin batch (`funcs.c`): float math, bitwise, string, list/dict —
+/// ids `3135..=3158`.
+pub const VIML_FN_SQRT: u16 = 3135;
+/// `floor()`
+pub const VIML_FN_FLOOR: u16 = 3136;
+/// `ceil()`
+pub const VIML_FN_CEIL: u16 = 3137;
+/// `round()`
+pub const VIML_FN_ROUND: u16 = 3138;
+/// `trunc()`
+pub const VIML_FN_TRUNC: u16 = 3139;
+/// `log()`
+pub const VIML_FN_LOG: u16 = 3140;
+/// `exp()`
+pub const VIML_FN_EXP: u16 = 3141;
+/// `sin()`
+pub const VIML_FN_SIN: u16 = 3142;
+/// `cos()`
+pub const VIML_FN_COS: u16 = 3143;
+/// `pow()`
+pub const VIML_FN_POW: u16 = 3144;
+/// `and()`
+pub const VIML_FN_AND: u16 = 3145;
+/// `or()`
+pub const VIML_FN_OR: u16 = 3146;
+/// `xor()`
+pub const VIML_FN_XOR: u16 = 3147;
+/// `invert()`
+pub const VIML_FN_INVERT: u16 = 3148;
+/// `strchars()`
+pub const VIML_FN_STRCHARS: u16 = 3149;
+/// `strpart()`
+pub const VIML_FN_STRPART: u16 = 3150;
+/// `stridx()`
+pub const VIML_FN_STRIDX: u16 = 3151;
+/// `trim()`
+pub const VIML_FN_TRIM: u16 = 3152;
+/// `insert()`
+pub const VIML_FN_INSERT: u16 = 3153;
+/// `remove()`
+pub const VIML_FN_REMOVE: u16 = 3154;
+/// `extend()`
+pub const VIML_FN_EXTEND: u16 = 3155;
+/// `copy()`
+pub const VIML_FN_COPY: u16 = 3156;
+/// `items()`
+pub const VIML_FN_ITEMS: u16 = 3157;
+/// `uniq()`
+pub const VIML_FN_UNIQ: u16 = 3158;
+/// `matchstr()` — Vim-regex matched substring.
+pub const VIML_FN_MATCHSTR: u16 = 3159;
+/// `match()` — Vim-regex match index.
+pub const VIML_FN_MATCH: u16 = 3160;
+/// `substitute()` — Vim-regex replace.
+pub const VIML_FN_SUBSTITUTE: u16 = 3161;
+/// `matchlist()`
+pub const VIML_FN_MATCHLIST: u16 = 3162;
+/// `matchend()`
+pub const VIML_FN_MATCHEND: u16 = 3163;
+/// `strridx()`
+pub const VIML_FN_STRRIDX: u16 = 3164;
+/// `escape()`
+pub const VIML_FN_ESCAPE: u16 = 3165;
+/// `tr()`
+pub const VIML_FN_TR: u16 = 3166;
+/// `str2list()`
+pub const VIML_FN_STR2LIST: u16 = 3167;
+/// `list2str()`
+pub const VIML_FN_LIST2STR: u16 = 3168;
+/// `flatten()`
+pub const VIML_FN_FLATTEN: u16 = 3169;
+/// `reduce()` — fold a List with a funcref `f(acc, val)` (callback, bridge-side).
+pub const VIML_FN_REDUCE: u16 = 3170;
+/// `eval()` — evaluate a string as an expression (bridge-side).
+pub const VIML_FN_EVAL: u16 = 3171;
+/// `execute()` — run ex commands and capture their output (bridge-side).
+pub const VIML_FN_EXECUTE: u16 = 3172;
+/// `deepcopy()`
+pub const VIML_FN_DEEPCOPY: u16 = 3173;
+/// `fmod()`
+pub const VIML_FN_FMOD: u16 = 3174;
+/// `atan2()`
+pub const VIML_FN_ATAN2: u16 = 3175;
+/// `tan()`
+pub const VIML_FN_TAN: u16 = 3176;
+/// `atan()`
+pub const VIML_FN_ATAN: u16 = 3177;
+/// `asin()`
+pub const VIML_FN_ASIN: u16 = 3178;
+/// `acos()`
+pub const VIML_FN_ACOS: u16 = 3179;
+/// `sinh()`
+pub const VIML_FN_SINH: u16 = 3180;
+/// `cosh()`
+pub const VIML_FN_COSH: u16 = 3181;
+/// `tanh()`
+pub const VIML_FN_TANH: u16 = 3182;
+/// `log10()`
+pub const VIML_FN_LOG10: u16 = 3183;
+/// `:execute` statement: pop argc values, join with spaces, run as a command.
+pub const VIML_EXEC_STMT: u16 = 3184;
+/// `:set` statement: pop the argument string, apply via `option::do_set`.
+pub const VIML_SET: u16 = 3185;
+/// Debug line marker: pop a line number → notify the DAP `check_line` hook
+/// (emitted before each statement only in debug-compiled chunks).
+pub const VIML_SET_LINENO: u16 = 3070;
+/// User-function call: pop `argc` args then the name → run the function.
+pub const VIML_CALL_USER: u16 = 3071;
+/// `:return {expr}`: pop the value → store it as the current call's result.
+pub const VIML_SET_RETURN: u16 = 3072;
+/// `:throw {expr}`: pop the value → raise it as the pending exception.
+pub const VIML_THROW: u16 = 3073;
+/// Push `Bool(an exception is pending)` — the per-statement unwind check.
+pub const VIML_CHECK_EXC: u16 = 3074;
+/// `:catch /{pat}/`: pop the pattern → if it matches the pending exception,
+/// catch it (clear pending, keep `v:exception`) and push `Bool(true)`.
+pub const VIML_CATCH_MATCH: u16 = 3075;
+/// At program end: if an exception is still pending, report `E605` and clear it.
+pub const VIML_REPORT_UNCAUGHT: u16 = 3076;
+
+/// Builtin id for comparison `(op, ignore_case)`.
+pub fn cmp_id(op: CmpOp, ic: bool) -> u16 {
+    let off = match op {
+        CmpOp::Equal => 0,
+        CmpOp::NotEqual => 1,
+        CmpOp::Match => 2,
+        CmpOp::NoMatch => 3,
+        CmpOp::Greater => 4,
+        CmpOp::GreaterEqual => 5,
+        CmpOp::Less => 6,
+        CmpOp::LessEqual => 7,
+        CmpOp::Is => 8,
+        CmpOp::IsNot => 9,
+    };
+    VIML_CMP_BASE + off + if ic { VIML_CMP_IC_OFFSET } else { 0 }
+}
+
+/// Resolve the comparison ignore-case flag from a `==#`/`==?` suffix. Phase 3
+/// has no `'ignorecase'` option, so `Default` is match-case.
+pub fn ic_flag(case: CaseFlag) -> bool {
+    matches!(case, CaseFlag::IgnoreCase)
+}
+
+/// Map a lexer [`CmpOp`] to the ported [`exprtype_T`] `typval_compare` expects.
+fn cmp_to_exprtype(op: CmpOp) -> exprtype_T {
+    match op {
+        CmpOp::Equal => EXPR_EQUAL,
+        CmpOp::NotEqual => EXPR_NEQUAL,
+        CmpOp::Match => EXPR_MATCH,
+        CmpOp::NoMatch => EXPR_NOMATCH,
+        CmpOp::Greater => EXPR_GREATER,
+        CmpOp::GreaterEqual => EXPR_GEQUAL,
+        CmpOp::Less => EXPR_SMALLER,
+        CmpOp::LessEqual => EXPR_SEQUAL,
+        CmpOp::Is => EXPR_IS,
+        CmpOp::IsNot => EXPR_ISNOT,
+    }
+}
+
+// ── per-run bridge state (carve-out; smuggles compounds + holds the run result
+//    and echo sink — no C analog) ──
+
+thread_local! {
+    /// Compound `typval_T` handles smuggled across the fusevm `Value` boundary
+    /// (see file header). Cleared between runs; `Rc` keeps live values alive.
+    static REFPOOL: RefCell<Vec<typval_T>> = const { RefCell::new(Vec::new()) };
+    /// Value of the last bare-expression statement (REPL `-e` result).
+    static LAST_RESULT: RefCell<Option<typval_T>> = const { RefCell::new(None) };
+    /// `:echo` sink: `Some(buf)` captures (tests/embedding), `None` is stdout.
+    static ECHO_SINK: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// Registry of user-defined functions, by name (populated from a compiled
+    /// program before its `main` chunk runs).
+    static FUNCTIONS: RefCell<std::collections::HashMap<String, crate::compile_viml::UserFuncDef>> =
+        RefCell::new(std::collections::HashMap::new());
+    /// Stack of pending function return values (one per active call); the
+    /// `VIML_SET_RETURN` handler writes the top.
+    static RETURN_STACK: RefCell<Vec<Option<typval_T>>> = const { RefCell::new(Vec::new()) };
+    /// The currently-raised, not-yet-caught exception value (`:throw`). `Some`
+    /// while unwinding toward a `:catch`. Models `ex_eval.c`'s `current_exception`.
+    static PENDING_EXC: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// `v:exception` — the most recently caught exception text.
+    static V_EXCEPTION: RefCell<String> = const { RefCell::new(String::new()) };
+    /// `v:val` — the current element during `map()`/`filter()`/`sort()`.
+    static V_VAL: RefCell<Option<typval_T>> = const { RefCell::new(None) };
+    /// `v:key` — the current key/index during `map()`/`filter()`.
+    static V_KEY: RefCell<Option<typval_T>> = const { RefCell::new(None) };
+}
+
+// ── Typval ↔ fusevm::Value bridge ──
+
+fn tv_to_value(tv: typval_T) -> Value {
+    match (tv.v_type, tv.vval) {
+        (VAR_NUMBER, v_number(n)) => Value::Int(n),
+        (VAR_FLOAT, v_float(f)) => Value::Float(f),
+        (VAR_STRING, v_string(s)) => Value::str(s),
+        (VAR_FUNC, v_string(s)) => Value::str(format!("\u{1}func\u{1}{s}")),
+        (VAR_BOOL, v_bool(b)) => {
+            Value::Bool(b == crate::ported::eval::typval_defs_h::BoolVarValue::kBoolVarTrue)
+        }
+        (VAR_SPECIAL, _) | (VAR_UNKNOWN, _) => Value::Undef,
+        // Compound: stash the whole typval (keeps v_type) and tag with the index.
+        (vt, vv) => {
+            let idx = REFPOOL.with(|p| {
+                let mut p = p.borrow_mut();
+                p.push(typval_T {
+                    v_type: vt,
+                    v_lock: VAR_UNLOCKED,
+                    vval: vv,
+                });
+                p.len() - 1
+            });
+            Value::Ref(Box::new(Value::Int(idx as i64)))
+        }
+    }
+}
+
+fn value_to_tv(v: &Value) -> typval_T {
+    match v {
+        Value::Int(n) => tv_num(*n),
+        Value::Float(f) => tv_flt(*f),
+        Value::Bool(b) => typval_T {
+            v_type: VAR_BOOL,
+            v_lock: VAR_UNLOCKED,
+            vval: v_bool(if *b {
+                crate::ported::eval::typval_defs_h::BoolVarValue::kBoolVarTrue
+            } else {
+                crate::ported::eval::typval_defs_h::BoolVarValue::kBoolVarFalse
+            }),
+        },
+        Value::Undef => tv_special(),
+        Value::Status(c) => tv_num(*c as varnumber_T),
+        Value::Str(s) => match s.strip_prefix("\u{1}func\u{1}") {
+            Some(name) => typval_T {
+                v_type: VAR_FUNC,
+                v_lock: VAR_UNLOCKED,
+                vval: v_string(name.to_string()),
+            },
+            None => tv_str(s.to_string()),
+        },
+        Value::Ref(inner) => match inner.as_ref() {
+            Value::Int(idx) => REFPOOL.with(|p| {
+                p.borrow()
+                    .get(*idx as usize)
+                    .cloned()
+                    .unwrap_or_else(tv_special)
+            }),
+            _ => tv_special(),
+        },
+        _ => tv_special(),
+    }
+}
+
+fn pop_tv(vm: &mut VM) -> typval_T {
+    let v = vm.pop();
+    value_to_tv(&v)
+}
+
+// ── handlers ──
+
+fn b_throw(vm: &mut VM, _: u8) -> Value {
+    let v = tv_get_string(&pop_tv(vm));
+    // c: throw_exception — set current_exception and v:exception.
+    V_EXCEPTION.with(|e| *e.borrow_mut() = v.clone());
+    PENDING_EXC.with(|p| *p.borrow_mut() = Some(v));
+    Value::Undef
+}
+
+fn b_check_exc(_vm: &mut VM, _: u8) -> Value {
+    Value::Bool(PENDING_EXC.with(|p| p.borrow().is_some()))
+}
+
+fn b_catch_match(vm: &mut VM, _: u8) -> Value {
+    let pat = tv_get_string(&pop_tv(vm));
+    let pending = PENDING_EXC.with(|p| p.borrow().clone());
+    let Some(exc) = pending else {
+        return Value::Bool(false);
+    };
+    // Empty pattern = catch-all; otherwise the catch pattern is a Vim regex.
+    let matched = pat.is_empty() || crate::viml_regex::regex_match(&pat, &exc, false);
+    if matched {
+        // c: caught — clear the pending exception; v:exception already set.
+        PENDING_EXC.with(|p| *p.borrow_mut() = None);
+        V_EXCEPTION.with(|e| *e.borrow_mut() = exc);
+    }
+    Value::Bool(matched)
+}
+
+fn b_report_uncaught(_vm: &mut VM, _: u8) -> Value {
+    if let Some(exc) = PENDING_EXC.with(|p| p.borrow_mut().take()) {
+        // c: E605 when an exception reaches the top level uncaught.
+        message::semsg(&format!("E605: Exception not caught: {exc}"));
+    }
+    Value::Undef
+}
+
+fn b_getvar(vm: &mut VM, _: u8) -> Value {
+    let name = tv_get_string(&pop_tv(vm));
+    // Dynamic v: state (not fixed v: constants).
+    if name == "v:exception" {
+        return Value::str(V_EXCEPTION.with(|e| e.borrow().clone()));
+    }
+    if name == "v:val" {
+        return V_VAL.with(|v| v.borrow().clone()).map_or(Value::Int(0), tv_to_value);
+    }
+    if name == "v:key" {
+        return V_KEY.with(|v| v.borrow().clone()).map_or(Value::Int(0), tv_to_value);
+    }
+    match eval_variable(&name) {
+        Some(tv) => tv_to_value(tv),
+        None => {
+            message::semsg(&format!("E121: Undefined variable: {name}"));
+            Value::Undef
+        }
+    }
+}
+
+fn b_setvar(vm: &mut VM, _: u8) -> Value {
+    let name = tv_get_string(&pop_tv(vm));
+    let val = pop_tv(vm);
+    set_var(&name, name.len(), val, false);
+    Value::Undef
+}
+
+fn b_setenv(vm: &mut VM, _: u8) -> Value {
+    let name = tv_get_string(&pop_tv(vm));
+    let val = tv_get_string(&pop_tv(vm));
+    std::env::set_var(name, val);
+    Value::Undef
+}
+
+fn b_truthy(vm: &mut VM, _: u8) -> Value {
+    // VimL truthiness: tv_get_number(tv) != 0 (the `:if`/`!`/`&&`/`||` test).
+    Value::Bool(tv_get_number_chk(&pop_tv(vm), None) != 0)
+}
+
+fn b_boolnum(vm: &mut VM, _: u8) -> Value {
+    Value::Int((tv_get_number_chk(&pop_tv(vm), None) != 0) as varnumber_T)
+}
+
+fn b_add(vm: &mut VM, _: u8) -> Value {
+    let b = pop_tv(vm);
+    let a = pop_tv(vm);
+    // c: eval5 — `+` is List+List / Blob+Blob concat, else numeric.
+    if let (VAR_LIST, VAR_LIST) = (a.v_type, b.v_type) {
+        return tv_to_value(list_concat(&a, &b));
+    }
+    if let (VAR_BLOB, VAR_BLOB) = (a.v_type, b.v_type) {
+        return tv_to_value(blob_concat(&a, &b));
+    }
+    if a.v_type == VAR_FLOAT || b.v_type == VAR_FLOAT {
+        tv_to_value(tv_flt(tv_get_float(&a) + tv_get_float(&b)))
+    } else {
+        tv_to_value(tv_num(
+            tv_get_number_chk(&a, None).wrapping_add(tv_get_number_chk(&b, None)),
+        ))
+    }
+}
+
+fn b_sub(vm: &mut VM, _: u8) -> Value {
+    let b = pop_tv(vm);
+    let a = pop_tv(vm);
+    // c: eval5 — numeric subtraction (float if either is Float).
+    if a.v_type == VAR_FLOAT || b.v_type == VAR_FLOAT {
+        tv_to_value(tv_flt(tv_get_float(&a) - tv_get_float(&b)))
+    } else {
+        tv_to_value(tv_num(
+            tv_get_number_chk(&a, None).wrapping_sub(tv_get_number_chk(&b, None)),
+        ))
+    }
+}
+
+fn b_mul(vm: &mut VM, _: u8) -> Value {
+    let b = pop_tv(vm);
+    let a = pop_tv(vm);
+    // c: eval6 — `*`.
+    if a.v_type == VAR_FLOAT || b.v_type == VAR_FLOAT {
+        tv_to_value(tv_flt(tv_get_float(&a) * tv_get_float(&b)))
+    } else {
+        tv_to_value(tv_num(
+            tv_get_number_chk(&a, None).wrapping_mul(tv_get_number_chk(&b, None)),
+        ))
+    }
+}
+
+fn b_div(vm: &mut VM, _: u8) -> Value {
+    let b = pop_tv(vm);
+    let a = pop_tv(vm);
+    // c: eval6 — `/`: float division, else num_divide.
+    if a.v_type == VAR_FLOAT || b.v_type == VAR_FLOAT {
+        tv_to_value(tv_flt(tv_get_float(&a) / tv_get_float(&b)))
+    } else {
+        tv_to_value(tv_num(crate::ported::eval::num_divide(
+            tv_get_number_chk(&a, None),
+            tv_get_number_chk(&b, None),
+        )))
+    }
+}
+
+fn b_mod(vm: &mut VM, _: u8) -> Value {
+    let b = pop_tv(vm);
+    let a = pop_tv(vm);
+    // c: eval6 — `%`: float fmod, else num_modulus.
+    if a.v_type == VAR_FLOAT || b.v_type == VAR_FLOAT {
+        tv_to_value(tv_flt(tv_get_float(&a) % tv_get_float(&b)))
+    } else {
+        tv_to_value(tv_num(crate::ported::eval::num_modulus(
+            tv_get_number_chk(&a, None),
+            tv_get_number_chk(&b, None),
+        )))
+    }
+}
+
+fn b_concat(vm: &mut VM, _: u8) -> Value {
+    let b = pop_tv(vm);
+    let a = pop_tv(vm);
+    // c: eval5 — `.`/`..` string concatenation.
+    tv_to_value(tv_str(tv_get_string(&a) + &tv_get_string(&b)))
+}
+
+fn b_neg(vm: &mut VM, _: u8) -> Value {
+    let v = pop_tv(vm);
+    // c: eval7_leader — `-`: negate Float, else negate Number.
+    match v.v_type {
+        VAR_FLOAT => tv_to_value(tv_flt(-tv_get_float(&v))),
+        _ => tv_to_value(tv_num(tv_get_number_chk(&v, None).wrapping_neg())),
+    }
+}
+
+fn b_uplus(vm: &mut VM, _: u8) -> Value {
+    let v = pop_tv(vm);
+    // c: eval7_leader — `+`: coerce to Float/Number, no value change.
+    match v.v_type {
+        VAR_FLOAT => tv_to_value(tv_flt(tv_get_float(&v))),
+        _ => tv_to_value(tv_num(tv_get_number_chk(&v, None))),
+    }
+}
+
+fn b_not(vm: &mut VM, _: u8) -> Value {
+    let v = pop_tv(vm);
+    // c: eval7_leader — `!`: logical NOT of tv_get_number.
+    tv_to_value(tv_num((tv_get_number_chk(&v, None) == 0) as varnumber_T))
+}
+
+/// Shared comparison body: `typval_compare(&mut a, &b, type, ic)` writes the
+/// boolean result into `a`.
+fn do_compare(vm: &mut VM, op: CmpOp, ic: bool) -> Value {
+    let b = pop_tv(vm);
+    let mut a = pop_tv(vm);
+    crate::ported::eval::typval_compare(&mut a, &b, cmp_to_exprtype(op), ic);
+    tv_to_value(a)
+}
+
+// One thin handler per comparison id (fusevm `register_builtin` takes plain
+// `fn`s; the `(op, ic)` pair is compile-time known).
+macro_rules! cmp_handlers {
+    ($(($name:ident, $op:expr, $ic:literal)),+ $(,)?) => {
+        $(fn $name(vm: &mut VM, _: u8) -> Value { do_compare(vm, $op, $ic) })+
+        fn register_cmp_handlers(vm: &mut VM) {
+            $(vm.register_builtin(cmp_id($op, $ic), $name);)+
+        }
+    };
+}
+cmp_handlers! {
+    (cmp_eq,     CmpOp::Equal,        false), (cmp_eq_ic,     CmpOp::Equal,        true),
+    (cmp_ne,     CmpOp::NotEqual,     false), (cmp_ne_ic,     CmpOp::NotEqual,     true),
+    (cmp_match,  CmpOp::Match,        false), (cmp_match_ic,  CmpOp::Match,        true),
+    (cmp_nomatch,CmpOp::NoMatch,      false), (cmp_nomatch_ic,CmpOp::NoMatch,      true),
+    (cmp_gt,     CmpOp::Greater,      false), (cmp_gt_ic,     CmpOp::Greater,      true),
+    (cmp_ge,     CmpOp::GreaterEqual, false), (cmp_ge_ic,     CmpOp::GreaterEqual, true),
+    (cmp_lt,     CmpOp::Less,         false), (cmp_lt_ic,     CmpOp::Less,         true),
+    (cmp_le,     CmpOp::LessEqual,    false), (cmp_le_ic,     CmpOp::LessEqual,    true),
+    (cmp_is,     CmpOp::Is,           false), (cmp_is_ic,     CmpOp::Is,           true),
+    (cmp_isnot,  CmpOp::IsNot,        false), (cmp_isnot_ic,  CmpOp::IsNot,        true),
+}
+
+fn b_make_list(vm: &mut VM, argc: u8) -> Value {
+    let mut items = Vec::with_capacity(argc as usize);
+    for _ in 0..argc {
+        items.push(pop_tv(vm));
+    }
+    items.reverse();
+    tv_to_value(new_list(items))
+}
+
+fn b_make_dict(vm: &mut VM, argc: u8) -> Value {
+    let n = argc as usize / 2;
+    let mut pairs = Vec::with_capacity(n);
+    for _ in 0..n {
+        let val = pop_tv(vm);
+        let key = tv_get_string(&pop_tv(vm));
+        pairs.push((key, val));
+    }
+    pairs.reverse();
+    let d = crate::ported::eval::typval::tv_dict_alloc();
+    {
+        let mut db = d.borrow_mut();
+        for (k, v) in pairs {
+            crate::ported::eval::typval::tv_dict_add_tv(&mut db, &k, v);
+        }
+    }
+    tv_to_value(typval_T {
+        v_type: VAR_DICT,
+        v_lock: VAR_UNLOCKED,
+        vval: v_dict(Some(d)),
+    })
+}
+
+fn b_index(vm: &mut VM, _: u8) -> Value {
+    let index = pop_tv(vm);
+    let base = pop_tv(vm);
+    tv_to_value(index_value(&base, &index))
+}
+
+fn b_slice(vm: &mut VM, _: u8) -> Value {
+    let to = pop_tv(vm);
+    let from = pop_tv(vm);
+    let base = pop_tv(vm);
+    tv_to_value(slice_value(&base, &from, &to))
+}
+
+fn b_echo(vm: &mut VM, argc: u8) -> Value {
+    echo_impl(vm, argc, true);
+    Value::Undef
+}
+fn b_echon(vm: &mut VM, argc: u8) -> Value {
+    echo_impl(vm, argc, false);
+    Value::Undef
+}
+
+fn echo_impl(vm: &mut VM, argc: u8, newline: bool) {
+    let mut parts = Vec::with_capacity(argc as usize);
+    for _ in 0..argc {
+        parts.push(pop_tv(vm));
+    }
+    parts.reverse();
+    let sep = if newline { " " } else { "" };
+    let rendered: Vec<String> = parts.iter().map(encode_tv2echo).collect();
+    let mut line = rendered.join(sep);
+    if newline {
+        line.push('\n');
+    }
+    echo_write(&line);
+}
+
+fn b_set_result(vm: &mut VM, _: u8) -> Value {
+    let v = pop_tv(vm);
+    LAST_RESULT.with(|r| *r.borrow_mut() = Some(v));
+    Value::Undef
+}
+
+fn b_getenv(vm: &mut VM, _: u8) -> Value {
+    let name = tv_get_string(&pop_tv(vm));
+    Value::str(std::env::var(&name).unwrap_or_default())
+}
+fn b_exec_stmt(vm: &mut VM, argc: u8) -> Value {
+    let mut parts = Vec::with_capacity(argc as usize);
+    for _ in 0..argc {
+        parts.push(tv_get_string(&pop_tv(vm)));
+    }
+    parts.reverse();
+    let _ = run_source_nested(&parts.join(" "));
+    Value::Undef
+}
+
+fn b_set_lineno(vm: &mut VM, _: u8) -> Value {
+    let line = tv_get_number_chk(&pop_tv(vm), None);
+    crate::dap::check_line(line as u32);
+    Value::Undef
+}
+
+fn b_call_user(vm: &mut VM, argc: u8) -> Value {
+    // Stack: [name, arg0, …, arg{argc-1}] (name pushed first).
+    let mut args = Vec::with_capacity(argc as usize);
+    for _ in 0..argc {
+        args.push(pop_tv(vm));
+    }
+    args.reverse();
+    let name = tv_get_string(&pop_tv(vm));
+    match call_user_function(&name, args) {
+        Some(rettv) => tv_to_value(rettv),
+        None => {
+            message::semsg(&format!("E117: Unknown function: {name}"));
+            Value::Undef
+        }
+    }
+}
+
+fn b_set_return(vm: &mut VM, _: u8) -> Value {
+    let v = pop_tv(vm);
+    RETURN_STACK.with(|r| {
+        if let Some(top) = r.borrow_mut().last_mut() {
+            *top = Some(v);
+        }
+    });
+    Value::Undef
+}
+
+/// Invoke a user function: bind `a:` args, push the `l:`/`a:` scope, run the
+/// body chunk on a nested VM, and return the result (`0` if no `:return`).
+fn call_user_function(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
+    let func = FUNCTIONS.with(|f| f.borrow().get(name).cloned())?;
+
+    // Bind named parameters into the a: scope; extras into a:0 / a:000.
+    let mut avars = crate::ported::eval::typval_defs_h::dict_T::default();
+    for (i, p) in func.params.iter().enumerate() {
+        let v = args.get(i).cloned().unwrap_or_else(tv_special);
+        crate::ported::eval::typval::tv_dict_add_tv(&mut avars, p, v);
+    }
+    let extra: Vec<typval_T> = if args.len() > func.params.len() {
+        args[func.params.len()..].to_vec()
+    } else {
+        Vec::new()
+    };
+    crate::ported::eval::typval::tv_dict_add_tv(&mut avars, "0", tv_num(extra.len() as varnumber_T));
+    crate::ported::eval::typval::tv_dict_add_tv(&mut avars, "000", new_list(extra));
+
+    crate::ported::eval::vars::funccal_stack.with(|s| {
+        s.borrow_mut().push(crate::ported::eval::vars::FuncScope {
+            fc_l_vars: crate::ported::eval::typval_defs_h::dict_T::default(),
+            fc_l_avars: avars,
+        })
+    });
+    RETURN_STACK.with(|r| r.borrow_mut().push(None));
+
+    run_chunk_nested(func.chunk.clone());
+
+    let ret = RETURN_STACK.with(|r| r.borrow_mut().pop().flatten());
+    crate::ported::eval::vars::funccal_stack.with(|s| {
+        s.borrow_mut().pop();
+    });
+    // c: a function with no :return yields 0.
+    Some(ret.unwrap_or_else(|| tv_num(0)))
+}
+
+/// Run a chunk on a nested VM **without** resetting the refpool (a user-function
+/// call happens mid-outer-run; clearing the refpool would corrupt the outer
+/// VM's live compound values). The outer `last_result` is saved and restored.
+fn run_chunk_nested(chunk: fusevm::Chunk) {
+    let saved = LAST_RESULT.with(|r| r.borrow_mut().take());
+    let mut vm = VM::new(chunk);
+    install(&mut vm);
+    let _ = vm.run();
+    LAST_RESULT.with(|r| *r.borrow_mut() = saved);
+}
+
+/// Run a nested chunk and capture its bare-expression result (the per-element
+/// expression eval used by `map`/`filter`). Refpool-safe like
+/// [`run_chunk_nested`]; restores the outer `last_result`.
+fn run_chunk_capture(chunk: fusevm::Chunk) -> Option<typval_T> {
+    let saved = LAST_RESULT.with(|r| r.borrow_mut().take());
+    let mut vm = VM::new(chunk);
+    install(&mut vm);
+    let _ = vm.run();
+    let result = LAST_RESULT.with(|r| r.borrow_mut().take());
+    LAST_RESULT.with(|r| *r.borrow_mut() = saved);
+    result
+}
+
+/// Compile a single VimL expression string to a runnable chunk (for the
+/// `map()`/`filter()` string-expression callback form).
+fn compile_expr_chunk(src: &str) -> Result<fusevm::Chunk, VimlError> {
+    let e = parse_expr(src)?;
+    Ok(crate::compile_viml::compile_program(&[Stmt::Expr(e)])?.main)
+}
+
+/// Parse + compile + run VimL source on a nested VM (refpool-safe — used by
+/// `execute()`, which runs commands mid-outer-run). Functions defined by the
+/// source register globally.
+fn run_source_nested(src: &str) -> Result<(), VimlError> {
+    let prog = crate::compile_viml::compile_program(&crate::viml_parser::parse_program(src)?)?;
+    FUNCTIONS.with(|f| {
+        let mut f = f.borrow_mut();
+        for func in prog.funcs {
+            f.insert(func.name.clone(), func);
+        }
+    });
+    run_chunk_nested(prog.main);
+    Ok(())
+}
+
+fn b_eval(vm: &mut VM, _: u8) -> Value {
+    let src = tv_get_string(&pop_tv(vm));
+    match compile_expr_chunk(&src) {
+        Ok(chunk) => run_chunk_capture(chunk).map_or(Value::Int(0), tv_to_value),
+        Err(e) => {
+            message::semsg(&format!("{e}"));
+            Value::Undef
+        }
+    }
+}
+
+/// `execute({command} [, {silent}])` — run ex command(s) (a string or a List of
+/// strings) and return their captured `:echo`/message output.
+fn b_execute(vm: &mut VM, argc: u8) -> Value {
+    let mut args = Vec::with_capacity(argc as usize);
+    for _ in 0..argc {
+        args.push(pop_tv(vm));
+    }
+    args.reverse();
+    let cmds: Vec<String> = match (args[0].v_type, &args[0].vval) {
+        (VAR_LIST, v_list(Some(l))) => {
+            l.borrow().lv_items.iter().map(tv_string_item).collect()
+        }
+        _ => vec![tv_get_string(&args[0])],
+    };
+    // Redirect output into a fresh capture buffer, run, then restore the sink.
+    let saved = ECHO_SINK.with(|s| s.borrow_mut().replace(String::new()));
+    for cmd in cmds {
+        let _ = run_source_nested(&cmd);
+    }
+    let out = ECHO_SINK.with(|s| s.borrow_mut().take().unwrap_or_default());
+    ECHO_SINK.with(|s| *s.borrow_mut() = saved);
+    tv_to_value(tv_str(out))
+}
+
+/// `tv_get_string` of a list item (helper for `execute`'s List form).
+fn tv_string_item(it: &listitem_T) -> String {
+    tv_get_string(&it.li_tv)
+}
+
+/// Evaluate a `map`/`filter` callback for one element: either a string
+/// expression (with `v:val`/`v:key` bound) or a funcref called as `f(key, val)`.
+fn eval_callback(
+    callback: &typval_T,
+    chunk: &Option<fusevm::Chunk>,
+    key: &typval_T,
+    val: &typval_T,
+) -> typval_T {
+    V_VAL.with(|v| *v.borrow_mut() = Some(val.clone()));
+    V_KEY.with(|v| *v.borrow_mut() = Some(key.clone()));
+    match callback.v_type {
+        VAR_FUNC => {
+            let name = tv_get_string(callback);
+            call_user_function(&name, vec![key.clone(), val.clone()])
+                .unwrap_or_else(|| tv_num(0))
+        }
+        _ => chunk
+            .as_ref()
+            .and_then(|c| run_chunk_capture(c.clone()))
+            .unwrap_or_else(|| tv_num(0)),
+    }
+}
+
+/// `map()`/`filter()` body. `is_map`: replace each element with the callback's
+/// result; otherwise keep elements whose callback is truthy. Mutates the list in
+/// place (Vim semantics) and the caller returns it.
+fn apply_map_filter(coll: &typval_T, callback: &typval_T, is_map: bool) {
+    let chunk = if callback.v_type == VAR_STRING {
+        match compile_expr_chunk(&tv_get_string(callback)) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                message::semsg(&format!("{e}"));
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    match (coll.v_type, &coll.vval) {
+        (VAR_LIST, v_list(Some(l))) => {
+            // `v:key` is the index; `v:val` is the element.
+            let items: Vec<typval_T> =
+                l.borrow().lv_items.iter().map(|it| it.li_tv.clone()).collect();
+            let mut out = Vec::with_capacity(items.len());
+            for (i, item) in items.into_iter().enumerate() {
+                let key = tv_num(i as varnumber_T);
+                let res = eval_callback(callback, &chunk, &key, &item);
+                if is_map {
+                    out.push(res);
+                } else if tv_get_number_chk(&res, None) != 0 {
+                    out.push(item);
+                }
+            }
+            let mut lb = l.borrow_mut();
+            lb.lv_len = out.len() as i32;
+            lb.lv_items = out.into_iter().map(|li_tv| listitem_T { li_tv }).collect();
+        }
+        (VAR_DICT, v_dict(Some(d))) => {
+            // `v:key` is the key string; `v:val` is the value.
+            let entries: Vec<(String, typval_T)> = d
+                .borrow()
+                .dv_hashtab
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            for (k, val) in entries {
+                let key = tv_str(k.clone());
+                let res = eval_callback(callback, &chunk, &key, &val);
+                let mut db = d.borrow_mut();
+                if is_map {
+                    db.dv_hashtab.insert(k, res);
+                } else if tv_get_number_chk(&res, None) == 0 {
+                    db.dv_hashtab.shift_remove(&k);
+                }
+            }
+        }
+        _ => message::emsg("E896: Argument of map()/filter() must be a List or Dictionary"),
+    }
+}
+
+fn b_map(vm: &mut VM, _: u8) -> Value {
+    let cb = pop_tv(vm);
+    let listtv = pop_tv(vm);
+    apply_map_filter(&listtv, &cb, true);
+    tv_to_value(listtv)
+}
+
+fn b_filter(vm: &mut VM, _: u8) -> Value {
+    let cb = pop_tv(vm);
+    let listtv = pop_tv(vm);
+    apply_map_filter(&listtv, &cb, false);
+    tv_to_value(listtv)
+}
+
+/// `reduce({list}, {func} [, {initial}])` — fold a List left-to-right calling
+/// the funcref `func(acc, val)`. Without `{initial}` the first element seeds the
+/// accumulator. Callback-orchestrating, so bridge-side (cites `f_reduce`).
+fn b_reduce(vm: &mut VM, argc: u8) -> Value {
+    let mut args = Vec::with_capacity(argc as usize);
+    for _ in 0..argc {
+        args.push(pop_tv(vm));
+    }
+    args.reverse();
+    let func = tv_get_string(&args[1]);
+    let items: Vec<typval_T> = match (args[0].v_type, &args[0].vval) {
+        (VAR_LIST, v_list(Some(l))) => {
+            l.borrow().lv_items.iter().map(|it| it.li_tv.clone()).collect()
+        }
+        _ => {
+            message::emsg("E897: List or Blob required");
+            return Value::Undef;
+        }
+    };
+    let (mut acc, start) = match args.get(2) {
+        Some(init) => (init.clone(), 0),
+        None => {
+            if items.is_empty() {
+                message::emsg("E998: Reduce of an empty List with no initial value");
+                return Value::Undef;
+            }
+            (items[0].clone(), 1)
+        }
+    };
+    for item in &items[start..] {
+        acc = call_user_function(&func, vec![acc, item.clone()]).unwrap_or_else(|| tv_num(0));
+    }
+    tv_to_value(acc)
+}
+
+fn b_sort(vm: &mut VM, argc: u8) -> Value {
+    let mut args = Vec::with_capacity(argc as usize);
+    for _ in 0..argc {
+        args.push(pop_tv(vm));
+    }
+    args.reverse();
+    let listtv = args[0].clone();
+    let flag = args.get(1).map(tv_get_string).unwrap_or_default();
+    if let (VAR_LIST, v_list(Some(l))) = (listtv.v_type, &listtv.vval) {
+        let mut lb = l.borrow_mut();
+        if flag == "n" || flag == "f" {
+            // c: numeric / float sort. Compare via an f64 key so ints and
+            // floats sort uniformly (tv_get_number errors on a Float).
+            let key = |tv: &typval_T| -> f64 {
+                match (tv.v_type, &tv.vval) {
+                    (VAR_FLOAT, v_float(f)) => *f,
+                    (VAR_NUMBER, v_number(n)) => *n as f64,
+                    _ => tv_get_string(tv).trim().parse().unwrap_or(0.0),
+                }
+            };
+            lb.lv_items.sort_by(|a, b| {
+                key(&a.li_tv).partial_cmp(&key(&b.li_tv)).unwrap_or(std::cmp::Ordering::Equal)
+            });
+        } else {
+            // c: default sort compares as strings.
+            lb.lv_items.sort_by(|a, b| tv_get_string(&a.li_tv).cmp(&tv_get_string(&b.li_tv)));
+        }
+    }
+    tv_to_value(listtv)
+}
+
+fn b_call(vm: &mut VM, argc: u8) -> Value {
+    let mut args = Vec::with_capacity(argc as usize);
+    for _ in 0..argc {
+        args.push(pop_tv(vm));
+    }
+    args.reverse();
+    let name = tv_get_string(&args[0]);
+    // The arg list is the second argument (a List).
+    let call_args: Vec<typval_T> = match args.get(1).map(|a| (a.v_type, &a.vval)) {
+        Some((VAR_LIST, v_list(Some(l)))) => {
+            l.borrow().lv_items.iter().map(|it| it.li_tv.clone()).collect()
+        }
+        _ => Vec::new(),
+    };
+    match call_user_function(&name, call_args) {
+        Some(rettv) => tv_to_value(rettv),
+        None => {
+            message::semsg(&format!("E117: Unknown function: {name}"));
+            Value::Undef
+        }
+    }
+}
+
+fn b_getopt(vm: &mut VM, _: u8) -> Value {
+    let name = tv_get_string(&pop_tv(vm));
+    // The option name may carry a `&l:`/`&g:` scope prefix; strip it.
+    let name = name.strip_prefix("l:").or_else(|| name.strip_prefix("g:")).unwrap_or(&name);
+    tv_to_value(crate::ported::option::get_option(name))
+}
+
+fn b_set(vm: &mut VM, _: u8) -> Value {
+    let args = tv_get_string(&pop_tv(vm));
+    crate::ported::option::do_set(&args);
+    Value::Undef
+}
+fn b_getreg(_: &mut VM, _: u8) -> Value {
+    Value::str("")
+}
+
+/// Dispatch a Phase-3 builtin function: pop `argc` args, call the ported
+/// `f_<name>` with a pre-initialized `VAR_NUMBER` rettv, push the result.
+fn call_func(vm: &mut VM, argc: u8, f: fn(&[typval_T], &mut typval_T)) -> Value {
+    let mut args = Vec::with_capacity(argc as usize);
+    for _ in 0..argc {
+        args.push(pop_tv(vm));
+    }
+    args.reverse();
+    // c: call_func pre-initializes rettv to VAR_NUMBER / 0.
+    let mut rettv = tv_num(0);
+    f(&args, &mut rettv);
+    tv_to_value(rettv)
+}
+
+fn b_fn_len(vm: &mut VM, argc: u8) -> Value {
+    call_func(vm, argc, f_len)
+}
+fn b_fn_type(vm: &mut VM, argc: u8) -> Value {
+    call_func(vm, argc, f_type)
+}
+fn b_fn_string(vm: &mut VM, argc: u8) -> Value {
+    call_func(vm, argc, f_string)
+}
+fn b_fn_empty(vm: &mut VM, argc: u8) -> Value {
+    call_func(vm, argc, f_empty)
+}
+fn b_fn_abs(vm: &mut VM, argc: u8) -> Value {
+    call_func(vm, argc, f_abs)
+}
+fn b_fn_str2nr(vm: &mut VM, argc: u8) -> Value {
+    call_func(vm, argc, f_str2nr)
+}
+fn b_fn_str2float(vm: &mut VM, argc: u8) -> Value {
+    call_func(vm, argc, f_str2float)
+}
+fn b_fn_float2nr(vm: &mut VM, argc: u8) -> Value {
+    call_func(vm, argc, f_float2nr)
+}
+
+// ── helpers reconstructing tree-walker logic (cite eval.c) ──
+
+/// Build a `VAR_LIST` typval from items (the `eval_list` result shape).
+fn new_list(items: Vec<typval_T>) -> typval_T {
+    let l = tv_list_alloc(items.len() as isize);
+    {
+        let mut lb = l.borrow_mut();
+        for it in items {
+            tv_list_append_tv(&mut lb, it);
+        }
+    }
+    typval_T {
+        v_type: VAR_LIST,
+        v_lock: VAR_UNLOCKED,
+        vval: v_list(Some(l)),
+    }
+}
+
+/// `eval5` List `+` List concatenation — a new list of both items' values.
+fn list_concat(a: &typval_T, b: &typval_T) -> typval_T {
+    let mut items = Vec::new();
+    if let v_list(Some(la)) = &a.vval {
+        items.extend(la.borrow().lv_items.iter().map(|it| it.li_tv.clone()));
+    }
+    if let v_list(Some(lb)) = &b.vval {
+        items.extend(lb.borrow().lv_items.iter().map(|it| it.li_tv.clone()));
+    }
+    new_list(items)
+}
+
+/// `eval5` Blob `+` Blob concatenation.
+fn blob_concat(a: &typval_T, b: &typval_T) -> typval_T {
+    let mut data = Vec::new();
+    if let v_blob(Some(ba)) = &a.vval {
+        data.extend_from_slice(&ba.borrow().bv_ga);
+    }
+    if let v_blob(Some(bb)) = &b.vval {
+        data.extend_from_slice(&bb.borrow().bv_ga);
+    }
+    let blob = std::rc::Rc::new(RefCell::new(blob_T {
+        bv_ga: data,
+        ..Default::default()
+    }));
+    typval_T {
+        v_type: VAR_BLOB,
+        v_lock: VAR_UNLOCKED,
+        vval: v_blob(Some(blob)),
+    }
+}
+
+/// `eval_index` subscript (`eval.c`) — Phase-3 String/List/Dict subset.
+fn index_value(base: &typval_T, index: &typval_T) -> typval_T {
+    match (base.v_type, &base.vval) {
+        (VAR_LIST, v_list(Some(l))) => {
+            let l = l.borrow();
+            let len = l.lv_len as varnumber_T;
+            let mut i = tv_get_number_chk(index, None);
+            if i < 0 {
+                i += len;
+            }
+            if i < 0 || i >= len {
+                message::emsg("E684: list index out of range");
+                tv_special()
+            } else {
+                l.lv_items[i as usize].li_tv.clone()
+            }
+        }
+        (VAR_DICT, v_dict(Some(d))) => {
+            let key = tv_get_string(index);
+            match crate::ported::eval::typval::tv_dict_find(&d.borrow(), &key) {
+                Some(v) => v.clone(),
+                None => {
+                    message::semsg(&format!("E716: Key not present in Dictionary: {key}"));
+                    tv_special()
+                }
+            }
+        }
+        (VAR_STRING, v_string(s)) => {
+            let chars: Vec<char> = s.chars().collect();
+            let len = chars.len() as varnumber_T;
+            let mut i = tv_get_number_chk(index, None);
+            if i < 0 {
+                i += len;
+            }
+            if i < 0 || i >= len {
+                tv_str(String::new())
+            } else {
+                tv_str(chars[i as usize].to_string())
+            }
+        }
+        _ => {
+            message::emsg("E909: Cannot index this type");
+            tv_special()
+        }
+    }
+}
+
+/// `eval_index` slice branch (`eval.c`) — Phase-3 String/List subset.
+fn slice_value(base: &typval_T, from: &typval_T, to: &typval_T) -> typval_T {
+    let lower = |len: varnumber_T, t: &typval_T| -> varnumber_T {
+        if t.v_type == VAR_SPECIAL {
+            0
+        } else {
+            let mut i = tv_get_number_chk(t, None);
+            if i < 0 {
+                i += len;
+            }
+            i.max(0)
+        }
+    };
+    let upper = |len: varnumber_T, t: &typval_T| -> varnumber_T {
+        if t.v_type == VAR_SPECIAL {
+            len - 1
+        } else {
+            let mut i = tv_get_number_chk(t, None);
+            if i < 0 {
+                i += len;
+            }
+            i.min(len - 1)
+        }
+    };
+    match (base.v_type, &base.vval) {
+        (VAR_LIST, v_list(Some(l))) => {
+            let l = l.borrow();
+            let len = l.lv_len as varnumber_T;
+            let (lo, hi) = (lower(len, from), upper(len, to));
+            let items = if lo > hi {
+                Vec::new()
+            } else {
+                l.lv_items[lo as usize..=(hi as usize).min(l.lv_items.len().saturating_sub(1))]
+                    .iter()
+                    .map(|it| it.li_tv.clone())
+                    .collect()
+            };
+            new_list(items)
+        }
+        (VAR_STRING, v_string(s)) => {
+            let chars: Vec<char> = s.chars().collect();
+            let len = chars.len() as varnumber_T;
+            let (lo, hi) = (lower(len, from), upper(len, to));
+            if lo > hi || len == 0 {
+                tv_str(String::new())
+            } else {
+                tv_str(
+                    chars[lo as usize..=(hi as usize).min(chars.len() - 1)]
+                        .iter()
+                        .collect(),
+                )
+            }
+        }
+        _ => {
+            message::emsg("E909: Cannot slice this type");
+            tv_special()
+        }
+    }
+}
+
+// ── echo sink + per-run lifecycle (carve-out) ──
+
+fn echo_write(s: &str) {
+    ECHO_SINK.with(|sink| {
+        let mut sink = sink.borrow_mut();
+        match sink.as_mut() {
+            Some(buf) => buf.push_str(s),
+            None => {
+                use std::io::Write;
+                let out = std::io::stdout();
+                let _ = out.lock().write_all(s.as_bytes());
+            }
+        }
+    });
+}
+
+/// Begin capturing `:echo` output into a buffer (tests / embedding).
+pub fn capture_begin() {
+    ECHO_SINK.with(|s| *s.borrow_mut() = Some(String::new()));
+}
+
+/// Take and clear the captured echo buffer, restoring stdout output.
+pub fn capture_take() -> String {
+    ECHO_SINK.with(|s| s.borrow_mut().take().unwrap_or_default())
+}
+
+/// Drain the captured echo buffer **without** disabling capture (the debugger
+/// streams output progressively as DAP `output` events at each pause).
+pub fn capture_drain() -> String {
+    ECHO_SINK.with(|s| {
+        let mut s = s.borrow_mut();
+        match s.as_mut() {
+            Some(buf) => std::mem::take(buf),
+            None => String::new(),
+        }
+    })
+}
+
+/// Take the last bare-expression result.
+pub fn take_last_result() -> Option<typval_T> {
+    LAST_RESULT.with(|r| r.borrow_mut().take())
+}
+
+/// Reset per-run state (refpool, last result, `did_emsg`).
+pub fn reset_run() {
+    REFPOOL.with(|p| p.borrow_mut().clear());
+    LAST_RESULT.with(|r| *r.borrow_mut() = None);
+    PENDING_EXC.with(|p| *p.borrow_mut() = None);
+    V_EXCEPTION.with(|e| e.borrow_mut().clear());
+    message::did_emsg.with(|d| d.set(0));
+}
+
+/// Register every `VIML_*` builtin on a fresh VM before `vm.run()`.
+pub fn install(vm: &mut VM) {
+    vm.register_builtin(VIML_GETVAR, b_getvar);
+    vm.register_builtin(VIML_SETVAR, b_setvar);
+    vm.register_builtin(VIML_SETENV, b_setenv);
+    vm.register_builtin(VIML_TRUTHY, b_truthy);
+    vm.register_builtin(VIML_BOOLNUM, b_boolnum);
+    vm.register_builtin(VIML_ADD, b_add);
+    vm.register_builtin(VIML_SUB, b_sub);
+    vm.register_builtin(VIML_MUL, b_mul);
+    vm.register_builtin(VIML_DIV, b_div);
+    vm.register_builtin(VIML_MOD, b_mod);
+    vm.register_builtin(VIML_CONCAT, b_concat);
+    vm.register_builtin(VIML_NEG, b_neg);
+    vm.register_builtin(VIML_UPLUS, b_uplus);
+    vm.register_builtin(VIML_NOT, b_not);
+    register_cmp_handlers(vm);
+    vm.register_builtin(VIML_MAKE_LIST, b_make_list);
+    vm.register_builtin(VIML_MAKE_DICT, b_make_dict);
+    vm.register_builtin(VIML_INDEX, b_index);
+    vm.register_builtin(VIML_SLICE, b_slice);
+    vm.register_builtin(VIML_ECHO, b_echo);
+    vm.register_builtin(VIML_ECHON, b_echon);
+    vm.register_builtin(VIML_SET_RESULT, b_set_result);
+    vm.register_builtin(VIML_GETENV, b_getenv);
+    vm.register_builtin(VIML_GETOPT, b_getopt);
+    vm.register_builtin(VIML_GETREG, b_getreg);
+    vm.register_builtin(VIML_FN_LEN, b_fn_len);
+    vm.register_builtin(VIML_FN_TYPE, b_fn_type);
+    vm.register_builtin(VIML_FN_STRING, b_fn_string);
+    vm.register_builtin(VIML_FN_EMPTY, b_fn_empty);
+    vm.register_builtin(VIML_FN_ABS, b_fn_abs);
+    vm.register_builtin(VIML_FN_STR2NR, b_fn_str2nr);
+    vm.register_builtin(VIML_FN_STR2FLOAT, b_fn_str2float);
+    vm.register_builtin(VIML_FN_FLOAT2NR, b_fn_float2nr);
+    // Second builtin batch — non-capturing closures coerce to the `fn` handler.
+    vm.register_builtin(VIML_FN_STRLEN, |vm, n| call_func(vm, n, f_strlen));
+    vm.register_builtin(VIML_FN_TOLOWER, |vm, n| call_func(vm, n, f_tolower));
+    vm.register_builtin(VIML_FN_TOUPPER, |vm, n| call_func(vm, n, f_toupper));
+    vm.register_builtin(VIML_FN_CHAR2NR, |vm, n| call_func(vm, n, f_char2nr));
+    vm.register_builtin(VIML_FN_NR2CHAR, |vm, n| call_func(vm, n, f_nr2char));
+    vm.register_builtin(VIML_FN_REPEAT, |vm, n| call_func(vm, n, f_repeat));
+    vm.register_builtin(VIML_FN_SPLIT, |vm, n| call_func(vm, n, f_split));
+    vm.register_builtin(VIML_FN_JOIN, |vm, n| call_func(vm, n, f_join));
+    vm.register_builtin(VIML_FN_RANGE, |vm, n| call_func(vm, n, f_range));
+    vm.register_builtin(VIML_FN_ADD, |vm, n| call_func(vm, n, f_add));
+    vm.register_builtin(VIML_FN_REVERSE, |vm, n| call_func(vm, n, f_reverse));
+    vm.register_builtin(VIML_FN_GET, |vm, n| call_func(vm, n, f_get));
+    vm.register_builtin(VIML_FN_HAS_KEY, |vm, n| call_func(vm, n, f_has_key));
+    vm.register_builtin(VIML_FN_KEYS, |vm, n| call_func(vm, n, f_keys));
+    vm.register_builtin(VIML_FN_VALUES, |vm, n| call_func(vm, n, f_values));
+    vm.register_builtin(VIML_FN_MAX, |vm, n| call_func(vm, n, f_max));
+    vm.register_builtin(VIML_FN_MIN, |vm, n| call_func(vm, n, f_min));
+    vm.register_builtin(VIML_FN_COUNT, |vm, n| call_func(vm, n, f_count));
+    vm.register_builtin(VIML_FN_INDEX, |vm, n| call_func(vm, n, f_index));
+    vm.register_builtin(VIML_FN_HAS, |vm, n| call_func(vm, n, f_has));
+    vm.register_builtin(VIML_FN_EXISTS, |vm, n| call_func(vm, n, f_exists));
+    vm.register_builtin(VIML_FN_PRINTF, |vm, n| call_func(vm, n, f_printf));
+    vm.register_builtin(VIML_FN_MAP, b_map);
+    vm.register_builtin(VIML_FN_FILTER, b_filter);
+    vm.register_builtin(VIML_FN_SORT, b_sort);
+    vm.register_builtin(VIML_FN_CALL, b_call);
+    vm.register_builtin(VIML_FN_FUNCTION, |vm, n| call_func(vm, n, f_function));
+    vm.register_builtin(VIML_FN_SQRT, |vm, n| call_func(vm, n, f_sqrt));
+    vm.register_builtin(VIML_FN_FLOOR, |vm, n| call_func(vm, n, f_floor));
+    vm.register_builtin(VIML_FN_CEIL, |vm, n| call_func(vm, n, f_ceil));
+    vm.register_builtin(VIML_FN_ROUND, |vm, n| call_func(vm, n, f_round));
+    vm.register_builtin(VIML_FN_TRUNC, |vm, n| call_func(vm, n, f_trunc));
+    vm.register_builtin(VIML_FN_LOG, |vm, n| call_func(vm, n, f_log));
+    vm.register_builtin(VIML_FN_EXP, |vm, n| call_func(vm, n, f_exp));
+    vm.register_builtin(VIML_FN_SIN, |vm, n| call_func(vm, n, f_sin));
+    vm.register_builtin(VIML_FN_COS, |vm, n| call_func(vm, n, f_cos));
+    vm.register_builtin(VIML_FN_POW, |vm, n| call_func(vm, n, f_pow));
+    vm.register_builtin(VIML_FN_AND, |vm, n| call_func(vm, n, f_and));
+    vm.register_builtin(VIML_FN_OR, |vm, n| call_func(vm, n, f_or));
+    vm.register_builtin(VIML_FN_XOR, |vm, n| call_func(vm, n, f_xor));
+    vm.register_builtin(VIML_FN_INVERT, |vm, n| call_func(vm, n, f_invert));
+    vm.register_builtin(VIML_FN_STRCHARS, |vm, n| call_func(vm, n, f_strchars));
+    vm.register_builtin(VIML_FN_STRPART, |vm, n| call_func(vm, n, f_strpart));
+    vm.register_builtin(VIML_FN_STRIDX, |vm, n| call_func(vm, n, f_stridx));
+    vm.register_builtin(VIML_FN_TRIM, |vm, n| call_func(vm, n, f_trim));
+    vm.register_builtin(VIML_FN_INSERT, |vm, n| call_func(vm, n, f_insert));
+    vm.register_builtin(VIML_FN_REMOVE, |vm, n| call_func(vm, n, f_remove));
+    vm.register_builtin(VIML_FN_EXTEND, |vm, n| call_func(vm, n, f_extend));
+    vm.register_builtin(VIML_FN_COPY, |vm, n| call_func(vm, n, f_copy));
+    vm.register_builtin(VIML_FN_ITEMS, |vm, n| call_func(vm, n, f_items));
+    vm.register_builtin(VIML_FN_UNIQ, |vm, n| call_func(vm, n, f_uniq));
+    vm.register_builtin(VIML_FN_MATCHSTR, |vm, n| call_func(vm, n, f_matchstr));
+    vm.register_builtin(VIML_FN_MATCH, |vm, n| call_func(vm, n, f_match));
+    vm.register_builtin(VIML_FN_SUBSTITUTE, |vm, n| call_func(vm, n, f_substitute));
+    vm.register_builtin(VIML_FN_MATCHLIST, |vm, n| call_func(vm, n, f_matchlist));
+    vm.register_builtin(VIML_FN_MATCHEND, |vm, n| call_func(vm, n, f_matchend));
+    vm.register_builtin(VIML_FN_STRRIDX, |vm, n| call_func(vm, n, f_strridx));
+    vm.register_builtin(VIML_FN_ESCAPE, |vm, n| call_func(vm, n, f_escape));
+    vm.register_builtin(VIML_FN_TR, |vm, n| call_func(vm, n, f_tr));
+    vm.register_builtin(VIML_FN_STR2LIST, |vm, n| call_func(vm, n, f_str2list));
+    vm.register_builtin(VIML_FN_LIST2STR, |vm, n| call_func(vm, n, f_list2str));
+    vm.register_builtin(VIML_FN_FLATTEN, |vm, n| call_func(vm, n, f_flatten));
+    vm.register_builtin(VIML_FN_REDUCE, b_reduce);
+    vm.register_builtin(VIML_FN_EVAL, b_eval);
+    vm.register_builtin(VIML_FN_EXECUTE, b_execute);
+    vm.register_builtin(VIML_FN_DEEPCOPY, |vm, n| call_func(vm, n, f_deepcopy));
+    vm.register_builtin(VIML_FN_FMOD, |vm, n| call_func(vm, n, f_fmod));
+    vm.register_builtin(VIML_FN_ATAN2, |vm, n| call_func(vm, n, f_atan2));
+    vm.register_builtin(VIML_FN_TAN, |vm, n| call_func(vm, n, f_tan));
+    vm.register_builtin(VIML_FN_ATAN, |vm, n| call_func(vm, n, f_atan));
+    vm.register_builtin(VIML_FN_ASIN, |vm, n| call_func(vm, n, f_asin));
+    vm.register_builtin(VIML_FN_ACOS, |vm, n| call_func(vm, n, f_acos));
+    vm.register_builtin(VIML_FN_SINH, |vm, n| call_func(vm, n, f_sinh));
+    vm.register_builtin(VIML_FN_COSH, |vm, n| call_func(vm, n, f_cosh));
+    vm.register_builtin(VIML_FN_TANH, |vm, n| call_func(vm, n, f_tanh));
+    vm.register_builtin(VIML_FN_LOG10, |vm, n| call_func(vm, n, f_log10));
+    vm.register_builtin(VIML_EXEC_STMT, b_exec_stmt);
+    vm.register_builtin(VIML_SET, b_set);
+    vm.register_builtin(VIML_SET_LINENO, b_set_lineno);
+    vm.register_builtin(VIML_CALL_USER, b_call_user);
+    vm.register_builtin(VIML_SET_RETURN, b_set_return);
+    vm.register_builtin(VIML_THROW, b_throw);
+    vm.register_builtin(VIML_CHECK_EXC, b_check_exc);
+    vm.register_builtin(VIML_CATCH_MATCH, b_catch_match);
+    vm.register_builtin(VIML_REPORT_UNCAUGHT, b_report_uncaught);
+}
+
+/// Register a compiled program's user functions, then run its `main` chunk.
+pub fn run_compiled(prog: crate::compile_viml::CompiledProgram) {
+    FUNCTIONS.with(|f| {
+        let mut f = f.borrow_mut();
+        for func in prog.funcs {
+            f.insert(func.name.clone(), func);
+        }
+    });
+    run_chunk(prog.main);
+}
+
+// ── debugger support (DAP) ──
+
+/// Parse + debug-compile + run source with a `SET_LINENO` marker before each
+/// statement, so the DAP `check_line` hook can pause at breakpoints.
+pub fn eval_source_debug(src: &str) -> Result<(), VimlError> {
+    let numbered = crate::viml_parser::parse_program_lines(src)?;
+    run_chunk(crate::compile_viml::compile_program_debug(&numbered)?);
+    Ok(())
+}
+
+/// Snapshot the `g:` scope for the debugger's variables view: `(name, rendered)`
+/// pairs read from `globvardict` (no VM run).
+pub fn dap_globals() -> Vec<(String, String)> {
+    crate::ported::eval::vars::globvardict.with(|d| {
+        d.borrow()
+            .dv_hashtab
+            .iter()
+            .map(|(k, v)| (format!("g:{k}"), encode_tv2echo(v)))
+            .collect()
+    })
+}
+
+/// Evaluate a bare variable name for the debugger's `evaluate` request (reads
+/// `eval_variable`, no nested VM run — avoids disturbing the paused executor).
+pub fn dap_eval_var(name: &str) -> Option<String> {
+    eval_variable(name).as_ref().map(encode_tv2echo)
+}
+
+// ── public driver: parse → compile → run on fusevm ──
+
+/// Run an already-compiled `fusevm::Chunk` on a fresh VM with the VimL host
+/// installed (the script-cache hit path — no lex/parse/compile).
+pub fn run_chunk(chunk: fusevm::Chunk) {
+    crate::fusevm_disasm::maybe_print_stdout("program", &chunk);
+    reset_run();
+    let mut vm = VM::new(chunk);
+    install(&mut vm);
+    let _ = vm.run();
+}
+
+/// Compile and run a statement list. `:echo` output and `emsg` errors happen as
+/// side effects.
+pub fn run_program(stmts: &[Stmt]) -> Result<(), VimlError> {
+    run_compiled(compile_program(stmts)?);
+    Ok(())
+}
+
+/// Parse + compile + run a block of VimL source. Block-structured (`:if`/
+/// `:while`/`:for`/…) statements are parsed across lines into one chunk. Returns
+/// the last bare-expression value.
+pub fn eval_source(src: &str) -> Result<Option<typval_T>, VimlError> {
+    run_program(&crate::viml_parser::parse_program(src)?)?;
+    Ok(take_last_result())
+}
+
+/// Source a `.vim` file through the rkyv bytecode cache: a 2nd+ run with an
+/// unchanged file and binary skips lex/parse/compile and runs the cached chunk.
+pub fn eval_file(path: &std::path::Path) -> Result<(), VimlError> {
+    if let Some(prog) = crate::script_cache::try_load(path) {
+        run_compiled(prog);
+        return Ok(());
+    }
+    let src = std::fs::read_to_string(path)
+        .map_err(|e| VimlError::msg(format!("vimlrs: {}: {e}", path.display())))?;
+    let prog = compile_program(&crate::viml_parser::parse_program(&src)?)?;
+    crate::script_cache::store(path, &prog);
+    run_compiled(prog);
+    Ok(())
+}
+
+/// Parse + compile + run a single expression, returning its value.
+pub fn eval_expr(src: &str) -> Result<typval_T, VimlError> {
+    let e = parse_expr(src)?;
+    run_program(&[Stmt::Expr(e)])?;
+    Ok(take_last_result().unwrap_or_else(tv_special))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run(src: &str) -> String {
+        capture_begin();
+        eval_source(src).unwrap();
+        capture_take()
+    }
+
+    #[test]
+    fn echo_arithmetic() {
+        assert_eq!(run("echo 1 + 2 * 3"), "7\n");
+        assert_eq!(run("echo 10 / 3"), "3\n");
+        assert_eq!(run("echo 10 % 3"), "1\n");
+    }
+
+    #[test]
+    fn echo_float_and_concat() {
+        assert_eq!(run("echo 1.5 + 1.5"), "3.0\n");
+        assert_eq!(run(r#"echo "a" . "b" . 1"#), "ab1\n");
+    }
+
+    #[test]
+    fn echo_collections() {
+        assert_eq!(run("echo [1, 2, 3]"), "[1, 2, 3]\n");
+        assert_eq!(run("echo ['a', 'b']"), "['a', 'b']\n");
+        assert_eq!(run("echo {'k': 1}"), "{'k': 1}\n");
+    }
+
+    #[test]
+    fn variables_and_logic() {
+        assert_eq!(run("let x = 5\necho x + 1"), "6\n");
+        assert_eq!(run("echo 1 == 1"), "1\n");
+        assert_eq!(run(r#"echo 1 == "1""#), "1\n"); // Vim number/string coercion
+        assert_eq!(run("echo 2 > 1 && 1 < 3"), "1\n");
+        assert_eq!(run("echo 0 || 5"), "1\n");
+    }
+
+    #[test]
+    fn scopes_and_options() {
+        // s: script-local, visible inside functions.
+        assert_eq!(
+            run("let s:n = 100\nfunction G()\nreturn s:n\nendfunction\necho G()"),
+            "100\n"
+        );
+        // b:/w:/t: scopes.
+        assert_eq!(run("let b:x = 'B'\nlet w:y = 'W'\necho b:x . w:y"), "BW\n");
+        // &opt + :set (default, set, abbreviation-off, number).
+        assert_eq!(run("echo &ignorecase"), "0\n");
+        assert_eq!(run("set ignorecase\necho &ic"), "1\n");
+        assert_eq!(run("set ignorecase\nset noic\necho &ignorecase"), "0\n");
+        assert_eq!(run("set tabstop=4\necho &tabstop"), "4\n");
+        // 'ignorecase' flips =~ case sensitivity.
+        assert_eq!(run("echo 'FOO' =~ 'foo'"), "0\n");
+        assert_eq!(run("set ignorecase\necho 'FOO' =~ 'foo'"), "1\n");
+    }
+
+    #[test]
+    fn statement_features() {
+        // :execute builds and runs a command line.
+        assert_eq!(run("let g:n = 5\nexecute 'echo' 'g:n * 2'"), "10\n");
+        assert_eq!(run("execute 'let g:z = ' . (3 * 7)\necho g:z"), "21\n");
+        // :let list-unpack (+ ;rest).
+        assert_eq!(run("let [g:a, g:b] = [10, 20]\necho g:a . ',' . g:b"), "10,20\n");
+        assert_eq!(run("let [g:x; g:r] = [1, 2, 3]\necho g:r"), "[2, 3]\n");
+        // :for destructuring over a list of pairs and over items().
+        assert_eq!(run("for [x, y] in [[1, 2], [3, 4]]\necho x + y\nendfor"), "3\n7\n");
+    }
+
+    #[test]
+    fn eval_execute_dictmap() {
+        assert_eq!(run("echo eval('1 + 2 * 3')"), "7\n");
+        assert_eq!(run("echo map({'a': 1, 'b': 2}, 'v:val * 10')"), "{'a': 10, 'b': 20}\n");
+        assert_eq!(run("echo filter({'a': 1, 'b': 2, 'c': 3}, 'v:val > 1')"), "{'b': 2, 'c': 3}\n");
+        assert_eq!(run("echo execute('echo 41 + 1')"), "42\n\n"); // captured "42\n" + echo's \n
+        assert_eq!(run("echo deepcopy([[1], [2]])"), "[[1], [2]]\n");
+        assert_eq!(run("echo fmod(10.0, 3.0)"), "1.0\n");
+    }
+
+    #[test]
+    fn batch4_builtins() {
+        assert_eq!(
+            run("echo matchlist('a-b', '\\(\\w\\)-\\(\\w\\)')"),
+            "['a-b', 'a', 'b']\n"
+        );
+        assert_eq!(run("echo matchend('abc123', '\\d\\+')"), "6\n");
+        assert_eq!(run("echo strridx('a/b/c', '/')"), "3\n");
+        assert_eq!(run("echo escape('a.b', '.')"), "a\\.b\n");
+        assert_eq!(run("echo tr('hello', 'el', 'ip')"), "hippo\n");
+        assert_eq!(run("echo str2list('AB')"), "[65, 66]\n");
+        assert_eq!(run("echo list2str([72, 105])"), "Hi\n");
+        assert_eq!(run("echo flatten([1, [2, [3]]])"), "[1, 2, 3]\n");
+        assert_eq!(
+            run("function A(a, b)\nreturn a:a + a:b\nendfunction\necho reduce([1, 2, 3], function('A'), 0)"),
+            "6\n"
+        );
+    }
+
+    #[test]
+    fn regex_through_eval() {
+        assert_eq!(run("echo 'foobar123' =~ '\\d\\+'"), "1\n");
+        assert_eq!(run("echo 'hello' =~ '^h.*o$'"), "1\n");
+        assert_eq!(run("echo matchstr('ab123cd', '\\d\\+')"), "123\n");
+        assert_eq!(run("echo substitute('a-b-c', '-', '/', 'g')"), "a/b/c\n");
+        assert_eq!(
+            run("echo substitute('John Smith', '\\(\\w\\+\\) \\(\\w\\+\\)', '\\2 \\1', '')"),
+            "Smith John\n"
+        );
+        assert_eq!(run("echo split('a1b22c', '\\d\\+')"), "['a', 'b', 'c']\n");
+        // :catch with a regex pattern.
+        assert_eq!(
+            run("try\nthrow 'E42: bad'\ncatch /E\\d\\+/\necho 'caught'\nendtry"),
+            "caught\n"
+        );
+    }
+
+    #[test]
+    fn math_string_list_builtins() {
+        assert_eq!(run("echo float2nr(sqrt(16.0)) . float2nr(pow(2.0, 5.0))"), "432\n");
+        assert_eq!(run("echo and(12, 10) . or(12, 10) . xor(12, 10)"), "8146\n");
+        assert_eq!(run("echo strpart('hello world', 6)"), "world\n");
+        assert_eq!(run("echo stridx('abcabc', 'c', 3)"), "5\n");
+        assert_eq!(run("echo trim('  hi  ')"), "hi\n");
+        assert_eq!(run("echo insert([2, 3], 1)"), "[1, 2, 3]\n");
+        assert_eq!(run("echo remove([10, 20, 30], 1)"), "20\n");
+        assert_eq!(run("echo extend([1, 2], [3, 4])"), "[1, 2, 3, 4]\n");
+        assert_eq!(run("echo uniq([1, 1, 2, 3, 3])"), "[1, 2, 3]\n");
+        assert_eq!(run("echo sort([3.0, 1.0, 2.5], 'n')"), "[1.0, 2.5, 3.0]\n");
+        assert_eq!(run("echo items({'a': 1})"), "[['a', 1]]\n");
+    }
+
+    #[test]
+    fn callback_builtins() {
+        // map with a string expression binding v:val.
+        assert_eq!(run("echo map([1, 2, 3], 'v:val * 10')"), "[10, 20, 30]\n");
+        // filter.
+        assert_eq!(run("echo filter([1, 2, 3, 4], 'v:val % 2 == 0')"), "[2, 4]\n");
+        // sort: default string order vs numeric.
+        assert_eq!(run("echo sort([10, 9, 2])"), "[10, 2, 9]\n");
+        assert_eq!(run("echo sort([10, 9, 2], 'n')"), "[2, 9, 10]\n");
+        // map with a funcref + call().
+        assert_eq!(
+            run("function D(k, v)\nreturn a:v + a:v\nendfunction\necho map([1, 2], function('D'))"),
+            "[2, 4]\n"
+        );
+        assert_eq!(
+            run("function S(a, b)\nreturn a:a + a:b\nendfunction\necho call('S', [3, 4])"),
+            "7\n"
+        );
+        // chained.
+        assert_eq!(
+            run("echo sort(filter(map([5, 1, 4], 'v:val * v:val'), 'v:val > 4'), 'n')"),
+            "[16, 25]\n"
+        );
+    }
+
+    #[test]
+    fn builtins_batch() {
+        assert_eq!(run("echo join(split('a b c'), '-')"), "a-b-c\n");
+        assert_eq!(run("echo range(2, 8, 2)"), "[2, 4, 6, 8]\n");
+        assert_eq!(run("echo toupper('hi') . repeat('!', 3)"), "HI!!!\n");
+        assert_eq!(run("echo max([3, 9, 2]) . '/' . min([3, 9, 2])"), "9/2\n");
+        assert_eq!(run("echo has_key({'x': 1}, 'x')"), "1\n");
+        assert_eq!(run("echo get([10, 20, 30], 1)"), "20\n");
+        assert_eq!(run("echo printf('%s=%05X', 'n', 255)"), "n=000FF\n");
+        assert_eq!(run("echo count([1, 2, 2, 3], 2) . index([1, 2, 3], 3)"), "22\n");
+        assert_eq!(run("echo reverse([1, 2, 3])"), "[3, 2, 1]\n");
+    }
+
+    #[test]
+    fn exceptions() {
+        // throw caught by matching pattern + v:exception + finally always runs.
+        assert_eq!(
+            run("try\nthrow 'boom'\necho 'skipped'\ncatch /boom/\necho 'caught ' . v:exception\nfinally\necho 'fin'\nendtry"),
+            "caught boom\nfin\n"
+        );
+        // throw from a function propagates and is caught in the caller (no
+        // spurious value consumed by the aborted command).
+        assert_eq!(
+            run("function R(n)\nif a:n < 0\nthrow 'neg'\nendif\nreturn a:n\nendfunction\ntry\necho R(7)\necho R(-1)\ncatch /neg/\necho 'caught'\nendtry"),
+            "7\ncaught\n"
+        );
+    }
+
+    #[test]
+    fn user_functions() {
+        // a: args + return.
+        assert_eq!(
+            run("function Add(a, b)\nreturn a:a + a:b\nendfunction\necho Add(3, 4)"),
+            "7\n"
+        );
+        // recursion (scope stack + nested calls).
+        assert_eq!(
+            run("function Fact(n)\nif a:n <= 1\nreturn 1\nendif\nreturn a:n * Fact(a:n - 1)\nendfunction\necho Fact(5)"),
+            "120\n"
+        );
+        // l: locals + call inside an expression.
+        assert_eq!(
+            run("function Inc(x)\nlet l:y = a:x + 1\nreturn l:y\nendfunction\necho Inc(10) * 2"),
+            "22\n"
+        );
+    }
+
+    #[test]
+    fn control_flow() {
+        assert_eq!(
+            run("let g:x = 5\nif g:x > 10\necho 'big'\nelseif g:x > 3\necho 'mid'\nelse\necho 'small'\nendif"),
+            "mid\n"
+        );
+        // while with break/continue: i=1 echo, i=2 continue, i=3 echo, i=4 break.
+        assert_eq!(
+            run("let g:i = 0\nwhile g:i < 9\nlet g:i = g:i + 1\nif g:i == 2\ncontinue\nendif\nif g:i == 4\nbreak\nendif\necho g:i\nendwhile"),
+            "1\n3\n"
+        );
+        // for over a list.
+        assert_eq!(run("for n in [10, 20, 30]\necho n\nendfor"), "10\n20\n30\n");
+        // while accumulator.
+        assert_eq!(
+            run("let g:s = 0\nlet g:k = 1\nwhile g:k <= 4\nlet g:s = g:s + g:k\nlet g:k = g:k + 1\nendwhile\necho g:s"),
+            "10\n"
+        );
+    }
+
+    #[test]
+    fn ternary_index_builtins() {
+        assert_eq!(run("echo 1 ? 'y' : 'n'"), "y\n");
+        assert_eq!(run("echo 0 ?? 7"), "7\n");
+        assert_eq!(run("echo [10, 20, 30][-1]"), "30\n");
+        assert_eq!(run("echo 'hello'[1:3]"), "ell\n");
+        assert_eq!(run("echo len([1, 2, 3])"), "3\n");
+        assert_eq!(run("echo abs(-5)"), "5\n");
+        assert_eq!(run("echo [1, 2, 3]->len()"), "3\n");
+    }
+}

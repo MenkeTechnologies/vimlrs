@@ -45,9 +45,21 @@ Early / in development.
 | Expression engine — arithmetic, comparison, logic, ternary, index/slice, lists/dicts | Working |
 | Builtin function surface | Partial (`len`/`type`/`string`/`empty`/`abs`/`str2nr`/`str2float`/`float2nr`; full `funcs.c` pending) |
 | Standalone `vimlrs` binary (`-e` / `-c` / file / REPL) | Working |
-| User functions, scopes (`l:`/`s:`/…), control flow (`:if`/`:while`/`:try`) | Planned |
-| rkyv bytecode script cache | Planned |
-| DAP debugger (`--dap`) · LSP server (`--lsp`) | Planned |
+| rkyv bytecode script cache (`~/.cache/vimlrs/scripts.rkyv`, mmap zero-copy) | Working |
+| AOT build (`--build` bakes scripts into a self-contained executable) | Working |
+| Bytecode disassembler (`--disasm`) | Working |
+| LSP server (`--lsp`) — diagnostics, completion, hover, document symbols | Working |
+| DAP debugger (`--dap`) — breakpoints, stepping, variables, evaluate | Working |
+| Control flow — `:if`/`:elseif`/`:else`, `:while`, `:for`, `:break`/`:continue` | Working |
+| `:execute`, `:let [a, b; rest] = …` & `:for [k, v] in …` destructuring | Working |
+| User functions — `:function`/`:return`, recursion, `a:`/`l:` scopes | Working |
+| Variable scopes — `g:`/`s:`/`b:`/`w:`/`t:`/`v:` + `:set`/`&opt` (`'ignorecase'` wired into regex) | Working |
+| `:try`/`:catch`/`:finally`/`:throw` exceptions, `v:exception` | Working |
+| `funcs.c` builtin table | In progress (~84 ported: string/list/dict, float math, bitwise, regex, `eval`/`execute`, …) |
+| `map`/`filter`/`sort`/`reduce`/`call` (lists **and** dicts; string-expr + funcref) | Working |
+| `eval()` / `execute()` (run-string metaprogramming) | Working |
+| Regex engine — Vim magic dialect, backing `=~`/`matchstr`/`match`/`substitute`/`split`/`:catch` | Working |
+| `s:`/`b:`/`w:`/`t:` scopes, autoload, `:execute` | Planned |
 
 Porting discipline (exact C names, `// c:NNN` citations, two-zone `src/ported/`
 vs crate-root carve-out layout) is documented in [`docs/PORT.md`](docs/PORT.md).

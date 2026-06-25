@@ -1,0 +1,170 @@
+//! Port of `src/nvim/option.c` (subset) — the option table, `&opt` access, and
+//! the `:set` command parser (`do_set`).
+//!
+//! Neovim's option machinery is large (hundreds of options, per-buffer/window
+//! scopes, side effects). This ports the common global boolean/number options
+//! plus the `do_set` argument grammar (`set opt`, `set noopt`, `set opt!`,
+//! `set inv opt`, `set opt=val`, `set opt?`); the value store is a thread-local
+//! map seeded with Vim's defaults. String options and per-buffer scopes follow
+//! with the editor integration.
+#![allow(non_snake_case, non_upper_case_globals)]
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+
+use crate::ported::eval::typval_defs_h::{
+    typval_T, typval_vval_union::*, varnumber_T, VarLockStatus, VarType::*,
+};
+
+/// Option kind, for parsing `:set` values.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Bool,
+    Number,
+    /// String options (`'shell'`, `'filetype'`, …) arrive with editor
+    /// integration; the parse path already handles them.
+    #[allow(dead_code)]
+    String,
+}
+
+/// `(canonical name, abbreviation, kind, default)` rows of the supported option
+/// table — the subset of `options[]` (`option.c`) ported so far.
+const OPTIONS: &[(&str, &str, Kind, varnumber_T)] = &[
+    ("ignorecase", "ic", Kind::Bool, 0),
+    ("smartcase", "scs", Kind::Bool, 0),
+    ("magic", "magic", Kind::Bool, 1),
+    ("expandtab", "et", Kind::Bool, 0),
+    ("number", "nu", Kind::Bool, 0),
+    ("relativenumber", "rnu", Kind::Bool, 0),
+    ("wrap", "wrap", Kind::Bool, 1),
+    ("hlsearch", "hls", Kind::Bool, 0),
+    ("incsearch", "is", Kind::Bool, 0),
+    ("autoindent", "ai", Kind::Bool, 0),
+    ("tabstop", "ts", Kind::Number, 8),
+    ("shiftwidth", "sw", Kind::Number, 8),
+    ("softtabstop", "sts", Kind::Number, 0),
+    ("textwidth", "tw", Kind::Number, 0),
+    ("scrolloff", "so", Kind::Number, 0),
+];
+
+thread_local! {
+    /// Current option values, keyed by canonical name. Lazily seeded from the
+    /// table defaults on first access.
+    static option_values: RefCell<HashMap<String, typval_T>> = RefCell::new(HashMap::new());
+}
+
+/// Resolve an option name or abbreviation to its `OPTIONS` row.
+fn lookup(name: &str) -> Option<&'static (&'static str, &'static str, Kind, varnumber_T)> {
+    OPTIONS.iter().find(|(n, abbr, _, _)| *n == name || *abbr == name)
+}
+
+fn num_tv(n: varnumber_T) -> typval_T {
+    typval_T {
+        v_type: VAR_NUMBER,
+        v_lock: VarLockStatus::VAR_UNLOCKED,
+        vval: v_number(n),
+    }
+}
+
+fn str_tv(s: String) -> typval_T {
+    typval_T {
+        v_type: VAR_STRING,
+        v_lock: VarLockStatus::VAR_UNLOCKED,
+        vval: v_string(s),
+    }
+}
+
+/// Port of `get_option_value()` (`option.c`) reduced — the value of `&name` (or
+/// its abbreviation). Unknown options yield "" (the empty string).
+pub fn get_option(name: &str) -> typval_T {
+    let Some((canon, _, kind, default)) = lookup(name) else {
+        return str_tv(String::new());
+    };
+    option_values.with(|m| {
+        m.borrow().get(*canon).cloned().unwrap_or_else(|| match kind {
+            Kind::String => str_tv(String::new()),
+            _ => num_tv(*default),
+        })
+    })
+}
+
+/// The boolean value of option `name` (0 default). Used to seed regex
+/// ignore-case from `'ignorecase'`.
+pub fn get_option_bool(name: &str) -> bool {
+    crate::ported::eval::typval::tv_get_bool(&get_option(name)) != 0
+}
+
+/// Store option `name`'s value (canonicalizing the name).
+fn store(canon: &str, tv: typval_T) {
+    option_values.with(|m| {
+        m.borrow_mut().insert(canon.to_string(), tv);
+    });
+}
+
+/// Port of `do_set()` (`option.c`) — parse and apply a `:set` argument string:
+/// `set opt` / `set noopt` / `set opt!` / `set invopt` / `set opt=val` /
+/// `set opt:val` / `set opt?` (whitespace-separated, multiple per line).
+pub fn do_set(args: &str) {
+    for part in args.split_whitespace() {
+        // `opt=val` / `opt:val`.
+        if let Some((name, val)) = part.split_once(['=', ':']) {
+            if let Some((canon, _, kind, _)) = lookup(name) {
+                let tv = match kind {
+                    Kind::String => str_tv(val.to_string()),
+                    _ => num_tv(val.trim().parse().unwrap_or(0)),
+                };
+                store(canon, tv);
+            }
+            continue;
+        }
+        // `opt!` (toggle a bool) / `opt?` (query — no-op here).
+        if let Some(name) = part.strip_suffix('!') {
+            if let Some((canon, _, Kind::Bool, _)) = lookup(name) {
+                let cur = get_option_bool(canon);
+                store(canon, num_tv(varnumber_T::from(!cur)));
+            }
+            continue;
+        }
+        if part.ends_with('?') {
+            continue; // query form: no terminal output in this subset
+        }
+        // `noopt` / `invopt` (bool off / invert).
+        if let Some(name) = part.strip_prefix("no") {
+            if let Some((canon, _, Kind::Bool, _)) = lookup(name) {
+                store(canon, num_tv(0));
+                continue;
+            }
+        }
+        if let Some(name) = part.strip_prefix("inv") {
+            if let Some((canon, _, Kind::Bool, _)) = lookup(name) {
+                let cur = get_option_bool(canon);
+                store(canon, num_tv(varnumber_T::from(!cur)));
+                continue;
+            }
+        }
+        // Bare `opt` — turn a boolean on (number/string forms are queries).
+        if let Some((canon, _, Kind::Bool, _)) = lookup(part) {
+            store(canon, num_tv(1));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn set_and_get_bool_and_number() {
+        do_set("ignorecase");
+        assert!(get_option_bool("ignorecase"));
+        do_set("noic"); // abbreviation + no-prefix
+        assert!(!get_option_bool("ignorecase"));
+        do_set("ic!"); // toggle
+        assert!(get_option_bool("ignorecase"));
+        do_set("tabstop=4");
+        assert_eq!(
+            crate::ported::eval::typval::tv_get_number_chk(&get_option("ts"), None),
+            4
+        );
+    }
+}
