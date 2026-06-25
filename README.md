@@ -48,6 +48,7 @@ Early / in development.
 | **Float** arithmetic + float-accumulator loops trace-JIT too (native `fadd`; int counter + float accumulator in one trace) | Working |
 | Compound loop conditions (`&&`/`||` of numeric compares, short-circuit) trace-JIT; `if` inside loops + nested loops trace | Working |
 | Per-loop slot scoping: a hot loop traces even when the function also calls helpers (callees can't see `l:` locals) or runs a sibling list-`for` | Working (function scope; script-scope calls still bail, since bare = `g:`) |
+| Native integer `%` (e.g. `if i % 2 == 0`) so modulo loops trace; `/` stays on the builtin (fusevm div is float, unlike VimL integer `/`) | Working |
 | Observable from the real CLI: `VIMLRS_JIT_STATS=1 vimlrs script.vim` reports loop traces compiled; `VIMLRS_NO_JIT=1` forces the interpreter baseline | Working — a 20M-iteration loop runs **~15–100× faster** with the JIT |
 | Native `Op::ReturnValue` (whole function bodies block-compile) + per-loop (not per-chunk) slot scoping | In progress (next) |
 | Expression engine — arithmetic, comparison, logic, ternary, index/slice, lists/dicts | Working |

@@ -1177,6 +1177,18 @@ impl Compiler {
                         return Ok(());
                     }
                 }
+                // Native `%` for INTEGER operands only: fusevm `Op::Mod` is
+                // `(y==0)?0:x%y`, identical to the `num_modulus` port, and Rust
+                // `%` is C-truncated like VimL. Floats diverge (VimL errors on
+                // `%` with a Float), so they keep the builtin. (`/` always stays
+                // on the builtin — fusevm `Op::Div` is float division, unlike
+                // VimL's integer `/`.)
+                if matches!(op, ArithOp::Mod) && self.expr_is_int(lhs) && self.expr_is_int(rhs) {
+                    self.expr(lhs)?;
+                    self.expr(rhs)?;
+                    self.emit(Op::Mod);
+                    return Ok(());
+                }
                 self.expr(lhs)?;
                 self.expr(rhs)?;
                 let id = match op {

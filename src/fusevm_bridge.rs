@@ -1935,6 +1935,36 @@ mod tests {
         );
     }
 
+    /// Proof that a loop using integer `%` (e.g. `if i % 2 == 0`) trace-JITs —
+    /// native `Op::Mod` (identical to VimL's `num_modulus` for ints).
+    #[test]
+    fn modulo_loop_traces_on_jit() {
+        use crate::compile_viml::compile_program;
+        use crate::viml_parser::parse_program;
+        use fusevm::Op;
+
+        let src = "let s = 0\nfor i in range(5000)\n  if i % 2 == 0\n    let s = s + i\n  endif\nendfor";
+        let chunk = compile_program(&parse_program(src).unwrap()).unwrap().main;
+        let (header, back) = chunk
+            .ops
+            .iter()
+            .enumerate()
+            .find_map(|(i, o)| match o {
+                Op::JumpIfTrue(t) if (*t as usize) < i => Some((*t as usize, i)),
+                _ => None,
+            })
+            .expect("loop backedge");
+        assert!(
+            chunk.ops[header..=back].iter().any(|o| matches!(o, Op::Mod)),
+            "loop body should use native Op::Mod"
+        );
+        run_chunk(chunk.clone());
+        assert!(
+            fusevm::JitCompiler::new().trace_is_compiled(&chunk, header),
+            "fusevm must compile a trace for the modulo loop"
+        );
+    }
+
     /// Proof that vimlrs bytecode actually runs on fusevm's Cranelift JIT:
     /// an integer expression lowers to a CallBuiltin-free native-op chunk, and
     /// fusevm block-JIT-compiles it to machine code after the warm-up threshold.
