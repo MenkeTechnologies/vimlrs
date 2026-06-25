@@ -1,0 +1,16 @@
+[package]
+name = "zemacs-viml"
+description = "Faithful Rust port of the Vimscript (VimL) interpreter, from the Neovim C eval engine"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+# The eval engine this ports is Vim-licensed in both Vim and Neovim
+# (Neovim is Apache-2.0 except for Vim-derived parts, which the eval/* tree is).
+# A faithful port is a derivative work and inherits the Vim license.
+license = "Vim"
+readme = "README.md"
+
+[dependencies]
