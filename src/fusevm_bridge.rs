@@ -1574,9 +1574,39 @@ pub fn dap_eval_var(name: &str) -> Option<String> {
 pub fn run_chunk(chunk: fusevm::Chunk) {
     crate::fusevm_disasm::maybe_print_stdout("program", &chunk);
     reset_run();
+    let stats = std::env::var_os("VIMLRS_JIT_STATS").is_some();
+    let probe = if stats { Some(chunk.clone()) } else { None };
     let mut vm = VM::new(chunk);
     install(&mut vm);
     let _ = vm.run();
+    if let Some(chunk) = probe {
+        jit_stats_report(&chunk);
+    }
+}
+
+/// Diagnostic (opt-in via `VIMLRS_JIT_STATS`): report how much of a chunk fusevm
+/// JIT-compiled to native machine code — block compilation of the whole chunk
+/// plus any loop whose trace compiled. Goes to stderr like `--doctor`.
+fn jit_stats_report(chunk: &fusevm::Chunk) {
+    use fusevm::Op;
+    let jc = fusevm::JitCompiler::new();
+    let traced = chunk
+        .ops
+        .iter()
+        .enumerate()
+        .filter_map(|(i, o)| match o {
+            Op::Jump(t) | Op::JumpIfTrue(t) | Op::JumpIfFalse(t) if (*t as usize) < i => {
+                Some(*t as usize)
+            }
+            _ => None,
+        })
+        .filter(|&h| jc.trace_is_compiled(chunk, h))
+        .count();
+    eprintln!(
+        "vimlrs: JIT — block-compiled={}, loop traces compiled={}",
+        jc.block_jit_is_compiled(chunk),
+        traced
+    );
 }
 
 /// Compile and run a statement list. `:echo` output and `emsg` errors happen as
@@ -1772,6 +1802,38 @@ mod tests {
         assert!(
             fusevm::JitCompiler::new().trace_is_compiled(&chunk, header),
             "fusevm must compile a trace for the script-level loop"
+        );
+    }
+
+    /// End-to-end proof: a real script run through the SAME path as
+    /// `vimlrs script.vim` (`run_chunk` → `install` → `run`, no manual slot
+    /// pre-sizing) JIT-compiles its hot loop. This is the actual runtime path,
+    /// not a hand-built harness.
+    #[test]
+    fn real_run_path_jit_compiles_hot_loop() {
+        use crate::compile_viml::compile_program;
+        use crate::viml_parser::parse_program;
+        use fusevm::Op;
+
+        let src = "let s = 0\nfor i in range(2000)\n  let s = s + i\nendfor";
+        let chunk = compile_program(&parse_program(src).unwrap()).unwrap().main;
+        let header = chunk
+            .ops
+            .iter()
+            .enumerate()
+            .find_map(|(i, o)| match o {
+                Op::JumpIfTrue(t) if (*t as usize) < i => Some(*t as usize),
+                _ => None,
+            })
+            .expect("loop backedge");
+
+        // EXACTLY what the CLI does for a script: run_chunk installs builtins,
+        // enables the JIT, and runs. No ensure_slots — `let s = 0` grows them.
+        run_chunk(chunk.clone());
+
+        assert!(
+            fusevm::JitCompiler::new().trace_is_compiled(&chunk, header),
+            "the real `vimlrs script.vim` path must JIT-compile the hot loop"
         );
     }
 
