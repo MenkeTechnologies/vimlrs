@@ -298,35 +298,3 @@ pub fn tv_get_lnum_buf() { unimplemented!("STUB tv_get_lnum_buf — csrc/eval/ty
 /// C: `int tv_check_for_nonnull_dict_arg(const typval_T *const args, const int idx)`
 pub fn tv_check_for_nonnull_dict_arg() { unimplemented!("STUB tv_check_for_nonnull_dict_arg — csrc/eval/typval.c:4466") }
 
-/// Port of `tv_check_for_string_or_number_arg()` — `csrc/eval/typval.c:4489`. STUB: not yet ported.
-/// C: `int tv_check_for_string_or_number_arg(const typval_T *const args, const int idx)`
-pub fn tv_check_for_string_or_number_arg() { unimplemented!("STUB tv_check_for_string_or_number_arg — csrc/eval/typval.c:4489") }
-
-/// Port of `tv_check_for_buffer_arg()` — `csrc/eval/typval.c:4501`. STUB: not yet ported.
-/// C: `int tv_check_for_buffer_arg(const typval_T *const args, const int idx)`
-pub fn tv_check_for_buffer_arg() { unimplemented!("STUB tv_check_for_buffer_arg — csrc/eval/typval.c:4501") }
-
-/// Port of `tv_check_for_lnum_arg()` — `csrc/eval/typval.c:4509`. STUB: not yet ported.
-/// C: `int tv_check_for_lnum_arg(const typval_T *const args, const int idx)`
-pub fn tv_check_for_lnum_arg() { unimplemented!("STUB tv_check_for_lnum_arg — csrc/eval/typval.c:4509") }
-
-/// Port of `tv_check_for_string_or_list_arg()` — `csrc/eval/typval.c:4516`. STUB: not yet ported.
-/// C: `int tv_check_for_string_or_list_arg(const typval_T *const args, const int idx)`
-pub fn tv_check_for_string_or_list_arg() { unimplemented!("STUB tv_check_for_string_or_list_arg — csrc/eval/typval.c:4516") }
-
-/// Port of `tv_check_for_string_or_list_or_blob_arg()` — `csrc/eval/typval.c:4527`. STUB: not yet ported.
-/// C: `int tv_check_for_string_or_list_or_blob_arg(const typval_T *const args, const int idx)`
-pub fn tv_check_for_string_or_list_or_blob_arg() { unimplemented!("STUB tv_check_for_string_or_list_or_blob_arg — csrc/eval/typval.c:4527") }
-
-/// Port of `tv_check_for_opt_string_or_list_arg()` — `csrc/eval/typval.c:4540`. STUB: not yet ported.
-/// C: `int tv_check_for_opt_string_or_list_arg(const typval_T *const args, const int idx)`
-pub fn tv_check_for_opt_string_or_list_arg() { unimplemented!("STUB tv_check_for_opt_string_or_list_arg — csrc/eval/typval.c:4540") }
-
-/// Port of `tv_check_for_string_or_func_arg()` — `csrc/eval/typval.c:4549`. STUB: not yet ported.
-/// C: `int tv_check_for_string_or_func_arg(const typval_T *const args, const int idx)`
-pub fn tv_check_for_string_or_func_arg() { unimplemented!("STUB tv_check_for_string_or_func_arg — csrc/eval/typval.c:4549") }
-
-/// Port of `tv_check_for_list_or_blob_arg()` — `csrc/eval/typval.c:4562`. STUB: not yet ported.
-/// C: `int tv_check_for_list_or_blob_arg(const typval_T *const args, const int idx)`
-pub fn tv_check_for_list_or_blob_arg() { unimplemented!("STUB tv_check_for_list_or_blob_arg — csrc/eval/typval.c:4562") }
-

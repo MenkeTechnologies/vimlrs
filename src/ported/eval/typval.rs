@@ -696,6 +696,81 @@ pub fn tv_check_for_opt_dict_arg(args: &[typval_T], idx: usize) -> i32 {
     }
 }
 
+/// Port of `tv_check_for_string_or_number_arg()` from `Src/eval/typval.c` (c:4489).
+pub fn tv_check_for_string_or_number_arg(args: &[typval_T], idx: usize) -> i32 {
+    let t = args.get(idx).map(|a| a.v_type);
+    if t != Some(VAR_STRING) && t != Some(VAR_NUMBER) {
+        semsg(&format!("E1220: String or Number required for argument {}", idx + 1));
+        return FAIL;
+    }
+    OK
+}
+
+/// Port of `tv_check_for_buffer_arg()` from `Src/eval/typval.c` (c:4501) — a
+/// buffer number is a Number or a String.
+pub fn tv_check_for_buffer_arg(args: &[typval_T], idx: usize) -> i32 {
+    tv_check_for_string_or_number_arg(args, idx)
+}
+
+/// Port of `tv_check_for_lnum_arg()` from `Src/eval/typval.c` (c:4509) — a line
+/// number is a Number or a String.
+pub fn tv_check_for_lnum_arg(args: &[typval_T], idx: usize) -> i32 {
+    tv_check_for_string_or_number_arg(args, idx)
+}
+
+/// Port of `tv_check_for_string_or_list_arg()` from `Src/eval/typval.c` (c:4516).
+pub fn tv_check_for_string_or_list_arg(args: &[typval_T], idx: usize) -> i32 {
+    let t = args.get(idx).map(|a| a.v_type);
+    if t != Some(VAR_STRING) && t != Some(VAR_LIST) {
+        semsg(&format!("E1222: String or List required for argument {}", idx + 1));
+        return FAIL;
+    }
+    OK
+}
+
+/// Port of `tv_check_for_string_or_list_or_blob_arg()` from `Src/eval/typval.c`
+/// (c:4527).
+pub fn tv_check_for_string_or_list_or_blob_arg(args: &[typval_T], idx: usize) -> i32 {
+    let t = args.get(idx).map(|a| a.v_type);
+    if t != Some(VAR_STRING) && t != Some(VAR_LIST) && t != Some(VAR_BLOB) {
+        semsg(&format!("E1252: String, List or Blob required for argument {}", idx + 1));
+        return FAIL;
+    }
+    OK
+}
+
+/// Port of `tv_check_for_opt_string_or_list_arg()` from `Src/eval/typval.c`
+/// (c:4540).
+pub fn tv_check_for_opt_string_or_list_arg(args: &[typval_T], idx: usize) -> i32 {
+    if args.get(idx).map_or(VAR_UNKNOWN, |a| a.v_type) == VAR_UNKNOWN
+        || tv_check_for_string_or_list_arg(args, idx) != FAIL
+    {
+        OK
+    } else {
+        FAIL
+    }
+}
+
+/// Port of `tv_check_for_string_or_func_arg()` from `Src/eval/typval.c` (c:4549).
+pub fn tv_check_for_string_or_func_arg(args: &[typval_T], idx: usize) -> i32 {
+    let t = args.get(idx).map(|a| a.v_type);
+    if t != Some(VAR_PARTIAL) && t != Some(VAR_FUNC) && t != Some(VAR_STRING) {
+        semsg(&format!("E1256: String or function required for argument {}", idx + 1));
+        return FAIL;
+    }
+    OK
+}
+
+/// Port of `tv_check_for_list_or_blob_arg()` from `Src/eval/typval.c` (c:4562).
+pub fn tv_check_for_list_or_blob_arg(args: &[typval_T], idx: usize) -> i32 {
+    let t = args.get(idx).map(|a| a.v_type);
+    if t != Some(VAR_LIST) && t != Some(VAR_BLOB) {
+        semsg(&format!("E1226: List or Blob required for argument {}", idx + 1));
+        return FAIL;
+    }
+    OK
+}
+
 /// Port of `tv_dict_equal()` from `Src/eval/typval.c`.
 pub fn tv_dict_equal(d1: &Rc<RefCell<dict_T>>, d2: &Rc<RefCell<dict_T>>, ic: bool) -> bool {
     if Rc::ptr_eq(d1, d2) {
@@ -1407,6 +1482,14 @@ mod tests {
         }
     }
 
+    fn blob_tv() -> typval_T {
+        typval_T {
+            v_type: VAR_BLOB,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_blob(Some(tv_blob_alloc())),
+        }
+    }
+
     #[test]
     fn arg_type_checks_required_and_optional() {
         let args = [nr(5), str_tv("hi")];
@@ -1432,6 +1515,18 @@ mod tests {
         assert!(tv_check_str_or_nr(&nr(1)));
         assert!(tv_check_str(&nr(1)));
         assert!(tv_check_num(&str_tv("3")));
+        // "or" arg checks: accept either type, reject the rest.
+        assert_eq!(tv_check_for_string_or_number_arg(&[nr(1)], 0), OK);
+        assert_eq!(tv_check_for_string_or_number_arg(&[str_tv("x")], 0), OK);
+        assert_eq!(tv_check_for_string_or_number_arg(&[blob_tv()], 0), FAIL);
+        assert_eq!(tv_check_for_buffer_arg(&[nr(2)], 0), OK);
+        assert_eq!(tv_check_for_lnum_arg(&[str_tv("$")], 0), OK);
+        assert_eq!(tv_check_for_list_or_blob_arg(&[blob_tv()], 0), OK);
+        assert_eq!(tv_check_for_list_or_blob_arg(&[nr(1)], 0), FAIL);
+        // optional or-list: absent OK, present-string OK, present-number FAIL.
+        assert_eq!(tv_check_for_opt_string_or_list_arg(&[str_tv("x")], 5), OK);
+        assert_eq!(tv_check_for_opt_string_or_list_arg(&[str_tv("x")], 0), OK);
+        assert_eq!(tv_check_for_opt_string_or_list_arg(&[nr(1)], 0), FAIL);
     }
 
     #[test]
