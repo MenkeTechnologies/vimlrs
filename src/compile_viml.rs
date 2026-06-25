@@ -1145,6 +1145,13 @@ impl Compiler {
                 self.emit(Op::CallBuiltin(h::VIML_MAKE_DICT, n));
             }
             Expr::Unary { op, expr } => {
+                // Native numeric negation → `Op::Negate` (Int wrapping-negates,
+                // Float negates — exactly VimL), so `-x` keeps a loop JIT-able.
+                if matches!(op, UnaryOp::Neg) && self.expr_is_num(expr) {
+                    self.expr(expr)?;
+                    self.emit(Op::Negate);
+                    return Ok(());
+                }
                 self.expr(expr)?;
                 let id = match op {
                     UnaryOp::Neg => h::VIML_NEG,

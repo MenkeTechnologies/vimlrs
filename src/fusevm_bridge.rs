@@ -1587,27 +1587,36 @@ pub fn run_chunk(chunk: fusevm::Chunk) {
     }
 }
 
-/// Diagnostic (opt-in via `VIMLRS_JIT_STATS`): report how much of a chunk fusevm
-/// JIT-compiled to native machine code — block compilation of the whole chunk
-/// plus any loop whose trace compiled. Goes to stderr like `--doctor`.
-fn jit_stats_report(chunk: &fusevm::Chunk) {
+/// Diagnostic (opt-in via `VIMLRS_JIT_STATS`): report how much fusevm
+/// JIT-compiled to native machine code — across the main chunk AND every
+/// user-function body (which run on nested VMs), counting any loop whose trace
+/// compiled. Goes to stderr like `--doctor`.
+fn jit_stats_report(main: &fusevm::Chunk) {
     use fusevm::Op;
     let jc = fusevm::JitCompiler::new();
-    let traced = chunk
-        .ops
-        .iter()
-        .enumerate()
-        .filter_map(|(i, o)| match o {
-            Op::Jump(t) | Op::JumpIfTrue(t) | Op::JumpIfFalse(t) if (*t as usize) < i => {
-                Some(*t as usize)
-            }
-            _ => None,
-        })
-        .filter(|&h| jc.trace_is_compiled(chunk, h))
-        .count();
+    let count_traces = |chunk: &fusevm::Chunk| -> usize {
+        chunk
+            .ops
+            .iter()
+            .enumerate()
+            .filter_map(|(i, o)| match o {
+                Op::Jump(t) | Op::JumpIfTrue(t) | Op::JumpIfFalse(t) if (*t as usize) < i => {
+                    Some(*t as usize)
+                }
+                _ => None,
+            })
+            .filter(|&h| jc.trace_is_compiled(chunk, h))
+            .count()
+    };
+    let mut traced = count_traces(main);
+    FUNCTIONS.with(|f| {
+        for func in f.borrow().values() {
+            traced += count_traces(&func.chunk);
+        }
+    });
     eprintln!(
-        "vimlrs: JIT — block-compiled={}, loop traces compiled={}",
-        jc.block_jit_is_compiled(chunk),
+        "vimlrs: JIT — main block-compiled={}, loop traces compiled={}",
+        jc.block_jit_is_compiled(main),
         traced
     );
 }
@@ -1962,6 +1971,36 @@ mod tests {
         assert!(
             fusevm::JitCompiler::new().trace_is_compiled(&chunk, header),
             "fusevm must compile a trace for the modulo loop"
+        );
+    }
+
+    /// Proof that numeric negation lowers to native `Op::Negate` and keeps a
+    /// loop trace-JIT-able.
+    #[test]
+    fn negate_loop_traces_on_jit() {
+        use crate::compile_viml::compile_program;
+        use crate::viml_parser::parse_program;
+        use fusevm::Op;
+
+        let src = "let s = 0\nfor i in range(2000)\n  let s = s + -i\nendfor";
+        let chunk = compile_program(&parse_program(src).unwrap()).unwrap().main;
+        let (header, back) = chunk
+            .ops
+            .iter()
+            .enumerate()
+            .find_map(|(i, o)| match o {
+                Op::JumpIfTrue(t) if (*t as usize) < i => Some((*t as usize, i)),
+                _ => None,
+            })
+            .expect("loop backedge");
+        assert!(
+            chunk.ops[header..=back].iter().any(|o| matches!(o, Op::Negate)),
+            "loop body should use native Op::Negate"
+        );
+        run_chunk(chunk.clone());
+        assert!(
+            fusevm::JitCompiler::new().trace_is_compiled(&chunk, header),
+            "fusevm must compile a trace for the negate loop"
         );
     }
 
