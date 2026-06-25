@@ -1,16 +1,62 @@
 [package]
 name = "zemacs-viml"
 description = "Faithful Rust port of the Vimscript (VimL) interpreter, from the Neovim C eval engine"
-version.workspace = true
-authors.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-homepage.workspace = true
-repository.workspace = true
-# The eval engine this ports is Vim-licensed in both Vim and Neovim
-# (Neovim is Apache-2.0 except for Vim-derived parts, which the eval/* tree is).
-# A faithful port is a derivative work and inherits the Vim license.
-license = "Vim"
+version = "0.1.0"
+authors = ["MenkeTechnologies"]
+edition = "2021"
+rust-version = "1.80"
+homepage = "https://menketechnologies.github.io/vimlrs/"
+repository = "https://github.com/MenkeTechnologies/vimlrs"
+license = "MIT"
 readme = "README.md"
+# Early / in development — not yet published to crates.io (matches the other
+# in-progress crates in the meta repo). Flip to publishable once the interpreter
+# is feature-complete and the crate is renamed to match the `vimlrs` repo.
+publish = false
+# `csrc/` is the vendored Neovim C spec for porting; `docs/` is the published
+# HUD site — neither is part of the crate build.
+exclude = ["/csrc/", "/docs/"]
+
+# vimlrs is a standalone crate, not a workspace member. An explicit empty
+# `[workspace]` stops cargo walking up to the MenkeTechnologiesMeta parent.
+[workspace]
+
+[lib]
+name = "vimlrs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vimlrs"
+path = "src/main.rs"
 
 [dependencies]
+# Language-agnostic bytecode VM + 3-tier Cranelift JIT. VimL has no local
+# vm.rs / jit.rs: lex/parse → AST → lower to fusevm bytecode → fusevm runs it,
+# the same way zshrs hosts zsh. jit-disk-cache persists native code across runs.
+fusevm = { version = "0.14", features = ["jit", "jit-disk-cache"] }
+clap = { version = "4.5", features = ["derive", "cargo"] }
+thiserror = "2.0"
+rustc-hash = "2.1"
+# Dict keeps insertion order (closest to Vim's observable hashtab iteration,
+# and deterministic for echo/string() output).
+indexmap = "2"
+# rkyv bytecode cache (phase 8) — wired now so the script-cache format is
+# versioned from day one (compat-floor: never break a cached .vim that worked).
+rkyv = { version = "0.7", features = ["validation", "archive_le", "size_32"] }
+memmap2 = "0.9"
+dirs = "5"
+# Inner-blob codec for the rkyv script cache (the compiled fusevm::Chunk).
+bincode = "1.3"
+# flock on the cache shard so concurrent writers serialize.
+nix = { version = "0.29", features = ["fs"] }
+once_cell = "1"
+# AOT: zstd-compressed script trailer baked into the binary.
+zstd = "0.13"
+# LSP/DAP (phases 9–10).
+lsp-server = "0.7.9"
+lsp-types = "0.97.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
