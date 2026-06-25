@@ -22,6 +22,7 @@ use crate::ported::eval::funcs::{
     f_abs, f_add, f_and, f_ceil, f_char2nr, f_copy, f_cos, f_count, f_empty, f_exists, f_exp,
     f_extend, f_float2nr, f_floor, f_function, f_get, f_has, f_has_key, f_index, f_insert, f_invert,
     f_acos, f_asin, f_atan, f_atan2, f_cosh, f_deepcopy, f_escape, f_flatten, f_fmod, f_items,
+    f_isinf, f_isnan, f_getpid,
     f_json_decode, f_json_encode, f_strgetchar, f_strcharpart, f_byteidx, f_charidx,
     f_matchstrpos, f_extendnew, f_getenv, f_setenv, f_shellescape,
     f_join, f_keys, f_len, f_list2str, f_log, f_log10, f_match, f_matchend, f_matchlist, f_matchstr,
@@ -324,6 +325,12 @@ pub const VIML_FN_GETENV: u16 = 3194;
 pub const VIML_FN_SETENV: u16 = 3195;
 /// `shellescape()`
 pub const VIML_FN_SHELLESCAPE: u16 = 3196;
+/// `isinf()`
+pub const VIML_FN_ISINF: u16 = 3197;
+/// `isnan()`
+pub const VIML_FN_ISNAN: u16 = 3198;
+/// `getpid()`
+pub const VIML_FN_GETPID: u16 = 3199;
 /// Debug line marker: pop a line number → notify the DAP `check_line` hook
 /// (emitted before each statement only in debug-compiled chunks).
 pub const VIML_SET_LINENO: u16 = 3070;
@@ -1522,6 +1529,9 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FN_GETENV, |vm, n| call_func(vm, n, f_getenv));
     vm.register_builtin(VIML_FN_SETENV, |vm, n| call_func(vm, n, f_setenv));
     vm.register_builtin(VIML_FN_SHELLESCAPE, |vm, n| call_func(vm, n, f_shellescape));
+    vm.register_builtin(VIML_FN_ISINF, |vm, n| call_func(vm, n, f_isinf));
+    vm.register_builtin(VIML_FN_ISNAN, |vm, n| call_func(vm, n, f_isnan));
+    vm.register_builtin(VIML_FN_GETPID, |vm, n| call_func(vm, n, f_getpid));
     vm.register_builtin(VIML_SET_LINENO, b_set_lineno);
     vm.register_builtin(VIML_CALL_USER, b_call_user);
     vm.register_builtin(VIML_SET_RETURN, b_set_return);

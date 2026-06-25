@@ -200,9 +200,6 @@ pub fn f_getjumplist(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], 
 /// Port of `f_getmarklist()` — `csrc/eval/funcs.c:2123`. STUB: not yet ported.
 pub fn f_getmarklist(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_getmarklist — csrc/eval/funcs.c:2123") }
 
-/// Port of `f_getpid()` — `csrc/eval/funcs.c:2141`. STUB: not yet ported.
-pub fn f_getpid(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_getpid — csrc/eval/funcs.c:2141") }
-
 /// Port of `f_getcurpos()` — `csrc/eval/funcs.c:2147`. STUB: not yet ported.
 pub fn f_getcurpos(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_getcurpos — csrc/eval/funcs.c:2147") }
 
@@ -305,12 +302,6 @@ pub fn f_interrupt(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _r
 
 /// Port of `f_islocked()` — `csrc/eval/funcs.c:3223`. STUB: not yet ported.
 pub fn f_islocked(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_islocked — csrc/eval/funcs.c:3223") }
-
-/// Port of `f_isinf()` — `csrc/eval/funcs.c:3265`. STUB: not yet ported.
-pub fn f_isinf(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_isinf — csrc/eval/funcs.c:3265") }
-
-/// Port of `f_isnan()` — `csrc/eval/funcs.c:3274`. STUB: not yet ported.
-pub fn f_isnan(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_isnan — csrc/eval/funcs.c:3274") }
 
 /// Port of `f_id()` — `csrc/eval/funcs.c:3281`. STUB: not yet ported.
 pub fn f_id(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_id — csrc/eval/funcs.c:3281") }

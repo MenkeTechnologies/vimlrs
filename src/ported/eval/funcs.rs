@@ -1214,3 +1214,27 @@ pub fn f_shellescape(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.v_type = VAR_STRING;
     rettv.vval = v_string(out);
 }
+
+// ── batch 7: float predicates + pid (Src/eval/funcs.c) ──
+
+/// Port of `f_isinf()` from `Src/eval/funcs.c` (c:3265) — `1` for `+inf`, `-1`
+/// for `-inf`, `0` otherwise (incl. non-Float).
+pub fn f_isinf(argvars: &[typval_T], rettv: &mut typval_T) {
+    if let (VAR_FLOAT, v_float(f)) = (argvars[0].v_type, &argvars[0].vval) {
+        if f.is_infinite() {
+            rettv.vval = v_number(if *f > 0.0 { 1 } else { -1 });
+        }
+    }
+}
+
+/// Port of `f_isnan()` from `Src/eval/funcs.c` (c:3274) — `1` if the argument is
+/// a NaN Float, else `0`.
+pub fn f_isnan(argvars: &[typval_T], rettv: &mut typval_T) {
+    let is = matches!((argvars[0].v_type, &argvars[0].vval), (VAR_FLOAT, v_float(f)) if f.is_nan());
+    rettv.vval = v_number(is as varnumber_T);
+}
+
+/// Port of `f_getpid()` from `Src/eval/funcs.c` (c:2141) — this process's PID.
+pub fn f_getpid(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.vval = v_number(std::process::id() as varnumber_T);
+}
