@@ -22,7 +22,7 @@ use crate::ported::eval::funcs::{
     f_abs, f_add, f_and, f_ceil, f_char2nr, f_copy, f_cos, f_count, f_empty, f_exists, f_exp,
     f_extend, f_float2nr, f_floor, f_function, f_get, f_has, f_has_key, f_index, f_insert, f_invert,
     f_acos, f_asin, f_atan, f_atan2, f_cosh, f_deepcopy, f_escape, f_flatten, f_fmod, f_items,
-    f_isinf, f_isnan, f_getpid,
+    f_isinf, f_isnan, f_getpid, f_localtime, f_soundfold, f_byteidxcomp,
     f_json_decode, f_json_encode, f_strgetchar, f_strcharpart, f_byteidx, f_charidx,
     f_matchstrpos, f_extendnew, f_getenv, f_setenv, f_shellescape,
     f_join, f_keys, f_len, f_list2str, f_log, f_log10, f_match, f_matchend, f_matchlist, f_matchstr,
@@ -331,6 +331,12 @@ pub const VIML_FN_ISINF: u16 = 3197;
 pub const VIML_FN_ISNAN: u16 = 3198;
 /// `getpid()`
 pub const VIML_FN_GETPID: u16 = 3199;
+/// `localtime()`
+pub const VIML_FN_LOCALTIME: u16 = 3200;
+/// `soundfold()`
+pub const VIML_FN_SOUNDFOLD: u16 = 3201;
+/// `byteidxcomp()`
+pub const VIML_FN_BYTEIDXCOMP: u16 = 3202;
 /// Debug line marker: pop a line number → notify the DAP `check_line` hook
 /// (emitted before each statement only in debug-compiled chunks).
 pub const VIML_SET_LINENO: u16 = 3070;
@@ -1532,6 +1538,9 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FN_ISINF, |vm, n| call_func(vm, n, f_isinf));
     vm.register_builtin(VIML_FN_ISNAN, |vm, n| call_func(vm, n, f_isnan));
     vm.register_builtin(VIML_FN_GETPID, |vm, n| call_func(vm, n, f_getpid));
+    vm.register_builtin(VIML_FN_LOCALTIME, |vm, n| call_func(vm, n, f_localtime));
+    vm.register_builtin(VIML_FN_SOUNDFOLD, |vm, n| call_func(vm, n, f_soundfold));
+    vm.register_builtin(VIML_FN_BYTEIDXCOMP, |vm, n| call_func(vm, n, f_byteidxcomp));
     vm.register_builtin(VIML_SET_LINENO, b_set_lineno);
     vm.register_builtin(VIML_CALL_USER, b_call_user);
     vm.register_builtin(VIML_SET_RETURN, b_set_return);

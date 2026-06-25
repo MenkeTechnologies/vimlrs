@@ -1238,3 +1238,31 @@ pub fn f_isnan(argvars: &[typval_T], rettv: &mut typval_T) {
 pub fn f_getpid(_argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.vval = v_number(std::process::id() as varnumber_T);
 }
+
+// ── batch 8: time + soundfold + byteidxcomp (funcs.c / strings.c) ──
+
+/// Port of `f_localtime()` from `Src/eval/funcs.c` (c:4043) — `time(NULL)`, the
+/// current time in seconds since the Unix epoch.
+pub fn f_localtime(_argvars: &[typval_T], rettv: &mut typval_T) {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as varnumber_T)
+        .unwrap_or(0);
+    rettv.vval = v_number(secs);
+}
+
+/// Port of `f_soundfold()` from `Src/eval/funcs.c` (c:6943). `eval_soundfold`
+/// returns `{word}` unchanged when no spell file defines a soundfold mapping —
+/// which is always the case here (spell support is out of scope), so this
+/// returns the word as-is, matching Vim without `:set spell`.
+pub fn f_soundfold(argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.v_type = VAR_STRING;
+    rettv.vval = v_string(tv_get_string(&argvars[0]));
+}
+
+/// Port of `f_byteidxcomp()` from `Src/strings.c` — the byte index of the
+/// `{nr}`'th character. Identical to `byteidx()` here: vimlrs does not track
+/// composing characters separately, so each character is one index either way.
+pub fn f_byteidxcomp(argvars: &[typval_T], rettv: &mut typval_T) {
+    f_byteidx(argvars, rettv);
+}

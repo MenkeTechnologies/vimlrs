@@ -344,9 +344,6 @@ pub fn f_line(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv:
 /// Port of `f_line2byte()` — `csrc/eval/funcs.c:4029`. STUB: not yet ported.
 pub fn f_line2byte(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_line2byte — csrc/eval/funcs.c:4029") }
 
-/// Port of `f_localtime()` — `csrc/eval/funcs.c:4043`. STUB: not yet ported.
-pub fn f_localtime(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_localtime — csrc/eval/funcs.c:4043") }
-
 /// Port of `f_luaeval()` — `csrc/eval/funcs.c:4049`. STUB: not yet ported.
 pub fn f_luaeval(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_luaeval — csrc/eval/funcs.c:4049") }
 
@@ -601,9 +598,6 @@ pub fn f_stdioopen(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _r
 
 /// Port of `f_reltimefloat()` — `csrc/eval/funcs.c:6930`. STUB: not yet ported.
 pub fn f_reltimefloat(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_reltimefloat — csrc/eval/funcs.c:6930") }
-
-/// Port of `f_soundfold()` — `csrc/eval/funcs.c:6943`. STUB: not yet ported.
-pub fn f_soundfold(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_soundfold — csrc/eval/funcs.c:6943") }
 
 /// Port of `f_spellbadword()` — `csrc/eval/funcs.c:6951`. STUB: not yet ported.
 pub fn f_spellbadword(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_spellbadword — csrc/eval/funcs.c:6951") }

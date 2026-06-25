@@ -43,6 +43,7 @@ f_strchars
 f_strgetchar
 f_strcharpart
 f_byteidx
+f_byteidxcomp
 f_charidx
 f_strpart
 f_stridx
