@@ -46,6 +46,7 @@ Early / in development.
 | Idiomatic `for i in range(N)` → native integer counter loop (no list built) that **trace-JIT-compiles** | Working (1/2/3-arg `range()`; verified) |
 | Numeric loops trace-JIT at **both function and script (top-level) scope** | Working — `slot_plan` slots provably-Number locals, guarded so a `g:`/`l:`-aliased name stays dict-backed |
 | **Float** arithmetic + float-accumulator loops trace-JIT too (native `fadd`; int counter + float accumulator in one trace) | Working |
+| Compound loop conditions (`&&`/`||` of numeric compares, short-circuit) trace-JIT; `if` inside loops + nested loops trace | Working |
 | Observable from the real CLI: `VIMLRS_JIT_STATS=1 vimlrs script.vim` reports loop traces compiled; `VIMLRS_NO_JIT=1` forces the interpreter baseline | Working — a 20M-iteration loop runs **~15–100× faster** with the JIT |
 | Native `Op::ReturnValue` (whole function bodies block-compile) + per-loop (not per-chunk) slot scoping | In progress (next) |
 | Expression engine — arithmetic, comparison, logic, ternary, index/slice, lists/dicts | Working |

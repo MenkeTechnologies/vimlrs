@@ -1006,19 +1006,54 @@ impl Compiler {
     /// (no `VIML_TRUTHY` builtin), keeping a numeric loop/if test JIT-eligible;
     /// anything else falls back to the dynamic `expr` + `VIML_TRUTHY` path.
     fn cond(&mut self, e: &Expr) -> Result<(), VimlError> {
-        if let Expr::Compare { op, lhs, rhs, .. } = e {
-            if let Some(nop) = Self::native_cmp(*op) {
-                if self.expr_is_num(lhs) && self.expr_is_num(rhs) {
-                    self.expr(lhs)?;
-                    self.expr(rhs)?;
-                    self.emit(nop);
-                    return Ok(());
-                }
+        match e {
+            // Integer/float comparison → native compare op (Bool consumed by the
+            // following jump, never reified).
+            Expr::Compare { op, lhs, rhs, .. }
+                if Self::native_cmp(*op).is_some()
+                    && self.expr_is_num(lhs)
+                    && self.expr_is_num(rhs) =>
+            {
+                let nop = Self::native_cmp(*op).unwrap();
+                self.expr(lhs)?;
+                self.expr(rhs)?;
+                self.emit(nop);
+                Ok(())
+            }
+            // `a && b` — short-circuit, leaving one truthiness flag. Stays
+            // CallBuiltin-free when both arms are native, so a compound loop
+            // condition still traces.
+            Expr::And(a, b) => {
+                self.cond(a)?;
+                let to_false = self.emit(Op::JumpIfFalse(0)); // a false → result false
+                self.cond(b)?;
+                let to_end = self.emit(Op::Jump(0));
+                let l_false = self.b.current_pos();
+                self.b.patch_jump(to_false, l_false);
+                self.emit(Op::LoadFalse);
+                let l_end = self.b.current_pos();
+                self.b.patch_jump(to_end, l_end);
+                Ok(())
+            }
+            // `a || b` — short-circuit.
+            Expr::Or(a, b) => {
+                self.cond(a)?;
+                let to_true = self.emit(Op::JumpIfTrue(0)); // a true → result true
+                self.cond(b)?;
+                let to_end = self.emit(Op::Jump(0));
+                let l_true = self.b.current_pos();
+                self.b.patch_jump(to_true, l_true);
+                self.emit(Op::LoadTrue);
+                let l_end = self.b.current_pos();
+                self.b.patch_jump(to_end, l_end);
+                Ok(())
+            }
+            _ => {
+                self.expr(e)?;
+                self.emit(Op::CallBuiltin(h::VIML_TRUTHY, 1));
+                Ok(())
             }
         }
-        self.expr(e)?;
-        self.emit(Op::CallBuiltin(h::VIML_TRUTHY, 1));
-        Ok(())
     }
 
     fn expr(&mut self, e: &Expr) -> Result<(), VimlError> {

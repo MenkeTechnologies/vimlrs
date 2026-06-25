@@ -1866,6 +1866,33 @@ mod tests {
         );
     }
 
+    /// Proof that a loop with a COMPOUND condition (`&&`/`||` of native
+    /// comparisons) still trace-JITs — short-circuit lowering stays
+    /// CallBuiltin-free.
+    #[test]
+    fn compound_condition_loop_traces_on_jit() {
+        use crate::compile_viml::compile_program;
+        use crate::viml_parser::parse_program;
+        use fusevm::Op;
+
+        let src = "let i = 0\nlet s = 0\nwhile i < 5000 && s < 1000000000\n  let s = s + i\n  let i = i + 1\nendwhile";
+        let chunk = compile_program(&parse_program(src).unwrap()).unwrap().main;
+        let header = chunk
+            .ops
+            .iter()
+            .enumerate()
+            .find_map(|(i, o)| match o {
+                Op::JumpIfTrue(t) if (*t as usize) < i => Some(*t as usize),
+                _ => None,
+            })
+            .expect("loop backedge");
+        run_chunk(chunk.clone());
+        assert!(
+            fusevm::JitCompiler::new().trace_is_compiled(&chunk, header),
+            "fusevm must compile a trace for the compound-condition loop"
+        );
+    }
+
     /// Proof that vimlrs bytecode actually runs on fusevm's Cranelift JIT:
     /// an integer expression lowers to a CallBuiltin-free native-op chunk, and
     /// fusevm block-JIT-compiles it to machine code after the warm-up threshold.
