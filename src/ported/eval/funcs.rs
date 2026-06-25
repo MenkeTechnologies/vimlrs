@@ -552,46 +552,14 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
 /// Apply a unary `f64 -> f64` op to argvar 0, returning a `VAR_FLOAT`. Shared
 /// by the float-math `f_*` below (the C bodies are each `float_op(argvars,
 /// rettv, &fn)`).
-fn float_op(argvars: &[typval_T], rettv: &mut typval_T, op: fn(f64) -> f64) {
+/// Port of `float_op_wrapper()` from `Src/eval/funcs.c` (c:344) — apply a C
+/// `double(double)` math function to a single float argument. In Neovim the
+/// builtins `sqrt()`/`floor()`/`sin()`/… are `eval.lua` table entries that set
+/// `func_float` and route here; there are NO per-function `f_sqrt`/`f_floor`/…
+/// functions. The caller supplies `op` (the C `fptr.func_float`).
+pub fn float_op_wrapper(argvars: &[typval_T], rettv: &mut typval_T, op: fn(f64) -> f64) {
     rettv.v_type = VAR_FLOAT;
     rettv.vval = v_float(op(tv_get_float(&argvars[0])));
-}
-
-/// Port of `f_sqrt()` from `Src/eval/funcs.c`.
-pub fn f_sqrt(argvars: &[typval_T], rettv: &mut typval_T) {
-    float_op(argvars, rettv, f64::sqrt);
-}
-/// Port of `f_floor()` from `Src/eval/funcs.c`.
-pub fn f_floor(argvars: &[typval_T], rettv: &mut typval_T) {
-    float_op(argvars, rettv, f64::floor);
-}
-/// Port of `f_ceil()` from `Src/eval/funcs.c`.
-pub fn f_ceil(argvars: &[typval_T], rettv: &mut typval_T) {
-    float_op(argvars, rettv, f64::ceil);
-}
-/// Port of `f_round()` from `Src/eval/funcs.c`.
-pub fn f_round(argvars: &[typval_T], rettv: &mut typval_T) {
-    float_op(argvars, rettv, f64::round);
-}
-/// Port of `f_trunc()` from `Src/eval/funcs.c`.
-pub fn f_trunc(argvars: &[typval_T], rettv: &mut typval_T) {
-    float_op(argvars, rettv, f64::trunc);
-}
-/// Port of `f_log()` from `Src/eval/funcs.c`.
-pub fn f_log(argvars: &[typval_T], rettv: &mut typval_T) {
-    float_op(argvars, rettv, f64::ln);
-}
-/// Port of `f_exp()` from `Src/eval/funcs.c`.
-pub fn f_exp(argvars: &[typval_T], rettv: &mut typval_T) {
-    float_op(argvars, rettv, f64::exp);
-}
-/// Port of `f_sin()` from `Src/eval/funcs.c`.
-pub fn f_sin(argvars: &[typval_T], rettv: &mut typval_T) {
-    float_op(argvars, rettv, f64::sin);
-}
-/// Port of `f_cos()` from `Src/eval/funcs.c`.
-pub fn f_cos(argvars: &[typval_T], rettv: &mut typval_T) {
-    float_op(argvars, rettv, f64::cos);
 }
 
 /// Port of `f_pow()` from `Src/eval/funcs.c` — `pow(x, y)`.
@@ -996,38 +964,8 @@ pub fn f_atan2(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.vval = v_float(tv_get_float(&argvars[0]).atan2(tv_get_float(&argvars[1])));
 }
 
-/// Port of `f_tan()` from `Src/eval/funcs.c`.
-pub fn f_tan(argvars: &[typval_T], rettv: &mut typval_T) {
-    float_op(argvars, rettv, f64::tan);
-}
-/// Port of `f_atan()` from `Src/eval/funcs.c`.
-pub fn f_atan(argvars: &[typval_T], rettv: &mut typval_T) {
-    float_op(argvars, rettv, f64::atan);
-}
-/// Port of `f_asin()` from `Src/eval/funcs.c`.
-pub fn f_asin(argvars: &[typval_T], rettv: &mut typval_T) {
-    float_op(argvars, rettv, f64::asin);
-}
-/// Port of `f_acos()` from `Src/eval/funcs.c`.
-pub fn f_acos(argvars: &[typval_T], rettv: &mut typval_T) {
-    float_op(argvars, rettv, f64::acos);
-}
-/// Port of `f_sinh()` from `Src/eval/funcs.c`.
-pub fn f_sinh(argvars: &[typval_T], rettv: &mut typval_T) {
-    float_op(argvars, rettv, f64::sinh);
-}
-/// Port of `f_cosh()` from `Src/eval/funcs.c`.
-pub fn f_cosh(argvars: &[typval_T], rettv: &mut typval_T) {
-    float_op(argvars, rettv, f64::cosh);
-}
-/// Port of `f_tanh()` from `Src/eval/funcs.c`.
-pub fn f_tanh(argvars: &[typval_T], rettv: &mut typval_T) {
-    float_op(argvars, rettv, f64::tanh);
-}
-/// Port of `f_log10()` from `Src/eval/funcs.c`.
-pub fn f_log10(argvars: &[typval_T], rettv: &mut typval_T) {
-    float_op(argvars, rettv, f64::log10);
-}
+// (tan/atan/asin/acos/sinh/cosh/tanh/log10 are `eval.lua` `func_float` entries
+// routed through `float_op_wrapper` — no per-function `f_*`; see the bridge.)
 
 // ── json (Src/eval/funcs.c → encode.c / decode.c) ──
 

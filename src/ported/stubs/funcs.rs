@@ -33,10 +33,6 @@ pub fn call_internal_method() { unimplemented!("STUB call_internal_method — cs
 /// C: `static bool non_zero_arg(typval_T *argvars)`
 pub fn non_zero_arg() { unimplemented!("STUB non_zero_arg — csrc/eval/funcs.c:328") }
 
-/// Port of `float_op_wrapper()` — `csrc/eval/funcs.c:344`. STUB: not yet ported.
-/// C: `static void float_op_wrapper(typval_T *argvars, typval_T *rettv, EvalFuncData fptr)`
-pub fn float_op_wrapper() { unimplemented!("STUB float_op_wrapper — csrc/eval/funcs.c:344") }
-
 /// Port of `api_wrapper()` — `csrc/eval/funcs.c:360`. STUB: not yet ported.
 /// C: `static void api_wrapper(typval_T *argvars, typval_T *rettv, EvalFuncData fptr)`
 pub fn api_wrapper() { unimplemented!("STUB api_wrapper — csrc/eval/funcs.c:360") }

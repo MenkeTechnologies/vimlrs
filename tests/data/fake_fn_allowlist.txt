@@ -16,26 +16,6 @@
 # When math.c / strings.c / option.c get vendored, move their names out of this
 # file and the generator will recognize them.
 
-# ── math.c (not vendored) ──
-float_op
-f_sqrt
-f_floor
-f_ceil
-f_round
-f_trunc
-f_log
-f_log10
-f_exp
-f_sin
-f_cos
-f_tan
-f_atan
-f_asin
-f_acos
-f_sinh
-f_cosh
-f_tanh
-
 # ── strings.c (not vendored) ──
 f_string
 f_strlen

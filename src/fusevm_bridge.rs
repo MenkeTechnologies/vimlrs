@@ -19,17 +19,16 @@ use fusevm::{Value, VM};
 
 use crate::ported::eval::encode::encode_tv2echo;
 use crate::ported::eval::funcs::{
-    f_abs, f_add, f_and, f_ceil, f_char2nr, f_copy, f_cos, f_count, f_empty, f_exists, f_exp,
-    f_extend, f_float2nr, f_floor, f_function, f_get, f_has, f_has_key, f_index, f_insert, f_invert,
-    f_acos, f_asin, f_atan, f_atan2, f_cosh, f_deepcopy, f_escape, f_flatten, f_fmod, f_items,
+    float_op_wrapper,
+    f_abs, f_add, f_and, f_char2nr, f_copy, f_count, f_empty, f_exists, f_extend, f_float2nr, f_function, f_get, f_has, f_has_key, f_index, f_insert, f_invert,
+    f_atan2, f_deepcopy, f_escape, f_flatten, f_fmod, f_items,
     f_isinf, f_isnan, f_getpid, f_localtime, f_soundfold, f_byteidxcomp,
     f_json_decode, f_json_encode, f_strgetchar, f_strcharpart, f_byteidx, f_charidx,
     f_matchstrpos, f_extendnew, f_getenv, f_setenv, f_shellescape,
-    f_join, f_keys, f_len, f_list2str, f_log, f_log10, f_match, f_matchend, f_matchlist, f_matchstr,
-    f_max, f_min, f_nr2char, f_or, f_pow, f_printf, f_range, f_remove, f_repeat, f_reverse, f_round,
-    f_sin, f_sinh, f_split, f_sqrt, f_str2float, f_str2list, f_str2nr, f_strchars, f_stridx,
-    f_string, f_strlen, f_strpart, f_strridx, f_substitute, f_tan, f_tanh, f_tolower, f_toupper,
-    f_tr, f_trim, f_trunc, f_type, f_uniq, f_values, f_xor,
+    f_join, f_keys, f_len, f_list2str, f_match, f_matchend, f_matchlist, f_matchstr,
+    f_max, f_min, f_nr2char, f_or, f_pow, f_printf, f_range, f_remove, f_repeat, f_reverse, f_split, f_str2float, f_str2list, f_str2nr, f_strchars, f_stridx,
+    f_string, f_strlen, f_strpart, f_strridx, f_substitute, f_tolower, f_toupper,
+    f_tr, f_trim, f_type, f_uniq, f_values, f_xor,
 };
 use crate::ported::eval::typval::{
     tv_get_float, tv_get_number_chk, tv_get_string, tv_list_alloc, tv_list_append_tv,
@@ -1167,6 +1166,20 @@ fn call_func(vm: &mut VM, argc: u8, f: fn(&[typval_T], &mut typval_T)) -> Value 
     tv_to_value(rettv)
 }
 
+/// Dispatch a single-argument float builtin (`sqrt`/`floor`/`sin`/…) through the
+/// real `float_op_wrapper` with the C `func_float` (here a Rust `fn(f64)->f64`).
+/// Mirrors Neovim's eval.lua `func_float` routing — there is no `f_sqrt` etc.
+fn call_float_op(vm: &mut VM, argc: u8, op: fn(f64) -> f64) -> Value {
+    let mut args = Vec::with_capacity(argc as usize);
+    for _ in 0..argc {
+        args.push(pop_tv(vm));
+    }
+    args.reverse();
+    let mut rettv = tv_num(0);
+    float_op_wrapper(&args, &mut rettv, op);
+    tv_to_value(rettv)
+}
+
 fn b_fn_len(vm: &mut VM, argc: u8) -> Value {
     call_func(vm, argc, f_len)
 }
@@ -1473,15 +1486,15 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FN_SORT, b_sort);
     vm.register_builtin(VIML_FN_CALL, b_call);
     vm.register_builtin(VIML_FN_FUNCTION, |vm, n| call_func(vm, n, f_function));
-    vm.register_builtin(VIML_FN_SQRT, |vm, n| call_func(vm, n, f_sqrt));
-    vm.register_builtin(VIML_FN_FLOOR, |vm, n| call_func(vm, n, f_floor));
-    vm.register_builtin(VIML_FN_CEIL, |vm, n| call_func(vm, n, f_ceil));
-    vm.register_builtin(VIML_FN_ROUND, |vm, n| call_func(vm, n, f_round));
-    vm.register_builtin(VIML_FN_TRUNC, |vm, n| call_func(vm, n, f_trunc));
-    vm.register_builtin(VIML_FN_LOG, |vm, n| call_func(vm, n, f_log));
-    vm.register_builtin(VIML_FN_EXP, |vm, n| call_func(vm, n, f_exp));
-    vm.register_builtin(VIML_FN_SIN, |vm, n| call_func(vm, n, f_sin));
-    vm.register_builtin(VIML_FN_COS, |vm, n| call_func(vm, n, f_cos));
+    vm.register_builtin(VIML_FN_SQRT, |vm, n| call_float_op(vm, n, f64::sqrt));
+    vm.register_builtin(VIML_FN_FLOOR, |vm, n| call_float_op(vm, n, f64::floor));
+    vm.register_builtin(VIML_FN_CEIL, |vm, n| call_float_op(vm, n, f64::ceil));
+    vm.register_builtin(VIML_FN_ROUND, |vm, n| call_float_op(vm, n, f64::round));
+    vm.register_builtin(VIML_FN_TRUNC, |vm, n| call_float_op(vm, n, f64::trunc));
+    vm.register_builtin(VIML_FN_LOG, |vm, n| call_float_op(vm, n, f64::ln));
+    vm.register_builtin(VIML_FN_EXP, |vm, n| call_float_op(vm, n, f64::exp));
+    vm.register_builtin(VIML_FN_SIN, |vm, n| call_float_op(vm, n, f64::sin));
+    vm.register_builtin(VIML_FN_COS, |vm, n| call_float_op(vm, n, f64::cos));
     vm.register_builtin(VIML_FN_POW, |vm, n| call_func(vm, n, f_pow));
     vm.register_builtin(VIML_FN_AND, |vm, n| call_func(vm, n, f_and));
     vm.register_builtin(VIML_FN_OR, |vm, n| call_func(vm, n, f_or));
@@ -1514,14 +1527,14 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FN_DEEPCOPY, |vm, n| call_func(vm, n, f_deepcopy));
     vm.register_builtin(VIML_FN_FMOD, |vm, n| call_func(vm, n, f_fmod));
     vm.register_builtin(VIML_FN_ATAN2, |vm, n| call_func(vm, n, f_atan2));
-    vm.register_builtin(VIML_FN_TAN, |vm, n| call_func(vm, n, f_tan));
-    vm.register_builtin(VIML_FN_ATAN, |vm, n| call_func(vm, n, f_atan));
-    vm.register_builtin(VIML_FN_ASIN, |vm, n| call_func(vm, n, f_asin));
-    vm.register_builtin(VIML_FN_ACOS, |vm, n| call_func(vm, n, f_acos));
-    vm.register_builtin(VIML_FN_SINH, |vm, n| call_func(vm, n, f_sinh));
-    vm.register_builtin(VIML_FN_COSH, |vm, n| call_func(vm, n, f_cosh));
-    vm.register_builtin(VIML_FN_TANH, |vm, n| call_func(vm, n, f_tanh));
-    vm.register_builtin(VIML_FN_LOG10, |vm, n| call_func(vm, n, f_log10));
+    vm.register_builtin(VIML_FN_TAN, |vm, n| call_float_op(vm, n, f64::tan));
+    vm.register_builtin(VIML_FN_ATAN, |vm, n| call_float_op(vm, n, f64::atan));
+    vm.register_builtin(VIML_FN_ASIN, |vm, n| call_float_op(vm, n, f64::asin));
+    vm.register_builtin(VIML_FN_ACOS, |vm, n| call_float_op(vm, n, f64::acos));
+    vm.register_builtin(VIML_FN_SINH, |vm, n| call_float_op(vm, n, f64::sinh));
+    vm.register_builtin(VIML_FN_COSH, |vm, n| call_float_op(vm, n, f64::cosh));
+    vm.register_builtin(VIML_FN_TANH, |vm, n| call_float_op(vm, n, f64::tanh));
+    vm.register_builtin(VIML_FN_LOG10, |vm, n| call_float_op(vm, n, f64::log10));
     vm.register_builtin(VIML_EXEC_STMT, b_exec_stmt);
     vm.register_builtin(VIML_SET, b_set);
     vm.register_builtin(VIML_FN_JSON_ENCODE, |vm, n| call_func(vm, n, f_json_encode));
