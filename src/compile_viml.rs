@@ -71,7 +71,7 @@ pub fn compile_program(stmts: &[Stmt]) -> Result<CompiledProgram, VimlError> {
     // drops any bare name whose `g:`-alias is referenced (a bare script-level
     // name IS `g:name`). Disabled when exceptions add per-statement unwinds.
     if !exc {
-        (c.slots, c.int_slots) = slot_plan(&top);
+        (c.slots, c.int_slots) = slot_plan(&top, false);
     }
     c.unwind.push(Vec::new());
     c.compile_stmts(&top)?;
@@ -100,7 +100,7 @@ fn compile_function_body(body: &[Stmt], exc: bool) -> Result<fusevm::Chunk, Viml
     // native ops the JIT can trace. (Exceptions add per-statement unwind
     // CallBuiltins that would break a native loop, so only when `!exc`.)
     if !exc {
-        (c.slots, c.int_slots) = slot_plan(body);
+        (c.slots, c.int_slots) = slot_plan(body, true);
     }
     c.unwind.push(Vec::new());
     c.compile_stmts(body)?;
@@ -199,96 +199,141 @@ struct Compiler {
 /// so `let s = s + i` keeps `s` a slot only while `i` is one too).
 type SlotPlan = (std::collections::HashMap<String, u16>, std::collections::HashSet<String>);
 
-fn slot_plan(stmts: &[Stmt]) -> SlotPlan {
+fn slot_plan(stmts: &[Stmt], in_function: bool) -> SlotPlan {
     use std::collections::{HashMap, HashSet};
 
     fn is_bare(name: &str) -> bool {
         !name.is_empty() && !name.contains(':') && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
     }
 
-    fn walk_expr(e: &Expr, bail: &mut bool) {
+    // Builtins that look a variable up BY NAME — they can observe even an `l:`
+    // slot, so a chunk that calls one must not slot.
+    fn introspects(name: &str) -> bool {
+        matches!(name, "exists" | "eval" | "execute" | "call")
+    }
+
+    struct Ctx<'a> {
+        bail: &'a mut bool,
+        assigns: &'a mut HashMap<String, Vec<Expr>>,
+        disq: &'a mut HashSet<String>,
+        in_function: bool,
+    }
+
+    fn walk_expr(e: &Expr, cx: &mut Ctx) {
         match e {
-            // A callee can read/modify any global; slotting would hide the var.
-            Expr::Call { .. } | Expr::Method { .. } => *bail = true,
-            Expr::Arith { lhs, rhs, .. } | Expr::Compare { lhs, rhs, .. } => {
-                walk_expr(lhs, bail);
-                walk_expr(rhs, bail);
+            // A callee runs in its own frame and cannot see this function's
+            // `l:` locals (legacy VimL has no closures), so slotting survives
+            // user/value-builtin calls inside a function. At SCRIPT scope a bare
+            // var IS `g:`, which a callee can read — bail. Name-introspecting
+            // builtins bail in either scope.
+            Expr::Call { name, args } => {
+                if !cx.in_function || introspects(name) {
+                    *cx.bail = true;
+                } else {
+                    args.iter().for_each(|a| walk_expr(a, cx));
+                }
             }
-            Expr::Unary { expr, .. } => walk_expr(expr, bail),
+            Expr::Method { base, name, args } => {
+                if !cx.in_function || introspects(name) {
+                    *cx.bail = true;
+                } else {
+                    walk_expr(base, cx);
+                    args.iter().for_each(|a| walk_expr(a, cx));
+                }
+            }
+            Expr::Arith { lhs, rhs, .. } | Expr::Compare { lhs, rhs, .. } => {
+                walk_expr(lhs, cx);
+                walk_expr(rhs, cx);
+            }
+            Expr::Unary { expr, .. } => walk_expr(expr, cx),
             Expr::And(a, b) | Expr::Or(a, b) | Expr::Coalesce(a, b) => {
-                walk_expr(a, bail);
-                walk_expr(b, bail);
+                walk_expr(a, cx);
+                walk_expr(b, cx);
             }
             Expr::Ternary { cond, then, otherwise } => {
-                walk_expr(cond, bail);
-                walk_expr(then, bail);
-                walk_expr(otherwise, bail);
+                walk_expr(cond, cx);
+                walk_expr(then, cx);
+                walk_expr(otherwise, cx);
             }
             Expr::Index { base, index } => {
-                walk_expr(base, bail);
-                walk_expr(index, bail);
+                walk_expr(base, cx);
+                walk_expr(index, cx);
             }
             Expr::Slice { base, from, to } => {
-                walk_expr(base, bail);
+                walk_expr(base, cx);
                 if let Some(f) = from {
-                    walk_expr(f, bail);
+                    walk_expr(f, cx);
                 }
                 if let Some(t) = to {
-                    walk_expr(t, bail);
+                    walk_expr(t, cx);
                 }
             }
-            Expr::List(items) => items.iter().for_each(|i| walk_expr(i, bail)),
+            Expr::List(items) => items.iter().for_each(|i| walk_expr(i, cx)),
             Expr::Dict(pairs) => pairs.iter().for_each(|(k, v)| {
-                walk_expr(k, bail);
-                walk_expr(v, bail);
+                walk_expr(k, cx);
+                walk_expr(v, cx);
             }),
             _ => {}
         }
     }
 
-    fn walk(stmts: &[Stmt], assigns: &mut HashMap<String, Vec<Expr>>, bail: &mut bool) {
+    fn walk(stmts: &[Stmt], cx: &mut Ctx) {
         for s in stmts {
-            if *bail {
+            if *cx.bail {
                 return;
             }
             match s {
                 Stmt::Function { .. } | Stmt::Execute(_) | Stmt::Set(_) | Stmt::Try { .. } => {
-                    *bail = true
+                    *cx.bail = true
                 }
                 // `for BARE in range(...)` keeps its var slottable (range yields
-                // Numbers); the body is recursed. Any other for-loop bails.
+                // Numbers); recurse the body.
                 Stmt::For { vars: ForVars::One(name), iter, body }
                     if is_bare(name)
                         && matches!(iter, Expr::Call { name: f, .. } if f == "range") =>
                 {
                     if let Expr::Call { args, .. } = iter {
-                        args.iter().for_each(|a| walk_expr(a, bail));
+                        args.iter().for_each(|a| walk_expr(a, cx));
                     }
-                    assigns.entry(name.clone()).or_default().push(Expr::Number(0));
-                    walk(body, assigns, bail);
+                    cx.assigns.entry(name.clone()).or_default().push(Expr::Number(0));
+                    walk(body, cx);
                 }
-                Stmt::For { .. } => *bail = true,
+                // Any other for-loop: the loop var(s) take non-Number values —
+                // disqualify them — but DON'T bail; sibling numeric loops can
+                // still slot.
+                Stmt::For { vars, iter, body } => {
+                    walk_expr(iter, cx);
+                    match vars {
+                        ForVars::One(n) => {
+                            cx.disq.insert(n.clone());
+                        }
+                        ForVars::List(ns) => ns.iter().for_each(|n| {
+                            cx.disq.insert(n.clone());
+                        }),
+                    }
+                    walk(body, cx);
+                }
                 Stmt::Let { target: LetTarget::Var(name), expr } => {
-                    walk_expr(expr, bail);
+                    walk_expr(expr, cx);
                     if is_bare(name) {
-                        assigns.entry(name.clone()).or_default().push(expr.clone());
+                        cx.assigns.entry(name.clone()).or_default().push(expr.clone());
                     }
                 }
-                Stmt::Let { .. } => *bail = true, // non-bare target: be safe
-                Stmt::Echo(es) | Stmt::Echon(es) => es.iter().for_each(|e| walk_expr(e, bail)),
-                Stmt::Call(e) | Stmt::Expr(e) | Stmt::Throw(e) => walk_expr(e, bail),
-                Stmt::Return(Some(e)) => walk_expr(e, bail),
+                Stmt::Let { .. } => *cx.bail = true, // non-bare target: be safe
+                Stmt::Echo(es) | Stmt::Echon(es) => es.iter().for_each(|e| walk_expr(e, cx)),
+                Stmt::Call(e) | Stmt::Expr(e) | Stmt::Throw(e) => walk_expr(e, cx),
+                Stmt::Return(Some(e)) => walk_expr(e, cx),
                 Stmt::While { cond, body } => {
-                    walk_expr(cond, bail);
-                    walk(body, assigns, bail);
+                    walk_expr(cond, cx);
+                    walk(body, cx);
                 }
                 Stmt::If { arms, else_body } => {
                     for (c, b) in arms {
-                        walk_expr(c, bail);
-                        walk(b, assigns, bail);
+                        walk_expr(c, cx);
+                        walk(b, cx);
                     }
                     if let Some(b) = else_body {
-                        walk(b, assigns, bail);
+                        walk(b, cx);
                     }
                 }
                 _ => {}
@@ -298,7 +343,11 @@ fn slot_plan(stmts: &[Stmt]) -> SlotPlan {
 
     let mut assigns: HashMap<String, Vec<Expr>> = HashMap::new();
     let mut bail = false;
-    walk(stmts, &mut assigns, &mut bail);
+    let mut disq: HashSet<String> = HashSet::new();
+    walk(
+        stmts,
+        &mut Ctx { bail: &mut bail, assigns: &mut assigns, disq: &mut disq, in_function },
+    );
     if bail || assigns.is_empty() {
         return (HashMap::new(), HashSet::new());
     }
@@ -424,7 +473,7 @@ fn slot_plan(stmts: &[Stmt]) -> SlotPlan {
     }
     let mut scoped = HashSet::new();
     scoped_s(stmts, &mut scoped);
-    num.retain(|n| !scoped.contains(n));
+    num.retain(|n| !scoped.contains(n) && !disq.contains(n));
 
     let mut names: Vec<String> = num.iter().cloned().collect();
     names.sort();

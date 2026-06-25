@@ -1893,6 +1893,48 @@ mod tests {
         );
     }
 
+    /// Proof that a hot loop in a function that ALSO calls another function
+    /// still trace-JITs: a callee can't see this function's `l:` locals, so the
+    /// call no longer bails slotting (only at script scope, where bare = `g:`).
+    #[test]
+    fn loop_with_sibling_call_traces_in_function() {
+        use crate::compile_viml::compile_program;
+        use crate::viml_parser::parse_program;
+        use fusevm::Op;
+
+        let src = "function! Helper()\n  return 99\nendfunction\nfunction! F()\n  let s = 0\n  for i in range(1000)\n    let s = s + i\n  endfor\n  let x = Helper()\n  return s + x\nendfunction";
+        let prog = compile_program(&parse_program(src).unwrap()).unwrap();
+        let chunk = prog.funcs.iter().find(|f| f.name == "F").unwrap().chunk.clone();
+
+        let (header, back) = chunk
+            .ops
+            .iter()
+            .enumerate()
+            .find_map(|(i, o)| match o {
+                Op::JumpIfTrue(t) if (*t as usize) < i => Some((*t as usize, i)),
+                _ => None,
+            })
+            .expect("loop backedge");
+        // The loop body is CallBuiltin-free even though the chunk calls Helper().
+        assert!(
+            !chunk.ops[header..=back]
+                .iter()
+                .any(|o| matches!(o, Op::CallBuiltin(..) | Op::Extended(..))),
+            "loop body must be CallBuiltin-free despite the sibling call, got {:?}",
+            &chunk.ops[header..=back]
+        );
+        let mut vm = VM::new(chunk.clone());
+        install(&mut vm);
+        while vm.frames.last().unwrap().slots.len() < 2 {
+            vm.frames.last_mut().unwrap().slots.push(fusevm::Value::Int(0));
+        }
+        let _ = vm.run();
+        assert!(
+            fusevm::JitCompiler::new().trace_is_compiled(&chunk, header),
+            "fusevm must compile a trace for the loop despite the sibling call"
+        );
+    }
+
     /// Proof that vimlrs bytecode actually runs on fusevm's Cranelift JIT:
     /// an integer expression lowers to a CallBuiltin-free native-op chunk, and
     /// fusevm block-JIT-compiles it to machine code after the warm-up threshold.
