@@ -45,7 +45,8 @@ Early / in development.
 | Runs on fusevm's 3-tier Cranelift JIT | Working — JIT enabled; integer `+`/`-`/`*` → native `Op::Add`/`Sub`/`Mul`, integer compares → `Op::NumLt`/…; an integer expression **block-JIT-compiles** to machine code, and a function's numeric `while` loop (provably-Number `l:` locals → `Op::GetSlot`/`SetSlot`, loop rotated so the condition is the backedge) **trace-JIT-compiles** to native code — both verified by tests. Dynamic ops stay `CallBuiltin` (the deopt fallback). |
 | Idiomatic `for i in range(N)` → native integer counter loop (no list built) that **trace-JIT-compiles** | Working (1/2/3-arg `range()`; verified) |
 | Numeric loops trace-JIT at **both function and script (top-level) scope** | Working — `slot_plan` slots provably-Number locals, guarded so a `g:`/`l:`-aliased name stays dict-backed |
-| Observable from the real CLI: `VIMLRS_JIT_STATS=1 vimlrs script.vim` reports loop traces compiled to native code | Working |
+| **Float** arithmetic + float-accumulator loops trace-JIT too (native `fadd`; int counter + float accumulator in one trace) | Working |
+| Observable from the real CLI: `VIMLRS_JIT_STATS=1 vimlrs script.vim` reports loop traces compiled; `VIMLRS_NO_JIT=1` forces the interpreter baseline | Working — a 20M-iteration loop runs **~15–100× faster** with the JIT |
 | Native `Op::ReturnValue` (whole function bodies block-compile) + per-loop (not per-chunk) slot scoping | In progress (next) |
 | Expression engine — arithmetic, comparison, logic, ternary, index/slice, lists/dicts | Working |
 | Builtin function surface | Partial (`len`/`type`/`string`/`empty`/`abs`/`str2nr`/`str2float`/`float2nr`; full `funcs.c` pending) |

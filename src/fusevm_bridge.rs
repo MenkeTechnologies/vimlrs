@@ -1395,7 +1395,10 @@ pub fn install(vm: &mut VM) {
     // tier dispatch is gated on it. Safe: only CallBuiltin-free chunks/loop
     // bodies are eligible; everything else runs on the interpreter exactly as
     // before, and the tracing tier deopts back to it on a slot-type guard miss.
-    vm.enable_tracing_jit();
+    // `VIMLRS_NO_JIT` forces the interpreter (for benchmarking the baseline).
+    if std::env::var_os("VIMLRS_NO_JIT").is_none() {
+        vm.enable_tracing_jit();
+    }
     vm.register_builtin(VIML_GETVAR, b_getvar);
     vm.register_builtin(VIML_SETVAR, b_setvar);
     vm.register_builtin(VIML_SETENV, b_setenv);
@@ -1834,6 +1837,32 @@ mod tests {
         assert!(
             fusevm::JitCompiler::new().trace_is_compiled(&chunk, header),
             "the real `vimlrs script.vim` path must JIT-compile the hot loop"
+        );
+    }
+
+    /// Proof that a FLOAT accumulator loop also trace-JITs (native `fadd` over a
+    /// Float slot; int counter + float accumulator in the same trace).
+    #[test]
+    fn float_loop_traces_on_jit() {
+        use crate::compile_viml::compile_program;
+        use crate::viml_parser::parse_program;
+        use fusevm::Op;
+
+        let src = "let x = 0.0\nfor i in range(1000)\n  let x = x + 0.5\nendfor";
+        let chunk = compile_program(&parse_program(src).unwrap()).unwrap().main;
+        let header = chunk
+            .ops
+            .iter()
+            .enumerate()
+            .find_map(|(i, o)| match o {
+                Op::JumpIfTrue(t) if (*t as usize) < i => Some(*t as usize),
+                _ => None,
+            })
+            .expect("loop backedge");
+        run_chunk(chunk.clone());
+        assert!(
+            fusevm::JitCompiler::new().trace_is_compiled(&chunk, header),
+            "fusevm must compile a trace for the native float loop"
         );
     }
 

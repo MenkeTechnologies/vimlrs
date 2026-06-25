@@ -71,7 +71,7 @@ pub fn compile_program(stmts: &[Stmt]) -> Result<CompiledProgram, VimlError> {
     // drops any bare name whose `g:`-alias is referenced (a bare script-level
     // name IS `g:name`). Disabled when exceptions add per-statement unwinds.
     if !exc {
-        c.slots = slot_plan(&top);
+        (c.slots, c.int_slots) = slot_plan(&top);
     }
     c.unwind.push(Vec::new());
     c.compile_stmts(&top)?;
@@ -100,7 +100,7 @@ fn compile_function_body(body: &[Stmt], exc: bool) -> Result<fusevm::Chunk, Viml
     // native ops the JIT can trace. (Exceptions add per-statement unwind
     // CallBuiltins that would break a native loop, so only when `!exc`.)
     if !exc {
-        c.slots = slot_plan(body);
+        (c.slots, c.int_slots) = slot_plan(body);
     }
     c.unwind.push(Vec::new());
     c.compile_stmts(body)?;
@@ -177,12 +177,15 @@ struct Compiler {
     /// Stack of pending exception-unwind jump sites, one frame per exception
     /// boundary (function body, `:try` body, top level); top is innermost.
     unwind: Vec<Vec<usize>>,
-    /// Bare function-local variables proven always-Number, mapped to fusevm
-    /// slot indices. Their reads/writes lower to native `Op::GetSlot`/`SetSlot`
-    /// (instead of `VIML_GETVAR`/`SETVAR` builtins) so a numeric loop body is
-    /// CallBuiltin-free and the tracing JIT can compile it. Only populated for
-    /// function bodies, where bare names are `l:` locals that don't alias `g:`.
+    /// Bare locals proven always-Number, mapped to fusevm slot indices. Their
+    /// reads/writes lower to native `Op::GetSlot`/`SetSlot` (instead of the
+    /// `VIML_GETVAR`/`SETVAR` builtins) so a numeric loop body is CallBuiltin-
+    /// free and the tracing JIT can compile it. `int_slots` is the subset proven
+    /// always-Integer (the rest may hold Float) — used to keep `range()` bounds
+    /// integer, while native `+`/`-`/`*`/compares accept either (fusevm's
+    /// `arith_int_fast` promotes int↔float exactly like VimL).
     slots: std::collections::HashMap<String, u16>,
+    int_slots: std::collections::HashSet<String>,
 }
 
 /// Decide which bare function-local variables can live in fusevm slots.
@@ -194,7 +197,9 @@ struct Compiler {
 /// `:let` target other than a bare name. A name is slotted only if *every*
 /// assignment to it provably evaluates to a Number (fixed-point over the set,
 /// so `let s = s + i` keeps `s` a slot only while `i` is one too).
-fn slot_plan(stmts: &[Stmt]) -> std::collections::HashMap<String, u16> {
+type SlotPlan = (std::collections::HashMap<String, u16>, std::collections::HashSet<String>);
+
+fn slot_plan(stmts: &[Stmt]) -> SlotPlan {
     use std::collections::{HashMap, HashSet};
 
     fn is_bare(name: &str) -> bool {
@@ -295,37 +300,48 @@ fn slot_plan(stmts: &[Stmt]) -> std::collections::HashMap<String, u16> {
     let mut bail = false;
     walk(stmts, &mut assigns, &mut bail);
     if bail || assigns.is_empty() {
-        return HashMap::new();
+        return (HashMap::new(), HashSet::new());
     }
 
-    // A literal/arith/unary tree is a Number when every leaf is an int literal
-    // or a (still-candidate) slot var.
-    fn rhs_is_int(e: &Expr, set: &HashSet<String>) -> bool {
+    // A tree is a Number (`is_int=false`) / an Integer (`is_int=true`) when every
+    // leaf is a matching literal or a (still-candidate) slot var of that kind.
+    // `+ - * / %` of Numbers are Numbers; only `/`,`%` and Float leaves break
+    // integer-ness. Concat is a string op — never numeric.
+    fn rhs_kind(e: &Expr, set: &HashSet<String>, is_int: bool) -> bool {
         match e {
             Expr::Number(_) => true,
+            Expr::Float(_) => !is_int,
             Expr::Var(n) => set.contains(n),
             Expr::Arith { op, lhs, rhs } => {
-                !matches!(op, ArithOp::Concat) && rhs_is_int(lhs, set) && rhs_is_int(rhs, set)
+                !matches!(op, ArithOp::Concat)
+                    && rhs_kind(lhs, set, is_int)
+                    && rhs_kind(rhs, set, is_int)
             }
-            Expr::Unary { op: UnaryOp::Neg | UnaryOp::Plus, expr } => rhs_is_int(expr, set),
+            Expr::Unary { op: UnaryOp::Neg | UnaryOp::Plus, expr } => rhs_kind(expr, set, is_int),
             _ => false,
         }
     }
 
-    // Fixed-point: drop any name with a non-int assignment until stable.
-    let mut int: HashSet<String> = assigns.keys().cloned().collect();
-    loop {
-        let mut changed = false;
-        for name in int.iter().cloned().collect::<Vec<_>>() {
-            if !assigns[&name].iter().all(|rhs| rhs_is_int(rhs, &int)) {
-                int.remove(&name);
-                changed = true;
+    // Fixed-point over the candidate set for a given kind (numeric, or integer).
+    let fixed_point = |is_int: bool| -> HashSet<String> {
+        let mut set: HashSet<String> = assigns.keys().cloned().collect();
+        loop {
+            let mut changed = false;
+            for name in set.iter().cloned().collect::<Vec<_>>() {
+                if !assigns[&name].iter().all(|rhs| rhs_kind(rhs, &set, is_int)) {
+                    set.remove(&name);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
             }
         }
-        if !changed {
-            break;
-        }
-    }
+        set
+    };
+    // `num` = slottable (always a Number); `int_only` ⊆ `num` = always Integer.
+    let mut num = fixed_point(false);
+    let int_only = fixed_point(true);
 
     // A bare name at script level IS `g:name`; in a function it IS `l:name`.
     // If any scoped alias of a candidate is referenced, slotting it would
@@ -408,11 +424,16 @@ fn slot_plan(stmts: &[Stmt]) -> std::collections::HashMap<String, u16> {
     }
     let mut scoped = HashSet::new();
     scoped_s(stmts, &mut scoped);
-    int.retain(|n| !scoped.contains(n));
+    num.retain(|n| !scoped.contains(n));
 
-    let mut names: Vec<String> = int.into_iter().collect();
+    let mut names: Vec<String> = num.iter().cloned().collect();
     names.sort();
-    names.into_iter().enumerate().map(|(i, n)| (n, i as u16)).collect()
+    let slots: HashMap<String, u16> =
+        names.into_iter().enumerate().map(|(i, n)| (n, i as u16)).collect();
+    // Integer subset, restricted to the names that actually got slotted.
+    let int_slots: HashSet<String> =
+        int_only.into_iter().filter(|n| slots.contains_key(n)).collect();
+    (slots, int_slots)
 }
 
 impl Compiler {
@@ -426,6 +447,7 @@ impl Compiler {
             exc,
             unwind: Vec::new(),
             slots: std::collections::HashMap::new(),
+            int_slots: std::collections::HashSet::new(),
         }
     }
 
@@ -934,11 +956,27 @@ impl Compiler {
     /// `+ - * / %` of Numbers are Numbers (`/`,`%` are integer ops in VimL);
     /// unary `-`/`+` of a Number is a Number. Anything else is rejected, so the
     /// dynamic builtin path is used and correctness is never at risk.
+    /// `true` if `e` provably evaluates to a Number (Integer OR Float) — so its
+    /// `+`/`-`/`*` and comparisons may lower to native ops (fusevm promotes
+    /// int↔float exactly like VimL).
+    fn expr_is_num(&self, e: &Expr) -> bool {
+        match e {
+            Expr::Number(_) | Expr::Float(_) => true,
+            Expr::Var(name) => self.slots.contains_key(name), // slotted ⇒ Number
+            Expr::Arith { op, lhs, rhs } => {
+                !matches!(op, ArithOp::Concat) && self.expr_is_num(lhs) && self.expr_is_num(rhs)
+            }
+            Expr::Unary { op: UnaryOp::Neg | UnaryOp::Plus, expr } => self.expr_is_num(expr),
+            _ => false,
+        }
+    }
+
+    /// `true` if `e` provably evaluates to an Integer — required for `range()`
+    /// bounds (Vim's `range()` rejects Floats) and the native counter.
     fn expr_is_int(&self, e: &Expr) -> bool {
         match e {
             Expr::Number(_) => true,
-            // A slotted local is proven always-Number by `slot_plan`.
-            Expr::Var(name) => self.slots.contains_key(name),
+            Expr::Var(name) => self.int_slots.contains(name),
             Expr::Arith { op, lhs, rhs } => {
                 !matches!(op, ArithOp::Concat) && self.expr_is_int(lhs) && self.expr_is_int(rhs)
             }
@@ -970,7 +1008,7 @@ impl Compiler {
     fn cond(&mut self, e: &Expr) -> Result<(), VimlError> {
         if let Expr::Compare { op, lhs, rhs, .. } = e {
             if let Some(nop) = Self::native_cmp(*op) {
-                if self.expr_is_int(lhs) && self.expr_is_int(rhs) {
+                if self.expr_is_num(lhs) && self.expr_is_num(rhs) {
                     self.expr(lhs)?;
                     self.expr(rhs)?;
                     self.emit(nop);
@@ -1048,7 +1086,7 @@ impl Compiler {
                     _ => None,
                 };
                 if let Some(nop) = native {
-                    if self.expr_is_int(lhs) && self.expr_is_int(rhs) {
+                    if self.expr_is_num(lhs) && self.expr_is_num(rhs) {
                         self.expr(lhs)?;
                         self.expr(rhs)?;
                         self.emit(nop);
