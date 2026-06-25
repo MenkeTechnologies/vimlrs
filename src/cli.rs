@@ -40,6 +40,11 @@ pub struct Cli {
     #[arg(short = 'b', long = "build", value_name = "OUT")]
     build: Option<PathBuf>,
 
+    /// With --build: AOT-compile to native machine code (Cranelift object
+    /// linked standalone) instead of embedding the source.
+    #[arg(short = 'n', long = "native")]
+    native: bool,
+
     /// Delete the rkyv bytecode script cache and exit.
     #[arg(long = "clear-cache")]
     clear_cache: bool,
@@ -110,7 +115,12 @@ pub fn run() -> ExitCode {
     }
 
     if let Some(out) = cli.build {
-        return match aot::build(&cli.files, &out) {
+        let result = if cli.native {
+            aot::build_native(&cli.files, &out)
+        } else {
+            aot::build(&cli.files, &out)
+        };
+        return match result {
             Ok(p) => {
                 println!("{}", p.display());
                 ExitCode::SUCCESS

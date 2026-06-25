@@ -24,6 +24,9 @@ exclude = ["/csrc/", "/docs/"]
 [lib]
 name = "vimlrs"
 path = "src/lib.rs"
+# `staticlib` produces libvimlrs.a so `--build --native` can link AOT-compiled
+# objects (fusevm::aot) against the VimL runtime into a standalone executable.
+crate-type = ["lib", "staticlib"]
 
 [[bin]]
 name = "vimlrs"
@@ -33,7 +36,7 @@ path = "src/main.rs"
 # Language-agnostic bytecode VM + 3-tier Cranelift JIT. VimL has no local
 # vm.rs / jit.rs: lex/parse → AST → lower to fusevm bytecode → fusevm runs it,
 # the same way zshrs hosts zsh. jit-disk-cache persists native code across runs.
-fusevm = { version = "0.14", features = ["jit", "jit-disk-cache"] }
+fusevm = { version = "0.14.2", features = ["jit", "jit-disk-cache", "aot"] }
 clap = { version = "4.5", features = ["derive", "cargo"] }
 thiserror = "2.0"
 rustc-hash = "2.1"

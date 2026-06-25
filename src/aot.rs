@@ -245,6 +245,116 @@ pub fn build(script_paths: &[PathBuf], out_path: &Path) -> Result<PathBuf, Strin
     Ok(out_path.to_path_buf())
 }
 
+// ───────────────────────── Native AOT (`--build --native`) ─────────────────
+//
+// Unlike the source-trailer build above (which embeds the script text and
+// re-runs it interpreted at startup), the native path compiles the script to a
+// fusevm chunk, lowers it to native machine code via `fusevm::aot` (Cranelift
+// `ObjectModule` → relocatable `.o`), and links the object against the VimL
+// runtime staticlib (`libvimlrs.a`) into a standalone executable.
+
+/// Frontend runtime hook invoked by `fusevm::aot::fusevm_aot_run_embedded` at
+/// startup of a native AOT binary: install the VimL host + builtins on the run
+/// VM (the same setup the interpreter's `run_chunk` does via `install`).
+///
+/// # Safety
+/// `vm` is the live run VM passed by the fusevm runtime; borrowed only here.
+#[no_mangle]
+pub extern "C" fn fusevm_aot_register_builtins(vm: *mut fusevm::VM) {
+    // SAFETY: the fusevm runtime hands us the live run VM for this call.
+    let vm = unsafe { &mut *vm };
+    crate::fusevm_bridge::install(vm);
+}
+
+/// Locate the VimL runtime staticlib to link against. `VIMLRS_AOT_RUNTIME_LIB`
+/// overrides; otherwise look for `libvimlrs.a` beside the running executable.
+fn runtime_staticlib() -> Result<PathBuf, String> {
+    if let Ok(p) = std::env::var("VIMLRS_AOT_RUNTIME_LIB") {
+        return Ok(PathBuf::from(p));
+    }
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    if let Some(dir) = exe.parent() {
+        let cand = dir.join("libvimlrs.a");
+        if cand.exists() {
+            return Ok(cand);
+        }
+    }
+    Err("could not locate libvimlrs.a (set VIMLRS_AOT_RUNTIME_LIB)".to_string())
+}
+
+/// `vimlrs --build OUT --native A.vim [B.vim]`: AOT-compile the inputs to native
+/// machine code and link a standalone executable. Inputs are concatenated in
+/// order into one program (matching the source-trailer build).
+pub fn build_native(script_paths: &[PathBuf], out_path: &Path) -> Result<PathBuf, String> {
+    if script_paths.is_empty() {
+        return Err("vimlrs --build --native: at least one script path required".to_string());
+    }
+    let mut source = String::new();
+    for p in script_paths {
+        let s = fs::read_to_string(p)
+            .map_err(|e| format!("vimlrs --build --native: cannot read {}: {e}", p.display()))?;
+        source.push_str(&s);
+        if !source.ends_with('\n') {
+            source.push('\n');
+        }
+    }
+    let stmts = crate::viml_parser::parse_program(&source)
+        .map_err(|e| format!("vimlrs --build --native: {e}"))?;
+    let prog = crate::compile_viml::compile_program(&stmts)
+        .map_err(|e| format!("vimlrs --build --native: {e}"))?;
+    if !prog.funcs.is_empty() {
+        return Err(
+            "vimlrs --build --native: scripts defining `:function` are not yet supported \
+             (user functions compile to a separate registry, not the main chunk); \
+             use `--build` without `--native` for those"
+                .to_string(),
+        );
+    }
+    if prog.main.ops.is_empty() {
+        return Err("vimlrs --build --native: script compiled to an empty chunk".to_string());
+    }
+
+    let runtime_lib = runtime_staticlib()?;
+    if !runtime_lib.exists() {
+        return Err(format!(
+            "vimlrs --build --native: runtime staticlib not found at {}",
+            runtime_lib.display()
+        ));
+    }
+
+    let obj = out_path.with_extension("o");
+    fusevm::aot::compile_object(&prog.main, &obj)
+        .map_err(|e| format!("vimlrs --build --native: {e}"))?;
+
+    let stub = out_path.with_extension("aot_main.c");
+    fs::write(
+        &stub,
+        b"extern long fusevm_aot_run_embedded(void);\nint main(void){return (int)fusevm_aot_run_embedded();}\n" as &[u8],
+    )
+    .map_err(|e| format!("vimlrs --build --native: write entry stub: {e}"))?;
+
+    let mut cmd = std::process::Command::new("cc");
+    cmd.arg(&stub).arg(&obj).arg(&runtime_lib);
+    if cfg!(target_os = "macos") {
+        // chrono/iana-time-zone pull CoreFoundation on macOS.
+        cmd.arg("-framework").arg("CoreFoundation");
+    }
+    cmd.arg("-o").arg(out_path);
+    let status = cmd
+        .status()
+        .map_err(|e| format!("vimlrs --build --native: invoking cc: {e}"))?;
+    let _ = fs::remove_file(&stub);
+    let _ = fs::remove_file(&obj);
+    if !status.success() {
+        return Err(format!(
+            "vimlrs --build --native: link failed (cc exit {:?})",
+            status.code()
+        ));
+    }
+    set_executable(out_path);
+    Ok(out_path.to_path_buf())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
