@@ -15,7 +15,10 @@ use crate::ported::eval::typval::{
     tv_list_len, tv_list_ref,
 };
 use crate::ported::eval_h::{FAIL, OK};
-use crate::ported::eval::typval::{tv_get_number, tv_get_string_buf};
+use crate::ported::eval::typval::{
+    tv_blob_get, tv_check_for_number_arg, tv_check_for_string_arg, tv_get_number, tv_get_string_buf,
+    CALL_FUNC_HOOK,
+};
 use crate::ported::os::env::os_get_pid;
 use crate::ported::os::time::{os_hrtime, os_localtime_r, os_strptime};
 use crate::ported::profile::{profile_end, profile_msg, profile_signed, profile_start, profile_sub, proftime_T};
@@ -1014,6 +1017,138 @@ pub fn f_reltimefloat(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.vval = v_float(0.0);
     if list2proftime(&argvars[0], &mut tm) == OK {
         rettv.vval = v_float(profile_signed(tm) as f64 / 1_000_000_000.0);
+    }
+}
+
+/// Port of `reduce_list()` from `Src/eval/funcs.c:5413`.
+fn reduce_list(argvars: &[typval_T], expr: &typval_T, rettv: &mut typval_T) {
+    let l = match &argvars[0].vval {
+        v_list(Some(l)) => l.clone(),
+        _ => return,
+    };
+    let name = tv_get_string(expr);
+    // call `name(acc, item)` via the bridge hook.
+    let call = |acc: &typval_T, item: &typval_T| -> Option<typval_T> {
+        CALL_FUNC_HOOK.with(|h| *h.borrow()).and_then(|f| f(&name, &[acc.clone(), item.clone()]))
+    };
+    let items: Vec<typval_T> = l.borrow().lv_items.iter().map(|it| it.li_tv.clone()).collect();
+    let start = if argvars.len() < 3 {
+        if items.is_empty() {
+            emsg("E998: Reduce of an empty List with no initial value");
+            return;
+        }
+        *rettv = items[0].clone();
+        1
+    } else {
+        *rettv = argvars[2].clone();
+        0
+    };
+    for item in items.iter().skip(start) {
+        match call(rettv, item) {
+            Some(r) => *rettv = r,
+            None => return,
+        }
+    }
+}
+
+/// Port of `reduce_string()` from `Src/eval/funcs.c` — fold over the characters.
+fn reduce_string(argvars: &[typval_T], expr: &typval_T, rettv: &mut typval_T) {
+    let s = tv_get_string(&argvars[0]);
+    let name = tv_get_string(expr);
+    let call = |acc: &typval_T, item: &typval_T| -> Option<typval_T> {
+        CALL_FUNC_HOOK.with(|h| *h.borrow()).and_then(|f| f(&name, &[acc.clone(), item.clone()]))
+    };
+    let chars: Vec<char> = s.chars().collect();
+    let start = if argvars.len() < 3 {
+        if chars.is_empty() {
+            emsg("E998: Reduce of an empty String with no initial value");
+            return;
+        }
+        *rettv = typval_T {
+            v_type: VAR_STRING,
+            v_lock: crate::ported::eval::typval_defs_h::VarLockStatus::VAR_UNLOCKED,
+            vval: v_string(chars[0].to_string()),
+        };
+        1
+    } else {
+        if tv_check_for_string_arg(argvars, 2) == FAIL {
+            return;
+        }
+        *rettv = argvars[2].clone();
+        0
+    };
+    for ch in chars.iter().skip(start) {
+        let item = typval_T {
+            v_type: VAR_STRING,
+            v_lock: crate::ported::eval::typval_defs_h::VarLockStatus::VAR_UNLOCKED,
+            vval: v_string(ch.to_string()),
+        };
+        match call(rettv, &item) {
+            Some(r) => *rettv = r,
+            None => return,
+        }
+    }
+}
+
+/// Port of `reduce_blob()` from `Src/eval/funcs.c` — fold over the bytes.
+fn reduce_blob(argvars: &[typval_T], expr: &typval_T, rettv: &mut typval_T) {
+    let b = match &argvars[0].vval {
+        v_blob(Some(b)) => b.clone(),
+        _ => return,
+    };
+    let name = tv_get_string(expr);
+    let call = |acc: &typval_T, item: &typval_T| -> Option<typval_T> {
+        CALL_FUNC_HOOK.with(|h| *h.borrow()).and_then(|f| f(&name, &[acc.clone(), item.clone()]))
+    };
+    let len = tv_blob_len(&b.borrow());
+    let start = if argvars.len() < 3 {
+        if len == 0 {
+            emsg("E998: Reduce of an empty Blob with no initial value");
+            return;
+        }
+        rettv.v_type = VAR_NUMBER;
+        rettv.vval = v_number(tv_blob_get(&b.borrow(), 0) as varnumber_T);
+        1
+    } else {
+        if tv_check_for_number_arg(argvars, 2) == FAIL {
+            return;
+        }
+        *rettv = argvars[2].clone();
+        0
+    };
+    let mut i = start;
+    while i < len {
+        let item = typval_T {
+            v_type: VAR_NUMBER,
+            v_lock: crate::ported::eval::typval_defs_h::VarLockStatus::VAR_UNLOCKED,
+            vval: v_number(tv_blob_get(&b.borrow(), i) as varnumber_T),
+        };
+        match call(rettv, &item) {
+            Some(r) => *rettv = r,
+            None => return,
+        }
+        i += 1;
+    }
+}
+
+/// Port of `f_reduce()` from `Src/eval/funcs.c:5554`.
+///
+/// "reduce({object}, {func} [, {initial}])" — fold a List/String/Blob with
+/// `{func}(acc, item)`.
+pub fn f_reduce(argvars: &[typval_T], rettv: &mut typval_T) {
+    if !matches!(argvars[0].v_type, VAR_STRING | VAR_LIST | VAR_BLOB) {
+        emsg("E1098: String, List or Blob required");
+        return;
+    }
+    let func_name = tv_get_string(&argvars[1]); // VAR_FUNC string IS the name
+    if func_name.is_empty() {
+        emsg("E1132: Missing function argument");
+        return;
+    }
+    match argvars[0].v_type {
+        VAR_LIST => reduce_list(argvars, &argvars[1], rettv),
+        VAR_STRING => reduce_string(argvars, &argvars[1], rettv),
+        _ => reduce_blob(argvars, &argvars[1], rettv),
     }
 }
 

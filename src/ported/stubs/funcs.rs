@@ -433,21 +433,6 @@ pub fn repeat_blob() { unimplemented!("STUB repeat_blob — csrc/eval/funcs.c:53
 /// C: `static void repeat_string(typval_T *str_tv, varnumber_T n, typval_T *rettv)`
 pub fn repeat_string() { unimplemented!("STUB repeat_string — csrc/eval/funcs.c:5356") }
 
-/// Port of `reduce_list()` — `csrc/eval/funcs.c:5408`. STUB: not yet ported.
-/// C: `static void reduce_list(typval_T *argvars, typval_T *expr, typval_T *rettv)`
-pub fn reduce_list() { unimplemented!("STUB reduce_list — csrc/eval/funcs.c:5408") }
-
-/// Port of `reduce_string()` — `csrc/eval/funcs.c:5456`. STUB: not yet ported.
-/// C: `static void reduce_string(typval_T *argvars, typval_T *expr, typval_T *rettv)`
-pub fn reduce_string() { unimplemented!("STUB reduce_string — csrc/eval/funcs.c:5456") }
-
-/// Port of `reduce_blob()` — `csrc/eval/funcs.c:5503`. STUB: not yet ported.
-/// C: `static void reduce_blob(typval_T *argvars, typval_T *expr, typval_T *rettv)`
-pub fn reduce_blob() { unimplemented!("STUB reduce_blob — csrc/eval/funcs.c:5503") }
-
-/// Port of `f_reduce()` — `csrc/eval/funcs.c:5549`. STUB: not yet ported.
-pub fn f_reduce(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_reduce — csrc/eval/funcs.c:5549") }
-
 /// Port of `get_search_arg()` — `csrc/eval/funcs.c:5593`. STUB: not yet ported.
 /// C: `static int get_search_arg(typval_T *varp, int *flagsp)`
 pub fn get_search_arg() { unimplemented!("STUB get_search_arg — csrc/eval/funcs.c:5593") }

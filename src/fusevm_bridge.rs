@@ -25,7 +25,7 @@ use crate::ported::eval::funcs::{
     f_isinf, f_isnan, f_getpid, f_localtime, f_soundfold, f_json_decode, f_json_encode, f_matchstrpos, f_getenv, f_setenv, f_shellescape,
     f_reltime, f_reltimestr, f_reltimefloat, f_rand, f_srand, f_strftime, f_strptime, f_sha256,
     f_keys, f_len, f_list2str, f_match, f_matchend, f_matchlist, f_matchstr,
-    f_max, f_min, f_nr2char, f_or, f_pow, f_printf, f_range, f_repeat, f_reverse, f_split, f_str2float, f_substitute, f_type, f_values, f_xor,
+    f_max, f_min, f_nr2char, f_or, f_pow, f_printf, f_range, f_reduce, f_repeat, f_reverse, f_split, f_str2float, f_substitute, f_type, f_values, f_xor,
 };
 use crate::ported::eval::fs::f_pathshorten;
 use crate::ported::eval::list::{
@@ -33,7 +33,8 @@ use crate::ported::eval::list::{
     FILTER_MAP_CMD_HOOK, FILTER_MAP_EVAL_HOOK,
 };
 use crate::ported::eval::typval::{
-    f_blob2list, f_join, f_list2blob, f_sort, f_uniq, tv_list_slice_or_index, SORT_FUNCREF_HOOK,
+    f_blob2list, f_join, f_list2blob, f_sort, f_uniq, tv_list_slice_or_index, CALL_FUNC_HOOK,
+    SORT_FUNCREF_HOOK,
 };
 use crate::ported::strings::{
     f_string, f_strlen, f_strchars, f_strgetchar, f_strcharpart, f_byteidx, f_byteidxcomp,
@@ -1027,40 +1028,7 @@ fn eval_callback(
 // `src/ported/eval/list.rs`; the per-item evaluation comes back here through the
 // `FILTER_MAP_EVAL_HOOK`/`FILTER_MAP_CMD_HOOK` (installed in `install()`).
 
-/// `reduce({list}, {func} [, {initial}])` — fold a List left-to-right calling
-/// the funcref `func(acc, val)`. Without `{initial}` the first element seeds the
-/// accumulator. Callback-orchestrating, so bridge-side (cites `f_reduce`).
-fn b_reduce(vm: &mut VM, argc: u8) -> Value {
-    let mut args = Vec::with_capacity(argc as usize);
-    for _ in 0..argc {
-        args.push(pop_tv(vm));
-    }
-    args.reverse();
-    let func = tv_get_string(&args[1]);
-    let items: Vec<typval_T> = match (args[0].v_type, &args[0].vval) {
-        (VAR_LIST, v_list(Some(l))) => {
-            l.borrow().lv_items.iter().map(|it| it.li_tv.clone()).collect()
-        }
-        _ => {
-            message::emsg("E897: List or Blob required");
-            return Value::Undef;
-        }
-    };
-    let (mut acc, start) = match args.get(2) {
-        Some(init) => (init.clone(), 0),
-        None => {
-            if items.is_empty() {
-                message::emsg("E998: Reduce of an empty List with no initial value");
-                return Value::Undef;
-            }
-            (items[0].clone(), 1)
-        }
-    };
-    for item in &items[start..] {
-        acc = call_user_function(&func, vec![acc, item.clone()]).unwrap_or_else(|| tv_num(0));
-    }
-    tv_to_value(acc)
-}
+// `reduce()` is ported faithfully in `src/ported/eval/funcs.rs` (uses CALL_FUNC_HOOK).
 
 /// The `sort()`/`uniq()` `{func}` comparator hook (installed into the value
 /// layer's `SORT_FUNCREF_HOOK`): call the user function with the two items and
@@ -1068,6 +1036,12 @@ fn b_reduce(vm: &mut VM, argc: u8) -> Value {
 fn sort_compare_funcref(name: &str, a: &typval_T, b: &typval_T) -> Option<varnumber_T> {
     let r = call_user_function(name, vec![a.clone(), b.clone()])?;
     Some(tv_get_number_chk(&r, None))
+}
+
+/// The generic "call user function" hook (installed into `CALL_FUNC_HOOK`), used
+/// by `reduce()`.
+fn call_func_hook(name: &str, args: &[typval_T]) -> Option<typval_T> {
+    call_user_function(name, args.to_vec())
 }
 
 /// The map()/filter()/foreach() per-item evaluator hook (installed into the
@@ -1532,7 +1506,8 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FN_STR2LIST, |vm, n| call_func(vm, n, f_str2list));
     vm.register_builtin(VIML_FN_LIST2STR, |vm, n| call_func(vm, n, f_list2str));
     vm.register_builtin(VIML_FN_FLATTEN, |vm, n| call_func(vm, n, f_flatten));
-    vm.register_builtin(VIML_FN_REDUCE, b_reduce);
+    CALL_FUNC_HOOK.with(|h| *h.borrow_mut() = Some(call_func_hook));
+    vm.register_builtin(VIML_FN_REDUCE, |vm, n| call_func(vm, n, f_reduce));
     vm.register_builtin(VIML_FN_EVAL, b_eval);
     vm.register_builtin(VIML_FN_EXECUTE, b_execute);
     vm.register_builtin(VIML_FN_DEEPCOPY, |vm, n| call_func(vm, n, f_deepcopy));
@@ -2639,6 +2614,28 @@ mod tests {
         assert_eq!(run("let e={'a':1}\ncall extend(e,{'a':99})\necho e"), "{'a': 99}\n");
         // extendnew returns a new value, leaving the source intact.
         assert_eq!(run("let n=[1,2]\nlet p=extendnew(n,[3])\necho n\necho p"), "[1, 2]\n[1, 2, 3]\n");
+    }
+
+    #[test]
+    fn reduce_builtin() {
+        // List fold (no initial uses the first element; with initial).
+        assert_eq!(
+            run("function! Add(a,b)\nreturn a:a+a:b\nendfunction\necho reduce([1,2,3,4], function('Add'))"),
+            "10\n"
+        );
+        assert_eq!(
+            run("function! Add(a,b)\nreturn a:a+a:b\nendfunction\necho reduce([1,2,3,4], function('Add'), 100)"),
+            "110\n"
+        );
+        // String fold and Blob fold.
+        assert_eq!(
+            run("function! Cat(a,b)\nreturn a:a . a:b\nendfunction\necho reduce('abc', function('Cat'), '>')"),
+            ">abc\n"
+        );
+        assert_eq!(
+            run("function! Add(a,b)\nreturn a:a+a:b\nendfunction\necho reduce(list2blob([1,2,3]), function('Add'), 0)"),
+            "6\n"
+        );
     }
 
     #[test]

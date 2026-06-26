@@ -1977,6 +1977,12 @@ thread_local! {
     /// bridge), so the bridge installs this hook in `install()`.
     pub static SORT_FUNCREF_HOOK: std::cell::RefCell<Option<fn(&str, &typval_T, &typval_T) -> Option<varnumber_T>>> =
         const { std::cell::RefCell::new(None) };
+
+    /// Generic "call a user function by name with args → result" hook, installed
+    /// by the bridge (the value layer can't call user functions itself). Used by
+    /// `reduce()`. `None` on a call error.
+    pub static CALL_FUNC_HOOK: std::cell::RefCell<Option<fn(&str, &[typval_T]) -> Option<typval_T>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Port of `item_compare()` from `Src/eval/typval.c` — the default comparison.
