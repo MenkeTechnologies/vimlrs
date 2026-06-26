@@ -381,19 +381,7 @@ fn max_min(argvars: &[typval_T], rettv: &mut typval_T, domax: bool) {
 
 /// Port of `f_count()` from `Src/eval/funcs.c` (subset) — occurrences of
 /// `{expr}` in a List.
-pub fn f_count(argvars: &[typval_T], rettv: &mut typval_T) {
-    let needle = &argvars[1];
-    let n = match (argvars[0].v_type, &argvars[0].vval) {
-        (VAR_LIST, v_list(Some(l))) => l
-            .borrow()
-            .lv_items
-            .iter()
-            .filter(|it| crate::ported::eval::typval::tv_equal(&it.li_tv, needle, false))
-            .count() as varnumber_T,
-        _ => 0,
-    };
-    rettv.vval = v_number(n);
-}
+// `f_count` lives in its real home file, `src/ported/eval/list.rs` (eval/list.c).
 
 /// Port of `f_index()` from `Src/eval/funcs.c` (subset) — first index of
 /// `{expr}` in a List, or -1.
@@ -618,37 +606,7 @@ pub fn f_remove(argvars: &[typval_T], rettv: &mut typval_T) {
     }
 }
 
-/// Port of `f_extend()` from `Src/eval/funcs.c` (subset) — append `{expr2}`'s
-/// items to a `{list}`, or merge a `{dict}`'s entries, returning the first.
-pub fn f_extend(argvars: &[typval_T], rettv: &mut typval_T) {
-    match (argvars[0].v_type, &argvars[0].vval) {
-        (VAR_LIST, v_list(Some(l1))) => {
-            if let (VAR_LIST, v_list(Some(l2))) = (argvars[1].v_type, &argvars[1].vval) {
-                let add: Vec<_> = l2.borrow().lv_items.iter().map(|it| it.li_tv.clone()).collect();
-                let mut lb = l1.borrow_mut();
-                for tv in add {
-                    tv_list_append_tv(&mut lb, tv);
-                }
-            }
-        }
-        (VAR_DICT, v_dict(Some(d1))) => {
-            if let (VAR_DICT, v_dict(Some(d2))) = (argvars[1].v_type, &argvars[1].vval) {
-                let pairs: Vec<_> = d2
-                    .borrow()
-                    .dv_hashtab
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-                let mut db = d1.borrow_mut();
-                for (k, v) in pairs {
-                    tv_dict_add_tv(&mut db, &k, v);
-                }
-            }
-        }
-        _ => {}
-    }
-    *rettv = argvars[0].clone();
-}
+// `f_extend`/`f_extendnew` live in their real home file, `src/ported/eval/list.rs`.
 
 /// Port of `f_copy()` from `Src/eval/funcs.c` — a shallow copy of `{expr}`.
 pub fn f_copy(argvars: &[typval_T], rettv: &mut typval_T) {
@@ -926,42 +884,6 @@ pub fn f_matchstrpos(argvars: &[typval_T], rettv: &mut typval_T) {
     tv_list_append_string(&mut lb, &m);
     tv_list_append_number(&mut lb, start);
     tv_list_append_number(&mut lb, end);
-}
-
-/// Port of `f_extendnew()` from `Src/eval/list.c` — like `extend()` but returns
-/// a NEW List/Dict, leaving the arguments unchanged. (c: `extend(..., true)`.)
-pub fn f_extendnew(argvars: &[typval_T], rettv: &mut typval_T) {
-    match (argvars[0].v_type, &argvars[0].vval) {
-        (VAR_LIST, v_list(Some(l1))) => {
-            let mut items: Vec<_> =
-                l1.borrow().lv_items.iter().map(|it| it.li_tv.clone()).collect();
-            if let (VAR_LIST, v_list(Some(l2))) = (argvars[1].v_type, &argvars[1].vval) {
-                items.extend(l2.borrow().lv_items.iter().map(|it| it.li_tv.clone()));
-            }
-            let out = tv_list_alloc_ret(rettv, items.len() as isize);
-            let mut ob = out.borrow_mut();
-            for tv in items {
-                tv_list_append_tv(&mut ob, tv);
-            }
-        }
-        (VAR_DICT, v_dict(Some(d1))) => {
-            let mut pairs: Vec<_> = d1
-                .borrow()
-                .dv_hashtab
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            if let (VAR_DICT, v_dict(Some(d2))) = (argvars[1].v_type, &argvars[1].vval) {
-                pairs.extend(d2.borrow().dv_hashtab.iter().map(|(k, v)| (k.clone(), v.clone())));
-            }
-            let out = crate::ported::eval::typval::tv_dict_alloc_ret(rettv);
-            let mut ob = out.borrow_mut();
-            for (k, v) in pairs {
-                tv_dict_add_tv(&mut ob, &k, v); // later (expr2) keys override
-            }
-        }
-        _ => *rettv = argvars[0].clone(),
-    }
 }
 
 /// Port of `f_getenv()` from `Src/eval/funcs.c` — the value of environment

@@ -37,27 +37,3 @@ pub fn f_mapnew(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rett
 /// Port of `f_foreach()` — `csrc/eval/list.c:423`. STUB: not yet ported.
 pub fn f_foreach(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_foreach — csrc/eval/list.c:423") }
 
-/// Port of `count_string()` — `csrc/eval/list.c:459`. STUB: not yet ported.
-/// C: `static varnumber_T count_string(const char *haystack, const char *needle, bool ic)`
-pub fn count_string() { unimplemented!("STUB count_string — csrc/eval/list.c:459") }
-
-/// Port of `count_list()` — `csrc/eval/list.c:492`. STUB: not yet ported.
-/// C: `static varnumber_T count_list(list_T *l, typval_T *needle, int64_t idx, bool ic)`
-pub fn count_list() { unimplemented!("STUB count_list — csrc/eval/list.c:492") }
-
-/// Port of `count_dict()` — `csrc/eval/list.c:518`. STUB: not yet ported.
-/// C: `static varnumber_T count_dict(dict_T *d, typval_T *needle, bool ic)`
-pub fn count_dict() { unimplemented!("STUB count_dict — csrc/eval/list.c:518") }
-
-/// Port of `extend_dict()` — `csrc/eval/list.c:578`. STUB: not yet ported.
-/// C: `static void extend_dict(typval_T *argvars, const char *arg_errmsg, bool is_new, typval_T *rettv)`
-pub fn extend_dict() { unimplemented!("STUB extend_dict — csrc/eval/list.c:578") }
-
-/// Port of `extend_list()` — `csrc/eval/list.c:649`. STUB: not yet ported.
-/// C: `static void extend_list(typval_T *argvars, const char *arg_errmsg, bool is_new, typval_T *rettv)`
-pub fn extend_list() { unimplemented!("STUB extend_list — csrc/eval/list.c:649") }
-
-/// Port of `extend()` — `csrc/eval/list.c:707`. STUB: not yet ported.
-/// C: `static void extend(typval_T *argvars, typval_T *rettv, char *arg_errmsg, bool is_new)`
-pub fn extend() { unimplemented!("STUB extend — csrc/eval/list.c:707") }
-

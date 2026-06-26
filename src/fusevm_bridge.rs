@@ -20,14 +20,15 @@ use fusevm::{Value, VM};
 use crate::ported::eval::encode::encode_tv2echo;
 use crate::ported::eval::funcs::{
     float_op_wrapper,
-    f_abs, f_add, f_and, f_char2nr, f_copy, f_count, f_empty, f_exists, f_extend, f_float2nr, f_function, f_get, f_has, f_has_key, f_index, f_insert, f_invert,
+    f_abs, f_add, f_and, f_char2nr, f_copy, f_empty, f_exists, f_float2nr, f_function, f_get, f_has, f_has_key, f_index, f_insert, f_invert,
     f_atan2, f_deepcopy, f_escape, f_flatten, f_flattennew, f_fmod, f_items,
-    f_isinf, f_isnan, f_getpid, f_localtime, f_soundfold, f_json_decode, f_json_encode, f_matchstrpos, f_extendnew, f_getenv, f_setenv, f_shellescape,
+    f_isinf, f_isnan, f_getpid, f_localtime, f_soundfold, f_json_decode, f_json_encode, f_matchstrpos, f_getenv, f_setenv, f_shellescape,
     f_reltime, f_reltimestr, f_reltimefloat, f_rand, f_srand, f_strftime, f_strptime, f_sha256,
     f_join, f_keys, f_len, f_list2str, f_match, f_matchend, f_matchlist, f_matchstr,
     f_max, f_min, f_nr2char, f_or, f_pow, f_printf, f_range, f_remove, f_repeat, f_reverse, f_split, f_str2float, f_substitute, f_type, f_uniq, f_values, f_xor,
 };
 use crate::ported::eval::fs::f_pathshorten;
+use crate::ported::eval::list::{f_count, f_extend, f_extendnew};
 use crate::ported::strings::{
     f_string, f_strlen, f_strchars, f_strgetchar, f_strcharpart, f_byteidx, f_byteidxcomp,
     f_charidx, f_strpart, f_stridx, f_strridx, f_tolower, f_toupper, f_tr, f_trim, f_str2nr,
@@ -2622,6 +2623,31 @@ mod tests {
             run("let l=[1,[2,[3]]]\nlet m=flattennew(l)\necho l\necho m"),
             "[1, [2, [3]]]\n[1, 2, 3]\n"
         );
+    }
+
+    #[test]
+    fn count_builtin() {
+        // String/List/Dict + case-insensitivity + start index (verified vs nvim).
+        assert_eq!(run("echo count([1, 2, 2, 3], 2)"), "2\n");
+        assert_eq!(run("echo count('banana', 'a')"), "3\n");
+        assert_eq!(run("echo count({'a': 1, 'b': 2, 'c': 1}, 1)"), "2\n");
+        assert_eq!(run("echo count([1, 2, 2, 3, 2], 2, 0, 2)"), "2\n");
+        assert_eq!(run("echo count('aaa', 'aa')"), "1\n"); // non-overlapping
+    }
+
+    #[test]
+    fn extend_builtins() {
+        // List: append, and insert at an index (verified vs nvim).
+        assert_eq!(run("let l=[1,2,3]\ncall extend(l,[4,5])\necho l"), "[1, 2, 3, 4, 5]\n");
+        assert_eq!(run("let m=[1,2,3]\ncall extend(m,[9],1)\necho m"), "[1, 9, 2, 3]\n");
+        // Dict: keep (don't overwrite) vs force (default, overwrite).
+        assert_eq!(
+            run("let d={'a':1,'b':2}\ncall extend(d,{'b':20,'c':3},'keep')\necho d"),
+            "{'a': 1, 'b': 2, 'c': 3}\n"
+        );
+        assert_eq!(run("let e={'a':1}\ncall extend(e,{'a':99})\necho e"), "{'a': 99}\n");
+        // extendnew returns a new value, leaving the source intact.
+        assert_eq!(run("let n=[1,2]\nlet p=extendnew(n,[3])\necho n\necho p"), "[1, 2]\n[1, 2, 3]\n");
     }
 
     #[test]

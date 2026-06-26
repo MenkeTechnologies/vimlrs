@@ -22,6 +22,8 @@ pub mod decode;
 pub mod fs;
 /// Port of `eval/funcs.c`.
 pub mod funcs;
+/// Port of `eval/list.c` (the `count()` family; callback ops stay bridge-side).
+pub mod list;
 /// Port of `eval/vars.c`.
 pub mod vars;
 
