@@ -132,6 +132,8 @@ pub const VIML_INDEX: u16 = 3052;
 pub const VIML_SLICE: u16 = 3053;
 /// `let base[index] = value` — pop index, base, value; set base[index]=value.
 pub const VIML_SETINDEX: u16 = 3054;
+/// `let base[idx1:idx2] = list` — pop idx2, idx1, base, value; range-assign.
+pub const VIML_SETRANGE: u16 = 3055;
 /// `:echo`
 pub const VIML_ECHO: u16 = 3060;
 /// `:echon`
@@ -853,6 +855,53 @@ fn b_setindex(vm: &mut VM, _: u8) -> Value {
     Value::Undef
 }
 
+/// `let base[idx1:idx2] = list` — list range assignment via the ported
+/// `tv_list_assign_range`. Stack (top→bottom): idx2, idx1, base, value. An
+/// `idx2` of Undef (the compiler's `l[i:]` marker) means "to the end".
+fn b_setrange(vm: &mut VM, _: u8) -> Value {
+    use crate::ported::eval::typval::{
+        tv_list_assign_range, tv_list_check_range_index_one, tv_list_check_range_index_two,
+        tv_list_copy,
+    };
+    let idx2_tv = pop_tv(vm);
+    let idx1_tv = pop_tv(vm);
+    let base = pop_tv(vm);
+    let value = pop_tv(vm);
+    let dest = match (base.v_type, &base.vval) {
+        (VAR_LIST, v_list(Some(l))) => l.clone(),
+        _ => {
+            message::emsg("E709: [:] requires a List value");
+            return Value::Undef;
+        }
+    };
+    // c: the source must be a List (E709 otherwise). NULL list → empty.
+    let src = match (value.v_type, &value.vval) {
+        (VAR_LIST, v_list(Some(l))) => tv_list_copy(l, false),
+        (VAR_LIST, v_list(None)) => crate::ported::eval::typval::tv_list_alloc(0),
+        _ => {
+            message::emsg("E709: [:] requires a List value");
+            return Value::Undef;
+        }
+    };
+    // The compiler emits LoadUndef (→ VAR_SPECIAL/VAR_UNKNOWN) for an omitted
+    // second index (`l[i:]`), meaning "to the end".
+    let empty_idx2 = matches!(idx2_tv.v_type, VAR_SPECIAL | VAR_UNKNOWN);
+    let mut n1 = tv_get_number_chk(&idx1_tv, None) as i32;
+    let mut n2 = if empty_idx2 { 0 } else { tv_get_number_chk(&idx2_tv, None) as i32 };
+    let pos1 = match tv_list_check_range_index_one(&dest.borrow(), &mut n1, false) {
+        Some(p) => p,
+        None => return Value::Undef, // E684 already emitted
+    };
+    if !empty_idx2
+        && tv_list_check_range_index_two(&dest.borrow(), &mut n1, pos1, &mut n2, false)
+            == crate::ported::eval_h::FAIL
+    {
+        return Value::Undef;
+    }
+    tv_list_assign_range(&dest, &src.borrow(), n1, n2, empty_idx2, "=", "");
+    Value::Undef
+}
+
 fn b_echo(vm: &mut VM, argc: u8) -> Value {
     echo_impl(vm, argc, true);
     Value::Undef
@@ -1486,6 +1535,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_INDEX, b_index);
     vm.register_builtin(VIML_SLICE, b_slice);
     vm.register_builtin(VIML_SETINDEX, b_setindex);
+    vm.register_builtin(VIML_SETRANGE, b_setrange);
     vm.register_builtin(VIML_ECHO, b_echo);
     vm.register_builtin(VIML_ECHON, b_echon);
     vm.register_builtin(VIML_SET_RESULT, b_set_result);
@@ -2739,6 +2789,19 @@ mod tests {
             run("function! Add(a,b)\nreturn a:a+a:b\nendfunction\necho reduce(list2blob([1,2,3]), function('Add'), 0)"),
             "6\n"
         );
+    }
+
+    #[test]
+    fn list_range_assign() {
+        // `let l[i:j] = list` — values verified against `nvim --clean`.
+        assert_eq!(run("let l=[1,2,3,4,5]\nlet l[1:3]=[20,30,40]\necho l"), "[1, 20, 30, 40, 5]\n");
+        // `l[i:]` replaces from i to the end (grows when the source is longer).
+        assert_eq!(run("let m=[0,0,0,0]\nlet m[1:]=[7,8,9]\necho m"), "[0, 7, 8, 9]\n");
+        assert_eq!(run("let g=[1,2]\nlet g[1:]=[5,6,7,8]\necho g"), "[1, 5, 6, 7, 8]\n");
+        // `l[:j]` replaces from the start; single-element range; negative index.
+        assert_eq!(run("let p=[1,2,3]\nlet p[:1]=[8,9]\necho p"), "[8, 9, 3]\n");
+        assert_eq!(run("let q=[1,2,3]\nlet q[1:1]=[99]\necho q"), "[1, 99, 3]\n");
+        assert_eq!(run("let l=[1,2,3,4]\nlet l[-2:]=[88,99]\necho l"), "[1, 2, 88, 99]\n");
     }
 
     #[test]

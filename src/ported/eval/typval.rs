@@ -9,6 +9,7 @@ use std::rc::Rc;
 
 use crate::ported::charset::{vim_str2nr, STR2NR_ALL};
 use crate::ported::eval::encode::{encode_tv2echo, encode_tv2string};
+use crate::ported::eval::executor::eexe_mod_op;
 use crate::ported::eval::typval_defs_h::{
     blob_T, dict_T, float_T, list_T, listitem_T, typval_T, typval_vval_union::*, varnumber_T,
     BoolVarValue, BoolVarValue::*, SpecialVarValue::*, VarLockStatus, VarType::*,
@@ -291,6 +292,129 @@ pub fn tv_list_find(l: &list_T, n: i32) -> Option<&listitem_T> {
         return None;
     }
     l.lv_items.get(n as usize)
+}
+
+/// Port of `tv_list_find_index()` from `Src/eval/typval.c:1716` — resolve `*idx`
+/// to an in-range item index; if out of range and `*idx` was negative, clamp to
+/// 0. RUST-PORT NOTE: returns the resolved index (C returns the `listitem_T*`);
+/// `*idx` is updated only in the clamp-to-0 fallback, matching C.
+fn tv_list_find_index(l: &list_T, idx: &mut i32) -> Option<usize> {
+    let n = tv_list_uidx(l, *idx);
+    if n != -1 {
+        return Some(n as usize);
+    }
+    if *idx < 0 {
+        *idx = 0;
+        let n0 = tv_list_uidx(l, 0);
+        if n0 != -1 {
+            return Some(n0 as usize);
+        }
+    }
+    None
+}
+
+/// Port of `tv_list_check_range_index_one()` from `Src/eval/typval.c:633` — the
+/// item at `n1`, adjusting `n1` if needed; `E684` (unless `quiet`) when absent.
+pub(crate) fn tv_list_check_range_index_one(l: &list_T, n1: &mut i32, quiet: bool) -> Option<usize> {
+    let r = tv_list_find_index(l, n1);
+    if r.is_none() && !quiet {
+        semsg(&format!("E684: List index out of range: {n1}"));
+    }
+    r
+}
+
+/// Port of `tv_list_check_range_index_two()` from `Src/eval/typval.c:650` — check
+/// that `n2` is a valid second range index (negative → positive) and `n2 >= n1`.
+/// `pos1` is the resolved index of `n1`. Returns OK/FAIL.
+pub(crate) fn tv_list_check_range_index_two(l: &list_T, n1: &mut i32, pos1: usize, n2: &mut i32, quiet: bool) -> i32 {
+    if *n2 < 0 {
+        let ni = tv_list_uidx(l, *n2);
+        if ni == -1 {
+            if !quiet {
+                semsg(&format!("E684: List index out of range: {n2}"));
+            }
+            return FAIL;
+        }
+        *n2 = ni;
+    }
+    // c: if (*n1 < 0) *n1 = tv_list_idx_of_item(l, li1) — the resolved pos1.
+    if *n1 < 0 {
+        *n1 = pos1 as i32;
+    }
+    if *n2 < *n1 {
+        if !quiet {
+            semsg(&format!("E684: List index out of range: {n2}"));
+        }
+        return FAIL;
+    }
+    OK
+}
+
+/// Port of `tv_list_assign_range()` from `Src/eval/typval.c:684` — assign `src`'s
+/// values into `dest[idx1..=idx2]` (`empty_idx2` → all items from `idx1`). `op`
+/// is normally `"="` but may be `"+="` etc. (applied via `eexe_mod_op`). The
+/// range grows `dest` with `0` items when it runs short. Returns OK/FAIL.
+pub fn tv_list_assign_range(
+    dest: &Rc<RefCell<list_T>>,
+    src: &list_T,
+    idx1_arg: i32,
+    idx2: i32,
+    empty_idx2: bool,
+    op: &str,
+    varname: &str,
+) -> i32 {
+    let mut idx1 = idx1_arg;
+    let first_pos = match tv_list_find_index(&dest.borrow(), &mut idx1) {
+        Some(p) => p,
+        None => return FAIL,
+    };
+    let src_items: Vec<typval_T> = src.lv_items.iter().map(|it| it.li_tv.clone()).collect();
+    let opc = op.chars().next().filter(|&c| c != '=');
+
+    let mut idx = idx1;
+    let mut dpos = first_pos;
+    let mut si = 0usize;
+    while si < src_items.len() {
+        // c: bail if any destination item is locked.
+        let v_lock = dest.borrow().lv_items[dpos].li_tv.v_lock;
+        if value_check_lock(v_lock, Some(varname), TV_CSTRING) {
+            return FAIL;
+        }
+        match opc {
+            Some(c) => {
+                let mut cur = dest.borrow().lv_items[dpos].li_tv.clone();
+                eexe_mod_op(&mut cur, &src_items[si], c);
+                dest.borrow_mut().lv_items[dpos].li_tv = cur;
+            }
+            None => dest.borrow_mut().lv_items[dpos].li_tv = src_items[si].clone(),
+        }
+        si += 1;
+        if si >= src_items.len() || (!empty_idx2 && idx2 == idx) {
+            break;
+        }
+        // c: advance dest, appending an empty (0) item when it runs out.
+        if dpos + 1 >= dest.borrow().lv_items.len() {
+            tv_list_append_number(&mut dest.borrow_mut(), 0);
+            dpos = dest.borrow().lv_items.len() - 1;
+        } else {
+            dpos += 1;
+        }
+        idx += 1;
+    }
+    if si < src_items.len() {
+        emsg("E710: List value has more items than target");
+        return FAIL;
+    }
+    let too_few = if empty_idx2 {
+        dpos + 1 < dest.borrow().lv_items.len()
+    } else {
+        idx != idx2
+    };
+    if too_few {
+        emsg("E711: List value has not enough items");
+        return FAIL;
+    }
+    OK
 }
 
 /// Port of `tv_list_find_nr()` from `Src/eval/typval.c` (c:1684) — `l[n]` as a

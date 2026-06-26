@@ -1065,6 +1065,28 @@ impl Compiler {
                 self.emit(Op::Pop);
                 Ok(())
             }
+            LetTarget::Range { base, idx1, idx2 } => {
+                // `let base[idx1:idx2] = list` — push the source list, base, idx1
+                // (default 0), idx2 (Undef → "to the end"); the bridge assigns
+                // the range in place via tv_list_assign_range.
+                self.expr(expr)?;
+                self.expr(base)?;
+                match idx1 {
+                    Some(e) => self.expr(e)?,
+                    None => {
+                        self.emit(Op::LoadInt(0));
+                    }
+                }
+                match idx2 {
+                    Some(e) => self.expr(e)?,
+                    None => {
+                        self.emit(Op::LoadUndef);
+                    }
+                }
+                self.emit(Op::CallBuiltin(h::VIML_SETRANGE, 4));
+                self.emit(Op::Pop);
+                Ok(())
+            }
             LetTarget::Option(_) | LetTarget::Register(_) => Err(VimlError::msg(
                 "E15: :let on options/registers arrives with the option-table port",
             )),

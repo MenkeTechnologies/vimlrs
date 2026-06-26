@@ -474,9 +474,24 @@ fn parse_let(rest: &str) -> Result<Stmt, VimlError> {
         }
         let base_src = lhs[..open].trim();
         let index_src = &lhs[open + 1..lhs.len() - 1];
-        LetTarget::Index {
-            base: Box::new(parse_expr(base_src)?),
-            index: Box::new(parse_expr(index_src)?),
+        // A top-level `:` inside the subscript marks a range assign `l[i:j]=…`
+        // (split at the colon that is not nested in `[]`/`()` or a string).
+        match split_top_colon(index_src) {
+            Some((a, b)) => {
+                let parse_opt = |s: &str| -> Result<Option<Box<Expr>>, VimlError> {
+                    let s = s.trim();
+                    Ok(if s.is_empty() { None } else { Some(Box::new(parse_expr(s)?)) })
+                };
+                LetTarget::Range {
+                    base: Box::new(parse_expr(base_src)?),
+                    idx1: parse_opt(a)?,
+                    idx2: parse_opt(b)?,
+                }
+            }
+            None => LetTarget::Index {
+                base: Box::new(parse_expr(base_src)?),
+                index: Box::new(parse_expr(index_src)?),
+            },
         }
     } else if !lhs.contains('[')
         && lhs.contains('.')
@@ -507,6 +522,48 @@ fn parse_let(rest: &str) -> Result<Stmt, VimlError> {
     Ok(Stmt::Let { target, expr })
 }
 
+/// Split a subscript on its top-level `:` (the list-range separator). Returns
+/// `(before, after)`, or `None` when there is no unnested `:` (a plain index).
+/// `:` inside `[]`/`()` or a quoted string is ignored.
+fn split_top_colon(s: &str) -> Option<(&str, &str)> {
+    let bytes = s.as_bytes();
+    let mut depth = 0i32;
+    let mut quote: Option<u8> = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        match quote {
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                }
+            }
+            None => match c {
+                b'\'' | b'"' => quote = Some(c),
+                b'[' | b'(' => depth += 1,
+                b']' | b')' => depth -= 1,
+                b':' if depth == 0 => {
+                    // Skip a scope-prefix colon (`s:`/`g:`/`a:`/…): a single scope
+                    // letter at a token boundary, followed by an identifier char —
+                    // that's a scoped variable index, not a range separator.
+                    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+                    let scope_prefix = i >= 1
+                        && matches!(bytes[i - 1], b's' | b'g' | b'b' | b'w' | b't' | b'l' | b'a' | b'v')
+                        && (i == 1 || !is_ident(bytes[i - 2]))
+                        && i + 1 < bytes.len()
+                        && is_ident(bytes[i + 1]);
+                    if !scope_prefix {
+                        return Some((&s[..i], &s[i + 1..]));
+                    }
+                }
+                _ => {}
+            },
+        }
+        i += 1;
+    }
+    None
+}
+
 /// The current value of a compound-assignment target, as an expression. List
 /// unpack targets cannot take a compound operator (`E734`).
 fn let_target_expr(target: &LetTarget) -> Result<Expr, VimlError> {
@@ -519,7 +576,7 @@ fn let_target_expr(target: &LetTarget) -> Result<Expr, VimlError> {
             base: base.clone(),
             index: index.clone(),
         },
-        LetTarget::List { .. } => {
+        LetTarget::List { .. } | LetTarget::Range { .. } => {
             return Err(VimlError::msg("E734: Wrong variable type for +="))
         }
     })

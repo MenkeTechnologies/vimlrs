@@ -16,6 +16,8 @@ pub mod typval_defs_h;
 pub mod typval;
 /// Port of `eval/encode.c`.
 pub mod encode;
+/// Port of `eval/executor.c` (the `tv_op` compound-assignment operators).
+pub mod executor;
 /// Port of `eval/decode.c`.
 pub mod decode;
 /// Port of `eval/fs.c` (subset: the pure path-string builtins).

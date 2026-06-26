@@ -167,6 +167,16 @@ pub enum LetTarget {
         /// Trailing `; rest` name, if present (gets the remaining items).
         rest: Option<String>,
     },
+    /// `let base[idx1:idx2] = list` — list range assignment. Omitted `idx1`
+    /// defaults to 0; omitted `idx2` means "to the end".
+    Range {
+        /// The container expression.
+        base: Box<Expr>,
+        /// The first index (`None` → from the start).
+        idx1: Option<Box<Expr>>,
+        /// The last index (`None` → to the end).
+        idx2: Option<Box<Expr>>,
+    },
 }
 
 /// `:for` loop variable: a single name, or a `[a, b]` unpack of each item.

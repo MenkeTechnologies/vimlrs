@@ -57,22 +57,6 @@ pub fn tv_list_append() { unimplemented!("STUB tv_list_append — csrc/eval/typv
 /// C: `typval_T *tv_list_append_owned_tv(list_T *const l, typval_T tv)`
 pub fn tv_list_append_owned_tv() { unimplemented!("STUB tv_list_append_owned_tv — csrc/eval/typval.c:487") }
 
-/// Port of `tv_list_check_range_index_one()` — `csrc/eval/typval.c:633`. STUB: not yet ported.
-/// C: `listitem_T *tv_list_check_range_index_one(list_T *const l, int *const n1, const bool quiet)`
-pub fn tv_list_check_range_index_one() { unimplemented!("STUB tv_list_check_range_index_one — csrc/eval/typval.c:633") }
-
-/// Port of `tv_list_check_range_index_two()` — `csrc/eval/typval.c:650`. STUB: not yet ported.
-/// C: `int tv_list_check_range_index_two(list_T *const l, int *const n1, const listitem_T *const li1,`
-pub fn tv_list_check_range_index_two() { unimplemented!("STUB tv_list_check_range_index_two — csrc/eval/typval.c:650") }
-
-/// Port of `tv_list_assign_range()` — `csrc/eval/typval.c:684`. STUB: not yet ported.
-/// C: `int tv_list_assign_range(list_T *const dest, list_T *const src, const int idx1_arg, const int idx2,`
-pub fn tv_list_assign_range() { unimplemented!("STUB tv_list_assign_range — csrc/eval/typval.c:684") }
-
-/// Port of `tv_list_find_index()` — `csrc/eval/typval.c:1716`. STUB: not yet ported.
-/// C: `static listitem_T *tv_list_find_index(list_T *const l, int *const idx)`
-pub fn tv_list_find_index() { unimplemented!("STUB tv_list_find_index — csrc/eval/typval.c:1716") }
-
 /// Port of `tv_list_idx_of_item()` — `csrc/eval/typval.c:1737`. STUB: not yet ported.
 /// C: `int tv_list_idx_of_item(const list_T *const l, const listitem_T *const item)`
 pub fn tv_list_idx_of_item() { unimplemented!("STUB tv_list_idx_of_item — csrc/eval/typval.c:1737") }
