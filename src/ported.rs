@@ -15,6 +15,10 @@ pub mod eval_h;
 pub mod eval;
 /// Port of `src/nvim/option.c` (subset: the option table, `&opt`, `:set`).
 pub mod option;
+/// Port of `src/nvim/os/` (subset: `os/time.c`'s `os_hrtime`).
+pub mod os;
+/// Port of `src/nvim/profile.c` (the `proftime_T` helpers backing `reltime()`).
+pub mod profile;
 /// Port of `src/nvim/strings.c` (the Vimscript string builtins `f_string`,
 /// `f_strlen`, `f_byteidx`, `f_tr`, …). Home file not under the vendored
 /// `csrc/eval/` tree; see `tests/data/fake_fn_allowlist.txt`.

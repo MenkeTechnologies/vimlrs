@@ -62,11 +62,12 @@ Early / in development.
 | DAP debugger (`--dap`) — breakpoints, stepping, variables, evaluate | Working |
 | Control flow — `:if`/`:elseif`/`:else`, `:while`, `:for`, `:break`/`:continue` | Working |
 | `:execute`, `:let [a, b; rest] = …` & `:for [k, v] in …` destructuring | Working |
+| `:let` compound assignment (`+=`/`-=`/`*=`/`/=`/`%=`/`.=`) — desugars to `target = target op rhs`, so accumulator loops trace-JIT | Working |
 | `\|` command separator (`let l = [1] \| echo l`) — strings/`\|\|`/`\\\|`/comment-aware | Working |
 | User functions — `:function`/`:return`, recursion, `a:`/`l:` scopes | Working |
 | Variable scopes — `g:`/`s:`/`b:`/`w:`/`t:`/`v:` + `:set`/`&opt` (`'ignorecase'` wired into regex) | Working |
 | `:try`/`:catch`/`:finally`/`:throw` exceptions, `v:exception` | Working |
-| `funcs.c` builtin table | In progress (~101 ported: string/list/dict, char-indexed string ops, float math + `isinf`/`isnan`, regex, `eval`/`execute`, `json_encode`/`json_decode`, env (`getenv`/`setenv`), `shellescape`, `getpid`/`localtime`/`soundfold`, …) |
+| `funcs.c` builtin table | In progress (~104 ported: string/list/dict, char-indexed string ops, float math + `isinf`/`isnan`, regex, `eval`/`execute`, `json_encode`/`json_decode`, env (`getenv`/`setenv`), `shellescape`, `getpid`/`localtime`/`soundfold`, `reltime`/`reltimestr`/`reltimefloat`, …) |
 | `map`/`filter`/`sort`/`reduce`/`call` (lists **and** dicts; string-expr + funcref) | Working |
 | `eval()` / `execute()` (run-string metaprogramming) | Working |
 | Regex engine — Vim magic dialect, backing `=~`/`matchstr`/`match`/`substitute`/`split`/`:catch` | Working |

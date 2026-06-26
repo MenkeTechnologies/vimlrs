@@ -23,6 +23,7 @@ use crate::ported::eval::funcs::{
     f_abs, f_add, f_and, f_char2nr, f_copy, f_count, f_empty, f_exists, f_extend, f_float2nr, f_function, f_get, f_has, f_has_key, f_index, f_insert, f_invert,
     f_atan2, f_deepcopy, f_escape, f_flatten, f_fmod, f_items,
     f_isinf, f_isnan, f_getpid, f_localtime, f_soundfold, f_json_decode, f_json_encode, f_matchstrpos, f_extendnew, f_getenv, f_setenv, f_shellescape,
+    f_reltime, f_reltimestr, f_reltimefloat,
     f_join, f_keys, f_len, f_list2str, f_match, f_matchend, f_matchlist, f_matchstr,
     f_max, f_min, f_nr2char, f_or, f_pow, f_printf, f_range, f_remove, f_repeat, f_reverse, f_split, f_str2float, f_substitute, f_type, f_uniq, f_values, f_xor,
 };
@@ -337,6 +338,12 @@ pub const VIML_FN_LOCALTIME: u16 = 3200;
 pub const VIML_FN_SOUNDFOLD: u16 = 3201;
 /// `byteidxcomp()`
 pub const VIML_FN_BYTEIDXCOMP: u16 = 3202;
+/// `reltime()`
+pub const VIML_FN_RELTIME: u16 = 3203;
+/// `reltimestr()`
+pub const VIML_FN_RELTIMESTR: u16 = 3204;
+/// `reltimefloat()`
+pub const VIML_FN_RELTIMEFLOAT: u16 = 3205;
 /// Debug line marker: pop a line number → notify the DAP `check_line` hook
 /// (emitted before each statement only in debug-compiled chunks).
 pub const VIML_SET_LINENO: u16 = 3070;
@@ -1555,6 +1562,9 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FN_LOCALTIME, |vm, n| call_func(vm, n, f_localtime));
     vm.register_builtin(VIML_FN_SOUNDFOLD, |vm, n| call_func(vm, n, f_soundfold));
     vm.register_builtin(VIML_FN_BYTEIDXCOMP, |vm, n| call_func(vm, n, f_byteidxcomp));
+    vm.register_builtin(VIML_FN_RELTIME, |vm, n| call_func(vm, n, f_reltime));
+    vm.register_builtin(VIML_FN_RELTIMESTR, |vm, n| call_func(vm, n, f_reltimestr));
+    vm.register_builtin(VIML_FN_RELTIMEFLOAT, |vm, n| call_func(vm, n, f_reltimefloat));
     vm.register_builtin(VIML_SET_LINENO, b_set_lineno);
     vm.register_builtin(VIML_CALL_USER, b_call_user);
     vm.register_builtin(VIML_SET_RETURN, b_set_return);
@@ -2037,6 +2047,41 @@ mod tests {
         );
     }
 
+    /// Proof that a compound-assignment accumulator (`let s += i`) trace-JITs.
+    /// `op=` desugars to `s = s + i`, the same store path as the plain form, so
+    /// the hot loop body stays CallBuiltin-free and fusevm compiles a trace.
+    #[test]
+    fn compound_add_loop_traces_on_jit() {
+        use crate::compile_viml::compile_program;
+        use crate::viml_parser::parse_program;
+        use fusevm::Op;
+
+        let src = "let s = 0\nfor i in range(2000)\n  let s += i\nendfor";
+        let chunk = compile_program(&parse_program(src).unwrap()).unwrap().main;
+        let (header, back) = chunk
+            .ops
+            .iter()
+            .enumerate()
+            .find_map(|(i, o)| match o {
+                Op::JumpIfTrue(t) if (*t as usize) < i => Some((*t as usize, i)),
+                _ => None,
+            })
+            .expect("loop backedge");
+        assert!(
+            chunk.ops[header..=back].iter().any(|o| matches!(o, Op::Add))
+                && !chunk.ops[header..=back]
+                    .iter()
+                    .any(|o| matches!(o, Op::CallBuiltin(..) | Op::Extended(..))),
+            "compound-add loop body must use native Op::Add and be CallBuiltin-free, got {:?}",
+            &chunk.ops[header..=back]
+        );
+        run_chunk(chunk.clone());
+        assert!(
+            fusevm::JitCompiler::new().trace_is_compiled(&chunk, header),
+            "fusevm must compile a trace for the `+=` loop"
+        );
+    }
+
     /// Proof that vimlrs bytecode actually runs on fusevm's Cranelift JIT:
     /// an integer expression lowers to a CallBuiltin-free native-op chunk, and
     /// fusevm block-JIT-compiles it to machine code after the warm-up threshold.
@@ -2135,6 +2180,35 @@ mod tests {
         assert_eq!(run("let [g:x; g:r] = [1, 2, 3]\necho g:r"), "[2, 3]\n");
         // :for destructuring over a list of pairs and over items().
         assert_eq!(run("for [x, y] in [[1, 2], [3, 4]]\necho x + y\nendfor"), "3\n7\n");
+    }
+
+    #[test]
+    fn compound_assignment() {
+        // op= for every operator (ex_let's tv_op).
+        assert_eq!(run("let a = 10\nlet a += 3\necho a"), "13\n");
+        assert_eq!(run("let a = 10\nlet a -= 3\necho a"), "7\n");
+        assert_eq!(run("let a = 10\nlet a *= 4\necho a"), "40\n");
+        assert_eq!(run("let a = 20\nlet a /= 6\necho a"), "3\n"); // integer division
+        assert_eq!(run("let a = 20\nlet a %= 6\necho a"), "2\n");
+        assert_eq!(run("let s = 'foo'\nlet s .= 'bar'\necho s"), "foobar\n");
+        // Float accumulation.
+        assert_eq!(run("let f = 1.5\nlet f += 0.25\necho f"), "1.75\n");
+        // Tight spacing (no blanks around `+=`).
+        assert_eq!(run("let n=1\nlet n+=41\necho n"), "42\n");
+        // Accumulation inside a loop — the common idiom that was silently a no-op.
+        assert_eq!(run("let s = 0\nfor i in range(101)\n  let s += i\nendfor\necho s"), "5050\n");
+        // Scoped target.
+        assert_eq!(run("let g:c = 5\nlet g:c += 10\necho g:c"), "15\n");
+    }
+
+    #[test]
+    fn reltime_builtins() {
+        // reltime() with no args → a 2-element [high, low] list.
+        assert_eq!(run("echo len(reltime())"), "2\n");
+        // Difference of a timestamp with itself is exactly zero, in both forms.
+        assert_eq!(run("let s = reltime()\necho reltimefloat(reltime(s, s))"), "0.0\n");
+        // reltimestr formats seconds as %10.6f (right-justified width 10).
+        assert_eq!(run("let s = reltime()\necho reltimestr(reltime(s, s))"), "  0.000000\n");
     }
 
     #[test]

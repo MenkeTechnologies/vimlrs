@@ -50,8 +50,9 @@ memmap2 = "0.9"
 dirs = "5"
 # Inner-blob codec for the rkyv script cache (the compiled fusevm::Chunk).
 bincode = "1.3"
-# flock on the cache shard so concurrent writers serialize.
-nix = { version = "0.29", features = ["fs"] }
+# flock on the cache shard so concurrent writers serialize; `time` provides the
+# monotonic clock backing `os_hrtime()` for reltime().
+nix = { version = "0.29", features = ["fs", "time"] }
 once_cell = "1"
 # AOT: zstd-compressed script trailer baked into the binary.
 zstd = "0.13"

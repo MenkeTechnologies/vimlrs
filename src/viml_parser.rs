@@ -417,7 +417,20 @@ fn parse_let(rest: &str) -> Result<Stmt, VimlError> {
     let eq = rest
         .find('=')
         .ok_or_else(|| VimlError::msg("E121: let requires '='"))?;
-    let lhs = rest[..eq].trim();
+    // Compound assignment (`+= -= *= /= %= .=`, ex_let's `tv_op`): the char just
+    // before `=` is the operator. A `:let` target never ends in one of these, so
+    // its presence unambiguously marks a compound assign.
+    let op = match rest[..eq].as_bytes().last() {
+        Some(b'+') => Some(ArithOp::Add),
+        Some(b'-') => Some(ArithOp::Sub),
+        Some(b'*') => Some(ArithOp::Mul),
+        Some(b'/') => Some(ArithOp::Div),
+        Some(b'%') => Some(ArithOp::Mod),
+        Some(b'.') => Some(ArithOp::Concat),
+        _ => None,
+    };
+    let lhs_end = if op.is_some() { eq - 1 } else { eq };
+    let lhs = rest[..lhs_end].trim();
     let rhs = rest[eq + 1..].trim();
     let target = if let Some(inner) = lhs.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
         // `[a, b]` or `[a, b; rest]` list-unpack.
@@ -443,9 +456,33 @@ fn parse_let(rest: &str) -> Result<Stmt, VimlError> {
     } else {
         LetTarget::Var(lhs.to_string())
     };
-    Ok(Stmt::Let {
-        target,
-        expr: parse_expr(rhs)?,
+    // Plain `=` stores the RHS directly; `op=` desugars to `target = target op rhs`
+    // (`tv_op` semantics), reusing the same store path so it stays JIT-eligible.
+    let expr = match op {
+        None => parse_expr(rhs)?,
+        Some(op) => {
+            let cur = let_target_expr(&target)?;
+            Expr::Arith {
+                op,
+                lhs: Box::new(cur),
+                rhs: Box::new(parse_expr(rhs)?),
+            }
+        }
+    };
+    Ok(Stmt::Let { target, expr })
+}
+
+/// The current value of a compound-assignment target, as an expression. List
+/// unpack targets cannot take a compound operator (`E734`).
+fn let_target_expr(target: &LetTarget) -> Result<Expr, VimlError> {
+    Ok(match target {
+        LetTarget::Var(n) => Expr::Var(n.clone()),
+        LetTarget::Option(n) => Expr::Option(n.clone()),
+        LetTarget::Env(n) => Expr::Env(n.clone()),
+        LetTarget::Register(c) => Expr::Register(*c),
+        LetTarget::List { .. } => {
+            return Err(VimlError::msg("E734: Wrong variable type for +="))
+        }
     })
 }
 

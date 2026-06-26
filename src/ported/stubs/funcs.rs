@@ -446,16 +446,6 @@ pub fn f_reg_recording(_argvars: &[crate::ported::eval::typval_defs_h::typval_T]
 /// Port of `f_reg_recorded()` — `csrc/eval/funcs.c:5213`. STUB: not yet ported.
 pub fn f_reg_recorded(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_reg_recorded — csrc/eval/funcs.c:5213") }
 
-/// Port of `list2proftime()` — `csrc/eval/funcs.c:5224`. STUB: not yet ported.
-/// C: `static int list2proftime(typval_T *arg, proftime_T *tm) FUNC_ATTR_NONNULL_ALL`
-pub fn list2proftime() { unimplemented!("STUB list2proftime — csrc/eval/funcs.c:5224") }
-
-/// Port of `f_reltime()` — `csrc/eval/funcs.c:5255`. STUB: not yet ported.
-pub fn f_reltime(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_reltime — csrc/eval/funcs.c:5255") }
-
-/// Port of `f_reltimestr()` — `csrc/eval/funcs.c:5297`. STUB: not yet ported.
-pub fn f_reltimestr(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_reltimestr — csrc/eval/funcs.c:5297") }
-
 /// Port of `repeat_list()` — `csrc/eval/funcs.c:5310`. STUB: not yet ported.
 /// C: `static void repeat_list(list_T *l, varnumber_T n, typval_T *rettv)`
 pub fn repeat_list() { unimplemented!("STUB repeat_list — csrc/eval/funcs.c:5310") }
@@ -591,9 +581,6 @@ pub fn f_sockconnect(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], 
 
 /// Port of `f_stdioopen()` — `csrc/eval/funcs.c:6896`. STUB: not yet ported.
 pub fn f_stdioopen(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_stdioopen — csrc/eval/funcs.c:6896") }
-
-/// Port of `f_reltimefloat()` — `csrc/eval/funcs.c:6930`. STUB: not yet ported.
-pub fn f_reltimefloat(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_reltimefloat — csrc/eval/funcs.c:6930") }
 
 /// Port of `f_spellbadword()` — `csrc/eval/funcs.c:6951`. STUB: not yet ported.
 pub fn f_spellbadword(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_spellbadword — csrc/eval/funcs.c:6951") }

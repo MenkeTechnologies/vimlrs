@@ -11,8 +11,10 @@
 use crate::ported::eval::typval::{
     tv_blob_len, tv_get_bool, tv_dict_add_tv, tv_dict_find, tv_dict_len, tv_equal, tv_get_float,
     tv_get_number_chk, tv_get_string, tv_list_alloc_ret, tv_list_append_number,
-    tv_list_append_string, tv_list_append_tv, tv_list_len,
+    tv_list_append_string, tv_list_append_tv, tv_list_find_nr, tv_list_len,
 };
+use crate::ported::eval_h::{FAIL, OK};
+use crate::ported::profile::{profile_end, profile_msg, profile_signed, profile_start, profile_sub, proftime_T};
 use crate::ported::eval::typval_defs_h::{
     typval_T, typval_vval_union::*, varnumber_T, BoolVarValue::*, SpecialVarValue::*, VarType::*,
     VAR_TYPE_BLOB,
@@ -1020,5 +1022,90 @@ pub fn f_localtime(_argvars: &[typval_T], rettv: &mut typval_T) {
 pub fn f_soundfold(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.v_type = VAR_STRING;
     rettv.vval = v_string(tv_get_string(&argvars[0]));
+}
+
+/// Port of `list2proftime()` from `Src/eval/funcs.c:5229`.
+///
+/// Reads a 2-element list `[high, low]` back into the 64-bit `proftime_T`. The C
+/// version type-puns through a `union { struct { int32_t low, high; }; prof; }`;
+/// the equivalent bit recombination keeps the exact wraparound semantics.
+fn list2proftime(arg: &typval_T, tm: &mut proftime_T) -> i32 {
+    // c: if (arg->v_type != VAR_LIST || tv_list_len(arg->vval.v_list) != 2) return FAIL;
+    let l = match (arg.v_type, &arg.vval) {
+        (VAR_LIST, v_list(Some(l))) => l,
+        _ => return FAIL,
+    };
+    let lb = l.borrow();
+    if tv_list_len(&lb) != 2 {
+        return FAIL;
+    }
+    let mut error = false;
+    let n1 = tv_list_find_nr(&lb, 0, Some(&mut error));
+    let n2 = tv_list_find_nr(&lb, 1, Some(&mut error));
+    if error {
+        return FAIL;
+    }
+    // c: u = { .split.high = (int32_t)n1, .split.low = (int32_t)n2 }; *tm = u.prof;
+    let high = (n1 as i32) as u32;
+    let low = (n2 as i32) as u32;
+    *tm = ((high as u64) << 32) | (low as u64);
+    OK
+}
+
+/// Port of `f_reltime()` from `Src/eval/funcs.c:5260`.
+///
+/// "reltime()" function — returns the current time, an elapsed time, or the
+/// difference of two times as a 2-element list of 32-bit halves.
+pub fn f_reltime(argvars: &[typval_T], rettv: &mut typval_T) {
+    let mut res: proftime_T = 0;
+    let mut start: proftime_T = 0;
+    if argvars.is_empty() {
+        // c: no arguments: get current time.
+        res = profile_start();
+    } else if argvars.len() == 1 {
+        if list2proftime(&argvars[0], &mut res) == FAIL {
+            return;
+        }
+        res = profile_end(res);
+    } else {
+        // c: two arguments: compute the difference.
+        if list2proftime(&argvars[0], &mut start) == FAIL
+            || list2proftime(&argvars[1], &mut res) == FAIL
+        {
+            return;
+        }
+        res = profile_sub(res, start);
+    }
+    // c: store the 64-bit proftime_T as two 32-bit list values [high, low].
+    let high = ((res >> 32) as u32) as i32 as varnumber_T;
+    let low = (res as u32) as i32 as varnumber_T;
+    let l = tv_list_alloc_ret(rettv, 2);
+    let mut lb = l.borrow_mut();
+    tv_list_append_number(&mut lb, high);
+    tv_list_append_number(&mut lb, low);
+}
+
+/// Port of `f_reltimestr()` from `Src/eval/funcs.c:5302`.
+///
+/// "reltimestr()" function — the elapsed time as a `%10.6f` seconds string.
+pub fn f_reltimestr(argvars: &[typval_T], rettv: &mut typval_T) {
+    let mut tm: proftime_T = 0;
+    rettv.v_type = VAR_STRING;
+    rettv.vval = v_string(String::new());
+    if list2proftime(&argvars[0], &mut tm) == OK {
+        rettv.vval = v_string(profile_msg(tm));
+    }
+}
+
+/// Port of `f_reltimefloat()` from `Src/eval/funcs.c:6935`.
+///
+/// "reltimefloat()" function — the elapsed time in seconds as a Float.
+pub fn f_reltimefloat(argvars: &[typval_T], rettv: &mut typval_T) {
+    let mut tm: proftime_T = 0;
+    rettv.v_type = VAR_FLOAT;
+    rettv.vval = v_float(0.0);
+    if list2proftime(&argvars[0], &mut tm) == OK {
+        rettv.vval = v_float(profile_signed(tm) as f64 / 1_000_000_000.0);
+    }
 }
 
