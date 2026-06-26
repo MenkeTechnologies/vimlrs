@@ -39,3 +39,20 @@ pub fn os_localtime_r(clock: &libc::time_t) -> Option<libc::tm> {
         }
     }
 }
+
+/// Port of `os_strptime()` from `Src/os/time.c:199`.
+///
+/// Parse `str` per `format` into `tm` (`strptime`); returns whether it parsed
+/// (C returns the pointer past the last consumed char, or NULL — the caller only
+/// tests for NULL). A NUL byte in either input makes the C string invalid, so it
+/// is treated as a parse failure.
+pub fn os_strptime(str: &str, format: &str, tm: &mut libc::tm) -> bool {
+    // c: #ifdef HAVE_STRPTIME return strptime(str, format, tm); #else NULL
+    let (Ok(s), Ok(f)) = (
+        std::ffi::CString::new(str),
+        std::ffi::CString::new(format),
+    ) else {
+        return false;
+    };
+    unsafe { !libc::strptime(s.as_ptr(), f.as_ptr(), tm).is_null() }
+}

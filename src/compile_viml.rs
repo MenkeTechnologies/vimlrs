@@ -383,6 +383,11 @@ fn slot_plan(stmts: &[Stmt], in_function: bool) -> SlotPlan {
             Expr::Unary { op: UnaryOp::Neg | UnaryOp::Plus, expr } => {
                 rhs_kind(expr, set, is_int, in_function)
             }
+            // The bitwise builtins always yield an Integer (so valid in either
+            // pass) when every argument is itself provably integer.
+            Expr::Call { name, args } if bitwise_native_op(name, args.len()).is_some() => {
+                args.iter().all(|a| rhs_kind(a, set, true, in_function))
+            }
             _ => false,
         }
     }
@@ -1060,6 +1065,10 @@ impl Compiler {
                 !matches!(op, ArithOp::Concat) && self.expr_is_num(lhs) && self.expr_is_num(rhs)
             }
             Expr::Unary { op: UnaryOp::Neg | UnaryOp::Plus, expr } => self.expr_is_num(expr),
+            // Bitwise builtins of integer args yield an Integer (so also a Number).
+            Expr::Call { name, args } if bitwise_native_op(name, args.len()).is_some() => {
+                args.iter().all(|a| self.expr_is_int(a))
+            }
             _ => false,
         }
     }
@@ -1074,6 +1083,10 @@ impl Compiler {
                 !matches!(op, ArithOp::Concat) && self.expr_is_int(lhs) && self.expr_is_int(rhs)
             }
             Expr::Unary { op: UnaryOp::Neg | UnaryOp::Plus, expr } => self.expr_is_int(expr),
+            // Bitwise builtins yield an Integer when every argument is an Integer.
+            Expr::Call { name, args } if bitwise_native_op(name, args.len()).is_some() => {
+                args.iter().all(|a| self.expr_is_int(a))
+            }
             _ => false,
         }
     }
@@ -1287,6 +1300,20 @@ impl Compiler {
                 ))
             }
             Expr::Call { name, args } => {
+                // JIT fast path: the bitwise builtins lower to fusevm-NATIVE ops
+                // when every argument is provably integer, so bit-manipulation
+                // loops stay JIT-eligible. `f_and` is `a & b` over `tv_get_number`,
+                // and fusevm `Op::BitAnd` is `to_int() & to_int()` — identical for
+                // Int operands. Non-int args keep the builtin (the deopt fallback).
+                if let Some(nop) = bitwise_native_op(name, args.len()) {
+                    if args.iter().all(|a| self.expr_is_int(a)) {
+                        for a in args {
+                            self.expr(a)?;
+                        }
+                        self.emit(nop);
+                        return Ok(());
+                    }
+                }
                 match builtin_fn_id(name) {
                     Some(id) => {
                         for a in args {
@@ -1400,6 +1427,20 @@ impl Compiler {
 
 /// Map a builtin function name to its `VIML_FN_*` id, or `None` if it is not a
 /// builtin (then it is compiled as a user-function call, resolved at runtime).
+/// The fusevm-native op for a VimL bitwise builtin (`and`/`or`/`xor`/`invert`)
+/// at the given arity, or `None`. `f_and`=`a&b`/etc. over `tv_get_number`, and
+/// the fusevm ops are `to_int()`-based — identical for provably-integer operands,
+/// which is the only case the caller lowers natively (else the builtin is kept).
+fn bitwise_native_op(name: &str, argc: usize) -> Option<Op> {
+    match (name, argc) {
+        ("and", 2) => Some(Op::BitAnd),
+        ("or", 2) => Some(Op::BitOr),
+        ("xor", 2) => Some(Op::BitXor),
+        ("invert", 1) => Some(Op::BitNot),
+        _ => None,
+    }
+}
+
 fn builtin_fn_id(name: &str) -> Option<u16> {
     Some(match name {
         "len" => h::VIML_FN_LEN,
@@ -1460,6 +1501,7 @@ fn builtin_fn_id(name: &str) -> Option<u16> {
         "rand" => h::VIML_FN_RAND,
         "srand" => h::VIML_FN_SRAND,
         "strftime" => h::VIML_FN_STRFTIME,
+        "strptime" => h::VIML_FN_STRPTIME,
         "sqrt" => h::VIML_FN_SQRT,
         "floor" => h::VIML_FN_FLOOR,
         "ceil" => h::VIML_FN_CEIL,

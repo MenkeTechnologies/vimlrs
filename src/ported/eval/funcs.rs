@@ -14,9 +14,9 @@ use crate::ported::eval::typval::{
     tv_list_append_string, tv_list_append_tv, tv_list_find_nr, tv_list_len,
 };
 use crate::ported::eval_h::{FAIL, OK};
-use crate::ported::eval::typval::tv_get_number;
+use crate::ported::eval::typval::{tv_get_number, tv_get_string_buf};
 use crate::ported::os::env::os_get_pid;
-use crate::ported::os::time::{os_hrtime, os_localtime_r};
+use crate::ported::os::time::{os_hrtime, os_localtime_r, os_strptime};
 use crate::ported::profile::{profile_end, profile_msg, profile_signed, profile_start, profile_sub, proftime_T};
 use crate::ported::eval::typval_defs_h::{
     typval_T, typval_vval_union::*, varnumber_T, BoolVarValue::*, SpecialVarValue::*, VarType::*,
@@ -1159,6 +1159,27 @@ pub fn f_strftime(argvars: &[typval_T], rettv: &mut typval_T) {
         String::from_utf8_lossy(&buf[..n]).into_owned()
     };
     rettv.vval = v_string(s);
+}
+
+/// Port of `f_strptime()` from `Src/eval/funcs.c:7270`.
+///
+/// "strptime({format}, {timestring})" function — parse a time string into a
+/// seconds-since-epoch Number via the C library's `strptime` + `mktime`. The
+/// locale-encoding conversion (`vimconv`) is omitted (UTF-8 / `CONV_NONE`).
+pub fn f_strptime(argvars: &[typval_T], rettv: &mut typval_T) {
+    use nix::libc;
+    // c: struct tm tmval = { .tm_isdst = -1 };
+    let mut tmval: libc::tm = unsafe { std::mem::zeroed() };
+    tmval.tm_isdst = -1;
+    let fmt = tv_get_string_buf(&argvars[0]);
+    let str = tv_get_string_buf(&argvars[1]);
+    // c: if fmt==NULL || os_strptime(...)==NULL || (rettv = mktime(&tmval))==-1 → 0
+    let secs = if os_strptime(&str, &fmt, &mut tmval) {
+        unsafe { libc::mktime(&mut tmval) }
+    } else {
+        -1
+    };
+    rettv.vval = v_number(if secs == -1 { 0 } else { secs as varnumber_T });
 }
 
 /// Port of `init_srand()` from `Src/eval/funcs.c:4959`.

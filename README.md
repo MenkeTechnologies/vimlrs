@@ -50,6 +50,7 @@ Early / in development.
 | Per-loop slot scoping: a hot loop traces even when the function also calls helpers (callees can't see `l:` locals) or runs a sibling list-`for` | Working (function scope; script-scope calls still bail, since bare = `g:`) |
 | Native integer `%` (e.g. `if i % 2 == 0`) so modulo loops trace; `/` stays on the builtin (fusevm div is float, unlike VimL integer `/`) | Working |
 | Native numeric negation (`-x` → `Op::Negate`); `VIMLRS_JIT_STATS` counts function-body loops too | Working |
+| Native bitwise builtins (`and`/`or`/`xor`/`invert` of integer args → `Op::BitAnd`/`BitOr`/`BitXor`/`BitNot`) so bit-manipulation loops trace | Working |
 | Observable from the real CLI: `VIMLRS_JIT_STATS=1 vimlrs script.vim` reports loop traces compiled; `VIMLRS_NO_JIT=1` forces the interpreter baseline | Working — a 20M-iteration loop runs **~15–100× faster** with the JIT |
 | Native `Op::ReturnValue` (whole function bodies block-compile) + per-loop (not per-chunk) slot scoping | In progress (next) |
 | Expression engine — arithmetic, comparison, logic, ternary, index/slice, lists/dicts | Working |
@@ -67,7 +68,7 @@ Early / in development.
 | User functions — `:function`/`:return`, recursion, `a:`/`l:` scopes | Working |
 | Variable scopes — `g:`/`s:`/`b:`/`w:`/`t:`/`v:` + `:set`/`&opt` (`'ignorecase'` wired into regex) | Working |
 | `:try`/`:catch`/`:finally`/`:throw` exceptions, `v:exception` | Working |
-| `funcs.c` builtin table | In progress (~107 ported: string/list/dict, char-indexed string ops, float math + `isinf`/`isnan`, regex, `eval`/`execute`, `json_encode`/`json_decode`, env (`getenv`/`setenv`), `shellescape`, `getpid`/`localtime`/`soundfold`, `reltime`/`reltimestr`/`reltimefloat`, `rand`/`srand` (xoshiro128**, bit-exact vs Neovim), `strftime`, …) |
+| `funcs.c` builtin table | In progress (~108 ported: string/list/dict, char-indexed string ops, float math + `isinf`/`isnan`, regex, `eval`/`execute`, `json_encode`/`json_decode`, env (`getenv`/`setenv`), `shellescape`, `getpid`/`localtime`/`soundfold`, `reltime`/`reltimestr`/`reltimefloat`, `rand`/`srand` (xoshiro128**, bit-exact vs Neovim), `strftime`/`strptime`, …) |
 | `map`/`filter`/`sort`/`reduce`/`call` (lists **and** dicts; string-expr + funcref) | Working |
 | `eval()` / `execute()` (run-string metaprogramming) | Working |
 | Regex engine — Vim magic dialect, backing `=~`/`matchstr`/`match`/`substitute`/`split`/`:catch` | Working |

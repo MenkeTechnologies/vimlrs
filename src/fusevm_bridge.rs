@@ -23,7 +23,7 @@ use crate::ported::eval::funcs::{
     f_abs, f_add, f_and, f_char2nr, f_copy, f_count, f_empty, f_exists, f_extend, f_float2nr, f_function, f_get, f_has, f_has_key, f_index, f_insert, f_invert,
     f_atan2, f_deepcopy, f_escape, f_flatten, f_fmod, f_items,
     f_isinf, f_isnan, f_getpid, f_localtime, f_soundfold, f_json_decode, f_json_encode, f_matchstrpos, f_extendnew, f_getenv, f_setenv, f_shellescape,
-    f_reltime, f_reltimestr, f_reltimefloat, f_rand, f_srand, f_strftime,
+    f_reltime, f_reltimestr, f_reltimefloat, f_rand, f_srand, f_strftime, f_strptime,
     f_join, f_keys, f_len, f_list2str, f_match, f_matchend, f_matchlist, f_matchstr,
     f_max, f_min, f_nr2char, f_or, f_pow, f_printf, f_range, f_remove, f_repeat, f_reverse, f_split, f_str2float, f_substitute, f_type, f_uniq, f_values, f_xor,
 };
@@ -354,6 +354,8 @@ pub const VIML_FN_RAND: u16 = 3206;
 pub const VIML_FN_SRAND: u16 = 3207;
 /// `strftime()`
 pub const VIML_FN_STRFTIME: u16 = 3208;
+/// `strptime()`
+pub const VIML_FN_STRPTIME: u16 = 3209;
 /// Debug line marker: pop a line number → notify the DAP `check_line` hook
 /// (emitted before each statement only in debug-compiled chunks).
 pub const VIML_SET_LINENO: u16 = 3070;
@@ -1584,6 +1586,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FN_RAND, |vm, n| call_func(vm, n, f_rand));
     vm.register_builtin(VIML_FN_SRAND, |vm, n| call_func(vm, n, f_srand));
     vm.register_builtin(VIML_FN_STRFTIME, |vm, n| call_func(vm, n, f_strftime));
+    vm.register_builtin(VIML_FN_STRPTIME, |vm, n| call_func(vm, n, f_strptime));
     vm.register_builtin(VIML_SET_LINENO, b_set_lineno);
     vm.register_builtin(VIML_CALL_USER, b_call_user);
     vm.register_builtin(VIML_SET_RETURN, b_set_return);
@@ -2050,6 +2053,53 @@ mod tests {
         );
     }
 
+    /// Proof that a bit-manipulation loop trace-JITs: `and()`/`or()`/`xor()`/
+    /// `invert()` of integer args lower to native `Op::BitAnd`/`BitOr`/`BitXor`/
+    /// `BitNot` (fusevm lowers all of these), so the loop body is CallBuiltin-free.
+    #[test]
+    fn bitwise_loop_traces_on_jit() {
+        use crate::compile_viml::compile_program;
+        use crate::viml_parser::parse_program;
+        use fusevm::Op;
+
+        let src = "function! H()\n  let h = 0\n  for i in range(2000)\n    let h = xor(h, i)\n    let h = and(h, 65535)\n  endfor\n  return h\nendfunction";
+        let prog = compile_program(&parse_program(src).unwrap()).unwrap();
+        let chunk = prog.funcs.iter().find(|f| f.name == "H").unwrap().chunk.clone();
+
+        let (header, back) = chunk
+            .ops
+            .iter()
+            .enumerate()
+            .find_map(|(i, o)| match o {
+                Op::JumpIfTrue(t) if (*t as usize) < i => Some((*t as usize, i)),
+                _ => None,
+            })
+            .expect("loop backedge");
+        assert!(
+            chunk.ops[header..=back].iter().any(|o| matches!(o, Op::BitXor))
+                && chunk.ops[header..=back].iter().any(|o| matches!(o, Op::BitAnd)),
+            "loop body should use native bitwise ops"
+        );
+        assert!(
+            !chunk.ops[header..=back]
+                .iter()
+                .any(|o| matches!(o, Op::CallBuiltin(..) | Op::Extended(..))),
+            "bitwise loop body must be CallBuiltin-free, got {:?}",
+            &chunk.ops[header..=back]
+        );
+
+        let mut vm = VM::new(chunk.clone());
+        install(&mut vm);
+        while vm.frames.last().unwrap().slots.len() < 2 {
+            vm.frames.last_mut().unwrap().slots.push(fusevm::Value::Int(0));
+        }
+        let _ = vm.run();
+        assert!(
+            fusevm::JitCompiler::new().trace_is_compiled(&chunk, header),
+            "fusevm must compile a trace for the bitwise loop"
+        );
+    }
+
     /// Proof that a loop using integer `%` (e.g. `if i % 2 == 0`) trace-JITs —
     /// native `Op::Mod` (identical to VimL's `num_modulus` for ints).
     #[test]
@@ -2364,6 +2414,30 @@ mod tests {
         // Format specifiers expand: `%Y-%m-%d` is always 10 chars (the exact date
         // is TZ-dependent, but its width is not), proving strftime() ran.
         assert_eq!(run("echo len(strftime('%Y-%m-%d', 0))"), "10\n");
+    }
+
+    #[test]
+    fn strptime_builtin() {
+        // Round-trip is TZ-independent: parse-local then format-local cancels the
+        // zone offset, recovering the input date.
+        assert_eq!(
+            run("echo strftime('%Y-%m-%d', strptime('%Y-%m-%d %H:%M', '2020-06-15 12:00'))"),
+            "2020-06-15\n"
+        );
+        // Unparseable input → 0 (strptime fails / mktime == -1).
+        assert_eq!(run("echo strptime('%Y', 'not-a-year')"), "0\n");
+    }
+
+    #[test]
+    fn bitwise_builtins() {
+        // and/or/xor/invert — verified bit-exact against Neovim.
+        assert_eq!(run("echo and(12, 10)"), "8\n");
+        assert_eq!(run("echo or(12, 10)"), "14\n");
+        assert_eq!(run("echo xor(12, 10)"), "6\n");
+        assert_eq!(run("echo invert(0)"), "-1\n");
+        // Nested + a slotted accumulator loop (the native-lowered path).
+        assert_eq!(run("echo and(255, xor(170, 85))"), "255\n");
+        assert_eq!(run("let h=0\nfor i in range(8)\nlet h=xor(h,i)\nendfor\necho h"), "0\n");
     }
 
     #[test]
