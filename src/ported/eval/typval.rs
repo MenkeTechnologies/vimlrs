@@ -1532,6 +1532,139 @@ pub fn tv_islocked(tv: &typval_T) -> bool {
     }
 }
 
+/// `TV_TRANSLATE` from `Src/eval/typval.h:436` — a `name_len` sentinel: the name
+/// is a message id to translate (identity here).
+pub const TV_TRANSLATE: usize = usize::MAX;
+/// `TV_CSTRING` from `Src/eval/typval.h:441` — a `name_len` sentinel: the name is
+/// a NUL-terminated C string (use its whole length).
+pub const TV_CSTRING: usize = usize::MAX - 1;
+
+/// `DICT_MAXNEST` from `Src/eval/typval.c:113` — the recursion cap for (un)lock.
+const DICT_MAXNEST: i32 = 100;
+
+/// Port of `value_check_lock()` from `Src/eval/typval.c:3917`.
+///
+/// If `lock` makes the value read-only, emit `E741`/`E742` (naming the value when
+/// `name` is given, per the C `%.*s`) and return true.
+pub fn value_check_lock(lock: VarLockStatus, name: Option<&str>, name_len: usize) -> bool {
+    // The `%.*s` shows `name_len` bytes of the name; the sentinels mean "all".
+    let shown = |n: &str| -> String {
+        if name_len == TV_TRANSLATE || name_len == TV_CSTRING {
+            n.to_string()
+        } else {
+            n.get(..name_len).unwrap_or(n).to_string()
+        }
+    };
+    let msg = match lock {
+        VarLockStatus::VAR_UNLOCKED => return false,
+        VarLockStatus::VAR_LOCKED => match name {
+            None => "E741: Value is locked".to_string(),
+            Some(n) => format!("E741: Value is locked: {}", shown(n)),
+        },
+        VarLockStatus::VAR_FIXED => match name {
+            None => "E742: Cannot change value".to_string(),
+            Some(n) => format!("E742: Cannot change value of {}", shown(n)),
+        },
+    };
+    emsg(&msg);
+    true
+}
+
+/// Port of `tv_check_lock()` from `Src/eval/typval.c:3888`.
+///
+/// Check both the value's own lock and (for a container) its contents' lock.
+pub fn tv_check_lock(tv: &typval_T, name: Option<&str>, name_len: usize) -> bool {
+    let lock = match (tv.v_type, &tv.vval) {
+        (VAR_BLOB, v_blob(Some(b))) => b.borrow().bv_lock,
+        (VAR_LIST, v_list(Some(l))) => l.borrow().lv_lock,
+        (VAR_DICT, v_dict(Some(d))) => d.borrow().dv_lock,
+        _ => VarLockStatus::VAR_UNLOCKED,
+    };
+    value_check_lock(tv.v_lock, name, name_len)
+        || (lock != VarLockStatus::VAR_UNLOCKED && value_check_lock(lock, name, name_len))
+}
+
+thread_local! {
+    /// `tv_item_lock`'s `static int recurse` (the (un)lock nesting guard).
+    static TV_ITEM_LOCK_RECURSE: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+}
+
+/// Port of `tv_item_lock()` from `Src/eval/typval.c:3777`.
+///
+/// Lock (or unlock) `tv` and, to `deep` levels (`< 0` = all), its contents. The C
+/// `check_refcount` skips shared containers; the `*_refcount` fields are retained
+/// for fidelity. The `CHANGE_LOCK` macro is inlined (`VAR_FIXED` never changes).
+pub fn tv_item_lock(tv: &mut typval_T, deep: i32, lock: bool, check_refcount: bool) {
+    // c: if (recurse >= DICT_MAXNEST) { emsg(e_variable_nested_too_deep_for_unlock); return; }
+    if TV_ITEM_LOCK_RECURSE.with(|r| r.get()) >= DICT_MAXNEST {
+        emsg("E743: Variable nested too deep for (un)lock");
+        return;
+    }
+    if deep == 0 {
+        return;
+    }
+    TV_ITEM_LOCK_RECURSE.with(|r| r.set(r.get() + 1));
+
+    let change_lock = |var: VarLockStatus| -> VarLockStatus {
+        match var {
+            VarLockStatus::VAR_FIXED => VarLockStatus::VAR_FIXED,
+            _ => {
+                if lock {
+                    VarLockStatus::VAR_LOCKED
+                } else {
+                    VarLockStatus::VAR_UNLOCKED
+                }
+            }
+        }
+    };
+    tv.v_lock = change_lock(tv.v_lock);
+
+    match (tv.v_type, &tv.vval) {
+        (VAR_BLOB, v_blob(Some(b))) => {
+            let mut bb = b.borrow_mut();
+            if !(check_refcount && bb.bv_refcount > 1) {
+                bb.bv_lock = change_lock(bb.bv_lock);
+            }
+        }
+        (VAR_LIST, v_list(Some(l))) => {
+            let recurse = {
+                let mut lb = l.borrow_mut();
+                if !(check_refcount && lb.lv_refcount > 1) {
+                    lb.lv_lock = change_lock(lb.lv_lock);
+                    deep < 0 || deep > 1
+                } else {
+                    false
+                }
+            };
+            if recurse {
+                let mut lb = l.borrow_mut();
+                for li in lb.lv_items.iter_mut() {
+                    tv_item_lock(&mut li.li_tv, deep - 1, lock, check_refcount);
+                }
+            }
+        }
+        (VAR_DICT, v_dict(Some(d))) => {
+            let recurse = {
+                let mut db = d.borrow_mut();
+                if !(check_refcount && db.dv_refcount > 1) {
+                    db.dv_lock = change_lock(db.dv_lock);
+                    deep < 0 || deep > 1
+                } else {
+                    false
+                }
+            };
+            if recurse {
+                let mut db = d.borrow_mut();
+                for (_k, v) in db.dv_hashtab.iter_mut() {
+                    tv_item_lock(v, deep - 1, lock, check_refcount);
+                }
+            }
+        }
+        _ => {}
+    }
+    TV_ITEM_LOCK_RECURSE.with(|r| r.set(r.get() - 1));
+}
+
 /// Port of `tv_get_bool_chk()` from `Src/eval/typval.c` (c:4248) — alias for
 /// `tv_get_number_chk` (Bool is a thin wrapper over Number).
 pub fn tv_get_bool_chk(tv: &typval_T, ret_error: Option<&mut bool>) -> varnumber_T {
@@ -1647,6 +1780,44 @@ mod tests {
             v_lock: VarLockStatus::VAR_UNLOCKED,
             vval: v_blob(Some(tv_blob_alloc())),
         }
+    }
+
+    #[test]
+    fn lock_family() {
+        use VarLockStatus::*;
+        // value_check_lock: unlocked → false (no error); locked/fixed → true.
+        assert!(!value_check_lock(VAR_UNLOCKED, None, TV_TRANSLATE));
+        assert!(value_check_lock(VAR_LOCKED, None, TV_TRANSLATE));
+        assert!(value_check_lock(VAR_FIXED, Some("x"), TV_TRANSLATE));
+
+        // tv_item_lock deep-locks a list and its items; tv_check_lock detects it.
+        let l = tv_list_alloc(0);
+        {
+            let mut lb = l.borrow_mut();
+            lb.lv_items = vec![listitem_T { li_tv: nr(1) }, listitem_T { li_tv: nr(2) }];
+            lb.lv_len = 2;
+        }
+        let mut tv = typval_T {
+            v_type: VAR_LIST,
+            v_lock: VAR_UNLOCKED,
+            vval: v_list(Some(l.clone())),
+        };
+        tv_item_lock(&mut tv, -1, true, false);
+        assert_eq!(tv.v_lock, VAR_LOCKED);
+        assert_eq!(l.borrow().lv_lock, VAR_LOCKED);
+        assert_eq!(l.borrow().lv_items[0].li_tv.v_lock, VAR_LOCKED); // deep
+        assert!(tv_check_lock(&tv, None, TV_TRANSLATE));
+
+        // ...and unlock again.
+        tv_item_lock(&mut tv, -1, false, false);
+        assert_eq!(l.borrow().lv_lock, VAR_UNLOCKED);
+        assert!(!tv_check_lock(&tv, None, TV_TRANSLATE));
+
+        // VAR_FIXED never changes.
+        let mut fixed = nr(1);
+        fixed.v_lock = VAR_FIXED;
+        tv_item_lock(&mut fixed, 1, false, false);
+        assert_eq!(fixed.v_lock, VAR_FIXED);
     }
 
     #[test]

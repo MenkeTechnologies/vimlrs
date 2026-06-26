@@ -248,18 +248,6 @@ pub fn _nothing_conv_real_dict_after_start() { unimplemented!("STUB _nothing_con
 /// C: `static inline void _nothing_conv_dict_end(typval_T *const tv, dict_T **const dictp,`
 pub fn _nothing_conv_dict_end() { unimplemented!("STUB _nothing_conv_dict_end — csrc/eval/typval.c:3597") }
 
-/// Port of `tv_item_lock()` — `csrc/eval/typval.c:3777`. STUB: not yet ported.
-/// C: `void tv_item_lock(typval_T *const tv, const int deep, const bool lock, const bool check_refcount)`
-pub fn tv_item_lock() { unimplemented!("STUB tv_item_lock — csrc/eval/typval.c:3777") }
-
-/// Port of `tv_check_lock()` — `csrc/eval/typval.c:3888`. STUB: not yet ported.
-/// C: `bool tv_check_lock(const typval_T *tv, const char *name, size_t name_len)`
-pub fn tv_check_lock() { unimplemented!("STUB tv_check_lock — csrc/eval/typval.c:3888") }
-
-/// Port of `value_check_lock()` — `csrc/eval/typval.c:3917`. STUB: not yet ported.
-/// C: `bool value_check_lock(VarLockStatus lock, const char *name, size_t name_len)`
-pub fn value_check_lock() { unimplemented!("STUB value_check_lock — csrc/eval/typval.c:3917") }
-
 /// Port of `tv_get_lnum()` — `csrc/eval/typval.c:4261`. STUB: not yet ported.
 /// C: `linenr_T tv_get_lnum(const typval_T *const tv)`
 pub fn tv_get_lnum() { unimplemented!("STUB tv_get_lnum — csrc/eval/typval.c:4261") }
