@@ -26,6 +26,8 @@ use crate::ported::eval::funcs::{
     f_reltime, f_reltimestr, f_reltimefloat, f_rand, f_srand, f_strftime, f_strptime, f_sha256,
     f_keys, f_len, f_list2str, f_match, f_matchend, f_matchlist, f_matchstr,
     f_max, f_min, f_nr2char, f_or, f_pow, f_printf, f_range, f_reduce, f_repeat, f_reverse, f_split, f_str2float, f_substitute, f_type, f_values, f_xor,
+    f_getreg, f_getregtype, f_getreginfo, f_setreg, f_reg_recording, f_reg_executing, f_reg_recorded,
+    f_gettext, f_garbagecollect, f_funcref, f_id, f_indexof,
 };
 use crate::ported::eval::fs::{
     f_chdir, f_delete, f_executable, f_exepath, f_filecopy, f_filereadable, f_filewritable,
@@ -430,6 +432,30 @@ pub const VIML_FN_GLOB2REGPAT: u16 = 3243;
 pub const VIML_FN_READDIR: u16 = 3244;
 /// `readblob()`
 pub const VIML_FN_READBLOB: u16 = 3245;
+/// `getreg()`
+pub const VIML_FN_GETREG: u16 = 3246;
+/// `getregtype()`
+pub const VIML_FN_GETREGTYPE: u16 = 3247;
+/// `getreginfo()`
+pub const VIML_FN_GETREGINFO: u16 = 3248;
+/// `setreg()`
+pub const VIML_FN_SETREG: u16 = 3249;
+/// `reg_recording()`
+pub const VIML_FN_REG_RECORDING: u16 = 3250;
+/// `reg_executing()`
+pub const VIML_FN_REG_EXECUTING: u16 = 3251;
+/// `reg_recorded()`
+pub const VIML_FN_REG_RECORDED: u16 = 3252;
+/// `gettext()`
+pub const VIML_FN_GETTEXT: u16 = 3253;
+/// `garbagecollect()`
+pub const VIML_FN_GARBAGECOLLECT: u16 = 3254;
+/// `funcref()`
+pub const VIML_FN_FUNCREF: u16 = 3255;
+/// `id()`
+pub const VIML_FN_ID: u16 = 3256;
+/// `indexof()`
+pub const VIML_FN_INDEXOF: u16 = 3257;
 /// `flattennew()`
 pub const VIML_FN_FLATTENNEW: u16 = 3211;
 /// `sha256()`
@@ -1750,6 +1776,18 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FN_GLOB2REGPAT, |vm, n| call_func(vm, n, f_glob2regpat));
     vm.register_builtin(VIML_FN_READDIR, |vm, n| call_func(vm, n, f_readdir));
     vm.register_builtin(VIML_FN_READBLOB, |vm, n| call_func(vm, n, f_readblob));
+    vm.register_builtin(VIML_FN_GETREG, |vm, n| call_func(vm, n, f_getreg));
+    vm.register_builtin(VIML_FN_GETREGTYPE, |vm, n| call_func(vm, n, f_getregtype));
+    vm.register_builtin(VIML_FN_GETREGINFO, |vm, n| call_func(vm, n, f_getreginfo));
+    vm.register_builtin(VIML_FN_SETREG, |vm, n| call_func(vm, n, f_setreg));
+    vm.register_builtin(VIML_FN_REG_RECORDING, |vm, n| call_func(vm, n, f_reg_recording));
+    vm.register_builtin(VIML_FN_REG_EXECUTING, |vm, n| call_func(vm, n, f_reg_executing));
+    vm.register_builtin(VIML_FN_REG_RECORDED, |vm, n| call_func(vm, n, f_reg_recorded));
+    vm.register_builtin(VIML_FN_GETTEXT, |vm, n| call_func(vm, n, f_gettext));
+    vm.register_builtin(VIML_FN_GARBAGECOLLECT, |vm, n| call_func(vm, n, f_garbagecollect));
+    vm.register_builtin(VIML_FN_FUNCREF, |vm, n| call_func(vm, n, f_funcref));
+    vm.register_builtin(VIML_FN_ID, |vm, n| call_func(vm, n, f_id));
+    vm.register_builtin(VIML_FN_INDEXOF, |vm, n| call_func(vm, n, f_indexof));
     vm.register_builtin(VIML_FN_FLATTENNEW, |vm, n| call_func(vm, n, f_flattennew));
     vm.register_builtin(VIML_FN_SHA256, |vm, n| call_func(vm, n, f_sha256));
     vm.register_builtin(VIML_FN_BLOB2LIST, |vm, n| call_func(vm, n, f_blob2list));
@@ -2875,6 +2913,45 @@ mod tests {
             run("function! Add(a,b)\nreturn a:a+a:b\nendfunction\necho reduce(list2blob([1,2,3]), function('Add'), 0)"),
             "6\n"
         );
+    }
+
+    #[test]
+    fn registers() {
+        // setreg/getreg/getregtype (values verified against `nvim --clean`).
+        assert_eq!(run("call setreg('a','hello')\necho getreg('a')"), "hello\n");
+        assert_eq!(run("call setreg('a','hello')\necho getregtype('a')"), "v\n");
+        assert_eq!(run("call setreg('b',['x','y','z'])\necho getreg('b',1,1)"), "['x', 'y', 'z']\n");
+        assert_eq!(run("call setreg('b',['x','y'])\necho getregtype('b')"), "V\n");
+        // charwise append continues the last line.
+        assert_eq!(
+            run("call setreg('a','hello')\ncall setreg('a',' world','a')\necho getreg('a')"),
+            "hello world\n"
+        );
+        // dict form + getreginfo (unset → {}); bracket access (the `.member`
+        // concat ambiguity means tests use ['key']).
+        assert_eq!(run("echo getreginfo('z')"), "{}\n");
+        assert_eq!(run("call setreg('b',['x','y'])\necho getreginfo('b')['regcontents']"), "['x', 'y']\n");
+        assert_eq!(
+            run("call setreg('e',{'regcontents':['p','q'],'regtype':'V'})\necho getreg('e',1,1)\necho getregtype('e')"),
+            "['p', 'q']\nV\n"
+        );
+        // reg_recording/executing/recorded are empty standalone.
+        assert_eq!(run("echo reg_recording()"), "\n");
+    }
+
+    #[test]
+    fn misc_utilities() {
+        assert_eq!(run("echo gettext('hello')"), "hello\n");
+        // indexof: first item where the expr (v:val/v:key) is true, else -1.
+        assert_eq!(run("echo indexof([1,2,3,4], 'v:val > 2')"), "2\n");
+        assert_eq!(run("echo indexof(['a','bb','ccc'], 'len(v:val) == 2')"), "1\n");
+        assert_eq!(run("echo indexof([1,2,3], 'v:val > 9')"), "-1\n");
+        // id() is non-empty and stable for a container, empty for a scalar.
+        assert_eq!(run("let l=[1,2]\necho id(l) == id(l)"), "1\n");
+        assert_eq!(run("echo id(5)"), "\n");
+        assert_eq!(run("let a=[1]\nlet b=[1]\necho id(a) != id(b)"), "1\n");
+        // garbagecollect() is a no-op that returns nothing.
+        assert_eq!(run("call garbagecollect()\necho 'ok'"), "ok\n");
     }
 
     #[test]

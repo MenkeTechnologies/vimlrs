@@ -15,6 +15,8 @@ pub mod eval_h;
 pub mod eval;
 /// Port of `src/nvim/option.c` (subset: the option table, `&opt`, `:set`).
 pub mod option;
+/// Port of `src/nvim/ops.c` (subset: the yank-register store for `getreg`/`setreg`).
+pub mod ops;
 /// Port of `src/nvim/os/` (subset: `os/time.c`'s `os_hrtime`).
 pub mod os;
 /// Port of `src/nvim/path.c` (subset: the path-component helpers behind

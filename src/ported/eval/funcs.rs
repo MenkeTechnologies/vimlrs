@@ -32,6 +32,13 @@ use crate::ported::eval::typval_defs_h::{
 };
 use crate::ported::message::emsg;
 use crate::ported::option::get_option_value;
+use crate::ported::ops::{
+    format_reg_type, get_reg_contents, get_reg_type, get_yank_type, write_reg_contents_lst,
+    MotionType,
+};
+use crate::ported::eval::vars::{get_vim_var_str, vv::VV_REG};
+use crate::ported::eval::list::FILTER_MAP_EVAL_HOOK;
+use crate::ported::eval::typval::{tv_dict_alloc_ret, tv_list_alloc};
 
 /// Port of `f_len()` from `Src/eval/funcs.c`.
 ///
@@ -1462,3 +1469,254 @@ pub fn f_rand(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.vval = v_number(result as varnumber_T);
 }
 
+
+// ── registers (funcs.c, backed by the ops.c carve-out in `ported::ops`) ──────
+
+/// Port of `getreg_get_regname()` from `Src/eval/funcs.c` — the register name
+/// from `argvars[0]`, or `v:register` when omitted; `0`/empty → `"`.
+fn getreg_get_regname(argvars: &[typval_T]) -> Option<char> {
+    let s = if argvars.is_empty() {
+        get_vim_var_str(VV_REG)
+    } else {
+        tv_get_string_chk(&argvars[0])?
+    };
+    let c = s.chars().next().unwrap_or('\0');
+    Some(if c == '\0' { '"' } else { c })
+}
+
+/// Port of `f_getreg()` from `Src/eval/funcs.c` — a register's contents (String,
+/// or List of lines when the 3rd arg is non-zero).
+pub fn f_getreg(argvars: &[typval_T], rettv: &mut typval_T) {
+    let regname = match getreg_get_regname(argvars) {
+        Some(r) => r,
+        None => return,
+    };
+    let return_list = argvars.len() > 2 && tv_get_number_chk(&argvars[2], None) != 0;
+    let lines = get_reg_contents(regname).unwrap_or_default();
+    if return_list {
+        let l = tv_list_alloc_ret(rettv, 0);
+        for line in lines {
+            tv_list_append_string(&mut l.borrow_mut(), &line);
+        }
+    } else {
+        // c: string form — lines joined by '\n', trailing '\n' if linewise.
+        let mut s = lines.join("\n");
+        if get_reg_type(regname).0 == MotionType::LineWise {
+            s.push('\n');
+        }
+        *rettv = typval_T::from(s);
+    }
+}
+
+/// Port of `f_getregtype()` from `Src/eval/funcs.c` — `v`/`V`/`<C-V>{w}`.
+pub fn f_getregtype(argvars: &[typval_T], rettv: &mut typval_T) {
+    let regname = match getreg_get_regname(argvars) {
+        Some(r) => r,
+        None => return,
+    };
+    let (t, len) = get_reg_type(regname);
+    *rettv = typval_T::from(format_reg_type(t, len));
+}
+
+/// Port of `f_getreginfo()` from `Src/eval/funcs.c` — `{regcontents, regtype,
+/// points_to|isunnamed}`.
+pub fn f_getreginfo(argvars: &[typval_T], rettv: &mut typval_T) {
+    let mut regname = match getreg_get_regname(argvars) {
+        Some(r) => r,
+        None => return,
+    };
+    if regname == '@' {
+        regname = '"';
+    }
+    let d = tv_dict_alloc_ret(rettv);
+    // c: get_reg_contents returns NULL for an unset register → empty dict.
+    let lines = match get_reg_contents(regname) {
+        Some(l) => l,
+        None => return,
+    };
+    let lst = tv_list_alloc(0);
+    for line in lines {
+        tv_list_append_string(&mut lst.borrow_mut(), &line);
+    }
+    let mk = |t, v| typval_T { v_type: t, v_lock: crate::ported::eval::typval_defs_h::VarLockStatus::VAR_UNLOCKED, vval: v };
+    tv_dict_add_tv(&mut d.borrow_mut(), "regcontents", mk(VAR_LIST, v_list(Some(lst))));
+    let (t, len) = get_reg_type(regname);
+    tv_dict_add_tv(&mut d.borrow_mut(), "regtype", typval_T::from(format_reg_type(t, len)));
+    if regname == '"' {
+        tv_dict_add_tv(&mut d.borrow_mut(), "points_to", typval_T::from("\"".to_string()));
+    } else {
+        tv_dict_add_tv(&mut d.borrow_mut(), "isunnamed", mk(VAR_BOOL, v_bool(kBoolVarFalse)));
+    }
+}
+
+/// Port of `f_setreg()` from `Src/eval/funcs.c` — store into a register. Options:
+/// `a`/`A` append, `c`/`v` charwise, `l`/`V` linewise, `b`/`<C-V>` blockwise.
+/// Returns 0 on success.
+pub fn f_setreg(argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(1 as varnumber_T); // FAIL default
+    let strreg = match tv_get_string_chk(&argvars[0]) {
+        Some(s) => s,
+        None => return,
+    };
+    let mut regname = strreg.chars().next().unwrap_or('\0');
+    if regname == '\0' || regname == '@' {
+        regname = '"';
+    }
+
+    // Resolve the contents typval and an optional dict-supplied type.
+    let mut yank_type: Option<MotionType> = None;
+    let contents: typval_T = if argvars[1].v_type == VAR_DICT {
+        if let v_dict(Some(dd)) = &argvars[1].vval {
+            let d = dd.borrow();
+            if let Some(rt) = d.dv_hashtab.get("regtype") {
+                let rt = tv_get_string(rt);
+                if let Some(c) = rt.bytes().next() {
+                    yank_type = get_yank_type(c, 0);
+                }
+            }
+            d.dv_hashtab.get("regcontents").cloned().unwrap_or_default()
+        } else {
+            typval_T::default()
+        }
+    } else {
+        argvars[1].clone()
+    };
+
+    let mut append = false;
+    if argvars.len() > 2 {
+        let opt = tv_get_string(&argvars[2]);
+        for c in opt.bytes() {
+            match c {
+                b'a' | b'A' => append = true,
+                b'u' | b'"' => {}
+                _ => {
+                    if let Some(t) = get_yank_type(c, 0) {
+                        yank_type = Some(t);
+                    }
+                }
+            }
+        }
+    }
+
+    // Build the lines + the default motion type from the value's shape.
+    let (lines, default_type) = match (contents.v_type, &contents.vval) {
+        (VAR_LIST, v_list(Some(l))) => (
+            l.borrow().lv_items.iter().map(|it| tv_get_string(&it.li_tv)).collect::<Vec<_>>(),
+            MotionType::LineWise,
+        ),
+        _ => {
+            let s = tv_get_string(&contents);
+            // A trailing newline makes a string register linewise (Vim).
+            if let Some(stripped) = s.strip_suffix('\n') {
+                (stripped.split('\n').map(str::to_string).collect(), MotionType::LineWise)
+            } else {
+                (s.split('\n').map(str::to_string).collect(), MotionType::CharWise)
+            }
+        }
+    };
+    write_reg_contents_lst(regname, lines, yank_type.unwrap_or(default_type), append);
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+
+/// Port of `f_reg_recording()` from `Src/eval/funcs.c`. RUST-PORT NOTE: the
+/// standalone interpreter records no macros → always "".
+pub fn f_reg_recording(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(String::new());
+}
+
+/// Port of `f_reg_executing()` — no macro playback standalone → "".
+pub fn f_reg_executing(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(String::new());
+}
+
+/// Port of `f_reg_recorded()` — no macro recording standalone → "".
+pub fn f_reg_recorded(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(String::new());
+}
+
+// ── misc pure utilities (funcs.c) ───────────────────────────────────────────
+
+/// Port of `f_gettext()` from `Src/eval/funcs.c`. RUST-PORT NOTE: no message
+/// catalog is loaded, so translation is the identity (`_(s)` → `s`).
+pub fn f_gettext(argvars: &[typval_T], rettv: &mut typval_T) {
+    if tv_check_for_string_arg(argvars, 0) == FAIL {
+        return;
+    }
+    *rettv = typval_T::from(tv_get_string(&argvars[0]));
+}
+
+/// Port of `f_garbagecollect()` from `Src/eval/funcs.c`. RUST-PORT NOTE: values
+/// are `Rc`-managed (no mark-sweep collector) → a no-op.
+pub fn f_garbagecollect(_argvars: &[typval_T], _rettv: &mut typval_T) {}
+
+/// Port of `f_funcref()` from `Src/eval/funcs.c` — like `function()` but binds by
+/// reference; in vimlrs it builds the same Partial as [`f_function`].
+pub fn f_funcref(argvars: &[typval_T], rettv: &mut typval_T) {
+    f_function(argvars, rettv);
+}
+
+/// Port of `f_id()` from `Src/eval/funcs.c` — a unique id string for a container.
+/// RUST-PORT NOTE: the `Rc` pointer address stands in for the C `%p` of the heap
+/// object (unique per object, stable while it lives); scalars have no address →
+/// the empty string.
+pub fn f_id(argvars: &[typval_T], rettv: &mut typval_T) {
+    let addr: usize = match &argvars[0].vval {
+        v_list(Some(l)) => std::rc::Rc::as_ptr(l) as *const () as usize,
+        v_dict(Some(d)) => std::rc::Rc::as_ptr(d) as *const () as usize,
+        v_blob(Some(b)) => std::rc::Rc::as_ptr(b) as *const () as usize,
+        v_partial(Some(p)) => std::rc::Rc::as_ptr(p) as *const () as usize,
+        _ => 0,
+    };
+    *rettv = typval_T::from(if addr == 0 { String::new() } else { format!("{addr:#018x}") });
+}
+
+/// Port of `f_indexof()` from `Src/eval/funcs.c` — the index of the first
+/// List/Blob item for which `{expr}` (string or funcref, `v:key`/`v:val`) is
+/// true, or -1. An optional `{startidx:n}` dict starts the scan later.
+pub fn f_indexof(argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(-1 as varnumber_T);
+    let startidx = match argvars.get(2) {
+        Some(d) if d.v_type == VAR_DICT => match &d.vval {
+            v_dict(Some(dd)) => dd
+                .borrow()
+                .dv_hashtab
+                .get("startidx")
+                .map(tv_get_number)
+                .unwrap_or(0),
+            _ => 0,
+        },
+        _ => 0,
+    };
+    let expr = &argvars[1];
+    let test = |idx: i64, item: &typval_T| -> bool {
+        let key = typval_T::from(idx);
+        FILTER_MAP_EVAL_HOOK
+            .with(|h| *h.borrow())
+            .and_then(|f| f(expr, &key, item))
+            .map(|r| tv_get_number(&r) != 0)
+            .unwrap_or(false)
+    };
+    match (argvars[0].v_type, &argvars[0].vval) {
+        (VAR_LIST, v_list(Some(l))) => {
+            let items: Vec<typval_T> = l.borrow().lv_items.iter().map(|it| it.li_tv.clone()).collect();
+            let start = if startidx < 0 { (items.len() as i64 + startidx).max(0) } else { startidx };
+            for (i, item) in items.iter().enumerate().skip(start as usize) {
+                if test(i as i64, item) {
+                    *rettv = typval_T::from(i as varnumber_T);
+                    return;
+                }
+            }
+        }
+        (VAR_BLOB, v_blob(Some(b))) => {
+            let bytes = b.borrow().bv_ga.clone();
+            let start = if startidx < 0 { (bytes.len() as i64 + startidx).max(0) } else { startidx };
+            for (i, byte) in bytes.iter().enumerate().skip(start as usize) {
+                if test(i as i64, &typval_T::from(*byte as varnumber_T)) {
+                    *rettv = typval_T::from(i as varnumber_T);
+                    return;
+                }
+            }
+        }
+        _ => {}
+    }
+}
