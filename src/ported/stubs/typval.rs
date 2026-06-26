@@ -77,26 +77,6 @@ pub fn tv_list_find_index() { unimplemented!("STUB tv_list_find_index — csrc/e
 /// C: `int tv_list_idx_of_item(const list_T *const l, const listitem_T *const item)`
 pub fn tv_list_idx_of_item() { unimplemented!("STUB tv_list_idx_of_item — csrc/eval/typval.c:1737") }
 
-/// Port of `tv_dict_watcher_free()` — `csrc/eval/typval.c:1759`. STUB: not yet ported.
-/// C: `static void tv_dict_watcher_free(DictWatcher *watcher)`
-pub fn tv_dict_watcher_free() { unimplemented!("STUB tv_dict_watcher_free — csrc/eval/typval.c:1759") }
-
-/// Port of `tv_dict_watcher_add()` — `csrc/eval/typval.c:1773`. STUB: not yet ported.
-/// C: `void tv_dict_watcher_add(dict_T *const dict, const char *const key_pattern,`
-pub fn tv_dict_watcher_add() { unimplemented!("STUB tv_dict_watcher_add — csrc/eval/typval.c:1773") }
-
-/// Port of `tv_dict_watcher_remove()` — `csrc/eval/typval.c:1922`. STUB: not yet ported.
-/// C: `bool tv_dict_watcher_remove(dict_T *const dict, const char *const key_pattern,`
-pub fn tv_dict_watcher_remove() { unimplemented!("STUB tv_dict_watcher_remove — csrc/eval/typval.c:1922") }
-
-/// Port of `tv_dict_watcher_matches()` — `csrc/eval/typval.c:1966`. STUB: not yet ported.
-/// C: `static bool tv_dict_watcher_matches(DictWatcher *watcher, const char *const key)`
-pub fn tv_dict_watcher_matches() { unimplemented!("STUB tv_dict_watcher_matches — csrc/eval/typval.c:1966") }
-
-/// Port of `tv_dict_watcher_notify()` — `csrc/eval/typval.c:1985`. STUB: not yet ported.
-/// C: `void tv_dict_watcher_notify(dict_T *const dict, const char *const key, typval_T *const newtv,`
-pub fn tv_dict_watcher_notify() { unimplemented!("STUB tv_dict_watcher_notify — csrc/eval/typval.c:1985") }
-
 /// Port of `tv_dict_item_alloc_len()` — `csrc/eval/typval.c:2059`. STUB: not yet ported.
 /// C: `dictitem_T *tv_dict_item_alloc_len(const char *const key, const size_t key_len)`
 pub fn tv_dict_item_alloc_len() { unimplemented!("STUB tv_dict_item_alloc_len — csrc/eval/typval.c:2059") }

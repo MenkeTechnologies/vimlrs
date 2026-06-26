@@ -16,8 +16,9 @@ use crate::ported::eval::typval::{
 };
 use crate::ported::eval_h::{FAIL, OK};
 use crate::ported::eval::typval::{
-    tv_blob_get, tv_check_for_number_arg, tv_check_for_string_arg, tv_get_number, tv_get_string_buf,
-    CALL_FUNC_HOOK,
+    callback_from_typval, tv_blob_get, tv_check_for_number_arg, tv_check_for_string_arg,
+    tv_dict_watcher_add, tv_dict_watcher_remove, tv_get_number, tv_get_string_buf, tv_get_string_chk,
+    Callback, CALL_FUNC_HOOK,
 };
 use crate::ported::os::env::os_get_pid;
 use crate::ported::os::time::{os_hrtime, os_localtime_r, os_strptime};
@@ -1149,6 +1150,63 @@ pub fn f_reduce(argvars: &[typval_T], rettv: &mut typval_T) {
         VAR_LIST => reduce_list(argvars, &argvars[1], rettv),
         VAR_STRING => reduce_string(argvars, &argvars[1], rettv),
         _ => reduce_blob(argvars, &argvars[1], rettv),
+    }
+}
+
+/// Port of `f_dictwatcheradd()` from `Src/eval/funcs.c`.
+///
+/// "dictwatcheradd({dict}, {pattern}, {callback})" — register a callback fired
+/// when a key matching `{pattern}` changes.
+pub fn f_dictwatcheradd(argvars: &[typval_T], _rettv: &mut typval_T) {
+    // c: check_secure() omitted.
+    if argvars[0].v_type != VAR_DICT {
+        emsg("E475: Invalid argument: dict");
+        return;
+    }
+    let d = match &argvars[0].vval {
+        v_dict(Some(d)) => d.clone(),
+        _ => return, // c: NULL dict → readonly error
+    };
+    if argvars[1].v_type != VAR_STRING && argvars[1].v_type != VAR_NUMBER {
+        emsg("E475: Invalid argument: key");
+        return;
+    }
+    let key_pattern = match tv_get_string_chk(&argvars[1]) {
+        Some(k) => k,
+        None => return,
+    };
+    let mut callback = Callback::None;
+    if !callback_from_typval(&mut callback, &argvars[2]) {
+        emsg("E475: Invalid argument: funcref");
+        return;
+    }
+    tv_dict_watcher_add(&d, &key_pattern, callback);
+}
+
+/// Port of `f_dictwatcherdel()` from `Src/eval/funcs.c`.
+pub fn f_dictwatcherdel(argvars: &[typval_T], _rettv: &mut typval_T) {
+    if argvars[0].v_type != VAR_DICT {
+        emsg("E475: Invalid argument: dict");
+        return;
+    }
+    if argvars[2].v_type != VAR_FUNC && argvars[2].v_type != VAR_STRING {
+        emsg("E475: Invalid argument: funcref");
+        return;
+    }
+    let key_pattern = match tv_get_string_chk(&argvars[1]) {
+        Some(k) => k,
+        None => return,
+    };
+    let mut callback = Callback::None;
+    if !callback_from_typval(&mut callback, &argvars[2]) {
+        return;
+    }
+    let d = match &argvars[0].vval {
+        v_dict(Some(d)) => d.clone(),
+        _ => return,
+    };
+    if !tv_dict_watcher_remove(&d, &key_pattern, &callback) {
+        emsg("Couldn't find a watcher matching key and callback");
     }
 }
 

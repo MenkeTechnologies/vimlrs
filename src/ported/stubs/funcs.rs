@@ -113,12 +113,6 @@ pub fn f_cursor(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rett
 /// Port of `f_debugbreak()` — `csrc/eval/funcs.c:1041`. STUB: not yet ported.
 pub fn f_debugbreak(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_debugbreak — csrc/eval/funcs.c:1041") }
 
-/// Port of `f_dictwatcheradd()` — `csrc/eval/funcs.c:1080`. STUB: not yet ported.
-pub fn f_dictwatcheradd(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_dictwatcheradd — csrc/eval/funcs.c:1080") }
-
-/// Port of `f_dictwatcherdel()` — `csrc/eval/funcs.c:1118`. STUB: not yet ported.
-pub fn f_dictwatcherdel(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_dictwatcherdel — csrc/eval/funcs.c:1118") }
-
 /// Port of `f_did_filetype()` — `csrc/eval/funcs.c:1153`. STUB: not yet ported.
 pub fn f_did_filetype(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_did_filetype — csrc/eval/funcs.c:1153") }
 

@@ -22,7 +22,7 @@ use crate::ported::eval::funcs::{
     float_op_wrapper,
     f_abs, f_add, f_and, f_char2nr, f_copy, f_empty, f_exists, f_float2nr, f_function, f_get, f_has, f_has_key, f_index, f_insert, f_invert,
     f_atan2, f_deepcopy, f_escape, f_flatten, f_flattennew, f_fmod, f_items,
-    f_isinf, f_isnan, f_getpid, f_localtime, f_soundfold, f_json_decode, f_json_encode, f_matchstrpos, f_getenv, f_setenv, f_shellescape,
+    f_dictwatcheradd, f_dictwatcherdel, f_isinf, f_isnan, f_getpid, f_localtime, f_soundfold, f_json_decode, f_json_encode, f_matchstrpos, f_getenv, f_setenv, f_shellescape,
     f_reltime, f_reltimestr, f_reltimefloat, f_rand, f_srand, f_strftime, f_strptime, f_sha256,
     f_keys, f_len, f_list2str, f_match, f_matchend, f_matchlist, f_matchstr,
     f_max, f_min, f_nr2char, f_or, f_pow, f_printf, f_range, f_reduce, f_repeat, f_reverse, f_split, f_str2float, f_substitute, f_type, f_values, f_xor,
@@ -379,6 +379,10 @@ pub const VIML_FN_LIST2BLOB: u16 = 3214;
 pub const VIML_FN_MAPNEW: u16 = 3215;
 /// `foreach()`
 pub const VIML_FN_FOREACH: u16 = 3216;
+/// `dictwatcheradd()`
+pub const VIML_FN_DICTWATCHERADD: u16 = 3217;
+/// `dictwatcherdel()`
+pub const VIML_FN_DICTWATCHERDEL: u16 = 3218;
 /// Debug line marker: pop a line number → notify the DAP `check_line` hook
 /// (emitted before each statement only in debug-compiled chunks).
 pub const VIML_SET_LINENO: u16 = 3070;
@@ -1466,6 +1470,8 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FN_FILTER, |vm, n| call_func(vm, n, f_filter));
     vm.register_builtin(VIML_FN_MAPNEW, |vm, n| call_func(vm, n, f_mapnew));
     vm.register_builtin(VIML_FN_FOREACH, |vm, n| call_func(vm, n, f_foreach));
+    vm.register_builtin(VIML_FN_DICTWATCHERADD, |vm, n| call_func(vm, n, f_dictwatcheradd));
+    vm.register_builtin(VIML_FN_DICTWATCHERDEL, |vm, n| call_func(vm, n, f_dictwatcherdel));
     // Let the value layer's sort()/uniq() call user comparator functions.
     SORT_FUNCREF_HOOK.with(|h| *h.borrow_mut() = Some(sort_compare_funcref));
     vm.register_builtin(VIML_FN_SORT, |vm, n| call_func(vm, n, f_sort));
@@ -2614,6 +2620,20 @@ mod tests {
         assert_eq!(run("let e={'a':1}\ncall extend(e,{'a':99})\necho e"), "{'a': 99}\n");
         // extendnew returns a new value, leaving the source intact.
         assert_eq!(run("let n=[1,2]\nlet p=extendnew(n,[3])\necho n\necho p"), "[1, 2]\n[1, 2, 3]\n");
+    }
+
+    #[test]
+    fn dictwatcher() {
+        // A watcher fires only on a pattern-matched key change (here, remove()).
+        assert_eq!(
+            run("let g:log=[]\nfunction! Cb(d,k,ch)\ncall add(g:log,a:k)\nendfunction\nlet d={'a':1,'b':2}\ncall dictwatcheradd(d,'a',function('Cb'))\ncall remove(d,'a')\ncall remove(d,'b')\necho g:log"),
+            "['a']\n"
+        );
+        // dictwatcherdel unregisters; a trailing '*' is a prefix match.
+        assert_eq!(
+            run("let g:log=[]\nfunction! Cb(d,k,ch)\ncall add(g:log,a:k)\nendfunction\nlet d={'foo':1}\ncall dictwatcheradd(d,'f*',function('Cb'))\ncall dictwatcherdel(d,'f*',function('Cb'))\ncall remove(d,'foo')\necho g:log"),
+            "[]\n"
+        );
     }
 
     #[test]

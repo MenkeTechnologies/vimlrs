@@ -374,10 +374,6 @@ pub fn f_system(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rett
 /// Port of `f_systemlist()` — `csrc/eval.c:4818`. STUB: not yet ported.
 pub fn f_systemlist(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_systemlist — csrc/eval.c:4818") }
 
-/// Port of `callback_from_typval()` — `csrc/eval.c:4824`. STUB: not yet ported.
-/// C: `bool callback_from_typval(Callback *const callback, const typval_T *const arg)`
-pub fn callback_from_typval() { unimplemented!("STUB callback_from_typval — csrc/eval.c:4824") }
-
 /// Port of `get_callback_depth()` — `csrc/eval.c:4882`. STUB: not yet ported.
 /// C: `int get_callback_depth(void)`
 pub fn get_callback_depth() { unimplemented!("STUB get_callback_depth — csrc/eval.c:4882") }

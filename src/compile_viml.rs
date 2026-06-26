@@ -1550,6 +1550,8 @@ fn builtin_fn_id(name: &str) -> Option<u16> {
         "filter" => h::VIML_FN_FILTER,
         "mapnew" => h::VIML_FN_MAPNEW,
         "foreach" => h::VIML_FN_FOREACH,
+        "dictwatcheradd" => h::VIML_FN_DICTWATCHERADD,
+        "dictwatcherdel" => h::VIML_FN_DICTWATCHERDEL,
         "sort" => h::VIML_FN_SORT,
         "call" => h::VIML_FN_CALL,
         "function" => h::VIML_FN_FUNCTION,

@@ -1773,7 +1773,11 @@ pub fn tv_dict_remove(argvars: &[typval_T], rettv: &mut typval_T, arg_errmsg: &s
     // c: di = tv_dict_find(d, key); NULL → E716; else remove + return.
     let removed = d.borrow_mut().dv_hashtab.shift_remove(&key);
     match removed {
-        Some(v) => *rettv = v,
+        Some(v) => {
+            // c: tv_dict_watcher_notify(d, key, NULL, &oldtv) on removal.
+            tv_dict_watcher_notify(&d, &key, None, Some(&v));
+            *rettv = v;
+        }
         None => emsg(&format!("E716: Key not present in Dictionary: \"{key}\"")),
     }
 }
@@ -2330,6 +2334,128 @@ pub fn tv_dict_get_callback(d: &dict_T, key: &str, result: &mut Callback) -> boo
         _ => {
             emsg("E6000: Argument is not a function or function name");
             false
+        }
+    }
+}
+
+/// Port of `callback_from_typval()` from `Src/eval/eval.c` — read a `Callback`
+/// from a typval (a Funcref/name; `v:none`/`v:null` → None; else fail).
+pub fn callback_from_typval(callback: &mut Callback, tv: &typval_T) -> bool {
+    match tv.v_type {
+        VAR_FUNC => {
+            *callback = Callback::Funcref(tv_get_string(tv));
+            true
+        }
+        VAR_STRING => {
+            let s = tv_get_string(tv);
+            *callback = if s.is_empty() { Callback::None } else { Callback::Funcref(s) };
+            true
+        }
+        VAR_SPECIAL => {
+            *callback = Callback::None;
+            true
+        }
+        _ => false,
+    }
+}
+
+// ── Dict watchers (Src/eval/typval.c) ──
+//
+// The C `DictWatcher` lives in a per-dict QUEUE (`dict->watchers`); here it is a
+// `Vec<DictWatcher>` on `dict_T.dv_watchers`. `busy`/`needs_free` (re-entrancy
+// bookkeeping) are unneeded: `tv_dict_watcher_notify` copies the matching
+// callbacks out before invoking them, so the dict is never borrowed during a call.
+
+/// Port of `DictWatcher` from `Src/eval/typval_defs.h` (funcref-only Callback).
+#[derive(Clone, Debug, Default)]
+pub struct DictWatcher {
+    pub callback: Callback,
+    pub key_pattern: String,
+}
+
+/// Port of `tv_dict_watcher_add()` from `Src/eval/typval.c`.
+pub fn tv_dict_watcher_add(dict: &Rc<RefCell<dict_T>>, key_pattern: &str, callback: Callback) {
+    dict.borrow_mut()
+        .dv_watchers
+        .push(DictWatcher { callback, key_pattern: key_pattern.to_string() });
+}
+
+/// Port of `tv_dict_watcher_matches()` from `Src/eval/typval.c` — a trailing `*`
+/// is a prefix match, else an exact match.
+fn tv_dict_watcher_matches(watcher: &DictWatcher, key: &str) -> bool {
+    let p = &watcher.key_pattern;
+    if let Some(prefix) = p.strip_suffix('*') {
+        key.starts_with(prefix)
+    } else {
+        key == p
+    }
+}
+
+/// Port of `tv_dict_watcher_free()` from `Src/eval/typval.c` — drop the watcher
+/// (its `Callback`/pattern are freed by Rust's drop).
+pub fn tv_dict_watcher_free(_watcher: DictWatcher) {}
+
+/// Port of `tv_dict_watcher_remove()` from `Src/eval/typval.c` — remove the
+/// watcher whose callback + key pattern match; `false` if none found.
+pub fn tv_dict_watcher_remove(
+    dict: &Rc<RefCell<dict_T>>,
+    key_pattern: &str,
+    callback: &Callback,
+) -> bool {
+    let mut d = dict.borrow_mut();
+    if let Some(i) = d
+        .dv_watchers
+        .iter()
+        .position(|w| tv_callback_equal(&w.callback, callback) && w.key_pattern == key_pattern)
+    {
+        let w = d.dv_watchers.remove(i);
+        tv_dict_watcher_free(w);
+        true
+    } else {
+        false
+    }
+}
+
+/// Port of `tv_dict_watcher_notify()` from `Src/eval/typval.c` — call every
+/// watcher whose pattern matches `key` with `(dict, key, {new, old})`.
+pub fn tv_dict_watcher_notify(
+    dict: &Rc<RefCell<dict_T>>,
+    key: &str,
+    newtv: Option<&typval_T>,
+    oldtv: Option<&typval_T>,
+) {
+    // Copy matching callbacks out so the dict isn't borrowed during the calls
+    // (the C uses watcher->busy for the same re-entrancy safety).
+    let matching: Vec<Callback> = dict
+        .borrow()
+        .dv_watchers
+        .iter()
+        .filter(|w| tv_dict_watcher_matches(w, key))
+        .map(|w| w.callback.clone())
+        .collect();
+    if matching.is_empty() {
+        return;
+    }
+    // c: argv[2] is a dict {"new": newtv, "old": oldtv} (each only if present).
+    let change = tv_dict_alloc();
+    if let Some(n) = newtv {
+        tv_dict_add_tv(&mut change.borrow_mut(), "new", n.clone());
+    }
+    if let Some(o) = oldtv {
+        if o.v_type != VAR_UNKNOWN {
+            tv_dict_add_tv(&mut change.borrow_mut(), "old", o.clone());
+        }
+    }
+    let mk = |t, v| typval_T { v_type: t, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v };
+    let dict_tv = mk(VAR_DICT, v_dict(Some(dict.clone())));
+    let key_tv = mk(VAR_STRING, v_string(key.to_string()));
+    let change_tv = mk(VAR_DICT, v_dict(Some(change)));
+    let hook = CALL_FUNC_HOOK.with(|h| *h.borrow());
+    for cb in matching {
+        if let Callback::Funcref(name) = cb {
+            if let Some(f) = hook {
+                let _ = f(&name, &[dict_tv.clone(), key_tv.clone(), change_tv.clone()]);
+            }
         }
     }
 }

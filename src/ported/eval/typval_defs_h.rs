@@ -215,6 +215,8 @@ pub struct dict_T {
     pub dv_refcount: i32,
     /// `VarLockStatus dv_lock` — whole-dict lock. (c:253)
     pub dv_lock: VarLockStatus,
+    /// `QUEUE watchers` — registered `dictwatcheradd()` watchers. (c:259)
+    pub dv_watchers: Vec<crate::ported::eval::typval::DictWatcher>,
 }
 
 /// `struct blobvar_S { garray_T bv_ga; int bv_refcount; VarLockStatus bv_lock;
