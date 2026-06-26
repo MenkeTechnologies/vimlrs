@@ -1,10 +1,6 @@
 //! STUB surface for `csrc/eval/vars.c` — generated, do not edit.
 #![allow(dead_code, unused_variables, non_snake_case, clippy::all)]
 
-/// Port of `evalvars_init()` — `csrc/eval/vars.c:261`. STUB: not yet ported.
-/// C: `void evalvars_init(void)`
-pub fn evalvars_init() { unimplemented!("STUB evalvars_init — csrc/eval/vars.c:261") }
-
 /// Port of `evalvars_clear()` — `csrc/eval/vars.c:361`. STUB: not yet ported.
 /// C: `void evalvars_clear(void)`
 pub fn evalvars_clear() { unimplemented!("STUB evalvars_clear — csrc/eval/vars.c:361") }
@@ -173,38 +169,6 @@ pub fn get_globvar_ht() { unimplemented!("STUB get_globvar_ht — csrc/eval/vars
 /// C: `dict_T *get_vimvar_dict(void)`
 pub fn get_vimvar_dict() { unimplemented!("STUB get_vimvar_dict — csrc/eval/vars.c:1868") }
 
-/// Port of `set_vim_var_tv()` — `csrc/eval/vars.c:1878`. STUB: not yet ported.
-/// C: `void set_vim_var_tv(const VimVarIndex idx, typval_T *const tv)`
-pub fn set_vim_var_tv() { unimplemented!("STUB set_vim_var_tv — csrc/eval/vars.c:1878") }
-
-/// Port of `get_vim_var_name()` — `csrc/eval/vars.c:1885`. STUB: not yet ported.
-/// C: `char *get_vim_var_name(const VimVarIndex idx)`
-pub fn get_vim_var_name() { unimplemented!("STUB get_vim_var_name — csrc/eval/vars.c:1885") }
-
-/// Port of `get_vim_var_tv()` — `csrc/eval/vars.c:1892`. STUB: not yet ported.
-/// C: `typval_T *get_vim_var_tv(const VimVarIndex idx)`
-pub fn get_vim_var_tv() { unimplemented!("STUB get_vim_var_tv — csrc/eval/vars.c:1892") }
-
-/// Port of `get_vim_var_nr()` — `csrc/eval/vars.c:1898`. STUB: not yet ported.
-/// C: `varnumber_T get_vim_var_nr(const VimVarIndex idx) FUNC_ATTR_PURE`
-pub fn get_vim_var_nr() { unimplemented!("STUB get_vim_var_nr — csrc/eval/vars.c:1898") }
-
-/// Port of `get_vim_var_list()` — `csrc/eval/vars.c:1906`. STUB: not yet ported.
-/// C: `list_T *get_vim_var_list(const VimVarIndex idx) FUNC_ATTR_PURE`
-pub fn get_vim_var_list() { unimplemented!("STUB get_vim_var_list — csrc/eval/vars.c:1906") }
-
-/// Port of `get_vim_var_dict()` — `csrc/eval/vars.c:1914`. STUB: not yet ported.
-/// C: `dict_T *get_vim_var_dict(const VimVarIndex idx) FUNC_ATTR_PURE`
-pub fn get_vim_var_dict() { unimplemented!("STUB get_vim_var_dict — csrc/eval/vars.c:1914") }
-
-/// Port of `get_vim_var_str()` — `csrc/eval/vars.c:1923`. STUB: not yet ported.
-/// C: `char *get_vim_var_str(const VimVarIndex idx)`
-pub fn get_vim_var_str() { unimplemented!("STUB get_vim_var_str — csrc/eval/vars.c:1923") }
-
-/// Port of `get_vim_var_partial()` — `csrc/eval/vars.c:1931`. STUB: not yet ported.
-/// C: `partial_T *get_vim_var_partial(const VimVarIndex idx) FUNC_ATTR_PURE`
-pub fn get_vim_var_partial() { unimplemented!("STUB get_vim_var_partial — csrc/eval/vars.c:1931") }
-
 /// Port of `cat_prefix_varname()` — `csrc/eval/vars.c:1945`. STUB: not yet ported.
 /// C: `char *cat_prefix_varname(int prefix, const char *name)`
 pub fn cat_prefix_varname() { unimplemented!("STUB cat_prefix_varname — csrc/eval/vars.c:1945") }
@@ -212,42 +176,6 @@ pub fn cat_prefix_varname() { unimplemented!("STUB cat_prefix_varname — csrc/e
 /// Port of `get_user_var_name()` — `csrc/eval/vars.c:1964`. STUB: not yet ported.
 /// C: `char *get_user_var_name(expand_T *xp, int idx)`
 pub fn get_user_var_name() { unimplemented!("STUB get_user_var_name — csrc/eval/vars.c:1964") }
-
-/// Port of `set_vim_var_type()` — `csrc/eval/vars.c:2050`. STUB: not yet ported.
-/// C: `void set_vim_var_type(const VimVarIndex idx, const VarType type)`
-pub fn set_vim_var_type() { unimplemented!("STUB set_vim_var_type — csrc/eval/vars.c:2050") }
-
-/// Port of `set_vim_var_nr()` — `csrc/eval/vars.c:2061`. STUB: not yet ported.
-/// C: `void set_vim_var_nr(const VimVarIndex idx, const varnumber_T val)`
-pub fn set_vim_var_nr() { unimplemented!("STUB set_vim_var_nr — csrc/eval/vars.c:2061") }
-
-/// Port of `set_vim_var_bool()` — `csrc/eval/vars.c:2072`. STUB: not yet ported.
-/// C: `void set_vim_var_bool(const VimVarIndex idx, const BoolVarValue val)`
-pub fn set_vim_var_bool() { unimplemented!("STUB set_vim_var_bool — csrc/eval/vars.c:2072") }
-
-/// Port of `set_vim_var_special()` — `csrc/eval/vars.c:2084`. STUB: not yet ported.
-/// C: `void set_vim_var_special(const VimVarIndex idx, const SpecialVarValue val)`
-pub fn set_vim_var_special() { unimplemented!("STUB set_vim_var_special — csrc/eval/vars.c:2084") }
-
-/// Port of `set_vim_var_char()` — `csrc/eval/vars.c:2093`. STUB: not yet ported.
-/// C: `void set_vim_var_char(int c)`
-pub fn set_vim_var_char() { unimplemented!("STUB set_vim_var_char — csrc/eval/vars.c:2093") }
-
-/// Port of `set_vim_var_string()` — `csrc/eval/vars.c:2107`. STUB: not yet ported.
-/// C: `void set_vim_var_string(const VimVarIndex idx, const char *const val, const ptrdiff_t len)`
-pub fn set_vim_var_string() { unimplemented!("STUB set_vim_var_string — csrc/eval/vars.c:2107") }
-
-/// Port of `set_vim_var_list()` — `csrc/eval/vars.c:2125`. STUB: not yet ported.
-/// C: `void set_vim_var_list(const VimVarIndex idx, list_T *const val)`
-pub fn set_vim_var_list() { unimplemented!("STUB set_vim_var_list — csrc/eval/vars.c:2125") }
-
-/// Port of `set_vim_var_dict()` — `csrc/eval/vars.c:2141`. STUB: not yet ported.
-/// C: `void set_vim_var_dict(const VimVarIndex idx, dict_T *const val)`
-pub fn set_vim_var_dict() { unimplemented!("STUB set_vim_var_dict — csrc/eval/vars.c:2141") }
-
-/// Port of `set_vim_var_partial()` — `csrc/eval/vars.c:2161`. STUB: not yet ported.
-/// C: `void set_vim_var_partial(const VimVarIndex idx, partial_T *val)`
-pub fn set_vim_var_partial() { unimplemented!("STUB set_vim_var_partial — csrc/eval/vars.c:2161") }
 
 /// Port of `set_reg_var()` — `csrc/eval/vars.c:2168`. STUB: not yet ported.
 /// C: `void set_reg_var(int c)`

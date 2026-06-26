@@ -1463,6 +1463,8 @@ pub fn install(vm: &mut VM) {
     if std::env::var_os("VIMLRS_NO_JIT").is_none() {
         vm.enable_tracing_jit();
     }
+    // Seed the v: variable store (vimvars[]) before any script runs.
+    crate::ported::eval::vars::evalvars_init();
     vm.register_builtin(VIML_GETVAR, b_getvar);
     vm.register_builtin(VIML_SETVAR, b_setvar);
     vm.register_builtin(VIML_SETENV, b_setenv);
@@ -2737,6 +2739,26 @@ mod tests {
             run("function! Add(a,b)\nreturn a:a+a:b\nendfunction\necho reduce(list2blob([1,2,3]), function('Add'), 0)"),
             "6\n"
         );
+    }
+
+    #[test]
+    fn vim_vars() {
+        // v: variable store (vimvars[]). Expected values verified against nvim.
+        assert_eq!(run("echo v:version"), "801\n");
+        assert_eq!(
+            run("echo v:t_number v:t_string v:t_func v:t_list v:t_dict v:t_float v:t_bool v:t_blob"),
+            "0 1 2 3 4 5 6 10\n"
+        );
+        assert_eq!(run("echo v:numbermax v:numbermin v:numbersize"), "9223372036854775807 -9223372036854775808 64\n");
+        assert_eq!(run("echo v:maxcol"), "2147483647\n");
+        assert_eq!(run("echo v:true v:false v:null"), "v:true v:false v:null\n");
+        assert_eq!(run("echo v:searchforward v:hlsearch v:count1"), "1 1 1\n");
+        assert_eq!(run("echo type(v:msgpack_types)"), "4\n");
+        assert_eq!(run("echo type(v:errors)"), "3\n");
+        assert_eq!(run("echo v:register"), "\"\n");
+        // Mutable v: var round-trips; read-only v: var declines assignment.
+        assert_eq!(run("let v:errmsg = 'boom'\necho v:errmsg"), "boom\n");
+        assert_eq!(run("echo v:errmsg"), "\n");
     }
 
     #[test]

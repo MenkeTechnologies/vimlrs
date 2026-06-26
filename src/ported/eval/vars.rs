@@ -7,11 +7,14 @@
 #![allow(non_snake_case, non_upper_case_globals)]
 
 use std::cell::RefCell;
+use std::rc::Rc;
 
-use crate::ported::eval::typval::{tv_dict_add_tv, tv_dict_find};
+use crate::ported::eval::typval::{tv_dict_add_tv, tv_dict_alloc, tv_dict_find, tv_get_string, tv_list_alloc};
 use crate::ported::eval::typval_defs_h::{
-    dict_T, typval_T, typval_vval_union::*, BoolVarValue::*, SpecialVarValue::*, VarLockStatus,
-    VarType::*,
+    dict_T, list_T, partial_T, typval_T, typval_vval_union::*, varnumber_T, BoolVarValue,
+    BoolVarValue::*, SpecialVarValue, SpecialVarValue::*, VarLockStatus, VarType, VarType::*,
+    VARNUMBER_MAX, VARNUMBER_MIN, VAR_TYPE_BLOB, VAR_TYPE_BOOL, VAR_TYPE_DICT, VAR_TYPE_FLOAT,
+    VAR_TYPE_FUNC, VAR_TYPE_LIST, VAR_TYPE_NUMBER, VAR_TYPE_STRING,
 };
 
 /// Reduced `funccall_T` (`typval_defs.h:299`) — one function-call activation's
@@ -69,6 +72,15 @@ pub fn set_var(name: &str, _name_len: usize, tv: typval_T, _copy: bool) {
     }
     if let Some(key) = name.strip_prefix("t:") {
         return tabpage_vars.with(|d| tv_dict_add_tv(&mut d.borrow_mut(), key, tv));
+    }
+    if let Some(key) = name.strip_prefix("v:") {
+        // c: v: variables — set the vimvars slot; RO entries decline (E46 in C).
+        if let Some(idx) = VIMVARS_DEF.iter().position(|&(n, _, _)| n == key) {
+            if VIMVARS_DEF[idx].2 & (VV_RO | VV_RO_SBX) == 0 {
+                set_vim_var_tv(idx, tv);
+            }
+        }
+        return;
     }
     if name.strip_prefix("a:").is_some() {
         // c: a: variables are read-only (E46) — silently ignore in the subset.
@@ -147,6 +159,18 @@ pub fn eval_variable(name: &str) -> Option<typval_T> {
         return funccal_stack
             .with(|s| s.borrow().last().and_then(|f| tv_dict_find(&f.fc_l_vars, key).cloned()));
     }
+    // c: v: variables live in `vimvardict` — consult the vimvars store. Returns
+    // None for VAR_UNKNOWN entries (v:val/v:key, which the bridge supplies
+    // dynamically) and for unknown v: names.
+    if let Some(key) = name.strip_prefix("v:") {
+        if let Some(idx) = VIMVARS_DEF.iter().position(|&(n, _, _)| n == key) {
+            let tv = get_vim_var_tv(idx);
+            if tv.v_type != VAR_UNKNOWN {
+                return Some(tv);
+            }
+        }
+        return None;
+    }
     // Bare name: `l:` inside a function (locals only — no fallthrough to g:),
     // else the global scope.
     funccal_stack.with(|s| {
@@ -157,3 +181,409 @@ pub fn eval_variable(name: &str) -> Option<typval_T> {
         }
     })
 }
+
+// ── v: variables (`vimvardict` / vimvars[] table) ───────────────────────────
+//
+// Port of the `v:` variable subsystem from `eval/vars.c` (the `vimvars[]` table,
+// the `VimVarIndex` defines from `eval_defs.h`, and the get/set accessors).
+//
+// RUST-PORT NOTE: C holds the values inline in `vimvars[idx].vv_tv` and the
+// accessors return `&vimvars[idx].vv_tv` (a mutable pointer). A `thread_local`
+// `Vec<VimVar>` stands in for the file-static array; `get_vim_var_tv` returns a
+// clone and the setters write the slot, which reproduces the observable
+// behavior. `VimVarIndex` is a `usize` alias with `VV_*` index constants (the C
+// enum) rather than a Rust enum, so the table can be indexed directly.
+
+/// `#define VV_COMPAT 1` — compatible, also usable without `v:`. (vars.c:81)
+const VV_COMPAT: u8 = 1;
+/// `#define VV_RO 2` — read-only. (vars.c:82)
+const VV_RO: u8 = 2;
+/// `#define VV_RO_SBX 4` — read-only in the sandbox. (vars.c:83)
+const VV_RO_SBX: u8 = 4;
+
+/// `typedef enum { VV_COUNT, … } VimVarIndex;` (eval_defs.h) — the index into
+/// `vimvars[]`. Modeled as a `usize` alias; the `VV_*` constants below give the
+/// enum values in declaration order.
+pub type VimVarIndex = usize;
+
+/// `VV_*` indices into [`vimvars`], in `eval_defs.h` declaration order.
+pub mod vv {
+    use super::VimVarIndex;
+    macro_rules! vv_indices {
+        ($($name:ident),+ $(,)?) => { vv_indices!(@n 0usize; $($name),+); };
+        (@n $n:expr; $name:ident $(, $rest:ident)*) => {
+            pub const $name: VimVarIndex = $n;
+            vv_indices!(@n $n + 1; $($rest),*);
+        };
+        (@n $n:expr;) => { /// Number of `v:` variables (`ARRAY_SIZE(vimvars)`).
+            pub const VV_LEN: VimVarIndex = $n; };
+    }
+    vv_indices!(
+        VV_COUNT, VV_COUNT1, VV_PREVCOUNT, VV_ERRMSG, VV_WARNINGMSG, VV_STATUSMSG, VV_SHELL_ERROR,
+        VV_THIS_SESSION, VV_VERSION, VV_LNUM, VV_TERMREQUEST, VV_TERMRESPONSE, VV_FNAME, VV_LANG,
+        VV_LC_TIME, VV_CTYPE, VV_CC_FROM, VV_CC_TO, VV_FNAME_IN, VV_FNAME_OUT, VV_FNAME_NEW,
+        VV_FNAME_DIFF, VV_CMDARG, VV_FOLDSTART, VV_FOLDEND, VV_FOLDDASHES, VV_FOLDLEVEL, VV_PROGNAME,
+        VV_SEND_SERVER, VV_DYING, VV_EXCEPTION, VV_THROWPOINT, VV_REG, VV_CMDBANG, VV_INSERTMODE,
+        VV_VAL, VV_KEY, VV_PROFILING, VV_FCS_REASON, VV_FCS_CHOICE, VV_BEVAL_BUFNR, VV_BEVAL_WINNR,
+        VV_BEVAL_WINID, VV_BEVAL_LNUM, VV_BEVAL_COL, VV_BEVAL_TEXT, VV_SCROLLSTART, VV_SWAPNAME,
+        VV_SWAPCHOICE, VV_SWAPCOMMAND, VV_CHAR, VV_MOUSE_WIN, VV_MOUSE_WINID, VV_MOUSE_LNUM,
+        VV_MOUSE_COL, VV_OP, VV_SEARCHFORWARD, VV_HLSEARCH, VV_OLDFILES, VV_WINDOWID, VV_PROGPATH,
+        VV_COMPLETED_ITEM, VV_OPTION_NEW, VV_OPTION_OLD, VV_OPTION_OLDLOCAL, VV_OPTION_OLDGLOBAL,
+        VV_OPTION_COMMAND, VV_OPTION_TYPE, VV_ERRORS, VV_FALSE, VV_TRUE, VV_NULL, VV_NUMBERMAX,
+        VV_NUMBERMIN, VV_NUMBERSIZE, VV_VIM_DID_ENTER, VV_TESTING, VV_TYPE_NUMBER, VV_TYPE_STRING,
+        VV_TYPE_FUNC, VV_TYPE_LIST, VV_TYPE_DICT, VV_TYPE_FLOAT, VV_TYPE_BOOL, VV_TYPE_BLOB,
+        VV_EVENT, VV_VERSIONLONG, VV_ECHOSPACE, VV_ARGF, VV_ARGV, VV_COLLATE, VV_EXITING, VV_MAXCOL,
+        VV_STACKTRACE, VV_VIM_DID_INIT, VV_STDERR, VV_MSGPACK_TYPES, VV_NULL_STRING, VV_NULL_LIST,
+        VV_NULL_DICT, VV_NULL_BLOB, VV_LUA, VV_RELNUM, VV_VIRTNUM, VV_STARTTIME, VV_EXITREASON,
+        VV_USERACTIVE, VV_STARTREASON,
+    );
+}
+use vv::*;
+
+/// One `vimvars[]` entry (`struct vimvar`, vars.c:102): the name, the held value,
+/// and the `VV_*` flags.
+pub struct VimVar {
+    /// `char *vv_name` — name without the `v:` prefix.
+    pub vv_name: &'static str,
+    /// `typval_T vv_tv` (`vv_di.di_tv`) — the value (its `v_type` is the slot's
+    /// declared type until set).
+    pub vv_tv: typval_T,
+    /// `char vv_flags` — VV_COMPAT / VV_RO / VV_RO_SBX.
+    pub vv_flags: u8,
+}
+
+/// `vimvars[]` declared (name, type, flags), in `VimVarIndex` order (vars.c:106).
+/// The value defaults are applied by [`seed_vimvars`] (the `evalvars_init` body).
+const VIMVARS_DEF: [(&str, VarType, u8); VV_LEN] = [
+    ("count", VAR_NUMBER, VV_RO),
+    ("count1", VAR_NUMBER, VV_RO),
+    ("prevcount", VAR_NUMBER, VV_RO),
+    ("errmsg", VAR_STRING, 0),
+    ("warningmsg", VAR_STRING, 0),
+    ("statusmsg", VAR_STRING, 0),
+    ("shell_error", VAR_NUMBER, VV_RO),
+    ("this_session", VAR_STRING, 0),
+    ("version", VAR_NUMBER, VV_COMPAT + VV_RO),
+    ("lnum", VAR_NUMBER, VV_RO_SBX),
+    ("termrequest", VAR_STRING, VV_RO),
+    ("termresponse", VAR_STRING, VV_RO),
+    ("fname", VAR_STRING, VV_RO),
+    ("lang", VAR_STRING, VV_RO),
+    ("lc_time", VAR_STRING, VV_RO),
+    ("ctype", VAR_STRING, VV_RO),
+    ("charconvert_from", VAR_STRING, VV_RO),
+    ("charconvert_to", VAR_STRING, VV_RO),
+    ("fname_in", VAR_STRING, VV_RO),
+    ("fname_out", VAR_STRING, VV_RO),
+    ("fname_new", VAR_STRING, VV_RO),
+    ("fname_diff", VAR_STRING, VV_RO),
+    ("cmdarg", VAR_STRING, VV_RO),
+    ("foldstart", VAR_NUMBER, VV_RO_SBX),
+    ("foldend", VAR_NUMBER, VV_RO_SBX),
+    ("folddashes", VAR_STRING, VV_RO_SBX),
+    ("foldlevel", VAR_NUMBER, VV_RO_SBX),
+    ("progname", VAR_STRING, VV_RO),
+    ("servername", VAR_STRING, VV_RO),
+    ("dying", VAR_NUMBER, VV_RO),
+    ("exception", VAR_STRING, VV_RO),
+    ("throwpoint", VAR_STRING, VV_RO),
+    ("register", VAR_STRING, VV_RO),
+    ("cmdbang", VAR_NUMBER, VV_RO),
+    ("insertmode", VAR_STRING, VV_RO),
+    ("val", VAR_UNKNOWN, VV_RO),
+    ("key", VAR_UNKNOWN, VV_RO),
+    ("profiling", VAR_NUMBER, VV_RO),
+    ("fcs_reason", VAR_STRING, VV_RO),
+    ("fcs_choice", VAR_STRING, 0),
+    ("beval_bufnr", VAR_NUMBER, VV_RO),
+    ("beval_winnr", VAR_NUMBER, VV_RO),
+    ("beval_winid", VAR_NUMBER, VV_RO),
+    ("beval_lnum", VAR_NUMBER, VV_RO),
+    ("beval_col", VAR_NUMBER, VV_RO),
+    ("beval_text", VAR_STRING, VV_RO),
+    ("scrollstart", VAR_STRING, 0),
+    ("swapname", VAR_STRING, VV_RO),
+    ("swapchoice", VAR_STRING, 0),
+    ("swapcommand", VAR_STRING, VV_RO),
+    ("char", VAR_STRING, 0),
+    ("mouse_win", VAR_NUMBER, 0),
+    ("mouse_winid", VAR_NUMBER, 0),
+    ("mouse_lnum", VAR_NUMBER, 0),
+    ("mouse_col", VAR_NUMBER, 0),
+    ("operator", VAR_STRING, VV_RO),
+    ("searchforward", VAR_NUMBER, 0),
+    ("hlsearch", VAR_NUMBER, 0),
+    ("oldfiles", VAR_LIST, 0),
+    ("windowid", VAR_NUMBER, VV_RO_SBX),
+    ("progpath", VAR_STRING, VV_RO),
+    ("completed_item", VAR_DICT, 0),
+    ("option_new", VAR_STRING, VV_RO),
+    ("option_old", VAR_STRING, VV_RO),
+    ("option_oldlocal", VAR_STRING, VV_RO),
+    ("option_oldglobal", VAR_STRING, VV_RO),
+    ("option_command", VAR_STRING, VV_RO),
+    ("option_type", VAR_STRING, VV_RO),
+    ("errors", VAR_LIST, 0),
+    ("false", VAR_BOOL, VV_RO),
+    ("true", VAR_BOOL, VV_RO),
+    ("null", VAR_SPECIAL, VV_RO),
+    ("numbermax", VAR_NUMBER, VV_RO),
+    ("numbermin", VAR_NUMBER, VV_RO),
+    ("numbersize", VAR_NUMBER, VV_RO),
+    ("vim_did_enter", VAR_NUMBER, VV_RO),
+    ("testing", VAR_NUMBER, 0),
+    ("t_number", VAR_NUMBER, VV_RO),
+    ("t_string", VAR_NUMBER, VV_RO),
+    ("t_func", VAR_NUMBER, VV_RO),
+    ("t_list", VAR_NUMBER, VV_RO),
+    ("t_dict", VAR_NUMBER, VV_RO),
+    ("t_float", VAR_NUMBER, VV_RO),
+    ("t_bool", VAR_NUMBER, VV_RO),
+    ("t_blob", VAR_NUMBER, VV_RO),
+    ("event", VAR_DICT, VV_RO),
+    ("versionlong", VAR_NUMBER, VV_RO),
+    ("echospace", VAR_NUMBER, VV_RO),
+    ("argf", VAR_LIST, VV_RO),
+    ("argv", VAR_LIST, VV_RO),
+    ("collate", VAR_STRING, VV_RO),
+    ("exiting", VAR_NUMBER, VV_RO),
+    ("maxcol", VAR_NUMBER, VV_RO),
+    ("stacktrace", VAR_LIST, VV_RO),
+    ("vim_did_init", VAR_NUMBER, VV_RO),
+    ("stderr", VAR_NUMBER, VV_RO),
+    ("msgpack_types", VAR_DICT, VV_RO),
+    ("_null_string", VAR_STRING, VV_RO),
+    ("_null_list", VAR_LIST, VV_RO),
+    ("_null_dict", VAR_DICT, VV_RO),
+    ("_null_blob", VAR_BLOB, VV_RO),
+    ("lua", VAR_PARTIAL, VV_RO),
+    ("relnum", VAR_NUMBER, VV_RO),
+    ("virtnum", VAR_NUMBER, VV_RO),
+    ("starttime", VAR_NUMBER, VV_RO),
+    ("exitreason", VAR_STRING, VV_RO),
+    ("useractive", VAR_NUMBER, VV_RO),
+    ("startreason", VAR_STRING, VV_RO),
+];
+
+thread_local! {
+    /// `static struct vimvar vimvars[];` — the `v:` variable store, built from
+    /// [`VIMVARS_DEF`] with the type-zero defaults (`{ .v_type = type }`: number
+    /// 0, NULL string → `""`, NULL container → `None`). The value defaults are
+    /// applied by [`evalvars_init`], which the bridge `install()` runs before any
+    /// script executes.
+    pub static vimvars: RefCell<Vec<VimVar>> = RefCell::new(
+        VIMVARS_DEF
+            .iter()
+            .map(|&(name, t, flags)| {
+                let vval = match t {
+                    VAR_NUMBER => v_number(0),
+                    VAR_FLOAT => v_float(0.0),
+                    VAR_STRING => v_string(String::new()),
+                    VAR_BOOL => v_bool(BoolVarValue::kBoolVarFalse),
+                    VAR_SPECIAL => v_special(SpecialVarValue::kSpecialVarNull),
+                    VAR_LIST => v_list(None),
+                    VAR_DICT => v_dict(None),
+                    VAR_BLOB => v_blob(None),
+                    VAR_PARTIAL => v_partial(None),
+                    _ => v_unknown,
+                };
+                VimVar {
+                    vv_name: name,
+                    vv_tv: typval_T { v_type: t, v_lock: VarLockStatus::VAR_UNLOCKED, vval },
+                    vv_flags: flags,
+                }
+            })
+            .collect()
+    );
+}
+
+/// Port of `evalvars_init()` from `Src/eval/vars.c:261` — apply the value
+/// defaults to the `v:` store. Idempotent (re-seed = reset). Editor-coupled
+/// fields (`echospace`=`sc_col-1`, `progpath`, `servername`, …) keep their
+/// type-zero default in the standalone interpreter.
+pub fn evalvars_init() {
+    // c: VIM_VERSION_MAJOR * 100 + VIM_VERSION_MINOR (the Vim compat floor).
+    const VIM_VERSION_MAJOR: varnumber_T = 8;
+    const VIM_VERSION_MINOR: varnumber_T = 1;
+    let vim_version = VIM_VERSION_MAJOR * 100 + VIM_VERSION_MINOR;
+
+    // Containers are allocated here (no `vimvars` borrow involved).
+    // c: v:msgpack_types — {nil:[], boolean:[], …, ext:[]} (8 empty lists).
+    let mpd = tv_dict_alloc();
+    for name in ["nil", "boolean", "integer", "float", "string", "array", "map", "ext"] {
+        let lst = tv_list_alloc(0);
+        let tv = typval_T { v_type: VAR_LIST, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_list(Some(lst)) };
+        tv_dict_add_tv(&mut mpd.borrow_mut(), name, tv);
+    }
+
+    // c: rebuild from the declared type-zero defaults (so re-init fully resets
+    // mutable v: vars), then apply the value defaults below.
+    let mut v: Vec<VimVar> = VIMVARS_DEF
+        .iter()
+        .map(|&(name, t, flags)| {
+            let vval = match t {
+                VAR_NUMBER => v_number(0),
+                VAR_FLOAT => v_float(0.0),
+                VAR_STRING => v_string(String::new()),
+                VAR_BOOL => v_bool(BoolVarValue::kBoolVarFalse),
+                VAR_SPECIAL => v_special(SpecialVarValue::kSpecialVarNull),
+                VAR_LIST => v_list(None),
+                VAR_DICT => v_dict(None),
+                VAR_BLOB => v_blob(None),
+                VAR_PARTIAL => v_partial(None),
+                _ => v_unknown,
+            };
+            VimVar { vv_name: name, vv_tv: typval_T { v_type: t, v_lock: VarLockStatus::VAR_UNLOCKED, vval }, vv_flags: flags }
+        })
+        .collect();
+    {
+        let num = |n: varnumber_T| typval_T {
+            v_type: VAR_NUMBER,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_number(n),
+        };
+        v[VV_VERSION].vv_tv = num(vim_version);
+        // c: vim_version * 10000 + highest_patch(); no patch table standalone → 0.
+        v[VV_VERSIONLONG].vv_tv = num(vim_version * 10000);
+
+        v[VV_MSGPACK_TYPES].vv_tv = typval_T { v_type: VAR_DICT, v_lock: VarLockStatus::VAR_FIXED, vval: v_dict(Some(mpd)) };
+        v[VV_COMPLETED_ITEM].vv_tv = typval_T { v_type: VAR_DICT, v_lock: VarLockStatus::VAR_FIXED, vval: v_dict(Some(tv_dict_alloc())) };
+        v[VV_EVENT].vv_tv = typval_T { v_type: VAR_DICT, v_lock: VarLockStatus::VAR_FIXED, vval: v_dict(Some(tv_dict_alloc())) };
+        v[VV_ERRORS].vv_tv = typval_T { v_type: VAR_LIST, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_list(Some(tv_list_alloc(0))) };
+
+        v[VV_STDERR].vv_tv = num(2); // CHAN_STDERR
+        v[VV_SEARCHFORWARD].vv_tv = num(1);
+        v[VV_HLSEARCH].vv_tv = num(1);
+        v[VV_COUNT1].vv_tv = num(1);
+        v[VV_STARTREASON].vv_tv = typval_T::from("normal".to_string());
+        v[VV_EXITING].vv_tv = typval_T { v_type: VAR_SPECIAL, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_special(SpecialVarValue::kSpecialVarNull) };
+
+        v[VV_TYPE_NUMBER].vv_tv = num(VAR_TYPE_NUMBER);
+        v[VV_TYPE_STRING].vv_tv = num(VAR_TYPE_STRING);
+        v[VV_TYPE_FUNC].vv_tv = num(VAR_TYPE_FUNC);
+        v[VV_TYPE_LIST].vv_tv = num(VAR_TYPE_LIST);
+        v[VV_TYPE_DICT].vv_tv = num(VAR_TYPE_DICT);
+        v[VV_TYPE_FLOAT].vv_tv = num(VAR_TYPE_FLOAT);
+        v[VV_TYPE_BOOL].vv_tv = num(VAR_TYPE_BOOL);
+        v[VV_TYPE_BLOB].vv_tv = num(VAR_TYPE_BLOB);
+
+        v[VV_FALSE].vv_tv = typval_T { v_type: VAR_BOOL, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_bool(BoolVarValue::kBoolVarFalse) };
+        v[VV_TRUE].vv_tv = typval_T { v_type: VAR_BOOL, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_bool(BoolVarValue::kBoolVarTrue) };
+        v[VV_NULL].vv_tv = typval_T { v_type: VAR_SPECIAL, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_special(SpecialVarValue::kSpecialVarNull) };
+        v[VV_NUMBERMAX].vv_tv = num(VARNUMBER_MAX);
+        v[VV_NUMBERMIN].vv_tv = num(VARNUMBER_MIN);
+        v[VV_NUMBERSIZE].vv_tv = num(64); // sizeof(varnumber_T) * 8
+        v[VV_MAXCOL].vv_tv = num(i32::MAX as varnumber_T); // MAXCOL
+
+        // c: set_vim_var_partial(VV_LUA, …) — a partial with an empty name.
+        v[VV_LUA].vv_tv = typval_T {
+            v_type: VAR_PARTIAL,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_partial(Some(Rc::new(partial_T { pt_refcount: 1, pt_name: String::new(), pt_argv: Vec::new(), pt_dict: None }))),
+        };
+        // c: set_reg_var(0) → v:register defaults to '"'.
+        v[VV_REG].vv_tv = typval_T::from("\"".to_string());
+    }
+    vimvars.with(|s| *s.borrow_mut() = v);
+}
+
+/// Port of `get_vim_var_tv()` from `Src/eval/vars.c:1892`. RUST-PORT NOTE:
+/// returns a clone (C returns `&vimvars[idx].vv_tv`).
+pub fn get_vim_var_tv(idx: VimVarIndex) -> typval_T {
+    vimvars.with(|s| s.borrow()[idx].vv_tv.clone())
+}
+
+/// Port of `set_vim_var_tv()` from `Src/eval/vars.c:1878`.
+pub fn set_vim_var_tv(idx: VimVarIndex, tv: typval_T) {
+    vimvars.with(|s| s.borrow_mut()[idx].vv_tv = tv);
+}
+
+/// Port of `get_vim_var_name()` from `Src/eval/vars.c:1885`.
+pub fn get_vim_var_name(idx: VimVarIndex) -> &'static str {
+    VIMVARS_DEF[idx].0
+}
+
+/// Port of `get_vim_var_nr()` from `Src/eval/vars.c:1898`.
+pub fn get_vim_var_nr(idx: VimVarIndex) -> varnumber_T {
+    match get_vim_var_tv(idx).vval {
+        v_number(n) => n,
+        _ => 0,
+    }
+}
+
+/// Port of `get_vim_var_list()` from `Src/eval/vars.c:1906`.
+pub fn get_vim_var_list(idx: VimVarIndex) -> Option<Rc<RefCell<list_T>>> {
+    match get_vim_var_tv(idx).vval {
+        v_list(l) => l,
+        _ => None,
+    }
+}
+
+/// Port of `get_vim_var_dict()` from `Src/eval/vars.c:1914`.
+pub fn get_vim_var_dict(idx: VimVarIndex) -> Option<Rc<RefCell<dict_T>>> {
+    match get_vim_var_tv(idx).vval {
+        v_dict(d) => d,
+        _ => None,
+    }
+}
+
+/// Port of `get_vim_var_str()` from `Src/eval/vars.c:1923` — never NULL.
+pub fn get_vim_var_str(idx: VimVarIndex) -> String {
+    tv_get_string(&get_vim_var_tv(idx))
+}
+
+/// Port of `get_vim_var_partial()` from `Src/eval/vars.c:1931`.
+pub fn get_vim_var_partial(idx: VimVarIndex) -> Option<Rc<partial_T>> {
+    match get_vim_var_tv(idx).vval {
+        v_partial(p) => p,
+        _ => None,
+    }
+}
+
+/// Port of `set_vim_var_type()` from `Src/eval/vars.c:2050`.
+pub fn set_vim_var_type(idx: VimVarIndex, t: VarType) {
+    vimvars.with(|s| s.borrow_mut()[idx].vv_tv.v_type = t);
+}
+
+/// Port of `set_vim_var_nr()` from `Src/eval/vars.c:2061`.
+pub fn set_vim_var_nr(idx: VimVarIndex, val: varnumber_T) {
+    set_vim_var_tv(idx, typval_T { v_type: get_vim_var_tv(idx).v_type, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_number(val) });
+}
+
+/// Port of `set_vim_var_bool()` from `Src/eval/vars.c:2072`.
+pub fn set_vim_var_bool(idx: VimVarIndex, val: BoolVarValue) {
+    set_vim_var_tv(idx, typval_T { v_type: VAR_BOOL, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_bool(val) });
+}
+
+/// Port of `set_vim_var_special()` from `Src/eval/vars.c:2084`.
+pub fn set_vim_var_special(idx: VimVarIndex, val: SpecialVarValue) {
+    set_vim_var_tv(idx, typval_T { v_type: VAR_SPECIAL, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_special(val) });
+}
+
+/// Port of `set_vim_var_char()` from `Src/eval/vars.c:2093` — set v:char.
+pub fn set_vim_var_char(c: char) {
+    set_vim_var_string(VV_CHAR, &c.to_string());
+}
+
+/// Port of `set_vim_var_string()` from `Src/eval/vars.c:2107`. RUST-PORT NOTE:
+/// `&str` carries its own length (the C `len`/`-1` distinction is unnecessary).
+pub fn set_vim_var_string(idx: VimVarIndex, val: &str) {
+    set_vim_var_tv(idx, typval_T::from(val.to_string()));
+}
+
+/// Port of `set_vim_var_list()` from `Src/eval/vars.c:2125`.
+pub fn set_vim_var_list(idx: VimVarIndex, val: Option<Rc<RefCell<list_T>>>) {
+    set_vim_var_tv(idx, typval_T { v_type: VAR_LIST, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_list(val) });
+}
+
+/// Port of `set_vim_var_dict()` from `Src/eval/vars.c:2141`.
+pub fn set_vim_var_dict(idx: VimVarIndex, val: Option<Rc<RefCell<dict_T>>>) {
+    set_vim_var_tv(idx, typval_T { v_type: VAR_DICT, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_dict(val) });
+}
+
+/// Port of `set_vim_var_partial()` from `Src/eval/vars.c:2161`. Note: does not
+/// set the type (use [`set_vim_var_type`]), matching C.
+pub fn set_vim_var_partial(idx: VimVarIndex, val: Option<Rc<partial_T>>) {
+    vimvars.with(|s| s.borrow_mut()[idx].vv_tv.vval = v_partial(val));
+}
+
