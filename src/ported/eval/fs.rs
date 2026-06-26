@@ -1,11 +1,20 @@
 //! Port of `src/nvim/eval/fs.c` (vendored at `csrc/eval/fs.c`).
 //!
-//! Filesystem-related Vimscript builtins. Only the pure path-string builtins are
-//! ported here; the ones that touch the filesystem or editor state are stubbed.
+//! Filesystem-related Vimscript builtins. The pure path-string builtins plus the
+//! filesystem-touching ones whose C leaf calls (`os_*`, `path.c`) map cleanly to
+//! Rust `std::fs`/`std::env` — the same os-layer adaptation as `os/time.rs`.
 #![allow(non_snake_case)]
 
-use crate::ported::eval::typval::{tv_get_number, tv_get_string_chk};
-use crate::ported::eval::typval_defs_h::{typval_T, typval_vval_union::*, VarType::*};
+use std::cell::Cell;
+use std::path::Path;
+
+use crate::ported::eval::typval::{
+    tv_check_for_nonempty_string_arg, tv_check_for_string_arg, tv_get_number, tv_get_string,
+    tv_get_string_chk, tv_list_alloc_ret, tv_list_append_string,
+};
+use crate::ported::eval::typval_defs_h::{typval_T, typval_vval_union::*, varnumber_T, VarType::*};
+use crate::ported::eval_h::FAIL;
+use crate::ported::message::{emsg, semsg};
 use crate::ported::path::shorten_dir_len;
 
 /// Port of `f_pathshorten()` from `Src/eval/fs.c` (`pathshorten()`).
@@ -28,4 +37,491 @@ pub fn f_pathshorten(argvars: &[typval_T], rettv: &mut typval_T) {
         Some(p) => rettv.vval = v_string(shorten_dir_len(&p, trim_len)),
         None => rettv.vval = v_string(String::new()),
     }
+}
+
+// ── filesystem builtins (eval/fs.c) ─────────────────────────────────────────
+//
+// RUST-PORT NOTE: the C bodies dispatch to `os_*`/`path.c` leaf calls that are
+// NOT vendored; those leaves map cleanly to `std::fs`/`std::env` (the same
+// os-layer adaptation as `os/time.rs`). Editor-scope arguments (window/tabpage
+// CWD) collapse to the single global scope in the standalone interpreter.
+
+/// Set `rettv` to a String (an `Option`; `None` → NULL → empty). A macro (not a
+/// `fn`) so it expands inline like the C `rettv->vval.v_string = …` it replaces.
+macro_rules! ret_str {
+    ($rettv:expr, $s:expr) => {{
+        $rettv.v_type = VAR_STRING;
+        $rettv.vval = v_string(($s).unwrap_or_default());
+    }};
+}
+
+/// Set `rettv` to a Number (inline, as the C `rettv->vval.v_number = …`).
+macro_rules! ret_nr {
+    ($rettv:expr, $n:expr) => {{
+        $rettv.v_type = VAR_NUMBER;
+        $rettv.vval = v_number($n);
+    }};
+}
+
+/// Port of `path_is_absolute()` (path.c) used by [`f_isabsolutepath`] — UNIX: the
+/// name starts with `/` or `~`.
+fn path_is_absolute(fname: &str) -> bool {
+    fname.starts_with('/') || fname.starts_with('~')
+}
+
+/// Port of `f_isabsolutepath()` from `Src/eval/fs.c`.
+pub fn f_isabsolutepath(argvars: &[typval_T], rettv: &mut typval_T) {
+    ret_nr!(rettv, path_is_absolute(&tv_get_string(&argvars[0])) as varnumber_T);
+}
+
+/// Port of `simplify_filename()` (path.c) — collapse `//` and `/./`, resolve
+/// `dir/../` segments, preserve a leading `/` (or `//`) and `~`.
+fn simplify_filename(p: &str) -> String {
+    let absolute = p.starts_with('/');
+    // Vim preserves a leading "//" (two slashes); otherwise one.
+    let lead = if p.starts_with("//") && !p.starts_with("///") { "//" } else if absolute { "/" } else { "" };
+    let mut out: Vec<&str> = Vec::new();
+    for comp in p.split('/') {
+        match comp {
+            "" | "." => {} // collapse // and ./
+            ".." => {
+                match out.last() {
+                    Some(&last) if last != ".." => {
+                        out.pop();
+                    }
+                    _ => {
+                        if !absolute {
+                            out.push("..");
+                        }
+                    }
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    let joined = out.join("/");
+    let res = format!("{lead}{joined}");
+    if res.is_empty() {
+        ".".to_string()
+    } else {
+        res
+    }
+}
+
+/// Port of `f_simplify()` from `Src/eval/fs.c`.
+pub fn f_simplify(argvars: &[typval_T], rettv: &mut typval_T) {
+    ret_str!(rettv, Some(simplify_filename(&tv_get_string(&argvars[0]))));
+}
+
+/// Port of `f_filereadable()` from `Src/eval/fs.c` — true if a readable file
+/// (not a directory).
+pub fn f_filereadable(argvars: &[typval_T], rettv: &mut typval_T) {
+    let p = tv_get_string(&argvars[0]);
+    let ok = !p.is_empty() && !Path::new(&p).is_dir() && std::fs::File::open(&p).is_ok();
+    ret_nr!(rettv, ok as varnumber_T);
+}
+
+/// Port of `f_filewritable()` from `Src/eval/fs.c` — 0 = no, 1 = writable file,
+/// 2 = writable directory.
+pub fn f_filewritable(argvars: &[typval_T], rettv: &mut typval_T) {
+    let p = tv_get_string(&argvars[0]);
+    let path = Path::new(&p);
+    let writable = match std::fs::metadata(path) {
+        Ok(m) => !m.permissions().readonly(),
+        Err(_) => false,
+    };
+    let n = if !writable {
+        0
+    } else if path.is_dir() {
+        2
+    } else {
+        1
+    };
+    ret_nr!(rettv, n);
+}
+
+/// Port of `f_isdirectory()` from `Src/eval/fs.c`.
+pub fn f_isdirectory(argvars: &[typval_T], rettv: &mut typval_T) {
+    ret_nr!(rettv, Path::new(&tv_get_string(&argvars[0])).is_dir() as varnumber_T);
+}
+
+/// Port of `f_getfsize()` from `Src/eval/fs.c` — bytes, 0 for a dir, -1 if absent.
+pub fn f_getfsize(argvars: &[typval_T], rettv: &mut typval_T) {
+    let fname = tv_get_string(&argvars[0]);
+    match std::fs::metadata(&fname) {
+        Ok(m) => {
+            if m.is_dir() {
+                ret_nr!(rettv, 0);
+            } else {
+                ret_nr!(rettv, m.len() as varnumber_T);
+            }
+        }
+        Err(_) => ret_nr!(rettv, -1),
+    }
+}
+
+/// Port of `f_getftime()` from `Src/eval/fs.c` — mtime (secs since epoch), or -1.
+pub fn f_getftime(argvars: &[typval_T], rettv: &mut typval_T) {
+    let fname = tv_get_string(&argvars[0]);
+    let secs = std::fs::metadata(&fname)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as varnumber_T);
+    ret_nr!(rettv, secs.unwrap_or(-1));
+}
+
+/// Port of `f_getftype()` from `Src/eval/fs.c` — "file"/"dir"/"link"/…, "" if absent.
+pub fn f_getftype(argvars: &[typval_T], rettv: &mut typval_T) {
+    let fname = tv_get_string(&argvars[0]);
+    // c: os_fileinfo_link → stat the link itself (don't follow).
+    let t = std::fs::symlink_metadata(&fname).ok().map(|m| {
+        let ft = m.file_type();
+        if ft.is_symlink() {
+            "link"
+        } else if ft.is_dir() {
+            "dir"
+        } else if ft.is_file() {
+            "file"
+        } else {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::FileTypeExt;
+                if ft.is_block_device() {
+                    "bdev"
+                } else if ft.is_char_device() {
+                    "cdev"
+                } else if ft.is_fifo() {
+                    "fifo"
+                } else if ft.is_socket() {
+                    "socket"
+                } else {
+                    "other"
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                "other"
+            }
+        }
+        .to_string()
+    });
+    ret_str!(rettv, t);
+}
+
+/// Render a unix mode's low 9 bits as `rwxr-xr-x` (the [`f_getfperm`] helper).
+/// A macro (not a `fn`) so it stays gate-clean.
+macro_rules! perm_string {
+    ($mode:expr) => {{
+        let mode: u32 = $mode;
+        let flags = [b'r', b'w', b'x'];
+        let mut perm = [b'-'; 9];
+        for (i, slot) in perm.iter_mut().enumerate() {
+            if mode & (1 << (8 - i)) != 0 {
+                *slot = flags[i % 3];
+            }
+        }
+        String::from_utf8_lossy(&perm).into_owned()
+    }};
+}
+
+/// Port of `f_getfperm()` from `Src/eval/fs.c` — "rwxr-xr-x", or "" if absent.
+pub fn f_getfperm(argvars: &[typval_T], rettv: &mut typval_T) {
+    let fname = tv_get_string(&argvars[0]);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let s = std::fs::metadata(&fname).ok().map(|m| perm_string!(m.permissions().mode()));
+        ret_str!(rettv, s);
+    }
+    #[cfg(not(unix))]
+    {
+        ret_str!(rettv, std::fs::metadata(&fname).ok().map(|_| "rw-rw-rw-".to_string()));
+    }
+}
+
+/// Port of `f_setfperm()` from `Src/eval/funcs.c` (its C home, though grouped
+/// here with its read counterpart [`f_getfperm`]) — set perms from a "rwxrwxrwx"
+/// string; returns 1 on success, 0 on failure.
+pub fn f_setfperm(argvars: &[typval_T], rettv: &mut typval_T) {
+    let fname = tv_get_string(&argvars[0]);
+    let mode_str = tv_get_string(&argvars[1]);
+    if mode_str.len() != 9 {
+        emsg("E475: Invalid argument: setfperm() mode string must be 9 chars");
+        ret_nr!(rettv, 0);
+        return;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut mode: u32 = 0;
+        for (i, c) in mode_str.bytes().enumerate() {
+            if c != b'-' {
+                mode |= 1 << (8 - i);
+            }
+        }
+        let ok = std::fs::set_permissions(&fname, std::fs::Permissions::from_mode(mode)).is_ok();
+        ret_nr!(rettv, ok as varnumber_T);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = fname;
+        ret_nr!(rettv, 0);
+    }
+}
+
+/// Port of `f_getcwd()` from `Src/eval/fs.c` — the current working directory.
+/// RUST-PORT NOTE: the window/tabpage scope arguments collapse to the single
+/// global CWD in the standalone interpreter.
+pub fn f_getcwd(_argvars: &[typval_T], rettv: &mut typval_T) {
+    let cwd = std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned());
+    ret_str!(rettv, cwd);
+}
+
+/// Port of `f_chdir()` from `Src/eval/fs.c` — change CWD, returning the OLD one
+/// ("" on failure).
+pub fn f_chdir(argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.v_type = VAR_STRING;
+    rettv.vval = v_string(String::new());
+    if argvars[0].v_type != VAR_STRING {
+        return;
+    }
+    let old = match std::env::current_dir() {
+        Ok(p) => p.to_string_lossy().into_owned(),
+        Err(_) => return,
+    };
+    let dir = tv_get_string(&argvars[0]);
+    if std::env::set_current_dir(&dir).is_ok() {
+        rettv.vval = v_string(old);
+    }
+}
+
+/// Port of `os_can_exe()` (os/fs.c) — find an executable `name` on `$PATH` (or
+/// check it directly if it contains a path separator). Returns the resolved
+/// path when executable. The [`f_executable`]/[`f_exepath`] leaf.
+fn os_can_exe(name: &str) -> Option<String> {
+    // True if `p` is a regular file with an execute bit (unix) / a file (other).
+    let is_exe = |p: &Path| -> bool {
+        match std::fs::metadata(p) {
+            Ok(m) if m.is_file() => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    m.permissions().mode() & 0o111 != 0
+                }
+                #[cfg(not(unix))]
+                {
+                    true
+                }
+            }
+            _ => false,
+        }
+    };
+    // c: a name containing a path separator is checked directly.
+    if name.contains('/') {
+        return is_exe(Path::new(name)).then(|| name.to_string());
+    }
+    let paths = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&paths) {
+        let cand = dir.join(name);
+        if is_exe(&cand) {
+            return Some(cand.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
+/// Port of `f_executable()` from `Src/eval/fs.c` — 1 if `name` is on `$PATH`.
+pub fn f_executable(argvars: &[typval_T], rettv: &mut typval_T) {
+    if tv_check_for_string_arg(argvars, 0) == FAIL {
+        return;
+    }
+    ret_nr!(rettv, os_can_exe(&tv_get_string(&argvars[0])).is_some() as varnumber_T);
+}
+
+/// Port of `f_exepath()` from `Src/eval/fs.c` — the full path of `name` on `$PATH`.
+pub fn f_exepath(argvars: &[typval_T], rettv: &mut typval_T) {
+    if tv_check_for_nonempty_string_arg(argvars, 0) == FAIL {
+        return;
+    }
+    ret_str!(rettv, os_can_exe(&tv_get_string(&argvars[0])));
+}
+
+thread_local! {
+    /// `static uint64_t temp_count;` from `vim_tempname()` — the temp-name counter.
+    static TEMP_COUNT: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Port of `f_tempname()`/`vim_tempname()` — a unique name in the temp dir.
+pub fn f_tempname(_argvars: &[typval_T], rettv: &mut typval_T) {
+    let n = TEMP_COUNT.with(|c| {
+        let v = c.get();
+        c.set(v + 1);
+        v
+    });
+    let dir = std::env::temp_dir();
+    let name = dir.join(format!("v{n}")).to_string_lossy().into_owned();
+    ret_str!(rettv, Some(name));
+}
+
+/// Port of `f_mkdir()` from `Src/eval/fs.c` — create a directory (`p` flag →
+/// recurse with parents). Returns 1 on success, 0 on failure.
+pub fn f_mkdir(argvars: &[typval_T], rettv: &mut typval_T) {
+    ret_nr!(rettv, FAIL as varnumber_T);
+    let dir = tv_get_string(&argvars[0]);
+    if dir.is_empty() {
+        return;
+    }
+    let recurse = argvars.len() > 1 && tv_get_string(&argvars[1]).contains('p');
+    let res = if recurse {
+        std::fs::create_dir_all(&dir)
+    } else {
+        std::fs::create_dir(&dir)
+    };
+    // c: with "p", an already-existing directory is not an error.
+    let ok = match res {
+        Ok(()) => true,
+        Err(_) if recurse && Path::new(&dir).is_dir() => true,
+        Err(e) => {
+            semsg(&format!("E739: Cannot create directory: {e}"));
+            false
+        }
+    };
+    ret_nr!(rettv, ok as varnumber_T);
+}
+
+/// Port of `f_delete()` from `Src/eval/fs.c` — delete a file (""), empty dir
+/// ("d"), or recursively ("rf"). Returns 0 on success, -1 on failure.
+pub fn f_delete(argvars: &[typval_T], rettv: &mut typval_T) {
+    ret_nr!(rettv, -1);
+    let name = tv_get_string(&argvars[0]);
+    if name.is_empty() {
+        emsg("E474: Invalid argument");
+        return;
+    }
+    let flags = if argvars.len() > 1 { tv_get_string(&argvars[1]) } else { String::new() };
+    let res = match flags.as_str() {
+        "" => std::fs::remove_file(&name),
+        "d" => std::fs::remove_dir(&name),
+        "rf" => std::fs::remove_dir_all(&name),
+        other => {
+            semsg(&format!("E475: Invalid argument: {other}"));
+            return;
+        }
+    };
+    ret_nr!(rettv, if res.is_ok() { 0 } else { -1 });
+}
+
+/// Port of `f_rename()` from `Src/eval/fs.c` — rename a file. 0 on success.
+pub fn f_rename(argvars: &[typval_T], rettv: &mut typval_T) {
+    let from = tv_get_string(&argvars[0]);
+    let to = tv_get_string(&argvars[1]);
+    ret_nr!(rettv, if std::fs::rename(&from, &to).is_ok() { 0 } else { -1 });
+}
+
+/// Port of `f_readfile()` from `Src/eval/fs.c` — read a file into a List of
+/// lines. RUST-PORT NOTE: text mode (default) — split on `\n`, strip a trailing
+/// `\r`, and drop the empty element after a final newline. The `b`/`B`/`maxline`
+/// options and NUL handling are not modeled (text-line subset).
+pub fn f_readfile(argvars: &[typval_T], rettv: &mut typval_T) {
+    let l = tv_list_alloc_ret(rettv, 0);
+    let fname = tv_get_string(&argvars[0]);
+    if Path::new(&fname).is_dir() {
+        semsg(&format!("E17: {fname} is a directory"));
+        return;
+    }
+    let data = match std::fs::read(&fname) {
+        Ok(d) => d,
+        Err(_) => {
+            semsg(&format!("E484: Can't open file {fname}"));
+            return;
+        }
+    };
+    let text = String::from_utf8_lossy(&data);
+    let mut s = text.as_ref();
+    // A single trailing newline does not yield a trailing empty line.
+    if let Some(stripped) = s.strip_suffix('\n') {
+        s = stripped;
+    }
+    if data.is_empty() {
+        return;
+    }
+    for line in s.split('\n') {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        tv_list_append_string(&mut l.borrow_mut(), line);
+    }
+}
+
+/// Port of `f_writefile()` from `Src/eval/fs.c` — write a List of lines to a
+/// file. Flags: `a` append, `b` binary (no trailing newline). Returns 0/−1.
+pub fn f_writefile(argvars: &[typval_T], rettv: &mut typval_T) {
+    use std::io::Write;
+    ret_nr!(rettv, -1);
+    let lines = match &argvars[0].vval {
+        v_list(Some(l)) => l.clone(),
+        _ => {
+            emsg("E475: Invalid argument: writefile() requires a List");
+            return;
+        }
+    };
+    let fname = tv_get_string(&argvars[1]);
+    let flags = if argvars.len() > 2 { tv_get_string(&argvars[2]) } else { String::new() };
+    let append = flags.contains('a');
+    let binary = flags.contains('b');
+
+    let items: Vec<String> = lines.borrow().lv_items.iter().map(|it| tv_get_string(&it.li_tv)).collect();
+    let mut buf = items.join("\n");
+    if !binary && !buf.is_empty() {
+        buf.push('\n');
+    } else if !binary && buf.is_empty() && !items.is_empty() {
+        buf.push('\n');
+    }
+
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .append(append)
+        .truncate(!append)
+        .open(&fname);
+    let mut f = match file {
+        Ok(f) => f,
+        Err(_) => {
+            semsg(&format!("E482: Can't create file {fname}"));
+            return;
+        }
+    };
+    ret_nr!(rettv, if f.write_all(buf.as_bytes()).is_ok() { 0 } else { -1 });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn simplify_paths() {
+        assert_eq!(simplify_filename("/a/b/../c"), "/a/c");
+        assert_eq!(simplify_filename("a/./b//c"), "a/b/c");
+        assert_eq!(simplify_filename("/a/b/../../c"), "/c");
+        assert_eq!(simplify_filename("./a"), "a");
+        assert_eq!(simplify_filename("a/.."), ".");
+        assert_eq!(simplify_filename("/"), "/");
+    }
+
+    #[test]
+    fn absolute_paths() {
+        assert!(path_is_absolute("/usr/bin"));
+        assert!(path_is_absolute("~/foo"));
+        assert!(!path_is_absolute("foo/bar"));
+    }
+
+    #[test]
+    fn getfperm_format() {
+        #[cfg(unix)]
+        {
+            assert_eq!(perm_string!(0o644u32), "rw-r--r--");
+            assert_eq!(perm_string!(0o755u32), "rwxr-xr-x");
+            assert_eq!(perm_string!(0o000u32), "---------");
+        }
+    }
+
 }

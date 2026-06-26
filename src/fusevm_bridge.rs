@@ -27,7 +27,11 @@ use crate::ported::eval::funcs::{
     f_keys, f_len, f_list2str, f_match, f_matchend, f_matchlist, f_matchstr,
     f_max, f_min, f_nr2char, f_or, f_pow, f_printf, f_range, f_reduce, f_repeat, f_reverse, f_split, f_str2float, f_substitute, f_type, f_values, f_xor,
 };
-use crate::ported::eval::fs::f_pathshorten;
+use crate::ported::eval::fs::{
+    f_chdir, f_delete, f_executable, f_exepath, f_filereadable, f_filewritable, f_getcwd, f_getfperm,
+    f_getfsize, f_getftime, f_getftype, f_isabsolutepath, f_isdirectory, f_mkdir, f_pathshorten,
+    f_readfile, f_rename, f_setfperm, f_simplify, f_tempname, f_writefile,
+};
 use crate::ported::eval::list::{
     f_count, f_extend, f_extendnew, f_filter, f_foreach, f_map, f_mapnew, f_remove,
     FILTER_MAP_CMD_HOOK, FILTER_MAP_EVAL_HOOK,
@@ -371,6 +375,46 @@ pub const VIML_FN_STRFTIME: u16 = 3208;
 pub const VIML_FN_STRPTIME: u16 = 3209;
 /// `pathshorten()`
 pub const VIML_FN_PATHSHORTEN: u16 = 3210;
+/// eval/fs.c filesystem builtins.
+pub const VIML_FN_ISABSOLUTEPATH: u16 = 3219;
+/// `simplify()`
+pub const VIML_FN_SIMPLIFY: u16 = 3220;
+/// `filereadable()`
+pub const VIML_FN_FILEREADABLE: u16 = 3221;
+/// `filewritable()`
+pub const VIML_FN_FILEWRITABLE: u16 = 3222;
+/// `isdirectory()`
+pub const VIML_FN_ISDIRECTORY: u16 = 3223;
+/// `getfsize()`
+pub const VIML_FN_GETFSIZE: u16 = 3224;
+/// `getftype()`
+pub const VIML_FN_GETFTYPE: u16 = 3225;
+/// `getftime()`
+pub const VIML_FN_GETFTIME: u16 = 3226;
+/// `getfperm()`
+pub const VIML_FN_GETFPERM: u16 = 3227;
+/// `setfperm()`
+pub const VIML_FN_SETFPERM: u16 = 3228;
+/// `getcwd()`
+pub const VIML_FN_GETCWD: u16 = 3229;
+/// `chdir()`
+pub const VIML_FN_CHDIR: u16 = 3230;
+/// `executable()`
+pub const VIML_FN_EXECUTABLE: u16 = 3231;
+/// `exepath()`
+pub const VIML_FN_EXEPATH: u16 = 3232;
+/// `tempname()`
+pub const VIML_FN_TEMPNAME: u16 = 3233;
+/// `mkdir()`
+pub const VIML_FN_MKDIR: u16 = 3234;
+/// `delete()`
+pub const VIML_FN_DELETE: u16 = 3235;
+/// `rename()`
+pub const VIML_FN_RENAME: u16 = 3236;
+/// `readfile()`
+pub const VIML_FN_READFILE: u16 = 3237;
+/// `writefile()`
+pub const VIML_FN_WRITEFILE: u16 = 3238;
 /// `flattennew()`
 pub const VIML_FN_FLATTENNEW: u16 = 3211;
 /// `sha256()`
@@ -1664,6 +1708,26 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FN_STRFTIME, |vm, n| call_func(vm, n, f_strftime));
     vm.register_builtin(VIML_FN_STRPTIME, |vm, n| call_func(vm, n, f_strptime));
     vm.register_builtin(VIML_FN_PATHSHORTEN, |vm, n| call_func(vm, n, f_pathshorten));
+    vm.register_builtin(VIML_FN_ISABSOLUTEPATH, |vm, n| call_func(vm, n, f_isabsolutepath));
+    vm.register_builtin(VIML_FN_SIMPLIFY, |vm, n| call_func(vm, n, f_simplify));
+    vm.register_builtin(VIML_FN_FILEREADABLE, |vm, n| call_func(vm, n, f_filereadable));
+    vm.register_builtin(VIML_FN_FILEWRITABLE, |vm, n| call_func(vm, n, f_filewritable));
+    vm.register_builtin(VIML_FN_ISDIRECTORY, |vm, n| call_func(vm, n, f_isdirectory));
+    vm.register_builtin(VIML_FN_GETFSIZE, |vm, n| call_func(vm, n, f_getfsize));
+    vm.register_builtin(VIML_FN_GETFTYPE, |vm, n| call_func(vm, n, f_getftype));
+    vm.register_builtin(VIML_FN_GETFTIME, |vm, n| call_func(vm, n, f_getftime));
+    vm.register_builtin(VIML_FN_GETFPERM, |vm, n| call_func(vm, n, f_getfperm));
+    vm.register_builtin(VIML_FN_SETFPERM, |vm, n| call_func(vm, n, f_setfperm));
+    vm.register_builtin(VIML_FN_GETCWD, |vm, n| call_func(vm, n, f_getcwd));
+    vm.register_builtin(VIML_FN_CHDIR, |vm, n| call_func(vm, n, f_chdir));
+    vm.register_builtin(VIML_FN_EXECUTABLE, |vm, n| call_func(vm, n, f_executable));
+    vm.register_builtin(VIML_FN_EXEPATH, |vm, n| call_func(vm, n, f_exepath));
+    vm.register_builtin(VIML_FN_TEMPNAME, |vm, n| call_func(vm, n, f_tempname));
+    vm.register_builtin(VIML_FN_MKDIR, |vm, n| call_func(vm, n, f_mkdir));
+    vm.register_builtin(VIML_FN_DELETE, |vm, n| call_func(vm, n, f_delete));
+    vm.register_builtin(VIML_FN_RENAME, |vm, n| call_func(vm, n, f_rename));
+    vm.register_builtin(VIML_FN_READFILE, |vm, n| call_func(vm, n, f_readfile));
+    vm.register_builtin(VIML_FN_WRITEFILE, |vm, n| call_func(vm, n, f_writefile));
     vm.register_builtin(VIML_FN_FLATTENNEW, |vm, n| call_func(vm, n, f_flattennew));
     vm.register_builtin(VIML_FN_SHA256, |vm, n| call_func(vm, n, f_sha256));
     vm.register_builtin(VIML_FN_BLOB2LIST, |vm, n| call_func(vm, n, f_blob2list));
@@ -2788,6 +2852,26 @@ mod tests {
         assert_eq!(
             run("function! Add(a,b)\nreturn a:a+a:b\nendfunction\necho reduce(list2blob([1,2,3]), function('Add'), 0)"),
             "6\n"
+        );
+    }
+
+    #[test]
+    fn fs_builtins() {
+        // Pure path builtins (verified against `nvim --clean`).
+        assert_eq!(run("echo isabsolutepath('/usr/bin')"), "1\n");
+        assert_eq!(run("echo isabsolutepath('foo/bar')"), "0\n");
+        assert_eq!(run("echo simplify('/a/b/../c')"), "/a/c\n");
+        assert_eq!(run("echo simplify('a/./b//c')"), "a/b/c\n");
+        // writefile → readfile round-trip + delete, through a system temp path
+        // (hermetic: tempname() lives under the OS temp dir, fine in headless CI).
+        assert_eq!(
+            run("let f=tempname()\ncall writefile(['a','b','c'], f)\necho readfile(f)\necho getfsize(f)\ncall delete(f)\necho filereadable(f)"),
+            "['a', 'b', 'c']\n6\n0\n"
+        );
+        // mkdir/isdirectory/delete on a temp directory.
+        assert_eq!(
+            run("let d=tempname()\necho mkdir(d)\necho isdirectory(d)\necho delete(d,'d')\necho isdirectory(d)"),
+            "1\n1\n0\n0\n"
         );
     }
 

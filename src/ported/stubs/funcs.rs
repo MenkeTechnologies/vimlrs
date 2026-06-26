@@ -508,9 +508,6 @@ pub fn f_setcharsearch(_argvars: &[crate::ported::eval::typval_defs_h::typval_T]
 /// Port of `f_setcursorcharpos()` — `csrc/eval/funcs.c:6515`. STUB: not yet ported.
 pub fn f_setcursorcharpos(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_setcursorcharpos — csrc/eval/funcs.c:6515") }
 
-/// Port of `f_setfperm()` — `csrc/eval/funcs.c:6543`. STUB: not yet ported.
-pub fn f_setfperm(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_setfperm — csrc/eval/funcs.c:6543") }
-
 /// Port of `f_setpos()` — `csrc/eval/funcs.c:6574`. STUB: not yet ported.
 pub fn f_setpos(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_setpos — csrc/eval/funcs.c:6574") }
 
