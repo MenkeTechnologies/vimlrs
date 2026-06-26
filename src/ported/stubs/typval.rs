@@ -69,18 +69,6 @@ pub fn tv_list_check_range_index_two() { unimplemented!("STUB tv_list_check_rang
 /// C: `int tv_list_assign_range(list_T *const dest, list_T *const src, const int idx1_arg, const int idx2,`
 pub fn tv_list_assign_range() { unimplemented!("STUB tv_list_assign_range — csrc/eval/typval.c:684") }
 
-/// Port of `tv_list_slice_or_index()` — `csrc/eval/typval.c:932`. STUB: not yet ported.
-/// C: `int tv_list_slice_or_index(list_T *list, bool range, varnumber_T n1_arg, varnumber_T n2_arg,`
-pub fn tv_list_slice_or_index() { unimplemented!("STUB tv_list_slice_or_index — csrc/eval/typval.c:932") }
-
-/// Port of `list_join_inner()` — `csrc/eval/typval.c:992`. STUB: not yet ported.
-/// C: `static int list_join_inner(garray_T *const gap, list_T *const l, const char *const sep,`
-pub fn list_join_inner() { unimplemented!("STUB list_join_inner — csrc/eval/typval.c:992") }
-
-/// Port of `tv_list_join()` — `csrc/eval/typval.c:1051`. STUB: not yet ported.
-/// C: `int tv_list_join(garray_T *const gap, list_T *const l, const char *const sep)`
-pub fn tv_list_join() { unimplemented!("STUB tv_list_join — csrc/eval/typval.c:1051") }
-
 /// Port of `item_compare()` — `csrc/eval/typval.c:1185`. STUB: not yet ported.
 /// C: `static int item_compare(const void *s1, const void *s2, bool keep_zero)`
 pub fn item_compare() { unimplemented!("STUB item_compare — csrc/eval/typval.c:1185") }

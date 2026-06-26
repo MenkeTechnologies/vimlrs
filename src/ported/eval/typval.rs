@@ -8,6 +8,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::ported::charset::{vim_str2nr, STR2NR_ALL};
+use crate::ported::eval::encode::encode_tv2echo;
 use crate::ported::eval::typval_defs_h::{
     blob_T, dict_T, float_T, list_T, listitem_T, typval_T, typval_vval_union::*, varnumber_T,
     BoolVarValue, BoolVarValue::*, SpecialVarValue::*, VarLockStatus, VarType::*,
@@ -1833,6 +1834,127 @@ pub fn tv_blob_remove(argvars: &[typval_T], rettv: &mut typval_T, arg_errmsg: &s
         }
         tv_blob_set_ret(rettv, new_blob);
     }
+}
+
+/// Port of `list_join_inner()` from `Src/eval/typval.c:992`.
+///
+/// Stringify each item with `encode_tv2echo` and concatenate into `gap` with
+/// `sep` between. The C pre-sizes via a per-item garray (`Join`); the result is
+/// identical built directly.
+fn list_join_inner(gap: &mut String, l: &list_T, sep: &str) -> i32 {
+    let mut first = true;
+    for item in &l.lv_items {
+        if first {
+            first = false;
+        } else {
+            gap.push_str(sep);
+        }
+        gap.push_str(&encode_tv2echo(&item.li_tv));
+    }
+    OK
+}
+
+/// Port of `tv_list_join()` from `Src/eval/typval.c:1051`.
+///
+/// Join a List into `gap` using `sep`.
+pub fn tv_list_join(gap: &mut String, l: &list_T, sep: &str) -> i32 {
+    // c: if (!tv_list_len(l)) return OK;
+    if tv_list_len(l) == 0 {
+        return OK;
+    }
+    list_join_inner(gap, l, sep)
+}
+
+/// Port of `f_join()` from `Src/eval/typval.c:1072`.
+///
+/// "join({list} [, {sep}])" — join a List into a String (items rendered as by
+/// `:echo`, so nested Lists/Dicts render structurally, unlike `tv_get_string`).
+pub fn f_join(argvars: &[typval_T], rettv: &mut typval_T) {
+    // c: if (argvars[0].v_type != VAR_LIST) { emsg(e_listreq); return; }
+    if argvars[0].v_type != VAR_LIST {
+        emsg("E714: List required");
+        return;
+    }
+    rettv.v_type = VAR_STRING;
+    // c: sep defaults to " "; a type error in {sep} yields a NULL string.
+    let sep = if argvars.len() < 2 {
+        " ".to_string()
+    } else {
+        match tv_get_string_chk(&argvars[1]) {
+            Some(s) => s,
+            None => {
+                rettv.vval = v_string(String::new());
+                return;
+            }
+        }
+    };
+    let mut ga = String::new();
+    if let v_list(Some(l)) = &argvars[0].vval {
+        tv_list_join(&mut ga, &l.borrow(), &sep);
+    }
+    rettv.vval = v_string(ga);
+}
+
+/// Port of `tv_list_slice_or_index()` from `Src/eval/typval.c:932`.
+///
+/// Subscript a List (`rettv` holds it): a single index → that item; a range →
+/// a sub-List. `E684` for an out-of-range single index (when `verbose`).
+pub fn tv_list_slice_or_index(
+    list: &Rc<RefCell<list_T>>,
+    range: bool,
+    n1_arg: varnumber_T,
+    n2_arg: varnumber_T,
+    exclusive: bool,
+    rettv: &mut typval_T,
+    verbose: bool,
+) -> i32 {
+    let len = tv_list_len(&list.borrow());
+    let mut n1 = n1_arg;
+    let mut n2 = n2_arg;
+
+    if n1 < 0 {
+        n1 = len as varnumber_T + n1;
+    }
+    if n1 < 0 || n1 >= len as varnumber_T {
+        // c: a range tolerates invalid bounds (→ empty); an index is an error.
+        if !range {
+            if verbose {
+                emsg(&format!("E684: List index out of range: {n1_arg}"));
+            }
+            return FAIL;
+        }
+        n1 = len as varnumber_T;
+    }
+    if range {
+        if n2 < 0 {
+            n2 = len as varnumber_T + n2;
+        } else if n2 >= len as varnumber_T {
+            n2 = len as varnumber_T - if exclusive { 0 } else { 1 };
+        }
+        if exclusive {
+            n2 -= 1;
+        }
+        if n2 < 0 || n2 + 1 < n1 {
+            n2 = -1;
+        }
+        let l = tv_list_slice(&list.borrow(), n1, n2);
+        tv_clear(rettv);
+        rettv.v_type = VAR_LIST;
+        rettv.vval = v_list(Some(l));
+    } else {
+        // c: copy the item out before clearing rettv (which may free the list).
+        let mut var1 = typval_T {
+            v_type: VAR_UNKNOWN,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_number(0),
+        };
+        if let Some(li) = tv_list_find(&list.borrow(), n1 as i32) {
+            tv_copy(&li.li_tv, &mut var1);
+        }
+        tv_clear(rettv);
+        *rettv = var1;
+    }
+    OK
 }
 
 #[cfg(test)]

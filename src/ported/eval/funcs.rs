@@ -220,25 +220,7 @@ pub fn f_substitute(argvars: &[typval_T], rettv: &mut typval_T) {
 
 /// Port of `f_join()` from `Src/eval/funcs.c` — join a List with a separator
 /// (default " ").
-pub fn f_join(argvars: &[typval_T], rettv: &mut typval_T) {
-    let sep = if argvars.len() >= 2 {
-        tv_get_string(&argvars[1])
-    } else {
-        " ".to_string()
-    };
-    rettv.v_type = VAR_STRING;
-    let out = match (argvars[0].v_type, &argvars[0].vval) {
-        (VAR_LIST, v_list(Some(l))) => l
-            .borrow()
-            .lv_items
-            .iter()
-            .map(|it| tv_get_string(&it.li_tv))
-            .collect::<Vec<_>>()
-            .join(&sep),
-        _ => String::new(),
-    };
-    rettv.vval = v_string(out);
-}
+// `f_join` lives in its real home file, `src/ported/eval/typval.rs` (eval/typval.c).
 
 /// Port of `f_range()` from `Src/eval/funcs.c`.
 ///

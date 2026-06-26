@@ -24,12 +24,12 @@ use crate::ported::eval::funcs::{
     f_atan2, f_deepcopy, f_escape, f_flatten, f_flattennew, f_fmod, f_items,
     f_isinf, f_isnan, f_getpid, f_localtime, f_soundfold, f_json_decode, f_json_encode, f_matchstrpos, f_getenv, f_setenv, f_shellescape,
     f_reltime, f_reltimestr, f_reltimefloat, f_rand, f_srand, f_strftime, f_strptime, f_sha256,
-    f_join, f_keys, f_len, f_list2str, f_match, f_matchend, f_matchlist, f_matchstr,
+    f_keys, f_len, f_list2str, f_match, f_matchend, f_matchlist, f_matchstr,
     f_max, f_min, f_nr2char, f_or, f_pow, f_printf, f_range, f_repeat, f_reverse, f_split, f_str2float, f_substitute, f_type, f_uniq, f_values, f_xor,
 };
 use crate::ported::eval::fs::f_pathshorten;
 use crate::ported::eval::list::{f_count, f_extend, f_extendnew, f_remove};
-use crate::ported::eval::typval::{f_blob2list, f_list2blob};
+use crate::ported::eval::typval::{f_blob2list, f_join, f_list2blob, tv_list_slice_or_index};
 use crate::ported::strings::{
     f_string, f_strlen, f_strchars, f_strgetchar, f_strcharpart, f_byteidx, f_byteidxcomp,
     f_charidx, f_strpart, f_stridx, f_strridx, f_tolower, f_toupper, f_tr, f_trim, f_str2nr,
@@ -1297,17 +1297,13 @@ fn blob_concat(a: &typval_T, b: &typval_T) -> typval_T {
 fn index_value(base: &typval_T, index: &typval_T) -> typval_T {
     match (base.v_type, &base.vval) {
         (VAR_LIST, v_list(Some(l))) => {
-            let l = l.borrow();
-            let len = l.lv_len as varnumber_T;
-            let mut i = tv_get_number_chk(index, None);
-            if i < 0 {
-                i += len;
-            }
-            if i < 0 || i >= len {
-                message::emsg("E684: list index out of range");
+            // Faithful single-index via the ported value layer.
+            let i = tv_get_number_chk(index, None);
+            let mut rettv = base.clone();
+            if tv_list_slice_or_index(l, false, i, 0, false, &mut rettv, true) == 0 {
                 tv_special()
             } else {
-                l.lv_items[i as usize].li_tv.clone()
+                rettv
             }
         }
         (VAR_DICT, v_dict(Some(d))) => {
@@ -1380,18 +1376,14 @@ fn slice_value(base: &typval_T, from: &typval_T, to: &typval_T) -> typval_T {
     };
     match (base.v_type, &base.vval) {
         (VAR_LIST, v_list(Some(l))) => {
-            let l = l.borrow();
-            let len = l.lv_len as varnumber_T;
-            let (lo, hi) = (lower(len, from), upper(len, to));
-            let items = if lo > hi {
-                Vec::new()
-            } else {
-                l.lv_items[lo as usize..=(hi as usize).min(l.lv_items.len().saturating_sub(1))]
-                    .iter()
-                    .map(|it| it.li_tv.clone())
-                    .collect()
-            };
-            new_list(items)
+            // Faithful list slice via the ported value layer (inclusive bounds;
+            // an omitted bound is the whole-start/whole-end default).
+            let len = l.borrow().lv_len as varnumber_T;
+            let n1 = if from.v_type == VAR_SPECIAL { 0 } else { tv_get_number_chk(from, None) };
+            let n2 = if to.v_type == VAR_SPECIAL { len - 1 } else { tv_get_number_chk(to, None) };
+            let mut rettv = base.clone();
+            let _ = tv_list_slice_or_index(l, true, n1, n2, false, &mut rettv, true);
+            rettv
         }
         (VAR_STRING, v_string(s)) => {
             let chars: Vec<char> = s.chars().collect();
@@ -2698,6 +2690,20 @@ mod tests {
         assert_eq!(run("let e={'a':1}\ncall extend(e,{'a':99})\necho e"), "{'a': 99}\n");
         // extendnew returns a new value, leaving the source intact.
         assert_eq!(run("let n=[1,2]\nlet p=extendnew(n,[3])\necho n\necho p"), "[1, 2]\n[1, 2, 3]\n");
+    }
+
+    #[test]
+    fn join_and_list_slice() {
+        // join() renders items as `:echo` (nested structurally) — the prior
+        // tv_get_string version dropped nested Lists. Verified vs nvim.
+        assert_eq!(run("echo join([[1,2],3], '-')"), "[1, 2]-3\n");
+        assert_eq!(run("echo join(['a','b','c'])"), "a b c\n");
+        assert_eq!(run("echo join([1,2,3], ', ')"), "1, 2, 3\n");
+        // List index/slice via the ported tv_list_slice_or_index.
+        assert_eq!(run("echo [10,20,30,40][2]"), "30\n");
+        assert_eq!(run("echo [10,20,30,40][1:2]"), "[20, 30]\n");
+        assert_eq!(run("echo [10,20,30,40][-2:]"), "[30, 40]\n");
+        assert_eq!(run("echo [10,20,30,40][1:]"), "[20, 30, 40]\n");
     }
 
     #[test]
