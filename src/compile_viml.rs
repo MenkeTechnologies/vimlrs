@@ -773,11 +773,13 @@ impl Compiler {
         idx
     }
 
-    /// `range(...)` arguments if `iter` is a `range()` call with provably-Number
-    /// arguments, else `None`. Used to fire the native integer induction loop.
-    fn range_int_args<'a>(&self, iter: &'a Expr) -> Option<&'a [Expr]> {
+    /// `range(...)` arguments if `iter` is a `range()` call with 1–3 args, else
+    /// `None`. Bounds need not be provably integer — `for_range_native` coerces a
+    /// non-int start/bound with `tv_get_number` (exactly as `f_range` does), so a
+    /// dynamic bound like `range(a:n)` or `range(len(x))` still runs natively.
+    fn range_native_args<'a>(&self, iter: &'a Expr) -> Option<&'a [Expr]> {
         if let Expr::Call { name, args } = iter {
-            if name == "range" && (1..=3).contains(&args.len()) && args.iter().all(|a| self.expr_is_int(a)) {
+            if name == "range" && (1..=3).contains(&args.len()) {
                 return Some(args);
             }
         }
@@ -800,17 +802,26 @@ impl Compiler {
         } else {
             (Some(&args[0]), &args[1], Op::NumLe)
         };
+        // Coerce a non-literal-int start/bound to an integer once (range() does
+        // tv_get_number on its args); the coercion is in the loop prologue, so
+        // the traced body stays CallBuiltin-free.
         match start {
             None => {
                 self.emit(Op::LoadInt(0));
             }
             Some(e) => {
                 self.expr(e)?;
+                if !self.expr_is_int(e) {
+                    self.emit(Op::CallBuiltin(h::VIML_TONUMBER, 1));
+                }
             }
         }
         self.emit(Op::SetSlot(slot)); // i = start
         let bound_slot = self.alloc_slot();
         self.expr(bound)?;
+        if !self.expr_is_int(bound) {
+            self.emit(Op::CallBuiltin(h::VIML_TONUMBER, 1));
+        }
         self.emit(Op::SetSlot(bound_slot)); // bound = <expr> (once)
 
         let to_test = self.emit(Op::Jump(0));
@@ -847,7 +858,7 @@ impl Compiler {
         // `0..n-1`; 2 args → `a..b` inclusive; 3 args → step (positive literal).
         if let ForVars::One(name) = vars {
             if let Some(&slot) = self.slots.get(self.slot_key(name)) {
-                if let Some(args) = self.range_int_args(iter) {
+                if let Some(args) = self.range_native_args(iter) {
                     // step must be a positive literal so the compare direction
                     // is known at compile time; anything else falls through.
                     let step = match args.get(2) {
@@ -1448,6 +1459,7 @@ fn builtin_fn_id(name: &str) -> Option<u16> {
         "reltimefloat" => h::VIML_FN_RELTIMEFLOAT,
         "rand" => h::VIML_FN_RAND,
         "srand" => h::VIML_FN_SRAND,
+        "strftime" => h::VIML_FN_STRFTIME,
         "sqrt" => h::VIML_FN_SQRT,
         "floor" => h::VIML_FN_FLOOR,
         "ceil" => h::VIML_FN_CEIL,

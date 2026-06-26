@@ -14,8 +14,9 @@ use crate::ported::eval::typval::{
     tv_list_append_string, tv_list_append_tv, tv_list_find_nr, tv_list_len,
 };
 use crate::ported::eval_h::{FAIL, OK};
+use crate::ported::eval::typval::tv_get_number;
 use crate::ported::os::env::os_get_pid;
-use crate::ported::os::time::os_hrtime;
+use crate::ported::os::time::{os_hrtime, os_localtime_r};
 use crate::ported::profile::{profile_end, profile_msg, profile_signed, profile_start, profile_sub, proftime_T};
 use crate::ported::eval::typval_defs_h::{
     typval_T, typval_vval_union::*, varnumber_T, BoolVarValue::*, SpecialVarValue::*, VarType::*,
@@ -1109,6 +1110,55 @@ pub fn f_reltimefloat(argvars: &[typval_T], rettv: &mut typval_T) {
     if list2proftime(&argvars[0], &mut tm) == OK {
         rettv.vval = v_float(profile_signed(tm) as f64 / 1_000_000_000.0);
     }
+}
+
+/// Port of `f_strftime()` from `Src/eval/funcs.c:7220`.
+///
+/// "strftime({format} [, {time}])" function — format a time via the C library's
+/// `strftime`. The locale-encoding conversion (`vimconv`) is omitted; the common
+/// `CONV_NONE` (UTF-8) path is taken directly.
+pub fn f_strftime(argvars: &[typval_T], rettv: &mut typval_T) {
+    use nix::libc;
+    rettv.v_type = VAR_STRING;
+    let p = tv_get_string(&argvars[0]);
+    // c: seconds = (argvars[1] == UNKNOWN) ? time(NULL) : (time_t)tv_get_number(&argvars[1]);
+    let seconds: libc::time_t = if argvars.len() < 2 {
+        unsafe { libc::time(std::ptr::null_mut()) }
+    } else {
+        tv_get_number(&argvars[1]) as libc::time_t
+    };
+    let curtime = match os_localtime_r(&seconds) {
+        Some(t) => t,
+        None => {
+            // c: MSVC returns NULL for an invalid value of seconds.
+            rettv.vval = v_string("(Invalid)".to_string());
+            return;
+        }
+    };
+    // c: strftime(result_buf, sizeof(result_buf), p, curtime_ptr)
+    let fmt = match std::ffi::CString::new(p) {
+        Ok(c) => c,
+        Err(_) => {
+            rettv.vval = v_string(String::new());
+            return;
+        }
+    };
+    let mut buf = [0u8; 256];
+    let n = unsafe {
+        libc::strftime(
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len(),
+            fmt.as_ptr(),
+            &curtime,
+        )
+    };
+    // c: if strftime() == 0 → empty result.
+    let s = if n == 0 {
+        String::new()
+    } else {
+        String::from_utf8_lossy(&buf[..n]).into_owned()
+    };
+    rettv.vval = v_string(s);
 }
 
 /// Port of `init_srand()` from `Src/eval/funcs.c:4959`.

@@ -23,7 +23,7 @@ use crate::ported::eval::funcs::{
     f_abs, f_add, f_and, f_char2nr, f_copy, f_count, f_empty, f_exists, f_extend, f_float2nr, f_function, f_get, f_has, f_has_key, f_index, f_insert, f_invert,
     f_atan2, f_deepcopy, f_escape, f_flatten, f_fmod, f_items,
     f_isinf, f_isnan, f_getpid, f_localtime, f_soundfold, f_json_decode, f_json_encode, f_matchstrpos, f_extendnew, f_getenv, f_setenv, f_shellescape,
-    f_reltime, f_reltimestr, f_reltimefloat, f_rand, f_srand,
+    f_reltime, f_reltimestr, f_reltimefloat, f_rand, f_srand, f_strftime,
     f_join, f_keys, f_len, f_list2str, f_match, f_matchend, f_matchlist, f_matchstr,
     f_max, f_min, f_nr2char, f_or, f_pow, f_printf, f_range, f_remove, f_repeat, f_reverse, f_split, f_str2float, f_substitute, f_type, f_uniq, f_values, f_xor,
 };
@@ -88,6 +88,10 @@ pub const VIML_SETVAR: u16 = 3001;
 pub const VIML_TRUTHY: u16 = 3002;
 /// `boolnum`: pop value → `Int(0/1)`.
 pub const VIML_BOOLNUM: u16 = 3003;
+/// Coerce the value on top of the stack to an integer (`tv_get_number`), as
+/// `range()`/`f_range` coerce their arguments. Used to hoist a non-literal
+/// `range()` bound into a native counter loop.
+pub const VIML_TONUMBER: u16 = 3004;
 /// `+`
 pub const VIML_ADD: u16 = 3010;
 /// `-`
@@ -348,6 +352,8 @@ pub const VIML_FN_RELTIMEFLOAT: u16 = 3205;
 pub const VIML_FN_RAND: u16 = 3206;
 /// `srand()`
 pub const VIML_FN_SRAND: u16 = 3207;
+/// `strftime()`
+pub const VIML_FN_STRFTIME: u16 = 3208;
 /// Debug line marker: pop a line number → notify the DAP `check_line` hook
 /// (emitted before each statement only in debug-compiled chunks).
 pub const VIML_SET_LINENO: u16 = 3070;
@@ -582,6 +588,11 @@ fn b_truthy(vm: &mut VM, _: u8) -> Value {
 
 fn b_boolnum(vm: &mut VM, _: u8) -> Value {
     Value::Int((tv_get_number_chk(&pop_tv(vm), None) != 0) as varnumber_T)
+}
+
+fn b_tonumber(vm: &mut VM, _: u8) -> Value {
+    // c: range() coerces each argument with tv_get_number before counting.
+    Value::Int(tv_get_number_chk(&pop_tv(vm), None))
 }
 
 fn b_add(vm: &mut VM, _: u8) -> Value {
@@ -1442,6 +1453,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_SETENV, b_setenv);
     vm.register_builtin(VIML_TRUTHY, b_truthy);
     vm.register_builtin(VIML_BOOLNUM, b_boolnum);
+    vm.register_builtin(VIML_TONUMBER, b_tonumber);
     vm.register_builtin(VIML_ADD, b_add);
     vm.register_builtin(VIML_SUB, b_sub);
     vm.register_builtin(VIML_MUL, b_mul);
@@ -1571,6 +1583,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FN_RELTIMEFLOAT, |vm, n| call_func(vm, n, f_reltimefloat));
     vm.register_builtin(VIML_FN_RAND, |vm, n| call_func(vm, n, f_rand));
     vm.register_builtin(VIML_FN_SRAND, |vm, n| call_func(vm, n, f_srand));
+    vm.register_builtin(VIML_FN_STRFTIME, |vm, n| call_func(vm, n, f_strftime));
     vm.register_builtin(VIML_SET_LINENO, b_set_lineno);
     vm.register_builtin(VIML_CALL_USER, b_call_user);
     vm.register_builtin(VIML_SET_RETURN, b_set_return);
@@ -1993,6 +2006,50 @@ mod tests {
         );
     }
 
+    /// Proof that `for i in range(<dynamic>)` trace-JITs: the bound need not be a
+    /// compile-time integer. `range(a:n)` hoists `a:n` once, coerced with
+    /// `tv_get_number` (`VIML_TONUMBER`) in the prologue, so the loop body is
+    /// native and fusevm compiles a trace. Driven through the real call path.
+    #[test]
+    fn dynamic_range_bound_traces_on_jit() {
+        use crate::compile_viml::compile_program;
+        use crate::viml_parser::parse_program;
+        use fusevm::Op;
+
+        let src = "function! F(n)\n  let s = 0\n  for i in range(a:n)\n    let s += i\n  endfor\n  return s\nendfunction\ncall F(3000)";
+        let prog = compile_program(&parse_program(src).unwrap()).unwrap();
+        let chunk = prog.funcs.iter().find(|f| f.name == "F").unwrap().chunk.clone();
+
+        let (header, back) = chunk
+            .ops
+            .iter()
+            .enumerate()
+            .find_map(|(i, o)| match o {
+                Op::JumpIfTrue(t) if (*t as usize) < i => Some((*t as usize, i)),
+                _ => None,
+            })
+            .expect("loop backedge");
+        // The bound coercion is in the prologue; the loop body is native.
+        assert!(
+            chunk.ops[header..=back].iter().any(|o| matches!(o, Op::NumLt)),
+            "native counter compare"
+        );
+        assert!(
+            !chunk.ops[header..=back]
+                .iter()
+                .any(|o| matches!(o, Op::CallBuiltin(..) | Op::Extended(..))),
+            "dynamic-range loop body must be CallBuiltin-free, got {:?}",
+            &chunk.ops[header..=back]
+        );
+
+        // Drive the function hot through the actual call path (a:n = 3000).
+        run_compiled(prog);
+        assert!(
+            fusevm::JitCompiler::new().trace_is_compiled(&chunk, header),
+            "fusevm must compile a trace for the dynamic-range loop"
+        );
+    }
+
     /// Proof that a loop using integer `%` (e.g. `if i % 2 == 0`) trace-JITs —
     /// native `Op::Mod` (identical to VimL's `num_modulus` for ints).
     #[test]
@@ -2275,6 +2332,38 @@ mod tests {
             run("let g:n = 100\nfunction! F()\nlet n = 7\nendfunction\ncall F()\necho g:n"),
             "100\n"
         );
+    }
+
+    #[test]
+    fn dynamic_range_bounds() {
+        // `range()` bound from a parameter, a string (coerced), an expression,
+        // and a two-arg inclusive range — all match Vim's tv_get_number coercion.
+        assert_eq!(
+            run("function! F(n)\nlet s=0\nfor i in range(a:n)\nlet s+=i\nendfor\nreturn s\nendfunction\necho F(101)"),
+            "5050\n"
+        );
+        assert_eq!(
+            run("function! F(n)\nlet s=0\nfor i in range(a:n)\nlet s+=i\nendfor\nreturn s\nendfunction\necho F('101')"),
+            "5050\n"
+        );
+        assert_eq!(
+            run("function! G(n)\nlet s=0\nfor i in range(2, a:n)\nlet s+=i\nendfor\nreturn s\nendfunction\necho G(10)"),
+            "54\n"
+        );
+        assert_eq!(
+            run("function! H(xs)\nlet s=0\nfor i in range(len(a:xs))\nlet s+=i\nendfor\nreturn s\nendfunction\necho H([5, 6, 7, 8])"),
+            "6\n"
+        );
+    }
+
+    #[test]
+    fn strftime_builtin() {
+        // TZ-independent: literal text passes through; `%%` → `%`.
+        assert_eq!(run("echo strftime('hello world')"), "hello world\n");
+        assert_eq!(run("echo strftime('100%%')"), "100%\n");
+        // Format specifiers expand: `%Y-%m-%d` is always 10 chars (the exact date
+        // is TZ-dependent, but its width is not), proving strftime() ran.
+        assert_eq!(run("echo len(strftime('%Y-%m-%d', 0))"), "10\n");
     }
 
     #[test]

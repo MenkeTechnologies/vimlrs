@@ -577,9 +577,6 @@ pub fn get_xdg_var_list() { unimplemented!("STUB get_xdg_var_list — csrc/eval/
 /// Port of `f_stdpath()` — `csrc/eval/funcs.c:7167`. STUB: not yet ported.
 pub fn f_stdpath(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_stdpath — csrc/eval/funcs.c:7167") }
 
-/// Port of `f_strftime()` — `csrc/eval/funcs.c:7215`. STUB: not yet ported.
-pub fn f_strftime(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_strftime — csrc/eval/funcs.c:7215") }
-
 /// Port of `f_strptime()` — `csrc/eval/funcs.c:7265`. STUB: not yet ported.
 pub fn f_strptime(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_strptime — csrc/eval/funcs.c:7265") }
 

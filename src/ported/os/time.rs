@@ -4,6 +4,7 @@
 //! Only the monotonic clock used by `profile.c`/`reltime()` is ported here.
 #![allow(non_snake_case)]
 
+use nix::libc;
 use nix::time::{clock_gettime, ClockId};
 
 /// Port of `os_hrtime()` from `Src/os/time.c`.
@@ -18,5 +19,23 @@ pub fn os_hrtime() -> u64 {
     match clock_gettime(ClockId::CLOCK_MONOTONIC) {
         Ok(ts) => (ts.tv_sec() as u64) * 1_000_000_000u64 + (ts.tv_nsec() as u64),
         Err(_) => 0,
+    }
+}
+
+/// Port of `os_localtime_r()` from `Src/os/time.c:108`.
+///
+/// Thread-safe broken-down local time. C threads the result through an out-param
+/// `struct tm *` (here returned as `Option`, `None` on failure). C also calls
+/// `tzset()` (cached) so a changed `$TZ` is honored; POSIX `localtime_r` already
+/// does so internally, and the cache is only an optimization.
+pub fn os_localtime_r(clock: &libc::time_t) -> Option<libc::tm> {
+    // c: return localtime_r(clock, result);
+    unsafe {
+        let mut result: libc::tm = std::mem::zeroed();
+        if libc::localtime_r(clock, &mut result).is_null() {
+            None
+        } else {
+            Some(result)
+        }
     }
 }
