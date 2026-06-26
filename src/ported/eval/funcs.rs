@@ -38,7 +38,8 @@ use crate::ported::ops::{
 };
 use crate::ported::eval::vars::{get_vim_var_str, vv::VV_REG};
 use crate::ported::eval::list::FILTER_MAP_EVAL_HOOK;
-use crate::ported::eval::typval::{tv_dict_alloc_ret, tv_list_alloc};
+use crate::ported::eval::typval::{tv_dict_alloc, tv_dict_alloc_ret, tv_list_alloc};
+use crate::viml_regex::{regex_matchlist, regex_matchstrpos};
 
 /// Port of `f_len()` from `Src/eval/funcs.c`.
 ///
@@ -1719,4 +1720,139 @@ pub fn f_indexof(argvars: &[typval_T], rettv: &mut typval_T) {
         }
         _ => {}
     }
+}
+
+// ── pattern / option / editor-absent builtins (funcs.c) ──────────────────────
+
+/// Port of `f_matchstrlist()` from `Src/eval/funcs.c` — for each String in a
+/// List, the first match of `{pat}`: `{idx, byteidx, text [, submatches]}`.
+pub fn f_matchstrlist(argvars: &[typval_T], rettv: &mut typval_T) {
+    let l = tv_list_alloc_ret(rettv, 0);
+    let list = match (argvars[0].v_type, &argvars[0].vval) {
+        (VAR_LIST, v_list(Some(l))) => l.clone(),
+        (VAR_LIST, v_list(None)) => return,
+        _ => {
+            emsg("E1211: List required");
+            return;
+        }
+    };
+    let pat = tv_get_string(&argvars[1]);
+    let ic = tv_get_number(&get_option_value("ignorecase")) != 0;
+    let submatches = argvars.get(2).is_some_and(|d| match &d.vval {
+        v_dict(Some(dd)) => dd.borrow().dv_hashtab.get("submatches").map(tv_get_bool).unwrap_or(0) != 0,
+        _ => false,
+    });
+    let items: Vec<typval_T> = list.borrow().lv_items.iter().map(|it| it.li_tv.clone()).collect();
+    let mk = |t, v| typval_T { v_type: t, v_lock: crate::ported::eval::typval_defs_h::VarLockStatus::VAR_UNLOCKED, vval: v };
+    for (idx, item) in items.iter().enumerate() {
+        let s = tv_get_string(item);
+        let (text, cstart, _) = regex_matchstrpos(&pat, &s, ic);
+        if cstart < 0 {
+            continue;
+        }
+        // c: byteidx is a BYTE offset; regex returns a char index.
+        let byteidx: usize = s.chars().take(cstart as usize).map(char::len_utf8).sum();
+        let d = tv_dict_alloc();
+        tv_dict_add_tv(&mut d.borrow_mut(), "idx", typval_T::from(idx as varnumber_T));
+        tv_dict_add_tv(&mut d.borrow_mut(), "byteidx", typval_T::from(byteidx as varnumber_T));
+        tv_dict_add_tv(&mut d.borrow_mut(), "text", typval_T::from(text));
+        if submatches {
+            // c: always the 9 \1..\9 backrefs, "" for groups that didn't match.
+            let groups = regex_matchlist(&pat, &s, ic);
+            let sub = tv_list_alloc(0);
+            for i in 1..=9 {
+                tv_list_append_string(&mut sub.borrow_mut(), groups.get(i).map_or("", |g| g.as_str()));
+            }
+            tv_dict_add_tv(&mut d.borrow_mut(), "submatches", mk(VAR_LIST, v_list(Some(sub))));
+        }
+        tv_list_append_tv(&mut l.borrow_mut(), mk(VAR_DICT, v_dict(Some(d))));
+    }
+}
+
+/// Port of `f_fnameescape()` from `Src/eval/funcs.c` — backslash-escape the
+/// characters special to a `:` command's filename argument.
+pub fn f_fnameescape(argvars: &[typval_T], rettv: &mut typval_T) {
+    // c: PATH_ESC_CHARS " \t\n*?[{`$\\%#'\"|!<".
+    const ESC: &[u8] = b" \t\n*?[{`$\\%#'\"|!<";
+    let name = tv_get_string(&argvars[0]);
+    let mut out = String::with_capacity(name.len() + 2);
+    for (i, b) in name.bytes().enumerate() {
+        // A leading '+' or '>' is also escaped (would start a different arg).
+        if ESC.contains(&b) || (i == 0 && (b == b'+' || b == b'>')) {
+            out.push('\\');
+        }
+        out.push(b as char);
+    }
+    *rettv = typval_T::from(out);
+}
+
+/// Port of `f_shiftwidth()`/`get_sw_value()` from `Src/eval/funcs.c` —
+/// `'shiftwidth'`, or `'tabstop'` when shiftwidth is 0.
+pub fn f_shiftwidth(_argvars: &[typval_T], rettv: &mut typval_T) {
+    let mut sw = tv_get_number(&get_option_value("shiftwidth"));
+    if sw == 0 {
+        sw = tv_get_number(&get_option_value("tabstop"));
+    }
+    *rettv = typval_T::from(sw);
+}
+
+// Editor/GUI/server-absent builtins: a standalone VimL interpreter has no
+// editor UI, so these report the fixed "nothing here" value Vim returns when
+// the corresponding subsystem is inactive.
+
+/// Port of `f_mode()` — normal mode (the standalone interpreter has no modes).
+pub fn f_mode(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from("n".to_string());
+}
+/// Port of `f_state()` — no pending state standalone → "".
+pub fn f_state(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(String::new());
+}
+/// Port of `f_visualmode()` — no prior Visual selection standalone → "".
+pub fn f_visualmode(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(String::new());
+}
+/// Port of `f_pumvisible()` — no popup menu → 0.
+pub fn f_pumvisible(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_wildmenumode()` — no wildmenu → 0.
+pub fn f_wildmenumode(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_did_filetype()` — no filetype autocommands → 0.
+pub fn f_did_filetype(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_eventhandler()` — not inside an event handler → 0.
+pub fn f_eventhandler(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_hlexists()` — no highlight groups → 0.
+pub fn f_hlexists(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_windowsversion()` — non-Windows → "".
+pub fn f_windowsversion(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(String::new());
+}
+/// Port of `f_getfontname()` — no GUI → "".
+pub fn f_getfontname(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(String::new());
+}
+/// Port of `f_foreground()` — no UI to raise → 0 (no-op).
+pub fn f_foreground(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_prompt_getprompt()` — no prompt buffer → "".
+pub fn f_prompt_getprompt(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(String::new());
+}
+/// Port of `f_pum_getpos()` — no popup menu → empty Dict.
+pub fn f_pum_getpos(_argvars: &[typval_T], rettv: &mut typval_T) {
+    tv_dict_alloc_ret(rettv);
+}
+/// Port of `f_serverlist()` — no server standalone → empty List.
+pub fn f_serverlist(_argvars: &[typval_T], rettv: &mut typval_T) {
+    tv_list_alloc_ret(rettv, 0);
 }

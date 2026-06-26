@@ -28,6 +28,9 @@ use crate::ported::eval::funcs::{
     f_max, f_min, f_nr2char, f_or, f_pow, f_printf, f_range, f_reduce, f_repeat, f_reverse, f_split, f_str2float, f_substitute, f_type, f_values, f_xor,
     f_getreg, f_getregtype, f_getreginfo, f_setreg, f_reg_recording, f_reg_executing, f_reg_recorded,
     f_gettext, f_garbagecollect, f_funcref, f_id, f_indexof,
+    f_matchstrlist, f_fnameescape, f_shiftwidth, f_mode, f_state, f_visualmode, f_pumvisible,
+    f_wildmenumode, f_did_filetype, f_eventhandler, f_hlexists, f_windowsversion, f_getfontname,
+    f_foreground, f_prompt_getprompt, f_pum_getpos, f_serverlist,
 };
 use crate::ported::eval::fs::{
     f_chdir, f_delete, f_executable, f_exepath, f_filecopy, f_filereadable, f_filewritable,
@@ -456,6 +459,40 @@ pub const VIML_FN_FUNCREF: u16 = 3255;
 pub const VIML_FN_ID: u16 = 3256;
 /// `indexof()`
 pub const VIML_FN_INDEXOF: u16 = 3257;
+/// `matchstrlist()`
+pub const VIML_FN_MATCHSTRLIST: u16 = 3258;
+/// `fnameescape()`
+pub const VIML_FN_FNAMEESCAPE: u16 = 3259;
+/// `shiftwidth()`
+pub const VIML_FN_SHIFTWIDTH: u16 = 3260;
+/// `mode()`
+pub const VIML_FN_MODE: u16 = 3261;
+/// `state()`
+pub const VIML_FN_STATE: u16 = 3262;
+/// `visualmode()`
+pub const VIML_FN_VISUALMODE: u16 = 3263;
+/// `pumvisible()`
+pub const VIML_FN_PUMVISIBLE: u16 = 3264;
+/// `wildmenumode()`
+pub const VIML_FN_WILDMENUMODE: u16 = 3265;
+/// `did_filetype()`
+pub const VIML_FN_DID_FILETYPE: u16 = 3266;
+/// `eventhandler()`
+pub const VIML_FN_EVENTHANDLER: u16 = 3267;
+/// `hlexists()`
+pub const VIML_FN_HLEXISTS: u16 = 3268;
+/// `windowsversion()`
+pub const VIML_FN_WINDOWSVERSION: u16 = 3269;
+/// `getfontname()`
+pub const VIML_FN_GETFONTNAME: u16 = 3270;
+/// `foreground()`
+pub const VIML_FN_FOREGROUND: u16 = 3271;
+/// `prompt_getprompt()`
+pub const VIML_FN_PROMPT_GETPROMPT: u16 = 3272;
+/// `pum_getpos()`
+pub const VIML_FN_PUM_GETPOS: u16 = 3273;
+/// `serverlist()`
+pub const VIML_FN_SERVERLIST: u16 = 3274;
 /// `flattennew()`
 pub const VIML_FN_FLATTENNEW: u16 = 3211;
 /// `sha256()`
@@ -1788,6 +1825,23 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FN_FUNCREF, |vm, n| call_func(vm, n, f_funcref));
     vm.register_builtin(VIML_FN_ID, |vm, n| call_func(vm, n, f_id));
     vm.register_builtin(VIML_FN_INDEXOF, |vm, n| call_func(vm, n, f_indexof));
+    vm.register_builtin(VIML_FN_MATCHSTRLIST, |vm, n| call_func(vm, n, f_matchstrlist));
+    vm.register_builtin(VIML_FN_FNAMEESCAPE, |vm, n| call_func(vm, n, f_fnameescape));
+    vm.register_builtin(VIML_FN_SHIFTWIDTH, |vm, n| call_func(vm, n, f_shiftwidth));
+    vm.register_builtin(VIML_FN_MODE, |vm, n| call_func(vm, n, f_mode));
+    vm.register_builtin(VIML_FN_STATE, |vm, n| call_func(vm, n, f_state));
+    vm.register_builtin(VIML_FN_VISUALMODE, |vm, n| call_func(vm, n, f_visualmode));
+    vm.register_builtin(VIML_FN_PUMVISIBLE, |vm, n| call_func(vm, n, f_pumvisible));
+    vm.register_builtin(VIML_FN_WILDMENUMODE, |vm, n| call_func(vm, n, f_wildmenumode));
+    vm.register_builtin(VIML_FN_DID_FILETYPE, |vm, n| call_func(vm, n, f_did_filetype));
+    vm.register_builtin(VIML_FN_EVENTHANDLER, |vm, n| call_func(vm, n, f_eventhandler));
+    vm.register_builtin(VIML_FN_HLEXISTS, |vm, n| call_func(vm, n, f_hlexists));
+    vm.register_builtin(VIML_FN_WINDOWSVERSION, |vm, n| call_func(vm, n, f_windowsversion));
+    vm.register_builtin(VIML_FN_GETFONTNAME, |vm, n| call_func(vm, n, f_getfontname));
+    vm.register_builtin(VIML_FN_FOREGROUND, |vm, n| call_func(vm, n, f_foreground));
+    vm.register_builtin(VIML_FN_PROMPT_GETPROMPT, |vm, n| call_func(vm, n, f_prompt_getprompt));
+    vm.register_builtin(VIML_FN_PUM_GETPOS, |vm, n| call_func(vm, n, f_pum_getpos));
+    vm.register_builtin(VIML_FN_SERVERLIST, |vm, n| call_func(vm, n, f_serverlist));
     vm.register_builtin(VIML_FN_FLATTENNEW, |vm, n| call_func(vm, n, f_flattennew));
     vm.register_builtin(VIML_FN_SHA256, |vm, n| call_func(vm, n, f_sha256));
     vm.register_builtin(VIML_FN_BLOB2LIST, |vm, n| call_func(vm, n, f_blob2list));
@@ -2913,6 +2967,45 @@ mod tests {
             run("function! Add(a,b)\nreturn a:a+a:b\nendfunction\necho reduce(list2blob([1,2,3]), function('Add'), 0)"),
             "6\n"
         );
+    }
+
+    #[test]
+    fn matchstrlist_fnameescape_shiftwidth() {
+        // matchstrlist — content verified against nvim (key order is vimlrs's
+        // deterministic IndexMap order; nvim's hashtab order differs cosmetically).
+        assert_eq!(
+            run("echo matchstrlist(['a1','b2','cc'], '\\d')"),
+            "[{'idx': 0, 'byteidx': 1, 'text': '1'}, {'idx': 1, 'byteidx': 1, 'text': '2'}]\n"
+        );
+        // submatches padded to the 9 \1..\9 backrefs.
+        assert_eq!(
+            run("echo matchstrlist(['foobar'], '\\(o\\+\\)', {'submatches': v:true})[0]['submatches']"),
+            "['oo', '', '', '', '', '', '', '', '']\n"
+        );
+        // fnameescape (verified vs nvim).
+        assert_eq!(run("echo fnameescape('foo bar')"), "foo\\ bar\n");
+        assert_eq!(run("echo fnameescape('a%b#c')"), "a\\%b\\#c\n");
+        // shiftwidth: 'shiftwidth', or 'tabstop' when sw==0.
+        assert_eq!(run("echo shiftwidth()"), "8\n");
+        assert_eq!(run("set shiftwidth=4\necho shiftwidth()"), "4\n");
+        assert_eq!(run("set shiftwidth=0\nset tabstop=2\necho shiftwidth()"), "2\n");
+    }
+
+    #[test]
+    fn editor_absent_builtins() {
+        // A standalone interpreter has no editor UI / GUI / server (verified vs nvim).
+        assert_eq!(run("echo visualmode()"), "\n");
+        assert_eq!(run("echo pumvisible()"), "0\n");
+        assert_eq!(run("echo wildmenumode()"), "0\n");
+        assert_eq!(run("echo did_filetype()"), "0\n");
+        assert_eq!(run("echo eventhandler()"), "0\n");
+        assert_eq!(run("echo hlexists('Foo')"), "0\n");
+        assert_eq!(run("echo windowsversion()"), "\n");
+        assert_eq!(run("echo getfontname()"), "\n");
+        assert_eq!(run("echo foreground()"), "0\n");
+        assert_eq!(run("echo pum_getpos()"), "{}\n");
+        assert_eq!(run("echo serverlist()"), "[]\n");
+        assert_eq!(run("echo mode()"), "n\n");
     }
 
     #[test]
