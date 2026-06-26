@@ -25,11 +25,13 @@ use crate::ported::eval::funcs::{
     f_isinf, f_isnan, f_getpid, f_localtime, f_soundfold, f_json_decode, f_json_encode, f_matchstrpos, f_getenv, f_setenv, f_shellescape,
     f_reltime, f_reltimestr, f_reltimefloat, f_rand, f_srand, f_strftime, f_strptime, f_sha256,
     f_keys, f_len, f_list2str, f_match, f_matchend, f_matchlist, f_matchstr,
-    f_max, f_min, f_nr2char, f_or, f_pow, f_printf, f_range, f_repeat, f_reverse, f_split, f_str2float, f_substitute, f_type, f_uniq, f_values, f_xor,
+    f_max, f_min, f_nr2char, f_or, f_pow, f_printf, f_range, f_repeat, f_reverse, f_split, f_str2float, f_substitute, f_type, f_values, f_xor,
 };
 use crate::ported::eval::fs::f_pathshorten;
 use crate::ported::eval::list::{f_count, f_extend, f_extendnew, f_remove};
-use crate::ported::eval::typval::{f_blob2list, f_join, f_list2blob, tv_list_slice_or_index};
+use crate::ported::eval::typval::{
+    f_blob2list, f_join, f_list2blob, f_sort, f_uniq, tv_list_slice_or_index, SORT_FUNCREF_HOOK,
+};
 use crate::ported::strings::{
     f_string, f_strlen, f_strchars, f_strgetchar, f_strcharpart, f_byteidx, f_byteidxcomp,
     f_charidx, f_strpart, f_stridx, f_strridx, f_tolower, f_toupper, f_tr, f_trim, f_str2nr,
@@ -1120,35 +1122,12 @@ fn b_reduce(vm: &mut VM, argc: u8) -> Value {
     tv_to_value(acc)
 }
 
-fn b_sort(vm: &mut VM, argc: u8) -> Value {
-    let mut args = Vec::with_capacity(argc as usize);
-    for _ in 0..argc {
-        args.push(pop_tv(vm));
-    }
-    args.reverse();
-    let listtv = args[0].clone();
-    let flag = args.get(1).map(tv_get_string).unwrap_or_default();
-    if let (VAR_LIST, v_list(Some(l))) = (listtv.v_type, &listtv.vval) {
-        let mut lb = l.borrow_mut();
-        if flag == "n" || flag == "f" {
-            // c: numeric / float sort. Compare via an f64 key so ints and
-            // floats sort uniformly (tv_get_number errors on a Float).
-            let key = |tv: &typval_T| -> f64 {
-                match (tv.v_type, &tv.vval) {
-                    (VAR_FLOAT, v_float(f)) => *f,
-                    (VAR_NUMBER, v_number(n)) => *n as f64,
-                    _ => tv_get_string(tv).trim().parse().unwrap_or(0.0),
-                }
-            };
-            lb.lv_items.sort_by(|a, b| {
-                key(&a.li_tv).partial_cmp(&key(&b.li_tv)).unwrap_or(std::cmp::Ordering::Equal)
-            });
-        } else {
-            // c: default sort compares as strings.
-            lb.lv_items.sort_by(|a, b| tv_get_string(&a.li_tv).cmp(&tv_get_string(&b.li_tv)));
-        }
-    }
-    tv_to_value(listtv)
+/// The `sort()`/`uniq()` `{func}` comparator hook (installed into the value
+/// layer's `SORT_FUNCREF_HOOK`): call the user function with the two items and
+/// read its result as a Number. `None` signals a call/type error.
+fn sort_compare_funcref(name: &str, a: &typval_T, b: &typval_T) -> Option<varnumber_T> {
+    let r = call_user_function(name, vec![a.clone(), b.clone()])?;
+    Some(tv_get_number_chk(&r, None))
 }
 
 fn b_call(vm: &mut VM, argc: u8) -> Value {
@@ -1545,7 +1524,9 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FN_PRINTF, |vm, n| call_func(vm, n, f_printf));
     vm.register_builtin(VIML_FN_MAP, b_map);
     vm.register_builtin(VIML_FN_FILTER, b_filter);
-    vm.register_builtin(VIML_FN_SORT, b_sort);
+    // Let the value layer's sort()/uniq() call user comparator functions.
+    SORT_FUNCREF_HOOK.with(|h| *h.borrow_mut() = Some(sort_compare_funcref));
+    vm.register_builtin(VIML_FN_SORT, |vm, n| call_func(vm, n, f_sort));
     vm.register_builtin(VIML_FN_CALL, b_call);
     vm.register_builtin(VIML_FN_FUNCTION, |vm, n| call_func(vm, n, f_function));
     vm.register_builtin(VIML_FN_SQRT, |vm, n| call_float_op(vm, n, f64::sqrt));
@@ -2690,6 +2671,22 @@ mod tests {
         assert_eq!(run("let e={'a':1}\ncall extend(e,{'a':99})\necho e"), "{'a': 99}\n");
         // extendnew returns a new value, leaving the source intact.
         assert_eq!(run("let n=[1,2]\nlet p=extendnew(n,[3])\necho n\necho p"), "[1, 2]\n[1, 2, 3]\n");
+    }
+
+    #[test]
+    fn sort_and_uniq() {
+        // Default (string) vs 'n' numeric vs 'i' ignorecase vs 'f' float.
+        assert_eq!(run("echo sort([10,9,2,100])"), "[10, 100, 2, 9]\n");
+        assert_eq!(run("echo sort([10,9,2,100], 'n')"), "[2, 9, 10, 100]\n");
+        assert_eq!(run("echo sort(['B','a','C'], 'i')"), "['a', 'B', 'C']\n");
+        assert_eq!(run("echo sort([3.5,1.2,2.8], 'f')"), "[1.2, 2.8, 3.5]\n");
+        // uniq drops adjacent-equal (after sorting).
+        assert_eq!(run("echo uniq(sort([3,1,2,2,1,3]))"), "[1, 2, 3]\n");
+        // Funcref comparator (sort {func}) via the bridge hook.
+        assert_eq!(
+            run("function! Desc(a,b)\nreturn a:b - a:a\nendfunction\necho sort([1,5,3,2,4], 'Desc')"),
+            "[5, 4, 3, 2, 1]\n"
+        );
     }
 
     #[test]

@@ -9,7 +9,7 @@
 #![allow(non_snake_case)]
 
 use crate::ported::eval::typval::{
-    tv_blob_len, tv_get_bool, tv_dict_add_tv, tv_dict_find, tv_dict_len, tv_equal, tv_get_float,
+    tv_blob_len, tv_get_bool, tv_dict_add_tv, tv_dict_find, tv_dict_len, tv_get_float,
     tv_get_number_chk, tv_get_string, tv_list_alloc_ret, tv_list_append_number,
     tv_list_append_string, tv_list_append_tv, tv_list_copy, tv_list_find_nr, tv_list_flatten,
     tv_list_len, tv_list_ref,
@@ -610,14 +610,7 @@ pub fn f_items(argvars: &[typval_T], rettv: &mut typval_T) {
 
 /// Port of `f_uniq()` from `Src/eval/funcs.c` (subset) — remove adjacent
 /// duplicate items from a `{list}`, returning it.
-pub fn f_uniq(argvars: &[typval_T], rettv: &mut typval_T) {
-    if let (VAR_LIST, v_list(Some(l))) = (argvars[0].v_type, &argvars[0].vval) {
-        let mut lb = l.borrow_mut();
-        lb.lv_items.dedup_by(|a, b| tv_equal(&a.li_tv, &b.li_tv, false));
-        lb.lv_len = lb.lv_items.len() as i32;
-    }
-    *rettv = argvars[0].clone();
-}
+// `f_sort`/`f_uniq` live in their real home file, `src/ported/eval/typval.rs`.
 
 // ── batch 4: regex-list, more string, list helpers (Src/eval/funcs.c) ──
 

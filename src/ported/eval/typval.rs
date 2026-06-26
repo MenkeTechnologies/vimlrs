@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::ported::charset::{vim_str2nr, STR2NR_ALL};
-use crate::ported::eval::encode::encode_tv2echo;
+use crate::ported::eval::encode::{encode_tv2echo, encode_tv2string};
 use crate::ported::eval::typval_defs_h::{
     blob_T, dict_T, float_T, list_T, listitem_T, typval_T, typval_vval_union::*, varnumber_T,
     BoolVarValue, BoolVarValue::*, SpecialVarValue::*, VarLockStatus, VarType::*,
@@ -1955,6 +1955,294 @@ pub fn tv_list_slice_or_index(
         *rettv = var1;
     }
     OK
+}
+
+/// Per-sort comparison configuration. Port of `sortinfo_T` from
+/// `Src/eval/typval.c:46`. Partials / `selfdict` are not modeled.
+#[derive(Default)]
+pub struct sortinfo_T {
+    pub item_compare_ic: bool,
+    pub item_compare_lc: bool,
+    pub item_compare_numeric: bool,
+    pub item_compare_numbers: bool,
+    pub item_compare_float: bool,
+    pub item_compare_func: Option<String>,
+    pub item_compare_func_err: std::cell::Cell<bool>,
+}
+
+thread_local! {
+    /// Bridge-installed funcref comparator for `sort()`/`uniq()` with a `{func}`
+    /// argument: `(name, a, b) -> Some(cmp)`, or `None` on a call/type error.
+    /// The value layer can't call user functions itself (that lives in the
+    /// bridge), so the bridge installs this hook in `install()`.
+    pub static SORT_FUNCREF_HOOK: std::cell::RefCell<Option<fn(&str, &typval_T, &typval_T) -> Option<varnumber_T>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Port of `item_compare()` from `Src/eval/typval.c` — the default comparison.
+fn item_compare(tv1: &typval_T, tv2: &typval_T, info: &sortinfo_T) -> i32 {
+    if info.item_compare_numbers {
+        let v1 = tv_get_number(tv1);
+        let v2 = tv_get_number(tv2);
+        return if v1 == v2 { 0 } else if v1 > v2 { 1 } else { -1 };
+    }
+    if info.item_compare_float {
+        let v1 = tv_get_float(tv1);
+        let v2 = tv_get_float(tv2);
+        return if v1 == v2 { 0 } else if v1 > v2 { 1 } else { -1 };
+    }
+    // c: a String uses its raw value; other types render via encode_tv2string;
+    //    a String vs a non-String uses "'" (Vim's documented quirk).
+    let p1 = if tv1.v_type == VAR_STRING {
+        if tv2.v_type != VAR_STRING || info.item_compare_numeric { "'".to_string() } else { tv_get_string(tv1) }
+    } else {
+        encode_tv2string(tv1)
+    };
+    let p2 = if tv2.v_type == VAR_STRING {
+        if tv1.v_type != VAR_STRING || info.item_compare_numeric { "'".to_string() } else { tv_get_string(tv2) }
+    } else {
+        encode_tv2string(tv2)
+    };
+    if !info.item_compare_numeric {
+        // c: lc → strcoll (locale; approximated by byte order); ic → STRICMP; else strcmp.
+        let ord = if info.item_compare_lc {
+            p1.cmp(&p2)
+        } else if info.item_compare_ic {
+            p1.to_lowercase().cmp(&p2.to_lowercase())
+        } else {
+            p1.cmp(&p2)
+        };
+        match ord {
+            std::cmp::Ordering::Less => -1,
+            std::cmp::Ordering::Equal => 0,
+            std::cmp::Ordering::Greater => 1,
+        }
+    } else {
+        // c: n1 = strtod(p1); n2 = strtod(p2);
+        let cs1 = std::ffi::CString::new(p1).unwrap_or_default();
+        let cs2 = std::ffi::CString::new(p2).unwrap_or_default();
+        let n1 = unsafe { nix::libc::strtod(cs1.as_ptr(), std::ptr::null_mut()) };
+        let n2 = unsafe { nix::libc::strtod(cs2.as_ptr(), std::ptr::null_mut()) };
+        if n1 == n2 { 0 } else if n1 > n2 { 1 } else { -1 }
+    }
+}
+
+// The `keep_zero` index tiebreak the C uses for qsort stability is unnecessary —
+// the Rust sort below is already stable; these wrappers mirror the C names.
+fn item_compare_keeping_zero(tv1: &typval_T, tv2: &typval_T, info: &sortinfo_T) -> i32 {
+    item_compare(tv1, tv2, info)
+}
+fn item_compare_not_keeping_zero(tv1: &typval_T, tv2: &typval_T, info: &sortinfo_T) -> i32 {
+    item_compare(tv1, tv2, info)
+}
+
+/// Port of `item_compare2()` — comparison via a user `{func}` (the bridge hook).
+fn item_compare2(tv1: &typval_T, tv2: &typval_T, info: &sortinfo_T) -> i32 {
+    // c: shortcut after a previous failure; compare all equal.
+    if info.item_compare_func_err.get() {
+        return 0;
+    }
+    let name = match &info.item_compare_func {
+        Some(n) => n,
+        None => return 0,
+    };
+    // Copy the fn pointer out before calling it — the nested user-function run
+    // re-enters install(), which borrows SORT_FUNCREF_HOOK mutably.
+    let hook = SORT_FUNCREF_HOOK.with(|h| *h.borrow());
+    let res = hook.and_then(|f| f(name, tv1, tv2));
+    match res {
+        Some(n) => {
+            if n > 0 {
+                1
+            } else if n < 0 {
+                -1
+            } else {
+                0
+            }
+        }
+        None => {
+            // c: ITEM_COMPARE_FAIL — record the error, compare equal henceforth.
+            info.item_compare_func_err.set(true);
+            0
+        }
+    }
+}
+fn item_compare2_keeping_zero(tv1: &typval_T, tv2: &typval_T, info: &sortinfo_T) -> i32 {
+    item_compare2(tv1, tv2, info)
+}
+fn item_compare2_not_keeping_zero(tv1: &typval_T, tv2: &typval_T, info: &sortinfo_T) -> i32 {
+    item_compare2(tv1, tv2, info)
+}
+
+/// Port of `parse_sort_uniq_args()` from `Src/eval/typval.c:1422`.
+fn parse_sort_uniq_args(argvars: &[typval_T], info: &mut sortinfo_T) -> i32 {
+    if argvars.len() < 2 {
+        return OK;
+    }
+    let a1 = &argvars[1];
+    // c: {func} as VAR_FUNC; VAR_PARTIAL not modeled.
+    if a1.v_type == VAR_FUNC {
+        info.item_compare_func = Some(tv_get_string(a1));
+    } else {
+        let mut error = false;
+        let nr = tv_get_number_chk(a1, Some(&mut error)) as i32;
+        if error {
+            return FAIL;
+        }
+        if nr == 1 {
+            info.item_compare_ic = true;
+        } else if a1.v_type != VAR_NUMBER {
+            info.item_compare_func = Some(tv_get_string(a1));
+        } else if nr != 0 {
+            emsg("E474: Invalid argument");
+            return FAIL;
+        }
+        if let Some(f) = info.item_compare_func.clone() {
+            match f.as_str() {
+                "" => info.item_compare_func = None, // empty → default sort
+                "n" => {
+                    info.item_compare_func = None;
+                    info.item_compare_numeric = true;
+                }
+                "N" => {
+                    info.item_compare_func = None;
+                    info.item_compare_numbers = true;
+                }
+                "f" => {
+                    info.item_compare_func = None;
+                    info.item_compare_float = true;
+                }
+                "i" => {
+                    info.item_compare_func = None;
+                    info.item_compare_ic = true;
+                }
+                "l" => {
+                    info.item_compare_func = None;
+                    info.item_compare_lc = true;
+                }
+                _ => {}
+            }
+        }
+    }
+    if argvars.len() > 2 {
+        // c: optional {dict} (selfdict) — validated, but unused (partials unmodeled).
+        if tv_check_for_dict_arg(argvars, 2) == FAIL {
+            return FAIL;
+        }
+    }
+    OK
+}
+
+/// Port of `do_sort()` from `Src/eval/typval.c:1349`. Uses Rust's stable sort,
+/// so the C index tiebreak for stability is unnecessary.
+fn do_sort(l: &Rc<RefCell<list_T>>, info: &sortinfo_T) {
+    let has_func = info.item_compare_func.is_some();
+    info.item_compare_func_err.set(false);
+    let mut lb = l.borrow_mut();
+    let original = lb.lv_items.clone();
+    let mut items = std::mem::take(&mut lb.lv_items);
+    items.sort_by(|a, b| {
+        let r = if has_func {
+            item_compare2_not_keeping_zero(&a.li_tv, &b.li_tv, info)
+        } else {
+            item_compare_not_keeping_zero(&a.li_tv, &b.li_tv, info)
+        };
+        r.cmp(&0)
+    });
+    if info.item_compare_func_err.get() {
+        // c: on a compare-func error the list is left as it was.
+        lb.lv_items = original;
+        emsg("E702: Sort compare function failed");
+    } else {
+        lb.lv_items = items;
+    }
+    lb.lv_len = lb.lv_items.len() as i32;
+}
+
+/// Port of `do_uniq()` from `Src/eval/typval.c:1390` — drop adjacent equal items.
+fn do_uniq(l: &Rc<RefCell<list_T>>, info: &sortinfo_T) {
+    let has_func = info.item_compare_func.is_some();
+    info.item_compare_func_err.set(false);
+    let mut lb = l.borrow_mut();
+    let items = std::mem::take(&mut lb.lv_items);
+    let mut out: Vec<listitem_T> = Vec::with_capacity(items.len());
+    let mut i = 0;
+    while i < items.len() {
+        let dup = if let Some(prev) = out.last() {
+            let r = if has_func {
+                item_compare2_keeping_zero(&prev.li_tv, &items[i].li_tv, info)
+            } else {
+                item_compare_keeping_zero(&prev.li_tv, &items[i].li_tv, info)
+            };
+            if info.item_compare_func_err.get() {
+                emsg("E882: Uniq compare function failed");
+                break;
+            }
+            r == 0
+        } else {
+            false
+        };
+        if !dup {
+            out.push(items[i].clone());
+        }
+        i += 1;
+    }
+    // c: on a compare-func error it stops; keep the not-yet-processed items.
+    while i < items.len() {
+        out.push(items[i].clone());
+        i += 1;
+    }
+    lb.lv_items = out;
+    lb.lv_len = lb.lv_items.len() as i32;
+}
+
+/// Port of `do_sort_uniq()` from `Src/eval/typval.c` — shared `sort()`/`uniq()`.
+fn do_sort_uniq(argvars: &[typval_T], rettv: &mut typval_T, sort: bool) {
+    // c: if (argvars[0].v_type != VAR_LIST) semsg(e_listarg, ...);
+    if argvars[0].v_type != VAR_LIST {
+        emsg(&format!(
+            "E686: Argument of {} must be a List",
+            if sort { "sort()" } else { "uniq()" }
+        ));
+        return;
+    }
+    let l = match &argvars[0].vval {
+        v_list(Some(l)) => l.clone(),
+        _ => {
+            rettv.v_type = VAR_LIST;
+            rettv.vval = v_list(None);
+            return;
+        }
+    };
+    let arg_errmsg = if sort { "sort() argument" } else { "uniq() argument" };
+    if value_check_lock(l.borrow().lv_lock, Some(arg_errmsg), TV_TRANSLATE) {
+        return;
+    }
+    // c: tv_list_set_ret(rettv, l);
+    rettv.v_type = VAR_LIST;
+    rettv.vval = v_list(Some(l.clone()));
+    if tv_list_len(&l.borrow()) <= 1 {
+        return; // short list sorts pretty quickly
+    }
+    let mut info = sortinfo_T::default();
+    if parse_sort_uniq_args(argvars, &mut info) == FAIL {
+        return;
+    }
+    if sort {
+        do_sort(&l, &info);
+    } else {
+        do_uniq(&l, &info);
+    }
+}
+
+/// Port of `f_sort()` from `Src/eval/typval.c`.
+pub fn f_sort(argvars: &[typval_T], rettv: &mut typval_T) {
+    do_sort_uniq(argvars, rettv, true);
+}
+
+/// Port of `f_uniq()` from `Src/eval/typval.c`.
+pub fn f_uniq(argvars: &[typval_T], rettv: &mut typval_T) {
+    do_sort_uniq(argvars, rettv, false);
 }
 
 #[cfg(test)]

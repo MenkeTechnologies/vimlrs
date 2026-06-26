@@ -69,49 +69,6 @@ pub fn tv_list_check_range_index_two() { unimplemented!("STUB tv_list_check_rang
 /// C: `int tv_list_assign_range(list_T *const dest, list_T *const src, const int idx1_arg, const int idx2,`
 pub fn tv_list_assign_range() { unimplemented!("STUB tv_list_assign_range — csrc/eval/typval.c:684") }
 
-/// Port of `item_compare()` — `csrc/eval/typval.c:1185`. STUB: not yet ported.
-/// C: `static int item_compare(const void *s1, const void *s2, bool keep_zero)`
-pub fn item_compare() { unimplemented!("STUB item_compare — csrc/eval/typval.c:1185") }
-
-/// Port of `item_compare_keeping_zero()` — `csrc/eval/typval.c:1269`. STUB: not yet ported.
-/// C: `static int item_compare_keeping_zero(const void *s1, const void *s2)`
-pub fn item_compare_keeping_zero() { unimplemented!("STUB item_compare_keeping_zero — csrc/eval/typval.c:1269") }
-
-/// Port of `item_compare_not_keeping_zero()` — `csrc/eval/typval.c:1274`. STUB: not yet ported.
-/// C: `static int item_compare_not_keeping_zero(const void *s1, const void *s2)`
-pub fn item_compare_not_keeping_zero() { unimplemented!("STUB item_compare_not_keeping_zero — csrc/eval/typval.c:1274") }
-
-/// Port of `item_compare2()` — `csrc/eval/typval.c:1279`. STUB: not yet ported.
-/// C: `static int item_compare2(const void *s1, const void *s2, bool keep_zero)`
-pub fn item_compare2() { unimplemented!("STUB item_compare2 — csrc/eval/typval.c:1279") }
-
-/// Port of `item_compare2_keeping_zero()` — `csrc/eval/typval.c:1338`. STUB: not yet ported.
-/// C: `static int item_compare2_keeping_zero(const void *s1, const void *s2)`
-pub fn item_compare2_keeping_zero() { unimplemented!("STUB item_compare2_keeping_zero — csrc/eval/typval.c:1338") }
-
-/// Port of `item_compare2_not_keeping_zero()` — `csrc/eval/typval.c:1343`. STUB: not yet ported.
-/// C: `static int item_compare2_not_keeping_zero(const void *s1, const void *s2)`
-pub fn item_compare2_not_keeping_zero() { unimplemented!("STUB item_compare2_not_keeping_zero — csrc/eval/typval.c:1343") }
-
-/// Port of `do_sort()` — `csrc/eval/typval.c:1349`. STUB: not yet ported.
-/// C: `static void do_sort(list_T *l, sortinfo_T *info)`
-pub fn do_sort() { unimplemented!("STUB do_sort — csrc/eval/typval.c:1349") }
-
-/// Port of `do_uniq()` — `csrc/eval/typval.c:1390`. STUB: not yet ported.
-/// C: `static void do_uniq(list_T *l, sortinfo_T *info)`
-pub fn do_uniq() { unimplemented!("STUB do_uniq — csrc/eval/typval.c:1390") }
-
-/// Port of `parse_sort_uniq_args()` — `csrc/eval/typval.c:1422`. STUB: not yet ported.
-/// C: `static int parse_sort_uniq_args(typval_T *argvars, sortinfo_T *info)`
-pub fn parse_sort_uniq_args() { unimplemented!("STUB parse_sort_uniq_args — csrc/eval/typval.c:1422") }
-
-/// Port of `do_sort_uniq()` — `csrc/eval/typval.c:1491`. STUB: not yet ported.
-/// C: `static void do_sort_uniq(typval_T *argvars, typval_T *rettv, bool sort)`
-pub fn do_sort_uniq() { unimplemented!("STUB do_sort_uniq — csrc/eval/typval.c:1491") }
-
-/// Port of `f_sort()` — `csrc/eval/typval.c:1530`. STUB: not yet ported.
-pub fn f_sort(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_sort — csrc/eval/typval.c:1530") }
-
 /// Port of `tv_list_find_index()` — `csrc/eval/typval.c:1716`. STUB: not yet ported.
 /// C: `static listitem_T *tv_list_find_index(list_T *const l, int *const idx)`
 pub fn tv_list_find_index() { unimplemented!("STUB tv_list_find_index — csrc/eval/typval.c:1716") }
