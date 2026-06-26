@@ -23,7 +23,7 @@ use crate::ported::eval::funcs::{
     f_abs, f_add, f_and, f_char2nr, f_copy, f_count, f_empty, f_exists, f_extend, f_float2nr, f_function, f_get, f_has, f_has_key, f_index, f_insert, f_invert,
     f_atan2, f_deepcopy, f_escape, f_flatten, f_fmod, f_items,
     f_isinf, f_isnan, f_getpid, f_localtime, f_soundfold, f_json_decode, f_json_encode, f_matchstrpos, f_extendnew, f_getenv, f_setenv, f_shellescape,
-    f_reltime, f_reltimestr, f_reltimefloat,
+    f_reltime, f_reltimestr, f_reltimefloat, f_rand, f_srand,
     f_join, f_keys, f_len, f_list2str, f_match, f_matchend, f_matchlist, f_matchstr,
     f_max, f_min, f_nr2char, f_or, f_pow, f_printf, f_range, f_remove, f_repeat, f_reverse, f_split, f_str2float, f_substitute, f_type, f_uniq, f_values, f_xor,
 };
@@ -344,6 +344,10 @@ pub const VIML_FN_RELTIME: u16 = 3203;
 pub const VIML_FN_RELTIMESTR: u16 = 3204;
 /// `reltimefloat()`
 pub const VIML_FN_RELTIMEFLOAT: u16 = 3205;
+/// `rand()`
+pub const VIML_FN_RAND: u16 = 3206;
+/// `srand()`
+pub const VIML_FN_SRAND: u16 = 3207;
 /// Debug line marker: pop a line number → notify the DAP `check_line` hook
 /// (emitted before each statement only in debug-compiled chunks).
 pub const VIML_SET_LINENO: u16 = 3070;
@@ -1565,6 +1569,8 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FN_RELTIME, |vm, n| call_func(vm, n, f_reltime));
     vm.register_builtin(VIML_FN_RELTIMESTR, |vm, n| call_func(vm, n, f_reltimestr));
     vm.register_builtin(VIML_FN_RELTIMEFLOAT, |vm, n| call_func(vm, n, f_reltimefloat));
+    vm.register_builtin(VIML_FN_RAND, |vm, n| call_func(vm, n, f_rand));
+    vm.register_builtin(VIML_FN_SRAND, |vm, n| call_func(vm, n, f_srand));
     vm.register_builtin(VIML_SET_LINENO, b_set_lineno);
     vm.register_builtin(VIML_CALL_USER, b_call_user);
     vm.register_builtin(VIML_SET_RETURN, b_set_return);
@@ -2047,6 +2053,52 @@ mod tests {
         );
     }
 
+    /// Proof that explicit `l:`-scoped references in a function trace-JIT.
+    /// In a legacy function `l:name` IS bare `name` (same slot), so a loop using
+    /// `l:` refs lowers to the same native slot ops and fusevm compiles a trace.
+    #[test]
+    fn local_ref_loop_traces_on_jit() {
+        use crate::compile_viml::compile_program;
+        use crate::viml_parser::parse_program;
+        use fusevm::Op;
+
+        let src = "function! S()\n  let l:s = 0\n  for l:i in range(2000)\n    let l:s += l:i\n  endfor\n  return l:s\nendfunction";
+        let prog = compile_program(&parse_program(src).unwrap()).unwrap();
+        let chunk = prog.funcs.iter().find(|f| f.name == "S").unwrap().chunk.clone();
+
+        // Both the accumulator (`l:s`) and the induction var (`l:i`) are slotted.
+        assert!(chunk.ops.iter().any(|o| matches!(o, Op::GetSlot(_))), "slotted reads");
+        assert!(chunk.ops.iter().any(|o| matches!(o, Op::SetSlot(_))), "slotted writes");
+
+        let (header, back) = chunk
+            .ops
+            .iter()
+            .enumerate()
+            .find_map(|(i, o)| match o {
+                Op::JumpIfTrue(t) if (*t as usize) < i => Some((*t as usize, i)),
+                _ => None,
+            })
+            .expect("loop backedge");
+        assert!(
+            !chunk.ops[header..=back]
+                .iter()
+                .any(|o| matches!(o, Op::CallBuiltin(..) | Op::Extended(..))),
+            "l: loop body must be CallBuiltin-free, got {:?}",
+            &chunk.ops[header..=back]
+        );
+
+        let mut vm = VM::new(chunk.clone());
+        install(&mut vm);
+        while vm.frames.last().unwrap().slots.len() < 2 {
+            vm.frames.last_mut().unwrap().slots.push(fusevm::Value::Int(0));
+        }
+        let _ = vm.run();
+        assert!(
+            fusevm::JitCompiler::new().trace_is_compiled(&chunk, header),
+            "fusevm must compile a trace for the l:-ref loop"
+        );
+    }
+
     /// Proof that a compound-assignment accumulator (`let s += i`) trace-JITs.
     /// `op=` desugars to `s = s + i`, the same store path as the plain form, so
     /// the hot loop body stays CallBuiltin-free and fusevm compiles a trace.
@@ -2199,6 +2251,46 @@ mod tests {
         assert_eq!(run("let s = 0\nfor i in range(101)\n  let s += i\nendfor\necho s"), "5050\n");
         // Scoped target.
         assert_eq!(run("let g:c = 5\nlet g:c += 10\necho g:c"), "15\n");
+    }
+
+    #[test]
+    fn local_scope_refs() {
+        // In a function, l:x is the SAME variable as bare x (both = the slot).
+        assert_eq!(
+            run("function! F()\nlet x = 1\nlet l:x += 2\nreturn l:x\nendfunction\necho F()"),
+            "3\n"
+        );
+        assert_eq!(
+            run("function! S()\nlet l:t = 0\nfor l:i in range(101)\nlet l:t += l:i\nendfor\nreturn l:t\nendfunction\necho S()"),
+            "5050\n"
+        );
+        // Soundness: g: in a function is a DISTINCT store from bare (l:) — the
+        // l:-slot optimization must not alias it.
+        assert_eq!(
+            run("let g:n = 100\nfunction! F()\nlet n = 1\nreturn g:n\nendfunction\necho F()"),
+            "100\n"
+        );
+        // ...and writing bare n must not leak into g:n.
+        assert_eq!(
+            run("let g:n = 100\nfunction! F()\nlet n = 7\nendfunction\ncall F()\necho g:n"),
+            "100\n"
+        );
+    }
+
+    #[test]
+    fn rand_srand_match_neovim() {
+        // Bit-exact against real Neovim (verified with `nvim --headless`):
+        // seeded srand/rand are deterministic (xoshiro128** + splitmix32).
+        assert_eq!(
+            run("echo srand(123)"),
+            "[1482537201, 2737842301, 2667502145, 3175280481]\n"
+        );
+        // rand(seed) advances the 4-number seed list in place, yielding a fixed
+        // sequence and leaving the list at the advanced state.
+        assert_eq!(
+            run("let s = srand(123)\necho rand(s)\necho rand(s)\necho string(s)"),
+            "3146710351\n1913850085\n[3045381587, 2236591504, 3326704989, 1565652893]\n"
+        );
     }
 
     #[test]

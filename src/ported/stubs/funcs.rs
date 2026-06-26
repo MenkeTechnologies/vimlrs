@@ -406,24 +406,6 @@ pub fn f_pumvisible(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _
 /// Port of `f_py3eval()` — `csrc/eval/funcs.c:4949`. STUB: not yet ported.
 pub fn f_py3eval(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_py3eval — csrc/eval/funcs.c:4949") }
 
-/// Port of `init_srand()` — `csrc/eval/funcs.c:4954`. STUB: not yet ported.
-/// C: `static void init_srand(uint32_t *const x)`
-pub fn init_srand() { unimplemented!("STUB init_srand — csrc/eval/funcs.c:4954") }
-
-/// Port of `splitmix32()` — `csrc/eval/funcs.c:4973`. STUB: not yet ported.
-/// C: `static inline uint32_t splitmix32(uint32_t *const x)`
-pub fn splitmix32() { unimplemented!("STUB splitmix32 — csrc/eval/funcs.c:4973") }
-
-/// Port of `shuffle_xoshiro128starstar()` — `csrc/eval/funcs.c:4982`. STUB: not yet ported.
-/// C: `static inline uint32_t shuffle_xoshiro128starstar(uint32_t *const x, uint32_t *const y,`
-pub fn shuffle_xoshiro128starstar() { unimplemented!("STUB shuffle_xoshiro128starstar — csrc/eval/funcs.c:4982") }
-
-/// Port of `f_rand()` — `csrc/eval/funcs.c:5000`. STUB: not yet ported.
-pub fn f_rand(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_rand — csrc/eval/funcs.c:5000") }
-
-/// Port of `f_srand()` — `csrc/eval/funcs.c:5070`. STUB: not yet ported.
-pub fn f_srand(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_srand — csrc/eval/funcs.c:5070") }
-
 /// Port of `f_perleval()` — `csrc/eval/funcs.c:5092`. STUB: not yet ported.
 pub fn f_perleval(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_perleval — csrc/eval/funcs.c:5092") }
 

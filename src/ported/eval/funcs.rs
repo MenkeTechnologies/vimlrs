@@ -14,6 +14,8 @@ use crate::ported::eval::typval::{
     tv_list_append_string, tv_list_append_tv, tv_list_find_nr, tv_list_len,
 };
 use crate::ported::eval_h::{FAIL, OK};
+use crate::ported::os::env::os_get_pid;
+use crate::ported::os::time::os_hrtime;
 use crate::ported::profile::{profile_end, profile_msg, profile_signed, profile_start, profile_sub, proftime_T};
 use crate::ported::eval::typval_defs_h::{
     typval_T, typval_vval_union::*, varnumber_T, BoolVarValue::*, SpecialVarValue::*, VarType::*,
@@ -1107,5 +1109,141 @@ pub fn f_reltimefloat(argvars: &[typval_T], rettv: &mut typval_T) {
     if list2proftime(&argvars[0], &mut tm) == OK {
         rettv.vval = v_float(profile_signed(tm) as f64 / 1_000_000_000.0);
     }
+}
+
+/// Port of `init_srand()` from `Src/eval/funcs.c:4959`.
+///
+/// Seed the PRNG. `uv_random()` (the OS CSPRNG) is unavailable here, so this
+/// uses Neovim's documented fallback: `os_hrtime()` XOR the process id.
+fn init_srand(x: &mut u32) {
+    // c: *x = (uint32_t)os_hrtime(); *x ^= (uint32_t)os_get_pid();
+    *x = os_hrtime() as u32;
+    *x ^= os_get_pid() as u32;
+}
+
+/// Port of `splitmix32()` from `Src/eval/funcs.c:4978`.
+///
+/// SplitMix32 step — advances `*x` and returns a well-mixed 32-bit value (used
+/// to expand a single seed into the xoshiro state).
+fn splitmix32(x: &mut u32) -> u32 {
+    // c: uint32_t z = (*x += 0x9e3779b9);
+    *x = x.wrapping_add(0x9e37_79b9);
+    let mut z = *x;
+    z = (z ^ (z >> 16)).wrapping_mul(0x85eb_ca6b);
+    z = (z ^ (z >> 13)).wrapping_mul(0xc2b2_ae35);
+    z ^ (z >> 16)
+}
+
+/// Port of `shuffle_xoshiro128starstar()` from `Src/eval/funcs.c:4987`.
+///
+/// xoshiro128** step — advances the 4-word state and returns the next value.
+/// `ROTL(v, k)` is `v.rotate_left(k)`.
+fn shuffle_xoshiro128starstar(x: &mut u32, y: &mut u32, z: &mut u32, w: &mut u32) -> u32 {
+    // c: const uint32_t result = ROTL(*y * 5, 7) * 9;
+    let result = y.wrapping_mul(5).rotate_left(7).wrapping_mul(9);
+    let t = *y << 9;
+    *z ^= *x;
+    *w ^= *y;
+    *y ^= *z;
+    *x ^= *w;
+    *z ^= t;
+    *w = w.rotate_left(11);
+    result
+}
+
+thread_local! {
+    /// `f_rand()`'s global seed state (`static gx,gy,gz,gw` + `initialized`).
+    static RAND_GLOBAL: std::cell::Cell<Option<[u32; 4]>> = const { std::cell::Cell::new(None) };
+}
+
+/// Port of `f_srand()` from `Src/eval/funcs.c:5075`.
+///
+/// "srand()" function — returns a 4-number seed list, from the given seed or a
+/// fresh entropy seed.
+pub fn f_srand(argvars: &[typval_T], rettv: &mut typval_T) {
+    let mut x: u32 = 0;
+    let l = tv_list_alloc_ret(rettv, 4);
+    if argvars.is_empty() {
+        init_srand(&mut x);
+    } else {
+        let mut error = false;
+        x = tv_get_number_chk(&argvars[0], Some(&mut error)) as u32;
+        if error {
+            return;
+        }
+    }
+    let mut lb = l.borrow_mut();
+    for _ in 0..4 {
+        let v = splitmix32(&mut x) as varnumber_T;
+        tv_list_append_number(&mut lb, v);
+    }
+}
+
+/// Port of `f_rand()` from `Src/eval/funcs.c:5005`.
+///
+/// "rand()" function — a 32-bit pseudo-random Number. With no argument it draws
+/// from (and advances) a lazily-seeded global state; with a 4-number seed list
+/// it advances that list in place (so repeated calls continue the sequence).
+pub fn f_rand(argvars: &[typval_T], rettv: &mut typval_T) {
+    let result: u32;
+    if argvars.is_empty() {
+        // c: use the global seed list, initializing it on first use.
+        let mut s = RAND_GLOBAL.with(|c| c.get()).unwrap_or_else(|| {
+            let mut x: u32 = 0;
+            init_srand(&mut x);
+            [
+                splitmix32(&mut x),
+                splitmix32(&mut x),
+                splitmix32(&mut x),
+                splitmix32(&mut x),
+            ]
+        });
+        let [mut gx, mut gy, mut gz, mut gw] = s;
+        result = shuffle_xoshiro128starstar(&mut gx, &mut gy, &mut gz, &mut gw);
+        s = [gx, gy, gz, gw];
+        RAND_GLOBAL.with(|c| c.set(Some(s)));
+    } else if let (VAR_LIST, v_list(Some(l))) = (argvars[0].v_type, &argvars[0].vval) {
+        let mut lb = l.borrow_mut();
+        // c: list must have exactly 4 VAR_NUMBER items, else `goto theend`.
+        let nums: Option<[u32; 4]> = if lb.lv_items.len() == 4 {
+            let mut a = [0u32; 4];
+            let mut ok = true;
+            for (i, it) in lb.lv_items.iter().enumerate() {
+                match (it.li_tv.v_type, &it.li_tv.vval) {
+                    (VAR_NUMBER, v_number(n)) => a[i] = *n as u32,
+                    _ => ok = false,
+                }
+            }
+            ok.then_some(a)
+        } else {
+            None
+        };
+        match nums {
+            Some([mut x, mut y, mut z, mut w]) => {
+                result = shuffle_xoshiro128starstar(&mut x, &mut y, &mut z, &mut w);
+                // c: write the advanced state back into the caller's list.
+                lb.lv_items[0].li_tv.vval = v_number(x as varnumber_T);
+                lb.lv_items[1].li_tv.vval = v_number(y as varnumber_T);
+                lb.lv_items[2].li_tv.vval = v_number(z as varnumber_T);
+                lb.lv_items[3].li_tv.vval = v_number(w as varnumber_T);
+            }
+            None => {
+                // c: theend: semsg(_(e_invarg2), …) → E475; rettv = -1.
+                drop(lb);
+                emsg(&format!("E475: Invalid argument: {}", tv_get_string(&argvars[0])));
+                rettv.v_type = VAR_NUMBER;
+                rettv.vval = v_number(-1);
+                return;
+            }
+        }
+    } else {
+        // c: theend: semsg(_(e_invarg2), …) → E475; rettv = -1.
+        emsg(&format!("E475: Invalid argument: {}", tv_get_string(&argvars[0])));
+        rettv.v_type = VAR_NUMBER;
+        rettv.vval = v_number(-1);
+        return;
+    }
+    rettv.v_type = VAR_NUMBER;
+    rettv.vval = v_number(result as varnumber_T);
 }
 

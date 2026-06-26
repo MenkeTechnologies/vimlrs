@@ -206,6 +206,20 @@ fn slot_plan(stmts: &[Stmt], in_function: bool) -> SlotPlan {
         !name.is_empty() && !name.contains(':') && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
     }
 
+    // The function-local slot key for a name, or None if it lives in another
+    // scope. In a function, `l:name` IS bare `name` (legacy VimL has no closures),
+    // so both share a slot; every other prefix (`g:`/`s:`/`a:`/`b:`/`w:`/`t:`/
+    // `v:`) is a distinct dict-backed store and can't be slotted.
+    fn slot_key(name: &str, in_function: bool) -> Option<&str> {
+        if is_bare(name) {
+            Some(name)
+        } else if in_function {
+            name.strip_prefix("l:").filter(|r| is_bare(r))
+        } else {
+            None
+        }
+    }
+
     // Builtins that look a variable up BY NAME — they can observe even an `l:`
     // slot, so a chunk that calls one must not slot.
     fn introspects(name: &str) -> bool {
@@ -286,37 +300,37 @@ fn slot_plan(stmts: &[Stmt], in_function: bool) -> SlotPlan {
                 Stmt::Function { .. } | Stmt::Execute(_) | Stmt::Set(_) | Stmt::Try { .. } => {
                     *cx.bail = true
                 }
-                // `for BARE in range(...)` keeps its var slottable (range yields
-                // Numbers); recurse the body.
+                // `for VAR in range(...)` keeps its var slottable (range yields
+                // Numbers) — bare or, in a function, `l:`-scoped; recurse the body.
                 Stmt::For { vars: ForVars::One(name), iter, body }
-                    if is_bare(name)
+                    if slot_key(name, cx.in_function).is_some()
                         && matches!(iter, Expr::Call { name: f, .. } if f == "range") =>
                 {
                     if let Expr::Call { args, .. } = iter {
                         args.iter().for_each(|a| walk_expr(a, cx));
                     }
-                    cx.assigns.entry(name.clone()).or_default().push(Expr::Number(0));
+                    let key = slot_key(name, cx.in_function).unwrap().to_string();
+                    cx.assigns.entry(key).or_default().push(Expr::Number(0));
                     walk(body, cx);
                 }
                 // Any other for-loop: the loop var(s) take non-Number values —
-                // disqualify them — but DON'T bail; sibling numeric loops can
-                // still slot.
+                // disqualify them (by slot key) — but DON'T bail; sibling numeric
+                // loops can still slot.
                 Stmt::For { vars, iter, body } => {
                     walk_expr(iter, cx);
+                    let mut disq_var = |n: &str| {
+                        cx.disq.insert(slot_key(n, cx.in_function).unwrap_or(n).to_string());
+                    };
                     match vars {
-                        ForVars::One(n) => {
-                            cx.disq.insert(n.clone());
-                        }
-                        ForVars::List(ns) => ns.iter().for_each(|n| {
-                            cx.disq.insert(n.clone());
-                        }),
+                        ForVars::One(n) => disq_var(n),
+                        ForVars::List(ns) => ns.iter().for_each(|n| disq_var(n)),
                     }
                     walk(body, cx);
                 }
                 Stmt::Let { target: LetTarget::Var(name), expr } => {
                     walk_expr(expr, cx);
-                    if is_bare(name) {
-                        cx.assigns.entry(name.clone()).or_default().push(expr.clone());
+                    if let Some(key) = slot_key(name, cx.in_function) {
+                        cx.assigns.entry(key.to_string()).or_default().push(expr.clone());
                     }
                 }
                 Stmt::Let { .. } => *cx.bail = true, // non-bare target: be safe
@@ -356,17 +370,19 @@ fn slot_plan(stmts: &[Stmt], in_function: bool) -> SlotPlan {
     // leaf is a matching literal or a (still-candidate) slot var of that kind.
     // `+ - * / %` of Numbers are Numbers; only `/`,`%` and Float leaves break
     // integer-ness. Concat is a string op — never numeric.
-    fn rhs_kind(e: &Expr, set: &HashSet<String>, is_int: bool) -> bool {
+    fn rhs_kind(e: &Expr, set: &HashSet<String>, is_int: bool, in_function: bool) -> bool {
         match e {
             Expr::Number(_) => true,
             Expr::Float(_) => !is_int,
-            Expr::Var(n) => set.contains(n),
+            Expr::Var(n) => slot_key(n, in_function).is_some_and(|k| set.contains(k)),
             Expr::Arith { op, lhs, rhs } => {
                 !matches!(op, ArithOp::Concat)
-                    && rhs_kind(lhs, set, is_int)
-                    && rhs_kind(rhs, set, is_int)
+                    && rhs_kind(lhs, set, is_int, in_function)
+                    && rhs_kind(rhs, set, is_int, in_function)
             }
-            Expr::Unary { op: UnaryOp::Neg | UnaryOp::Plus, expr } => rhs_kind(expr, set, is_int),
+            Expr::Unary { op: UnaryOp::Neg | UnaryOp::Plus, expr } => {
+                rhs_kind(expr, set, is_int, in_function)
+            }
             _ => false,
         }
     }
@@ -377,7 +393,7 @@ fn slot_plan(stmts: &[Stmt], in_function: bool) -> SlotPlan {
         loop {
             let mut changed = false;
             for name in set.iter().cloned().collect::<Vec<_>>() {
-                if !assigns[&name].iter().all(|rhs| rhs_kind(rhs, &set, is_int)) {
+                if !assigns[&name].iter().all(|rhs| rhs_kind(rhs, &set, is_int, in_function)) {
                     set.remove(&name);
                     changed = true;
                 }
@@ -395,76 +411,81 @@ fn slot_plan(stmts: &[Stmt], in_function: bool) -> SlotPlan {
     // A bare name at script level IS `g:name`; in a function it IS `l:name`.
     // If any scoped alias of a candidate is referenced, slotting it would
     // desync the dict-backed form — drop those candidates.
-    fn scoped_e(e: &Expr, out: &mut HashSet<String>) {
+    // `l:` in a function names the slot itself, not a separate store, so it is
+    // not a disqualifying alias there; every other prefix still is.
+    fn scoped_var(n: &str, in_function: bool, out: &mut HashSet<String>) {
+        if let Some((pre, suf)) = n.rsplit_once(':') {
+            if !(in_function && pre == "l") {
+                out.insert(suf.to_string());
+            }
+        }
+    }
+    fn scoped_e(e: &Expr, in_function: bool, out: &mut HashSet<String>) {
         match e {
-            Expr::Var(n) => {
-                if let Some((_, suf)) = n.rsplit_once(':') {
-                    out.insert(suf.to_string());
-                }
-            }
+            Expr::Var(n) => scoped_var(n, in_function, out),
             Expr::Arith { lhs, rhs, .. } | Expr::Compare { lhs, rhs, .. } => {
-                scoped_e(lhs, out);
-                scoped_e(rhs, out);
+                scoped_e(lhs, in_function, out);
+                scoped_e(rhs, in_function, out);
             }
-            Expr::Unary { expr, .. } => scoped_e(expr, out),
+            Expr::Unary { expr, .. } => scoped_e(expr, in_function, out),
             Expr::And(a, b) | Expr::Or(a, b) | Expr::Coalesce(a, b) => {
-                scoped_e(a, out);
-                scoped_e(b, out);
+                scoped_e(a, in_function, out);
+                scoped_e(b, in_function, out);
             }
             Expr::Ternary { cond, then, otherwise } => {
-                scoped_e(cond, out);
-                scoped_e(then, out);
-                scoped_e(otherwise, out);
+                scoped_e(cond, in_function, out);
+                scoped_e(then, in_function, out);
+                scoped_e(otherwise, in_function, out);
             }
             Expr::Index { base, index } => {
-                scoped_e(base, out);
-                scoped_e(index, out);
+                scoped_e(base, in_function, out);
+                scoped_e(index, in_function, out);
             }
             Expr::Slice { base, from, to } => {
-                scoped_e(base, out);
+                scoped_e(base, in_function, out);
                 if let Some(f) = from {
-                    scoped_e(f, out);
+                    scoped_e(f, in_function, out);
                 }
                 if let Some(t) = to {
-                    scoped_e(t, out);
+                    scoped_e(t, in_function, out);
                 }
             }
-            Expr::List(xs) => xs.iter().for_each(|x| scoped_e(x, out)),
+            Expr::List(xs) => xs.iter().for_each(|x| scoped_e(x, in_function, out)),
             Expr::Dict(ps) => ps.iter().for_each(|(k, v)| {
-                scoped_e(k, out);
-                scoped_e(v, out);
+                scoped_e(k, in_function, out);
+                scoped_e(v, in_function, out);
             }),
-            Expr::Call { args, .. } => args.iter().for_each(|a| scoped_e(a, out)),
+            Expr::Call { args, .. } => args.iter().for_each(|a| scoped_e(a, in_function, out)),
             _ => {}
         }
     }
-    fn scoped_s(stmts: &[Stmt], out: &mut HashSet<String>) {
+    fn scoped_s(stmts: &[Stmt], in_function: bool, out: &mut HashSet<String>) {
         for s in stmts {
             match s {
                 Stmt::Let { target: LetTarget::Var(n), expr } => {
-                    if let Some((_, suf)) = n.rsplit_once(':') {
-                        out.insert(suf.to_string());
-                    }
-                    scoped_e(expr, out);
+                    scoped_var(n, in_function, out);
+                    scoped_e(expr, in_function, out);
                 }
-                Stmt::Echo(es) | Stmt::Echon(es) => es.iter().for_each(|e| scoped_e(e, out)),
-                Stmt::Call(e) | Stmt::Expr(e) | Stmt::Throw(e) => scoped_e(e, out),
-                Stmt::Return(Some(e)) => scoped_e(e, out),
+                Stmt::Echo(es) | Stmt::Echon(es) => {
+                    es.iter().for_each(|e| scoped_e(e, in_function, out))
+                }
+                Stmt::Call(e) | Stmt::Expr(e) | Stmt::Throw(e) => scoped_e(e, in_function, out),
+                Stmt::Return(Some(e)) => scoped_e(e, in_function, out),
                 Stmt::While { cond, body } => {
-                    scoped_e(cond, out);
-                    scoped_s(body, out);
+                    scoped_e(cond, in_function, out);
+                    scoped_s(body, in_function, out);
                 }
                 Stmt::For { iter, body, .. } => {
-                    scoped_e(iter, out);
-                    scoped_s(body, out);
+                    scoped_e(iter, in_function, out);
+                    scoped_s(body, in_function, out);
                 }
                 Stmt::If { arms, else_body } => {
                     for (c, b) in arms {
-                        scoped_e(c, out);
-                        scoped_s(b, out);
+                        scoped_e(c, in_function, out);
+                        scoped_s(b, in_function, out);
                     }
                     if let Some(b) = else_body {
-                        scoped_s(b, out);
+                        scoped_s(b, in_function, out);
                     }
                 }
                 _ => {}
@@ -472,7 +493,7 @@ fn slot_plan(stmts: &[Stmt], in_function: bool) -> SlotPlan {
         }
     }
     let mut scoped = HashSet::new();
-    scoped_s(stmts, &mut scoped);
+    scoped_s(stmts, in_function, &mut scoped);
     num.retain(|n| !scoped.contains(n) && !disq.contains(n));
 
     let mut names: Vec<String> = num.iter().cloned().collect();
@@ -825,7 +846,7 @@ impl Compiler {
         // so fusevm's tracing JIT compiles it. Matches Vim's `range()`: 1 arg →
         // `0..n-1`; 2 args → `a..b` inclusive; 3 args → step (positive literal).
         if let ForVars::One(name) = vars {
-            if let Some(&slot) = self.slots.get(name) {
+            if let Some(&slot) = self.slots.get(self.slot_key(name)) {
                 if let Some(args) = self.range_int_args(iter) {
                     // step must be a positive literal so the compare direction
                     // is known at compile time; anything else falls through.
@@ -924,8 +945,20 @@ impl Compiler {
 
     /// Emit a get of a (possibly scoped) variable by name. A slotted local
     /// reads natively via `Op::GetSlot`.
+    /// The slot key for a variable: in a function, `l:name` is bare `name` (same
+    /// storage), so both reach the same slot. Other scopes pass through unchanged
+    /// and miss `self.slots`, falling back to the dict-backed builtin path.
+    fn slot_key<'a>(&self, name: &'a str) -> &'a str {
+        if self.in_function {
+            if let Some(rest) = name.strip_prefix("l:") {
+                return rest;
+            }
+        }
+        name
+    }
+
     fn get_var(&mut self, name: &str) {
-        if let Some(&slot) = self.slots.get(name) {
+        if let Some(&slot) = self.slots.get(self.slot_key(name)) {
             self.emit(Op::GetSlot(slot));
             return;
         }
@@ -937,7 +970,7 @@ impl Compiler {
     /// stack balanced. A slotted local writes natively via `Op::SetSlot` (which
     /// consumes the value).
     fn set_var(&mut self, name: &str) {
-        if let Some(&slot) = self.slots.get(name) {
+        if let Some(&slot) = self.slots.get(self.slot_key(name)) {
             self.emit(Op::SetSlot(slot));
             return;
         }
@@ -1011,7 +1044,7 @@ impl Compiler {
     fn expr_is_num(&self, e: &Expr) -> bool {
         match e {
             Expr::Number(_) | Expr::Float(_) => true,
-            Expr::Var(name) => self.slots.contains_key(name), // slotted ⇒ Number
+            Expr::Var(name) => self.slots.contains_key(self.slot_key(name)), // slotted ⇒ Number
             Expr::Arith { op, lhs, rhs } => {
                 !matches!(op, ArithOp::Concat) && self.expr_is_num(lhs) && self.expr_is_num(rhs)
             }
@@ -1025,7 +1058,7 @@ impl Compiler {
     fn expr_is_int(&self, e: &Expr) -> bool {
         match e {
             Expr::Number(_) => true,
-            Expr::Var(name) => self.int_slots.contains(name),
+            Expr::Var(name) => self.int_slots.contains(self.slot_key(name)),
             Expr::Arith { op, lhs, rhs } => {
                 !matches!(op, ArithOp::Concat) && self.expr_is_int(lhs) && self.expr_is_int(rhs)
             }
@@ -1413,6 +1446,8 @@ fn builtin_fn_id(name: &str) -> Option<u16> {
         "reltime" => h::VIML_FN_RELTIME,
         "reltimestr" => h::VIML_FN_RELTIMESTR,
         "reltimefloat" => h::VIML_FN_RELTIMEFLOAT,
+        "rand" => h::VIML_FN_RAND,
+        "srand" => h::VIML_FN_SRAND,
         "sqrt" => h::VIML_FN_SQRT,
         "floor" => h::VIML_FN_FLOOR,
         "ceil" => h::VIML_FN_CEIL,
