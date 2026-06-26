@@ -1,13 +1,6 @@
 //! STUB surface for `csrc/eval/fs.c` — generated, do not edit.
 #![allow(dead_code, unused_variables, non_snake_case, clippy::all)]
 
-/// Port of `modify_fname()` — `csrc/eval/fs.c:67`. STUB: not yet ported.
-/// C: `int modify_fname(char *src, bool tilde_file, size_t *usedlen, char **fnamep, char **bufp,`
-pub fn modify_fname() { unimplemented!("STUB modify_fname — csrc/eval/fs.c:67") }
-
-/// Port of `f_filecopy()` — `csrc/eval/fs.c:500`. STUB: not yet ported.
-pub fn f_filecopy(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_filecopy — csrc/eval/fs.c:500") }
-
 /// Port of `findfilendir()` — `csrc/eval/fs.c:536`. STUB: not yet ported.
 /// C: `static void findfilendir(typval_T *argvars, typval_T *rettv, int find_what)`
 pub fn findfilendir() { unimplemented!("STUB findfilendir — csrc/eval/fs.c:536") }
@@ -18,27 +11,15 @@ pub fn f_finddir(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _ret
 /// Port of `f_findfile()` — `csrc/eval/fs.c:608`. STUB: not yet ported.
 pub fn f_findfile(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_findfile — csrc/eval/fs.c:608") }
 
-/// Port of `f_fnamemodify()` — `csrc/eval/fs.c:614`. STUB: not yet ported.
-pub fn f_fnamemodify(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_fnamemodify — csrc/eval/fs.c:614") }
-
 /// Port of `f_glob()` — `csrc/eval/fs.c:853`. STUB: not yet ported.
 pub fn f_glob(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_glob — csrc/eval/fs.c:853") }
 
 /// Port of `f_globpath()` — `csrc/eval/fs.c:901`. STUB: not yet ported.
 pub fn f_globpath(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_globpath — csrc/eval/fs.c:901") }
 
-/// Port of `f_glob2regpat()` — `csrc/eval/fs.c:951`. STUB: not yet ported.
-pub fn f_glob2regpat(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_glob2regpat — csrc/eval/fs.c:951") }
-
-/// Port of `f_haslocaldir()` — `csrc/eval/fs.c:970`. STUB: not yet ported.
-pub fn f_haslocaldir(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_haslocaldir — csrc/eval/fs.c:970") }
-
 /// Port of `readdir_checkitem()` — `csrc/eval/fs.c:1166`. STUB: not yet ported.
 /// C: `static varnumber_T readdir_checkitem(void *context, const char *name)`
 pub fn readdir_checkitem() { unimplemented!("STUB readdir_checkitem — csrc/eval/fs.c:1166") }
-
-/// Port of `f_readdir()` — `csrc/eval/fs.c:1203`. STUB: not yet ported.
-pub fn f_readdir(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_readdir — csrc/eval/fs.c:1203") }
 
 /// Port of `read_blob()` — `csrc/eval/fs.c:1232`. STUB: not yet ported.
 /// C: `static int read_blob(FILE *const fd, typval_T *rettv, off_T offset, off_T size_arg)`
@@ -47,12 +28,6 @@ pub fn read_blob() { unimplemented!("STUB read_blob — csrc/eval/fs.c:1232") }
 /// Port of `read_file_or_blob()` — `csrc/eval/fs.c:1283`. STUB: not yet ported.
 /// C: `static void read_file_or_blob(typval_T *argvars, typval_T *rettv, bool always_blob)`
 pub fn read_file_or_blob() { unimplemented!("STUB read_file_or_blob — csrc/eval/fs.c:1283") }
-
-/// Port of `f_readblob()` — `csrc/eval/fs.c:1477`. STUB: not yet ported.
-pub fn f_readblob(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_readblob — csrc/eval/fs.c:1477") }
-
-/// Port of `f_resolve()` — `csrc/eval/fs.c:1509`. STUB: not yet ported.
-pub fn f_resolve(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_resolve — csrc/eval/fs.c:1509") }
 
 /// Port of `write_list()` — `csrc/eval/fs.c:1698`. STUB: not yet ported.
 /// C: `static bool write_list(FileDescriptor *const fp, const list_T *const list, const bool binary)`

@@ -28,9 +28,10 @@ use crate::ported::eval::funcs::{
     f_max, f_min, f_nr2char, f_or, f_pow, f_printf, f_range, f_reduce, f_repeat, f_reverse, f_split, f_str2float, f_substitute, f_type, f_values, f_xor,
 };
 use crate::ported::eval::fs::{
-    f_chdir, f_delete, f_executable, f_exepath, f_filereadable, f_filewritable, f_getcwd, f_getfperm,
-    f_getfsize, f_getftime, f_getftype, f_isabsolutepath, f_isdirectory, f_mkdir, f_pathshorten,
-    f_readfile, f_rename, f_setfperm, f_simplify, f_tempname, f_writefile,
+    f_chdir, f_delete, f_executable, f_exepath, f_filecopy, f_filereadable, f_filewritable,
+    f_fnamemodify, f_getcwd, f_getfperm, f_getfsize, f_getftime, f_getftype, f_glob2regpat,
+    f_haslocaldir, f_isabsolutepath, f_isdirectory, f_mkdir, f_pathshorten, f_readblob, f_readdir,
+    f_readfile, f_rename, f_resolve, f_setfperm, f_simplify, f_tempname, f_writefile,
 };
 use crate::ported::eval::list::{
     f_count, f_extend, f_extendnew, f_filter, f_foreach, f_map, f_mapnew, f_remove,
@@ -415,6 +416,20 @@ pub const VIML_FN_RENAME: u16 = 3236;
 pub const VIML_FN_READFILE: u16 = 3237;
 /// `writefile()`
 pub const VIML_FN_WRITEFILE: u16 = 3238;
+/// `fnamemodify()`
+pub const VIML_FN_FNAMEMODIFY: u16 = 3239;
+/// `filecopy()`
+pub const VIML_FN_FILECOPY: u16 = 3240;
+/// `haslocaldir()`
+pub const VIML_FN_HASLOCALDIR: u16 = 3241;
+/// `resolve()`
+pub const VIML_FN_RESOLVE: u16 = 3242;
+/// `glob2regpat()`
+pub const VIML_FN_GLOB2REGPAT: u16 = 3243;
+/// `readdir()`
+pub const VIML_FN_READDIR: u16 = 3244;
+/// `readblob()`
+pub const VIML_FN_READBLOB: u16 = 3245;
 /// `flattennew()`
 pub const VIML_FN_FLATTENNEW: u16 = 3211;
 /// `sha256()`
@@ -1728,6 +1743,13 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FN_RENAME, |vm, n| call_func(vm, n, f_rename));
     vm.register_builtin(VIML_FN_READFILE, |vm, n| call_func(vm, n, f_readfile));
     vm.register_builtin(VIML_FN_WRITEFILE, |vm, n| call_func(vm, n, f_writefile));
+    vm.register_builtin(VIML_FN_FNAMEMODIFY, |vm, n| call_func(vm, n, f_fnamemodify));
+    vm.register_builtin(VIML_FN_FILECOPY, |vm, n| call_func(vm, n, f_filecopy));
+    vm.register_builtin(VIML_FN_HASLOCALDIR, |vm, n| call_func(vm, n, f_haslocaldir));
+    vm.register_builtin(VIML_FN_RESOLVE, |vm, n| call_func(vm, n, f_resolve));
+    vm.register_builtin(VIML_FN_GLOB2REGPAT, |vm, n| call_func(vm, n, f_glob2regpat));
+    vm.register_builtin(VIML_FN_READDIR, |vm, n| call_func(vm, n, f_readdir));
+    vm.register_builtin(VIML_FN_READBLOB, |vm, n| call_func(vm, n, f_readblob));
     vm.register_builtin(VIML_FN_FLATTENNEW, |vm, n| call_func(vm, n, f_flattennew));
     vm.register_builtin(VIML_FN_SHA256, |vm, n| call_func(vm, n, f_sha256));
     vm.register_builtin(VIML_FN_BLOB2LIST, |vm, n| call_func(vm, n, f_blob2list));
@@ -2852,6 +2874,44 @@ mod tests {
         assert_eq!(
             run("function! Add(a,b)\nreturn a:a+a:b\nendfunction\necho reduce(list2blob([1,2,3]), function('Add'), 0)"),
             "6\n"
+        );
+    }
+
+    #[test]
+    fn fnamemodify_and_glob() {
+        // Filename modifiers (verified against `nvim --clean`).
+        assert_eq!(run("echo fnamemodify('/home/u/file.txt.gz', ':t')"), "file.txt.gz\n");
+        assert_eq!(run("echo fnamemodify('/home/u/file.txt.gz', ':h')"), "/home/u\n");
+        assert_eq!(run("echo fnamemodify('/home/u/file.txt.gz', ':r')"), "/home/u/file.txt\n");
+        assert_eq!(run("echo fnamemodify('/home/u/file.txt.gz', ':e')"), "gz\n");
+        assert_eq!(run("echo fnamemodify('a.b.c', ':e:e')"), "b.c\n");
+        assert_eq!(run("echo fnamemodify('a.b.c', ':r:r')"), "a\n");
+        assert_eq!(run("echo fnamemodify('path/to/this.file.ext', ':e:e')"), "file.ext\n");
+        assert_eq!(run("echo fnamemodify('foo/bar.txt', ':t:r')"), "bar\n");
+        assert_eq!(run("echo fnamemodify('foo/bar.txt', ':s?bar?baz?')"), "foo/baz.txt\n");
+        // glob2regpat (pure string transform).
+        assert_eq!(run("echo glob2regpat('*.txt')"), "\\.txt$\n");
+        assert_eq!(run("echo glob2regpat('foo?bar')"), "^foo.bar$\n");
+        assert_eq!(run("echo glob2regpat('a.b')"), "^a\\.b$\n");
+        assert_eq!(run("echo haslocaldir()"), "0\n");
+    }
+
+    #[test]
+    fn readdir_readblob_filecopy() {
+        // Hermetic: build a dir under a tempname(), exercise readdir/readblob/
+        // filecopy/readfile, then clean up. Headless-CI-safe.
+        let src = "let d=tempname()\ncall mkdir(d)\n\
+            call writefile(['AAA'], d.'/a.txt')\n\
+            call writefile(['B'], d.'/b.log')\n\
+            echo sort(readdir(d))\n\
+            echo readdir(d, 'v:val =~ \"txt$\"')\n\
+            echo readblob(d.'/a.txt')\n\
+            call filecopy(d.'/a.txt', d.'/c.txt')\n\
+            echo readfile(d.'/c.txt')\n\
+            call delete(d,'rf')";
+        assert_eq!(
+            run(src),
+            "['a.txt', 'b.log']\n['a.txt']\n0z4141410A\n['AAA']\n"
         );
     }
 

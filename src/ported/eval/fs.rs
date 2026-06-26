@@ -5,7 +5,6 @@
 //! Rust `std::fs`/`std::env` — the same os-layer adaptation as `os/time.rs`.
 #![allow(non_snake_case)]
 
-use std::cell::Cell;
 use std::path::Path;
 
 use crate::ported::eval::typval::{
@@ -347,20 +346,20 @@ pub fn f_exepath(argvars: &[typval_T], rettv: &mut typval_T) {
     ret_str!(rettv, os_can_exe(&tv_get_string(&argvars[0])));
 }
 
-thread_local! {
-    /// `static uint64_t temp_count;` from `vim_tempname()` — the temp-name counter.
-    static TEMP_COUNT: Cell<u64> = const { Cell::new(0) };
-}
+/// `static uint64_t temp_count;` from `vim_tempname()` — the temp-name counter.
+/// RUST-PORT NOTE: a process-global atomic (not the C file-static) so names stay
+/// unique across threads; the pid keeps them unique across processes (Vim gets
+/// this from its per-process `$TMPDIR/vNNNNN/` directory).
+static TEMP_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Port of `f_tempname()`/`vim_tempname()` — a unique name in the temp dir.
 pub fn f_tempname(_argvars: &[typval_T], rettv: &mut typval_T) {
-    let n = TEMP_COUNT.with(|c| {
-        let v = c.get();
-        c.set(v + 1);
-        v
-    });
+    let n = TEMP_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = std::env::temp_dir();
-    let name = dir.join(format!("v{n}")).to_string_lossy().into_owned();
+    let name = dir
+        .join(format!("v{}_{n}", std::process::id()))
+        .to_string_lossy()
+        .into_owned();
     ret_str!(rettv, Some(name));
 }
 
@@ -524,4 +523,362 @@ mod tests {
         }
     }
 
+}
+
+// ── fnamemodify / glob / readdir / blob IO (eval/fs.c) ───────────────────────
+
+/// Port of `path_tail()` (path.c) — the basename (everything after the last `/`).
+fn path_tail(name: &str) -> &str {
+    match name.rfind('/') {
+        Some(i) => &name[i + 1..],
+        None => name,
+    }
+}
+
+/// `:S` — shell-escape (single-quote wrap, `'` → `'\''`).
+fn shellescape(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Port of `modify_fname()` from `Src/eval/fs.c:67` — apply `:p :h :t :r :e :~
+/// :. :s :gs :S :8` modifiers to `fname`. RUST-PORT NOTE: a string adaptation of
+/// the C pointer-walking version; the `:8` Windows short-name is a no-op and `:p`
+/// uses the OS cwd/`$HOME` rather than Vim's buffer state.
+pub fn modify_fname(mods: &str, fname: &str) -> String {
+    let mut name = fname.to_string();
+    let mb = mods.as_bytes();
+    let mut i = 0;
+    let at = |i: usize, c: u8| i < mb.len() && mb[i] == c;
+    // `:p` leaf — absolute, `~`-expanded, simplified (the FullName_save/expand_env
+    // role); and `:h` head (strip the last component + its separators).
+    let full_path = |name: &str| -> String {
+        let mut s = name.to_string();
+        if let Some(rest) = s.strip_prefix("~/") {
+            if let Some(home) = std::env::var_os("HOME") {
+                s = format!("{}/{}", home.to_string_lossy(), rest);
+            }
+        } else if s == "~" {
+            if let Some(home) = std::env::var_os("HOME") {
+                s = home.to_string_lossy().into_owned();
+            }
+        }
+        if !s.starts_with('/') {
+            if let Ok(cwd) = std::env::current_dir() {
+                s = format!("{}/{}", cwd.to_string_lossy(), s);
+            }
+        }
+        simplify_filename(&s)
+    };
+    let fname_head = |name: &str| -> String {
+        let tail = path_tail(name);
+        let head_len = name.len() - tail.len();
+        let mut end = head_len;
+        while end > 1 && name.as_bytes()[end - 1] == b'/' {
+            end -= 1;
+        }
+        if end == 0 {
+            ".".to_string()
+        } else {
+            name[..end].to_string()
+        }
+    };
+    loop {
+        // ":p" — full path.
+        if at(i, b':') && at(i + 1, b'p') {
+            i += 2;
+            name = full_path(&name);
+            if Path::new(&name).is_dir() && !name.ends_with('/') {
+                name.push('/');
+            }
+        }
+        // ":." / ":~" / ":8".
+        while at(i, b':') && (at(i + 1, b'.') || at(i + 1, b'~') || at(i + 1, b'8')) {
+            let c = mb[i + 1];
+            i += 2;
+            if c == b'8' {
+                continue;
+            }
+            let full = full_path(&name);
+            if c == b'.' {
+                if let Ok(cwd) = std::env::current_dir() {
+                    let prefix = format!("{}/", cwd.to_string_lossy());
+                    name = full.strip_prefix(&prefix).map(str::to_string).unwrap_or(full);
+                }
+            } else if let Some(home) = std::env::var_os("HOME") {
+                let home = home.to_string_lossy();
+                if let Some(rest) = full.strip_prefix(&format!("{home}/")) {
+                    name = format!("~/{rest}");
+                } else if full == *home {
+                    name = "~".to_string();
+                } else {
+                    name = full;
+                }
+            }
+        }
+        // ":h" — head, repeatable.
+        while at(i, b':') && at(i + 1, b'h') {
+            i += 2;
+            name = fname_head(&name);
+        }
+        // ":8" — short name (no-op).
+        if at(i, b':') && at(i + 1, b'8') {
+            i += 2;
+        }
+        // ":t" — tail.
+        if at(i, b':') && at(i + 1, b't') {
+            i += 2;
+            name = path_tail(&name).to_string();
+        }
+        // ":e" / ":r" — extension / root, repeatable. Tracks offsets into the
+        // current fname so a repeated ":e" extends backward (Vim's `is_second_e`):
+        // "a.b.c":e → "c", :e:e → "b.c".
+        if at(i, b':') && (at(i + 1, b'e') || at(i + 1, b'r')) {
+            let nb = std::mem::take(&mut name);
+            let bytes = nb.as_bytes();
+            let tail = nb.rfind('/').map(|x| x + 1).unwrap_or(0); // path_tail offset
+            let mut fstart = 0usize;
+            let mut flen = nb.len();
+            while at(i, b':') && (at(i + 1, b'e') || at(i + 1, b'r')) {
+                let is_e = mb[i + 1] == b'e';
+                i += 2;
+                let end = fstart + flen;
+                // c: second :e scans from before the current ext; else from the end.
+                let mut s: isize = if is_e && fstart > tail {
+                    fstart as isize - 2
+                } else {
+                    end as isize - 1
+                };
+                while s > tail as isize {
+                    if bytes[s as usize] == b'.' {
+                        break;
+                    }
+                    s -= 1;
+                }
+                if is_e {
+                    if s > tail as isize {
+                        let newstart = (s + 1) as usize;
+                        fstart = newstart;
+                        flen = end - newstart;
+                    } else if fstart <= tail {
+                        flen = 0;
+                    }
+                } else if s > tail.max(fstart) as isize {
+                    // :r — remove one extension.
+                    flen = s as usize - fstart;
+                }
+            }
+            name = nb[fstart..fstart + flen].to_string();
+        }
+        // ":s?pat?sub?" / ":gs?pat?sub?" — substitute.
+        if at(i, b':') && (at(i + 1, b's') || (at(i + 1, b'g') && at(i + 2, b's'))) {
+            let global = mb[i + 1] == b'g';
+            let mut s = i + if global { 3 } else { 2 };
+            if s < mb.len() {
+                let sep = mb[s];
+                s += 1;
+                let pat_start = s;
+                while s < mb.len() && mb[s] != sep {
+                    s += 1;
+                }
+                if s < mb.len() {
+                    let pat = &mods[pat_start..s];
+                    s += 1;
+                    let sub_start = s;
+                    while s < mb.len() && mb[s] != sep {
+                        s += 1;
+                    }
+                    if s < mb.len() {
+                        let sub = &mods[sub_start..s];
+                        let flags = if global { "g" } else { "" };
+                        name = crate::viml_regex::regex_substitute(&name, pat, sub, flags);
+                        i = s + 1;
+                        continue; // c: goto repeat — re-apply all modifiers.
+                    }
+                }
+            }
+        }
+        // ":S" — shellescape (last modifier; no further parsing after it).
+        if at(i, b':') && at(i + 1, b'S') {
+            name = shellescape(&name);
+        }
+        break;
+    }
+    name
+}
+
+/// Port of `f_fnamemodify()` from `Src/eval/fs.c`.
+pub fn f_fnamemodify(argvars: &[typval_T], rettv: &mut typval_T) {
+    let fname = tv_get_string_chk(&argvars[0]);
+    let mods = tv_get_string_chk(&argvars[1]);
+    match (fname, mods) {
+        (Some(fname), Some(mods)) => {
+            let r = if mods.is_empty() { fname } else { modify_fname(&mods, &fname) };
+            ret_str!(rettv, Some(r));
+        }
+        _ => ret_str!(rettv, None::<String>),
+    }
+}
+
+/// Port of `f_filecopy()` from `Src/eval/fs.c` — copy a regular file. 1/0.
+pub fn f_filecopy(argvars: &[typval_T], rettv: &mut typval_T) {
+    if tv_check_for_string_arg(argvars, 0) == FAIL || tv_check_for_string_arg(argvars, 1) == FAIL {
+        ret_nr!(rettv, 0);
+        return;
+    }
+    let from = tv_get_string(&argvars[0]);
+    let to = tv_get_string(&argvars[1]);
+    // c: only copy a regular file or symlink.
+    let is_reg = std::fs::symlink_metadata(&from)
+        .map(|m| m.file_type().is_file() || m.file_type().is_symlink())
+        .unwrap_or(false);
+    let ok = is_reg && std::fs::copy(&from, &to).is_ok();
+    ret_nr!(rettv, ok as varnumber_T);
+}
+
+/// Port of `f_haslocaldir()` from `Src/eval/fs.c`. RUST-PORT NOTE: the standalone
+/// interpreter has only the global scope, which never has a local directory → 0.
+pub fn f_haslocaldir(_argvars: &[typval_T], rettv: &mut typval_T) {
+    ret_nr!(rettv, 0);
+}
+
+/// Port of `f_resolve()` from `Src/eval/fs.c` — follow symlinks, then simplify.
+/// RUST-PORT NOTE: iterates `read_link` (Vim's readlink loop); the exact
+/// relative-prefix preservation of the C version is approximated by simplify.
+pub fn f_resolve(argvars: &[typval_T], rettv: &mut typval_T) {
+    let fname = tv_get_string(&argvars[0]);
+    let mut p = fname.clone();
+    for _ in 0..100 {
+        match std::fs::read_link(&p) {
+            Ok(target) => {
+                p = if target.is_absolute() {
+                    target.to_string_lossy().into_owned()
+                } else {
+                    let dir = Path::new(&p).parent().unwrap_or_else(|| Path::new(""));
+                    dir.join(target).to_string_lossy().into_owned()
+                };
+            }
+            Err(_) => break,
+        }
+    }
+    ret_str!(rettv, Some(simplify_filename(&p)));
+}
+
+/// Port of `file_pat_to_reg_pat()` (fileio.c) — convert a shell glob to a Vim
+/// magic-mode regex. Leading/trailing `*` drop the `^`/`$` anchor; interior `*`
+/// → `.*`, `?` → `.`, and `. ~ , { }` are backslash-escaped.
+fn file_pat_to_reg_pat(pat: &str) -> String {
+    let b = pat.as_bytes();
+    let n = b.len();
+    if n == 0 {
+        return "^$".to_string();
+    }
+    let mut out: Vec<u8> = Vec::with_capacity(n + 2);
+    let mut start = 0;
+    if b[0] == b'*' {
+        while start < n - 1 && b[start] == b'*' {
+            start += 1;
+        }
+    } else {
+        out.push(b'^');
+    }
+    let mut end = n;
+    let mut add_dollar = true;
+    if end > start && b[end - 1] == b'*' {
+        while end - 1 > start && b[end - 1] == b'*' {
+            end -= 1;
+        }
+        add_dollar = false;
+    }
+    let mut p = start;
+    while p < end {
+        match b[p] {
+            b'*' => {
+                out.extend_from_slice(b".*");
+                while p + 1 < end && b[p + 1] == b'*' {
+                    p += 1;
+                }
+            }
+            b'?' => out.push(b'.'),
+            c @ (b'.' | b'~' | b',' | b'{' | b'}') => {
+                out.push(b'\\');
+                out.push(c);
+            }
+            c => out.push(c),
+        }
+        p += 1;
+    }
+    if add_dollar {
+        out.push(b'$');
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Port of `f_glob2regpat()` from `Src/eval/fs.c`.
+pub fn f_glob2regpat(argvars: &[typval_T], rettv: &mut typval_T) {
+    ret_str!(rettv, tv_get_string_chk(&argvars[0]).map(|p| file_pat_to_reg_pat(&p)));
+}
+
+/// Port of `f_readdir()` from `Src/eval/fs.c` — directory entries (sorted), with
+/// an optional filter expr (`{name -> 1 keep / 0 skip / -1 stop}` via `v:val`).
+pub fn f_readdir(argvars: &[typval_T], rettv: &mut typval_T) {
+    let l = tv_list_alloc_ret(rettv, 0);
+    let path = tv_get_string(&argvars[0]);
+    let mut names: Vec<String> = match std::fs::read_dir(&path) {
+        Ok(rd) => rd.filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned())).collect(),
+        Err(_) => return,
+    };
+    names.sort();
+    let has_filter = argvars.len() > 1 && argvars[1].v_type != VAR_UNKNOWN;
+    for name in names {
+        if has_filter {
+            // c: readdir_checkitem — set v:val=name, eval expr; 1 keep / 0 skip / -1 stop.
+            let key = typval_T::from(0 as varnumber_T);
+            let val = typval_T::from(name.clone());
+            let r = crate::ported::eval::list::FILTER_MAP_EVAL_HOOK
+                .with(|h| *h.borrow())
+                .and_then(|f| f(&argvars[1], &key, &val));
+            match r.map(|tv| tv_get_number(&tv)) {
+                Some(0) => continue,
+                Some(n) if n < 0 => break,
+                _ => {}
+            }
+        }
+        tv_list_append_string(&mut l.borrow_mut(), &name);
+    }
+}
+
+/// Port of `read_file_or_blob()`/`read_blob()`/`f_readblob()` from `Src/eval/fs.c`
+/// — read a file's bytes into a Blob, honoring `[offset [, size]]`.
+pub fn f_readblob(argvars: &[typval_T], rettv: &mut typval_T) {
+    use crate::ported::eval::typval::tv_blob_alloc_ret;
+    let b = tv_blob_alloc_ret(rettv);
+    let fname = tv_get_string(&argvars[0]);
+    let data = match std::fs::read(&fname) {
+        Ok(d) => d,
+        Err(_) => {
+            semsg(&format!("E484: Can't open file {fname}"));
+            return;
+        }
+    };
+    // c: offset (negative → from EOF), then size.
+    let len = data.len() as i64;
+    let mut off = if argvars.len() > 1 { tv_get_number(&argvars[1]) } else { 0 };
+    if off < 0 {
+        off += len;
+        if off < 0 {
+            off = 0;
+        }
+    }
+    let off = (off.min(len)) as usize;
+    let size = if argvars.len() > 2 {
+        let s = tv_get_number(&argvars[2]);
+        if s < 0 {
+            (len as usize).saturating_sub(off)
+        } else {
+            (s as usize).min(data.len() - off)
+        }
+    } else {
+        data.len() - off
+    };
+    b.borrow_mut().bv_ga.extend_from_slice(&data[off..off + size]);
 }
