@@ -454,19 +454,38 @@ fn parse_let(rest: &str) -> Result<Stmt, VimlError> {
     } else if let Some(reg) = lhs.strip_prefix('@') {
         LetTarget::Register(reg.chars().next().unwrap_or('"'))
     } else if lhs.ends_with(']') && lhs.contains('[') {
-        // `base[index] = …` (single-level subscript assignment).
-        let br = lhs.find('[').unwrap();
-        let base = lhs[..br].trim().to_string();
-        let index_src = &lhs[br + 1..lhs.len() - 1];
-        LetTarget::Index { base, index: Box::new(parse_expr(index_src)?) }
+        // `base[index] = …` — split at the LAST top-level subscript (so nested
+        // `d['a']['b']` parses `d['a']` as the base expression).
+        let bytes = lhs.as_bytes();
+        let mut depth = 0i32;
+        let mut open = 0;
+        for i in (0..lhs.len()).rev() {
+            match bytes[i] {
+                b']' => depth += 1,
+                b'[' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        open = i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let base_src = lhs[..open].trim();
+        let index_src = &lhs[open + 1..lhs.len() - 1];
+        LetTarget::Index {
+            base: Box::new(parse_expr(base_src)?),
+            index: Box::new(parse_expr(index_src)?),
+        }
     } else if !lhs.contains('[')
         && lhs.contains('.')
         && lhs.rsplit_once('.').is_some_and(|(_, k)| !k.is_empty() && k.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
     {
-        // `base.key = …` (single-level Dict member assignment; key is an ident).
+        // `base.key = …` — split at the last `.` (nested `d.a.b` → base `d.a`).
         let (base, key) = lhs.rsplit_once('.').unwrap();
         LetTarget::Index {
-            base: base.to_string(),
+            base: Box::new(parse_expr(base)?),
             index: Box::new(Expr::Str(key.to_string())),
         }
     } else {
@@ -497,7 +516,7 @@ fn let_target_expr(target: &LetTarget) -> Result<Expr, VimlError> {
         LetTarget::Env(n) => Expr::Env(n.clone()),
         LetTarget::Register(c) => Expr::Register(*c),
         LetTarget::Index { base, index } => Expr::Index {
-            base: Box::new(Expr::Var(base.clone())),
+            base: base.clone(),
             index: index.clone(),
         },
         LetTarget::List { .. } => {

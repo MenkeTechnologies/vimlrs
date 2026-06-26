@@ -1055,9 +1055,11 @@ impl Compiler {
             }
             LetTarget::Index { base, index } => {
                 // `let base[index] = value` — push value, base, index; the bridge
-                // sets base[index] = value (and fires Dict watchers).
+                // sets base[index] = value (and fires Dict watchers). `base` is an
+                // expression, so nested `d['a']['b']` resolves the inner container
+                // (a shared Rc, so the mutation propagates).
                 self.expr(expr)?;
-                self.get_var(base);
+                self.expr(base)?;
                 self.expr(index)?;
                 self.emit(Op::CallBuiltin(h::VIML_SETINDEX, 3));
                 self.emit(Op::Pop);
@@ -1374,10 +1376,11 @@ impl Compiler {
                 self.opt_bound(to)?;
                 self.emit(Op::CallBuiltin(h::VIML_SLICE, 3));
             }
-            Expr::Member { .. } => {
-                return Err(VimlError::msg(
-                    "E15: dict.member access arrives in a later phase; use d['key']",
-                ))
+            Expr::Member { base, key } => {
+                // `base.key` Dict member read — identical to `base['key']`.
+                self.expr(base)?;
+                self.load_str(key);
+                self.emit(Op::CallBuiltin(h::VIML_INDEX, 2));
             }
             Expr::Call { name, args } => {
                 // JIT fast path: the bitwise builtins lower to fusevm-NATIVE ops

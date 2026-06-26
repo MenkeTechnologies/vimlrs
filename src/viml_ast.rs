@@ -153,9 +153,10 @@ pub enum LetTarget {
     /// `let @x = …`.
     Register(char),
     /// `let base[index] = …` / `let base.key = …` — index/member assignment.
+    /// `base` is the container expression (so nesting like `d['a']['b']` works).
     Index {
-        /// The container variable name (possibly scoped).
-        base: String,
+        /// The container expression.
+        base: Box<Expr>,
         /// The index/key expression.
         index: Box<Expr>,
     },

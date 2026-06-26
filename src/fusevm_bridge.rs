@@ -2680,6 +2680,11 @@ mod tests {
         );
         // List element set, including a negative index.
         assert_eq!(run("let l=[1,2,3]\nlet l[1]=20\nlet l[-1]=30\necho l"), "[1, 20, 30]\n");
+        // Nested subscript assignment (shared-Rc propagation through containers).
+        assert_eq!(
+            run("let d={'a':{'b':1},'l':[10,20]}\nlet d['a']['b']=99\nlet d['l'][0]=100\necho [d['a']['b'], d['l'][0]]"),
+            "[99, 100]\n"
+        );
         // Compound index-assign (desugars to d[k] = d[k] op rhs).
         assert_eq!(run("let d={'n':5}\nlet d['n']+=10\necho d['n']"), "15\n");
         // A dict-set fires a registered watcher (the add side).
