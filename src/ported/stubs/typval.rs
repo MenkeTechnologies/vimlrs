@@ -85,26 +85,6 @@ pub fn tv_dict_watcher_free() { unimplemented!("STUB tv_dict_watcher_free — cs
 /// C: `void tv_dict_watcher_add(dict_T *const dict, const char *const key_pattern,`
 pub fn tv_dict_watcher_add() { unimplemented!("STUB tv_dict_watcher_add — csrc/eval/typval.c:1773") }
 
-/// Port of `tv_callback_equal()` — `csrc/eval/typval.c:1795`. STUB: not yet ported.
-/// C: `bool tv_callback_equal(const Callback *cb1, const Callback *cb2)`
-pub fn tv_callback_equal() { unimplemented!("STUB tv_callback_equal — csrc/eval/typval.c:1795") }
-
-/// Port of `callback_free()` — `csrc/eval/typval.c:1818`. STUB: not yet ported.
-/// C: `void callback_free(Callback *callback)`
-pub fn callback_free() { unimplemented!("STUB callback_free — csrc/eval/typval.c:1818") }
-
-/// Port of `callback_put()` — `csrc/eval/typval.c:1840`. STUB: not yet ported.
-/// C: `void callback_put(Callback *cb, typval_T *tv)`
-pub fn callback_put() { unimplemented!("STUB callback_put — csrc/eval/typval.c:1840") }
-
-/// Port of `callback_copy()` — `csrc/eval/typval.c:1867`. STUB: not yet ported.
-/// C: `void callback_copy(Callback *dest, Callback *src)`
-pub fn callback_copy() { unimplemented!("STUB callback_copy — csrc/eval/typval.c:1867") }
-
-/// Port of `callback_to_string()` — `csrc/eval/typval.c:1890`. STUB: not yet ported.
-/// C: `char *callback_to_string(Callback *cb, Arena *arena)`
-pub fn callback_to_string() { unimplemented!("STUB callback_to_string — csrc/eval/typval.c:1890") }
-
 /// Port of `tv_dict_watcher_remove()` — `csrc/eval/typval.c:1922`. STUB: not yet ported.
 /// C: `bool tv_dict_watcher_remove(dict_T *const dict, const char *const key_pattern,`
 pub fn tv_dict_watcher_remove() { unimplemented!("STUB tv_dict_watcher_remove — csrc/eval/typval.c:1922") }
@@ -140,10 +120,6 @@ pub fn tv_dict_item_remove() { unimplemented!("STUB tv_dict_item_remove — csrc
 /// Port of `tv_dict_free_dict()` — `csrc/eval/typval.c:2195`. STUB: not yet ported.
 /// C: `void tv_dict_free_dict(dict_T *const d)`
 pub fn tv_dict_free_dict() { unimplemented!("STUB tv_dict_free_dict — csrc/eval/typval.c:2195") }
-
-/// Port of `tv_dict_get_callback()` — `csrc/eval/typval.c:2430`. STUB: not yet ported.
-/// C: `bool tv_dict_get_callback(dict_T *const d, const char *const key, const ptrdiff_t key_len,`
-pub fn tv_dict_get_callback() { unimplemented!("STUB tv_dict_get_callback — csrc/eval/typval.c:2430") }
 
 /// Port of `tv_dict_wrong_func_name()` — `csrc/eval/typval.c:2457`. STUB: not yet ported.
 /// C: `int tv_dict_wrong_func_name(dict_T *d, typval_T *tv, const char *name)`

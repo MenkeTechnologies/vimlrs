@@ -2251,6 +2251,89 @@ pub fn f_uniq(argvars: &[typval_T], rettv: &mut typval_T) {
     do_sort_uniq(argvars, rettv, false);
 }
 
+// ── Callback (Src/eval/typval.c) ──
+//
+// `Callback` in C is a union of {funcref name, partial_T*, LuaRef} + a type tag.
+// vimlrs models neither partials nor Lua, so a `Callback` here is funcref-or-none
+// (the same adaptation as modeling funcrefs as `VAR_FUNC` strings). The C
+// `func_ref`/`func_unref` refcounting is vestigial (functions live in the bridge
+// `FUNCTIONS` registry), so copy is a clone and free is a reset.
+
+/// Port of `Callback` from `Src/eval/typval_defs.h:64` (funcref-only model).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum Callback {
+    /// `kCallbackNone`.
+    #[default]
+    None,
+    /// `kCallbackFuncref` — the function name.
+    Funcref(String),
+}
+
+/// Port of `callback_copy()` from `Src/eval/typval.c`.
+pub fn callback_copy(dest: &mut Callback, src: &Callback) {
+    // c: dup the funcref name + func_ref() (refcount vestigial here).
+    *dest = src.clone();
+}
+
+/// Port of `callback_free()` from `Src/eval/typval.c`.
+pub fn callback_free(callback: &mut Callback) {
+    // c: func_unref + free, then type = kCallbackNone.
+    *callback = Callback::None;
+}
+
+/// Port of `callback_put()` from `Src/eval/typval.c` — write a `Callback` into a
+/// `typval_T` (a Funcref, or v:null for None).
+pub fn callback_put(cb: &Callback, tv: &mut typval_T) {
+    match cb {
+        Callback::Funcref(name) => {
+            tv.v_type = VAR_FUNC;
+            tv.vval = v_string(name.clone());
+        }
+        Callback::None => {
+            tv.v_type = VAR_SPECIAL;
+            tv.vval =
+                v_special(crate::ported::eval::typval_defs_h::SpecialVarValue::kSpecialVarNull);
+        }
+    }
+}
+
+/// Port of `callback_to_string()` from `Src/eval/typval.c`.
+pub fn callback_to_string(cb: &Callback) -> String {
+    // c: snprintf("<vim function: %s>", funcref); None → "".
+    match cb {
+        Callback::Funcref(name) => format!("<vim function: {name}>"),
+        Callback::None => String::new(),
+    }
+}
+
+/// Port of `tv_callback_equal()` from `Src/eval/typval.c`.
+pub fn tv_callback_equal(cb1: &Callback, cb2: &Callback) -> bool {
+    // c: same type, and equal funcref names.
+    cb1 == cb2
+}
+
+/// Port of `tv_dict_get_callback()` from `Src/eval/typval.c` — read the
+/// `Callback` at `key`. Returns `false` (with `E6000`) if the value is present
+/// but is not a function/function-name; a missing key yields `true` + `None`.
+pub fn tv_dict_get_callback(d: &dict_T, key: &str, result: &mut Callback) -> bool {
+    *result = Callback::None;
+    let tv = match tv_dict_find(d, key) {
+        Some(tv) => tv,
+        None => return true,
+    };
+    // c: callback_from_typval — VAR_FUNC / VAR_STRING name → a funcref Callback.
+    match tv.v_type {
+        VAR_FUNC | VAR_STRING => {
+            *result = Callback::Funcref(tv_get_string(tv));
+            true
+        }
+        _ => {
+            emsg("E6000: Argument is not a function or function name");
+            false
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2347,6 +2430,38 @@ mod tests {
             v_lock: VarLockStatus::VAR_UNLOCKED,
             vval: v_blob(Some(tv_blob_alloc())),
         }
+    }
+
+    #[test]
+    fn callback_family() {
+        let func = |n: &str| typval_T {
+            v_type: VAR_FUNC,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_string(n.to_string()),
+        };
+        // copy / to_string / equal.
+        let mut c = Callback::None;
+        callback_copy(&mut c, &Callback::Funcref("Foo".to_string()));
+        assert_eq!(c, Callback::Funcref("Foo".to_string()));
+        assert_eq!(callback_to_string(&c), "<vim function: Foo>");
+        assert!(tv_callback_equal(&c, &Callback::Funcref("Foo".to_string())));
+        assert!(!tv_callback_equal(&c, &Callback::Funcref("Bar".to_string())));
+        // put → a VAR_FUNC typval.
+        let mut tv = nr(0);
+        callback_put(&c, &mut tv);
+        assert!(matches!((tv.v_type, &tv.vval), (VAR_FUNC, v_string(s)) if s == "Foo"));
+        // free → None.
+        callback_free(&mut c);
+        assert_eq!(c, Callback::None);
+        // tv_dict_get_callback: present func key → Funcref; missing → None (ok).
+        let d = tv_dict_alloc();
+        tv_dict_add_tv(&mut d.borrow_mut(), "cb", func("Handler"));
+        let mut r = Callback::None;
+        assert!(tv_dict_get_callback(&d.borrow(), "cb", &mut r));
+        assert_eq!(r, Callback::Funcref("Handler".to_string()));
+        let mut r2 = Callback::Funcref("x".to_string());
+        assert!(tv_dict_get_callback(&d.borrow(), "nope", &mut r2));
+        assert_eq!(r2, Callback::None);
     }
 
     #[test]
