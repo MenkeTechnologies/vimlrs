@@ -1548,6 +1548,8 @@ fn builtin_fn_id(name: &str) -> Option<u16> {
         "printf" => h::VIML_FN_PRINTF,
         "map" => h::VIML_FN_MAP,
         "filter" => h::VIML_FN_FILTER,
+        "mapnew" => h::VIML_FN_MAPNEW,
+        "foreach" => h::VIML_FN_FOREACH,
         "sort" => h::VIML_FN_SORT,
         "call" => h::VIML_FN_CALL,
         "function" => h::VIML_FN_FUNCTION,

@@ -1,16 +1,22 @@
 //! Port of `src/nvim/eval/list.c` (vendored at `csrc/eval/list.c`).
 //!
-//! List/Dict/String builtins whose bodies live in `list.c`. The callback-driven
-//! ones (`map`/`filter`/`foreach`) are orchestrated bridge-side; the pure
-//! counting helpers are ported here.
-#![allow(non_snake_case)]
+//! List/Dict/String builtins whose bodies live in `list.c`, including the
+//! callback-driven `map`/`filter`/`mapnew`/`foreach` (the per-item evaluation
+//! crosses into the bridge via `FILTER_MAP_EVAL_HOOK`/`FILTER_MAP_CMD_HOOK`).
+#![allow(non_snake_case, non_camel_case_types)]
+
+use std::cell::RefCell;
+use std::rc::Rc;
 
 use crate::ported::eval::typval::{
-    tv_blob_remove, tv_dict_copy, tv_dict_extend, tv_dict_remove, tv_equal, tv_get_number_chk,
-    tv_get_string_chk, tv_list_copy, tv_list_extend, tv_list_find, tv_list_len, tv_list_remove,
+    tv_blob_alloc, tv_blob_get, tv_blob_len, tv_blob_remove, tv_blob_set,
+    tv_dict_add_tv, tv_dict_alloc_ret, tv_dict_copy, tv_dict_extend, tv_dict_remove, tv_equal,
+    tv_get_number_chk, tv_get_string, tv_get_string_chk, tv_list_alloc_ret, tv_list_copy,
+    tv_list_extend, tv_list_find, tv_list_len, tv_list_remove, value_check_lock, TV_TRANSLATE,
 };
 use crate::ported::eval::typval_defs_h::{
-    dict_T, list_T, typval_T, typval_vval_union::*, varnumber_T, VarType::*,
+    blob_T, dict_T, list_T, listitem_T, typval_T, typval_vval_union::*, varnumber_T, VarLockStatus,
+    VarType::*,
 };
 use crate::ported::message::emsg;
 
@@ -248,6 +254,324 @@ pub fn f_extend(argvars: &[typval_T], rettv: &mut typval_T) {
 /// Port of `f_extendnew()` from `Src/eval/list.c:728`.
 pub fn f_extendnew(argvars: &[typval_T], rettv: &mut typval_T) {
     extend(argvars, rettv, true);
+}
+
+// ── map() / filter() / mapnew() / foreach() (Src/eval/list.c) ──
+
+/// Port of `filtermap_T` from `Src/eval/list.c:16`.
+#[derive(Clone, Copy, PartialEq)]
+pub enum filtermap_T {
+    FILTERMAP_FILTER,
+    FILTERMAP_MAP,
+    FILTERMAP_MAPNEW,
+    FILTERMAP_FOREACH,
+}
+use filtermap_T::*;
+
+thread_local! {
+    /// Per-item evaluator for map/filter/foreach: set `v:key`/`v:val`, then eval
+    /// the expr (string) or call the funcref → result. Installed by the bridge
+    /// in `install()` (the value layer cannot evaluate expressions itself).
+    pub static FILTER_MAP_EVAL_HOOK: RefCell<Option<fn(&typval_T, &typval_T, &typval_T) -> Option<typval_T>>> =
+        const { RefCell::new(None) };
+    /// `foreach()` with a String runs it as a command line (`do_cmdline_cmd`).
+    /// Installed by the bridge.
+    pub static FILTER_MAP_CMD_HOOK: RefCell<Option<fn(&str, &typval_T, &typval_T) -> bool>> =
+        const { RefCell::new(None) };
+}
+
+/// Port of `filter_map_one()` from `Src/eval/list.c:37`.
+///
+/// Apply `expr` to one item (`v:val`); returns `(newtv, rem)` or `None` on
+/// failure. For `filter()`, `rem` says drop the item. `foreach()` with a String
+/// runs it as a command.
+fn filter_map_one(
+    tv: &typval_T,
+    key: &typval_T,
+    expr: &typval_T,
+    filtermap: filtermap_T,
+) -> Option<(typval_T, bool)> {
+    // c: foreach() is not limited to an expression — a String is a command.
+    if filtermap == FILTERMAP_FOREACH && expr.v_type == VAR_STRING {
+        let hook = FILTER_MAP_CMD_HOOK.with(|h| *h.borrow());
+        let ok = hook.is_some_and(|f| f(&tv_get_string(expr), key, tv));
+        let unknown = typval_T {
+            v_type: VAR_UNKNOWN,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_number(0),
+        };
+        return if ok { Some((unknown, false)) } else { None };
+    }
+    let hook = FILTER_MAP_EVAL_HOOK.with(|h| *h.borrow());
+    let newtv = hook.and_then(|f| f(expr, key, tv))?;
+    let mut rem = false;
+    if filtermap == FILTERMAP_FILTER {
+        // c: filter() removes the item when the expr is zero.
+        let mut error = false;
+        rem = tv_get_number_chk(&newtv, Some(&mut error)) == 0;
+        if error {
+            return None;
+        }
+    }
+    Some((newtv, rem))
+}
+
+/// Port of `filter_map_list()` from `Src/eval/list.c:272`.
+fn filter_map_list(
+    l: &Rc<RefCell<list_T>>,
+    filtermap: filtermap_T,
+    arg_errmsg: &str,
+    expr: &typval_T,
+    rettv: &mut typval_T,
+) {
+    let nr_tv = |n: varnumber_T| typval_T {
+        v_type: VAR_NUMBER,
+        v_lock: VarLockStatus::VAR_UNLOCKED,
+        vval: v_number(n),
+    };
+    if filtermap == FILTERMAP_FILTER
+        && value_check_lock(l.borrow().lv_lock, Some(arg_errmsg), TV_TRANSLATE)
+    {
+        return;
+    }
+    let items: Vec<typval_T> = l.borrow().lv_items.iter().map(|it| it.li_tv.clone()).collect();
+    let mut out: Vec<listitem_T> = Vec::with_capacity(items.len());
+    let mut i = 0;
+    let mut failed = false;
+    while i < items.len() {
+        let key = nr_tv(i as varnumber_T);
+        match filter_map_one(&items[i], &key, expr, filtermap) {
+            None => {
+                failed = true;
+                break;
+            }
+            Some((newtv, rem)) => match filtermap {
+                FILTERMAP_MAP | FILTERMAP_MAPNEW => out.push(listitem_T { li_tv: newtv }),
+                FILTERMAP_FILTER => {
+                    if !rem {
+                        out.push(listitem_T { li_tv: items[i].clone() });
+                    }
+                }
+                FILTERMAP_FOREACH => {}
+            },
+        }
+        i += 1;
+    }
+    // c: on failure the loop stops, leaving later items unprocessed/original.
+    if failed && matches!(filtermap, FILTERMAP_MAP | FILTERMAP_FILTER) {
+        for it in items.iter().skip(i) {
+            out.push(listitem_T { li_tv: it.clone() });
+        }
+    }
+    match filtermap {
+        FILTERMAP_MAP | FILTERMAP_FILTER => {
+            let mut lb = l.borrow_mut();
+            lb.lv_len = out.len() as i32;
+            lb.lv_items = out;
+        }
+        FILTERMAP_MAPNEW => {
+            let nl = tv_list_alloc_ret(rettv, out.len() as isize);
+            let mut nb = nl.borrow_mut();
+            nb.lv_len = out.len() as i32;
+            nb.lv_items = out;
+        }
+        FILTERMAP_FOREACH => {}
+    }
+}
+
+/// Port of `filter_map_dict()` from `Src/eval/list.c:83`.
+fn filter_map_dict(
+    d: &Rc<RefCell<dict_T>>,
+    filtermap: filtermap_T,
+    arg_errmsg: &str,
+    expr: &typval_T,
+    rettv: &mut typval_T,
+) {
+    if filtermap == FILTERMAP_FILTER
+        && value_check_lock(d.borrow().dv_lock, Some(arg_errmsg), TV_TRANSLATE)
+    {
+        return;
+    }
+    let str_tv = |s: String| typval_T {
+        v_type: VAR_STRING,
+        v_lock: VarLockStatus::VAR_UNLOCKED,
+        vval: v_string(s),
+    };
+    let d_ret = if filtermap == FILTERMAP_MAPNEW { Some(tv_dict_alloc_ret(rettv)) } else { None };
+    let keys: Vec<String> = d.borrow().dv_hashtab.keys().cloned().collect();
+    for k in keys {
+        let val = match d.borrow().dv_hashtab.get(&k) {
+            Some(v) => v.clone(),
+            None => continue,
+        };
+        let key = str_tv(k.clone());
+        match filter_map_one(&val, &key, expr, filtermap) {
+            None => break,
+            Some((newtv, rem)) => match filtermap {
+                FILTERMAP_MAP => {
+                    d.borrow_mut().dv_hashtab.insert(k, newtv);
+                }
+                FILTERMAP_MAPNEW => {
+                    if let Some(dr) = &d_ret {
+                        tv_dict_add_tv(&mut dr.borrow_mut(), &k, newtv);
+                    }
+                }
+                FILTERMAP_FILTER => {
+                    if rem {
+                        d.borrow_mut().dv_hashtab.shift_remove(&k);
+                    }
+                }
+                FILTERMAP_FOREACH => {}
+            },
+        }
+    }
+}
+
+/// Port of `filter_map_blob()` from `Src/eval/list.c:149`.
+fn filter_map_blob(
+    b: &Rc<RefCell<blob_T>>,
+    filtermap: filtermap_T,
+    arg_errmsg: &str,
+    expr: &typval_T,
+    rettv: &mut typval_T,
+) {
+    if filtermap == FILTERMAP_FILTER
+        && value_check_lock(b.borrow().bv_lock, Some(arg_errmsg), TV_TRANSLATE)
+    {
+        return;
+    }
+    // mapnew() works on (and returns) a copy.
+    let nr_tv = |n: varnumber_T| typval_T {
+        v_type: VAR_NUMBER,
+        v_lock: VarLockStatus::VAR_UNLOCKED,
+        vval: v_number(n),
+    };
+    let b_ret = if filtermap == FILTERMAP_MAPNEW {
+        // c: tv_blob_copy(b, rettv); b_ret = rettv->vval.v_blob;
+        let nb = tv_blob_alloc();
+        nb.borrow_mut().bv_ga = b.borrow().bv_ga.clone();
+        rettv.v_type = VAR_BLOB;
+        rettv.vval = v_blob(Some(nb.clone()));
+        nb
+    } else {
+        b.clone()
+    };
+    let len = tv_blob_len(&b.borrow());
+    let mut i = 0i32;
+    let mut removed = 0i32;
+    while i < len {
+        let val = tv_blob_get(&b.borrow(), i) as varnumber_T;
+        let tv = nr_tv(val);
+        let key = nr_tv(i as varnumber_T);
+        match filter_map_one(&tv, &key, expr, filtermap) {
+            None => break,
+            Some((newtv, rem)) => {
+                if filtermap != FILTERMAP_FOREACH {
+                    if newtv.v_type != VAR_NUMBER && newtv.v_type != VAR_BOOL {
+                        emsg("E978: Invalid operation for Blob");
+                        break;
+                    }
+                    if filtermap != FILTERMAP_FILTER {
+                        let n = tv_get_number_chk(&newtv, None);
+                        if n != val {
+                            tv_blob_set(&mut b_ret.borrow_mut(), i - removed, n as u8);
+                        }
+                    } else if rem {
+                        b.borrow_mut().bv_ga.remove((i - removed) as usize);
+                        removed += 1;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+}
+
+/// Port of `filter_map_string()` from `Src/eval/list.c:216`.
+fn filter_map_string(str: &str, filtermap: filtermap_T, expr: &typval_T, rettv: &mut typval_T) {
+    let nr_tv = |n: varnumber_T| typval_T {
+        v_type: VAR_NUMBER,
+        v_lock: VarLockStatus::VAR_UNLOCKED,
+        vval: v_number(n),
+    };
+    let str_tv = |s: String| typval_T {
+        v_type: VAR_STRING,
+        v_lock: VarLockStatus::VAR_UNLOCKED,
+        vval: v_string(s),
+    };
+    let mut ga = String::new();
+    for (idx, ch) in str.chars().enumerate() {
+        let tv = str_tv(ch.to_string());
+        let key = nr_tv(idx as varnumber_T);
+        match filter_map_one(&tv, &key, expr, filtermap) {
+            None => break,
+            Some((newtv, rem)) => {
+                if filtermap == FILTERMAP_MAP || filtermap == FILTERMAP_MAPNEW {
+                    if newtv.v_type != VAR_STRING {
+                        emsg("E928: String required");
+                        break;
+                    }
+                    ga.push_str(&tv_get_string(&newtv));
+                } else if filtermap == FILTERMAP_FOREACH || !rem {
+                    ga.push(ch);
+                }
+            }
+        }
+    }
+    rettv.v_type = VAR_STRING;
+    rettv.vval = v_string(ga);
+}
+
+/// Port of `filter_map()` from `Src/eval/list.c:336` — the shared dispatcher.
+fn filter_map(argvars: &[typval_T], rettv: &mut typval_T, filtermap: filtermap_T) {
+    let func_name = match filtermap {
+        FILTERMAP_MAP => "map()",
+        FILTERMAP_MAPNEW => "mapnew()",
+        FILTERMAP_FILTER => "filter()",
+        FILTERMAP_FOREACH => "foreach()",
+    };
+    let arg_errmsg = match filtermap {
+        FILTERMAP_MAP => "map() argument",
+        FILTERMAP_MAPNEW => "mapnew() argument",
+        FILTERMAP_FILTER => "filter() argument",
+        FILTERMAP_FOREACH => "foreach() argument",
+    };
+    // c: map/filter/foreach return the first argument (not mapnew, not a String).
+    if filtermap != FILTERMAP_MAPNEW && argvars[0].v_type != VAR_STRING {
+        *rettv = argvars[0].clone();
+    }
+    if !matches!(argvars[0].v_type, VAR_BLOB | VAR_LIST | VAR_DICT | VAR_STRING) {
+        emsg(&format!("E1250: Argument of {func_name} must be a List, String, Dictionary or Blob"));
+        return;
+    }
+    if argvars.len() < 2 || argvars[1].v_type == VAR_UNKNOWN {
+        return;
+    }
+    let expr = &argvars[1];
+    match (argvars[0].v_type, &argvars[0].vval) {
+        (VAR_DICT, v_dict(Some(d))) => filter_map_dict(d, filtermap, arg_errmsg, expr, rettv),
+        (VAR_BLOB, v_blob(Some(b))) => filter_map_blob(b, filtermap, arg_errmsg, expr, rettv),
+        (VAR_STRING, _) => filter_map_string(&tv_get_string(&argvars[0]), filtermap, expr, rettv),
+        (VAR_LIST, v_list(Some(l))) => filter_map_list(l, filtermap, arg_errmsg, expr, rettv),
+        _ => {} // NULL container
+    }
+}
+
+/// Port of `f_filter()` from `Src/eval/list.c:405`.
+pub fn f_filter(argvars: &[typval_T], rettv: &mut typval_T) {
+    filter_map(argvars, rettv, FILTERMAP_FILTER);
+}
+/// Port of `f_map()` from `Src/eval/list.c:411`.
+pub fn f_map(argvars: &[typval_T], rettv: &mut typval_T) {
+    filter_map(argvars, rettv, FILTERMAP_MAP);
+}
+/// Port of `f_mapnew()` from `Src/eval/list.c:417`.
+pub fn f_mapnew(argvars: &[typval_T], rettv: &mut typval_T) {
+    filter_map(argvars, rettv, FILTERMAP_MAPNEW);
+}
+/// Port of `f_foreach()` from `Src/eval/list.c:423`.
+pub fn f_foreach(argvars: &[typval_T], rettv: &mut typval_T) {
+    filter_map(argvars, rettv, FILTERMAP_FOREACH);
 }
 
 /// Port of `f_remove()` from `Src/eval/list.c:810`.

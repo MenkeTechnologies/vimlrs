@@ -28,7 +28,10 @@ use crate::ported::eval::funcs::{
     f_max, f_min, f_nr2char, f_or, f_pow, f_printf, f_range, f_repeat, f_reverse, f_split, f_str2float, f_substitute, f_type, f_values, f_xor,
 };
 use crate::ported::eval::fs::f_pathshorten;
-use crate::ported::eval::list::{f_count, f_extend, f_extendnew, f_remove};
+use crate::ported::eval::list::{
+    f_count, f_extend, f_extendnew, f_filter, f_foreach, f_map, f_mapnew, f_remove,
+    FILTER_MAP_CMD_HOOK, FILTER_MAP_EVAL_HOOK,
+};
 use crate::ported::eval::typval::{
     f_blob2list, f_join, f_list2blob, f_sort, f_uniq, tv_list_slice_or_index, SORT_FUNCREF_HOOK,
 };
@@ -371,6 +374,10 @@ pub const VIML_FN_SHA256: u16 = 3212;
 pub const VIML_FN_BLOB2LIST: u16 = 3213;
 /// `list2blob()`
 pub const VIML_FN_LIST2BLOB: u16 = 3214;
+/// `mapnew()`
+pub const VIML_FN_MAPNEW: u16 = 3215;
+/// `foreach()`
+pub const VIML_FN_FOREACH: u16 = 3216;
 /// Debug line marker: pop a line number → notify the DAP `check_line` hook
 /// (emitted before each statement only in debug-compiled chunks).
 pub const VIML_SET_LINENO: u16 = 3070;
@@ -1016,76 +1023,9 @@ fn eval_callback(
     }
 }
 
-/// `map()`/`filter()` body. `is_map`: replace each element with the callback's
-/// result; otherwise keep elements whose callback is truthy. Mutates the list in
-/// place (Vim semantics) and the caller returns it.
-fn apply_map_filter(coll: &typval_T, callback: &typval_T, is_map: bool) {
-    let chunk = if callback.v_type == VAR_STRING {
-        match compile_expr_chunk(&tv_get_string(callback)) {
-            Ok(c) => Some(c),
-            Err(e) => {
-                message::semsg(&format!("{e}"));
-                return;
-            }
-        }
-    } else {
-        None
-    };
-    match (coll.v_type, &coll.vval) {
-        (VAR_LIST, v_list(Some(l))) => {
-            // `v:key` is the index; `v:val` is the element.
-            let items: Vec<typval_T> =
-                l.borrow().lv_items.iter().map(|it| it.li_tv.clone()).collect();
-            let mut out = Vec::with_capacity(items.len());
-            for (i, item) in items.into_iter().enumerate() {
-                let key = tv_num(i as varnumber_T);
-                let res = eval_callback(callback, &chunk, &key, &item);
-                if is_map {
-                    out.push(res);
-                } else if tv_get_number_chk(&res, None) != 0 {
-                    out.push(item);
-                }
-            }
-            let mut lb = l.borrow_mut();
-            lb.lv_len = out.len() as i32;
-            lb.lv_items = out.into_iter().map(|li_tv| listitem_T { li_tv }).collect();
-        }
-        (VAR_DICT, v_dict(Some(d))) => {
-            // `v:key` is the key string; `v:val` is the value.
-            let entries: Vec<(String, typval_T)> = d
-                .borrow()
-                .dv_hashtab
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            for (k, val) in entries {
-                let key = tv_str(k.clone());
-                let res = eval_callback(callback, &chunk, &key, &val);
-                let mut db = d.borrow_mut();
-                if is_map {
-                    db.dv_hashtab.insert(k, res);
-                } else if tv_get_number_chk(&res, None) == 0 {
-                    db.dv_hashtab.shift_remove(&k);
-                }
-            }
-        }
-        _ => message::emsg("E896: Argument of map()/filter() must be a List or Dictionary"),
-    }
-}
-
-fn b_map(vm: &mut VM, _: u8) -> Value {
-    let cb = pop_tv(vm);
-    let listtv = pop_tv(vm);
-    apply_map_filter(&listtv, &cb, true);
-    tv_to_value(listtv)
-}
-
-fn b_filter(vm: &mut VM, _: u8) -> Value {
-    let cb = pop_tv(vm);
-    let listtv = pop_tv(vm);
-    apply_map_filter(&listtv, &cb, false);
-    tv_to_value(listtv)
-}
+// map()/filter()/mapnew()/foreach() are ported faithfully in
+// `src/ported/eval/list.rs`; the per-item evaluation comes back here through the
+// `FILTER_MAP_EVAL_HOOK`/`FILTER_MAP_CMD_HOOK` (installed in `install()`).
 
 /// `reduce({list}, {func} [, {initial}])` — fold a List left-to-right calling
 /// the funcref `func(acc, val)`. Without `{initial}` the first element seeds the
@@ -1128,6 +1068,29 @@ fn b_reduce(vm: &mut VM, argc: u8) -> Value {
 fn sort_compare_funcref(name: &str, a: &typval_T, b: &typval_T) -> Option<varnumber_T> {
     let r = call_user_function(name, vec![a.clone(), b.clone()])?;
     Some(tv_get_number_chk(&r, None))
+}
+
+/// The map()/filter()/foreach() per-item evaluator hook (installed into the
+/// value layer's `FILTER_MAP_EVAL_HOOK`): set v:key/v:val and evaluate the expr
+/// (string) or call the funcref → result.
+fn filter_map_eval(expr: &typval_T, key: &typval_T, val: &typval_T) -> Option<typval_T> {
+    let chunk = if expr.v_type == VAR_STRING {
+        match compile_expr_chunk(&tv_get_string(expr)) {
+            Ok(c) => Some(c),
+            Err(_) => return None,
+        }
+    } else {
+        None
+    };
+    Some(eval_callback(expr, &chunk, key, val))
+}
+
+/// The foreach() command hook (`do_cmdline_cmd`): set v:key/v:val and run the
+/// string as a command line.
+fn filter_map_cmd(cmd: &str, key: &typval_T, val: &typval_T) -> bool {
+    V_VAL.with(|v| *v.borrow_mut() = Some(val.clone()));
+    V_KEY.with(|v| *v.borrow_mut() = Some(key.clone()));
+    run_source_nested(cmd).is_ok()
 }
 
 fn b_call(vm: &mut VM, argc: u8) -> Value {
@@ -1522,8 +1485,13 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FN_HAS, |vm, n| call_func(vm, n, f_has));
     vm.register_builtin(VIML_FN_EXISTS, |vm, n| call_func(vm, n, f_exists));
     vm.register_builtin(VIML_FN_PRINTF, |vm, n| call_func(vm, n, f_printf));
-    vm.register_builtin(VIML_FN_MAP, b_map);
-    vm.register_builtin(VIML_FN_FILTER, b_filter);
+    // Let the value layer's map/filter/foreach evaluate per-item callbacks.
+    FILTER_MAP_EVAL_HOOK.with(|h| *h.borrow_mut() = Some(filter_map_eval));
+    FILTER_MAP_CMD_HOOK.with(|h| *h.borrow_mut() = Some(filter_map_cmd));
+    vm.register_builtin(VIML_FN_MAP, |vm, n| call_func(vm, n, f_map));
+    vm.register_builtin(VIML_FN_FILTER, |vm, n| call_func(vm, n, f_filter));
+    vm.register_builtin(VIML_FN_MAPNEW, |vm, n| call_func(vm, n, f_mapnew));
+    vm.register_builtin(VIML_FN_FOREACH, |vm, n| call_func(vm, n, f_foreach));
     // Let the value layer's sort()/uniq() call user comparator functions.
     SORT_FUNCREF_HOOK.with(|h| *h.borrow_mut() = Some(sort_compare_funcref));
     vm.register_builtin(VIML_FN_SORT, |vm, n| call_func(vm, n, f_sort));
@@ -2671,6 +2639,35 @@ mod tests {
         assert_eq!(run("let e={'a':1}\ncall extend(e,{'a':99})\necho e"), "{'a': 99}\n");
         // extendnew returns a new value, leaving the source intact.
         assert_eq!(run("let n=[1,2]\nlet p=extendnew(n,[3])\necho n\necho p"), "[1, 2]\n[1, 2, 3]\n");
+    }
+
+    #[test]
+    fn map_filter_foreach_mapnew() {
+        // List map / filter.
+        assert_eq!(run("echo map([1,2,3], 'v:val * 2')"), "[2, 4, 6]\n");
+        assert_eq!(run("echo filter([1,2,3,4], 'v:val % 2 == 0')"), "[2, 4]\n");
+        // Dict map.
+        assert_eq!(run("echo map({'a':1,'b':2}, 'v:val + 10')"), "{'a': 11, 'b': 12}\n");
+        // String map / filter (new — char-by-char).
+        assert_eq!(run("echo map('abc', 'toupper(v:val)')"), "ABC\n");
+        assert_eq!(run("echo filter('hello', 'v:val != \"l\"')"), "heo\n");
+        // Blob map.
+        assert_eq!(run("echo blob2list(map(list2blob([1,2,3]), 'v:val + 1'))"), "[2, 3, 4]\n");
+        // mapnew leaves the source intact.
+        assert_eq!(
+            run("let l=[1,2,3]\nlet m=mapnew(l, 'v:val*10')\necho l\necho m"),
+            "[1, 2, 3]\n[10, 20, 30]\n"
+        );
+        // foreach with a funcref (side effect).
+        assert_eq!(
+            run("let g:s=0\nfunction! Add(i,x)\nlet g:s+=a:x\nendfunction\ncall foreach([1,2,3,4], function('Add'))\necho g:s"),
+            "10\n"
+        );
+        // map with a funcref.
+        assert_eq!(
+            run("function! Dbl(k,v)\nreturn a:v*2\nendfunction\necho map([5,6,7], function('Dbl'))"),
+            "[10, 12, 14]\n"
+        );
     }
 
     #[test]
