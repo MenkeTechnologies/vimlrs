@@ -148,13 +148,6 @@ pub fn f_menu_get(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _re
 /// Port of `f_expandcmd()` — `csrc/eval/funcs.c:1491`. STUB: not yet ported.
 pub fn f_expandcmd(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_expandcmd — csrc/eval/funcs.c:1491") }
 
-/// Port of `flatten_common()` — `csrc/eval/funcs.c:1529`. STUB: not yet ported.
-/// C: `static void flatten_common(typval_T *argvars, typval_T *rettv, bool make_copy)`
-pub fn flatten_common() { unimplemented!("STUB flatten_common — csrc/eval/funcs.c:1529") }
-
-/// Port of `f_flattennew()` — `csrc/eval/funcs.c:1582`. STUB: not yet ported.
-pub fn f_flattennew(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_flattennew — csrc/eval/funcs.c:1582") }
-
 /// Port of `f_feedkeys()` — `csrc/eval/funcs.c:1588`. STUB: not yet ported.
 pub fn f_feedkeys(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_feedkeys — csrc/eval/funcs.c:1588") }
 

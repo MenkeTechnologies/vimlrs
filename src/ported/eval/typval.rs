@@ -1016,9 +1016,15 @@ pub fn tv_list_flatten(list: &mut list_T, maxitems: i64, maxdepth: i64) {
                 inner.borrow().lv_items.iter().map(|it| { let mut t = it.li_tv.clone(); t.v_lock = VarLockStatus::VAR_UNLOCKED; t }).collect();
             if maxdepth > 0 {
                 let tmp = tv_list_alloc(0);
-                tmp.borrow_mut().lv_items = sub.into_iter().map(|tv| listitem_T { li_tv: tv }).collect();
-                tmp.borrow_mut().lv_len = tmp.borrow().lv_items.len() as i32;
-                tv_list_flatten(&mut tmp.borrow_mut(), inner.borrow().lv_len as i64, maxdepth - 1);
+                let items: Vec<listitem_T> = sub.into_iter().map(|tv| listitem_T { li_tv: tv }).collect();
+                let n = items.len() as i32;
+                {
+                    let mut t = tmp.borrow_mut();
+                    t.lv_items = items;
+                    t.lv_len = n;
+                }
+                let inner_len = inner.borrow().lv_len as i64;
+                tv_list_flatten(&mut tmp.borrow_mut(), inner_len, maxdepth - 1);
                 sub = tmp.borrow().lv_items.iter().map(|it| it.li_tv.clone()).collect();
             }
             list.lv_items.remove(i);

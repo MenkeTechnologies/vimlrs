@@ -11,7 +11,8 @@
 use crate::ported::eval::typval::{
     tv_blob_len, tv_get_bool, tv_dict_add_tv, tv_dict_find, tv_dict_len, tv_equal, tv_get_float,
     tv_get_number_chk, tv_get_string, tv_list_alloc_ret, tv_list_append_number,
-    tv_list_append_string, tv_list_append_tv, tv_list_find_nr, tv_list_len,
+    tv_list_append_string, tv_list_append_tv, tv_list_copy, tv_list_find_nr, tv_list_flatten,
+    tv_list_len, tv_list_ref,
 };
 use crate::ported::eval_h::{FAIL, OK};
 use crate::ported::eval::typval::{tv_get_number, tv_get_string_buf};
@@ -757,37 +758,66 @@ pub fn f_list2str(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.vval = v_string(out);
 }
 
-/// Port of `f_flatten()` from `Src/eval/funcs.c` — flatten a nested List up to
-/// `{maxdepth}` (default: fully), mutating it in place and returning it.
-pub fn f_flatten(argvars: &[typval_T], rettv: &mut typval_T) {
-    let maxdepth = argvars.get(1).map_or(varnumber_T::MAX, |t| tv_get_number_chk(t, None));
-    if let (VAR_LIST, v_list(Some(l))) = (argvars[0].v_type, &argvars[0].vval) {
-        // Iterative DFS (a private recursive helper would be a non-C name).
-        let top: Vec<typval_T> = l.borrow().lv_items.iter().map(|it| it.li_tv.clone()).collect();
-        let mut stack: Vec<(typval_T, varnumber_T)> =
-            top.into_iter().rev().map(|tv| (tv, maxdepth)).collect();
-        let mut out = Vec::new();
-        while let Some((tv, depth)) = stack.pop() {
-            if depth > 0 {
-                if let (VAR_LIST, v_list(Some(inner))) = (tv.v_type, &tv.vval) {
-                    let items: Vec<typval_T> =
-                        inner.borrow().lv_items.iter().map(|it| it.li_tv.clone()).collect();
-                    for it in items.into_iter().rev() {
-                        stack.push((it, depth - 1));
-                    }
-                    continue;
-                }
-            }
-            out.push(tv);
-        }
-        let mut lb = l.borrow_mut();
-        lb.lv_len = out.len() as i32;
-        lb.lv_items = out
-            .into_iter()
-            .map(|li_tv| crate::ported::eval::typval_defs_h::listitem_T { li_tv })
-            .collect();
+/// Port of `flatten_common()` from `Src/eval/funcs.c:1529`.
+///
+/// Shared body of `flatten()`/`flattennew()`: flatten a nested List up to
+/// `{maxdepth}` (default 999999). `make_copy` flattens a fresh copy (flattennew)
+/// instead of mutating the argument in place (flatten). The actual splicing is
+/// done by the ported `tv_list_flatten`.
+fn flatten_common(argvars: &[typval_T], rettv: &mut typval_T, make_copy: bool) {
+    let mut error = false;
+    // c: if (argvars[0].v_type != VAR_LIST) { semsg(_(e_listarg), "flatten()"); return; }
+    if argvars[0].v_type != VAR_LIST {
+        emsg("E686: Argument of flatten() must be a List");
+        return;
     }
-    *rettv = argvars[0].clone();
+    // c: maxdepth = (argvars[1] == UNKNOWN) ? 999999 : tv_get_number_chk(...); E900 if < 0.
+    let maxdepth = if argvars.len() < 2 {
+        999999
+    } else {
+        let d = tv_get_number_chk(&argvars[1], Some(&mut error));
+        if error {
+            return;
+        }
+        if d < 0 {
+            emsg("E900: maxdepth must be non-negative number");
+            return;
+        }
+        d
+    };
+    rettv.v_type = VAR_LIST;
+    // c: list = argvars[0].vval.v_list; if (list == NULL) return;
+    let list = match &argvars[0].vval {
+        v_list(Some(l)) => l.clone(),
+        _ => {
+            rettv.vval = v_list(None);
+            return;
+        }
+    };
+    let list = if make_copy {
+        // c: list = tv_list_copy(NULL, list, false, get_copyID());
+        tv_list_copy(&list, false)
+    } else {
+        // c: value_check_lock(...) (locks unmodeled, skipped); tv_list_ref(list);
+        tv_list_ref(&mut list.borrow_mut());
+        list
+    };
+    rettv.vval = v_list(Some(list.clone()));
+    // c: tv_list_flatten(list, NULL, tv_list_len(list), maxdepth);
+    let len = tv_list_len(&list.borrow()) as i64;
+    tv_list_flatten(&mut list.borrow_mut(), len, maxdepth as i64);
+}
+
+/// Port of `f_flatten()` from `Src/eval/funcs.c:1576`.
+pub fn f_flatten(argvars: &[typval_T], rettv: &mut typval_T) {
+    // c: flatten_common(argvars, rettv, false);
+    flatten_common(argvars, rettv, false);
+}
+
+/// Port of `f_flattennew()` from `Src/eval/funcs.c:1582`.
+pub fn f_flattennew(argvars: &[typval_T], rettv: &mut typval_T) {
+    // c: flatten_common(argvars, rettv, true);
+    flatten_common(argvars, rettv, true);
 }
 
 // ── batch 5: deepcopy + more float math (Src/eval/funcs.c) ──

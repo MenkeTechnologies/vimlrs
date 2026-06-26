@@ -21,7 +21,7 @@ use crate::ported::eval::encode::encode_tv2echo;
 use crate::ported::eval::funcs::{
     float_op_wrapper,
     f_abs, f_add, f_and, f_char2nr, f_copy, f_count, f_empty, f_exists, f_extend, f_float2nr, f_function, f_get, f_has, f_has_key, f_index, f_insert, f_invert,
-    f_atan2, f_deepcopy, f_escape, f_flatten, f_fmod, f_items,
+    f_atan2, f_deepcopy, f_escape, f_flatten, f_flattennew, f_fmod, f_items,
     f_isinf, f_isnan, f_getpid, f_localtime, f_soundfold, f_json_decode, f_json_encode, f_matchstrpos, f_extendnew, f_getenv, f_setenv, f_shellescape,
     f_reltime, f_reltimestr, f_reltimefloat, f_rand, f_srand, f_strftime, f_strptime,
     f_join, f_keys, f_len, f_list2str, f_match, f_matchend, f_matchlist, f_matchstr,
@@ -359,6 +359,8 @@ pub const VIML_FN_STRFTIME: u16 = 3208;
 pub const VIML_FN_STRPTIME: u16 = 3209;
 /// `pathshorten()`
 pub const VIML_FN_PATHSHORTEN: u16 = 3210;
+/// `flattennew()`
+pub const VIML_FN_FLATTENNEW: u16 = 3211;
 /// Debug line marker: pop a line number → notify the DAP `check_line` hook
 /// (emitted before each statement only in debug-compiled chunks).
 pub const VIML_SET_LINENO: u16 = 3070;
@@ -1591,6 +1593,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FN_STRFTIME, |vm, n| call_func(vm, n, f_strftime));
     vm.register_builtin(VIML_FN_STRPTIME, |vm, n| call_func(vm, n, f_strptime));
     vm.register_builtin(VIML_FN_PATHSHORTEN, |vm, n| call_func(vm, n, f_pathshorten));
+    vm.register_builtin(VIML_FN_FLATTENNEW, |vm, n| call_func(vm, n, f_flattennew));
     vm.register_builtin(VIML_SET_LINENO, b_set_lineno);
     vm.register_builtin(VIML_CALL_USER, b_call_user);
     vm.register_builtin(VIML_SET_RETURN, b_set_return);
@@ -2146,6 +2149,52 @@ mod tests {
         );
     }
 
+    /// Proof that a value-position comparison in a loop trace-JITs: `i > 500`
+    /// lowers to a native compare reified to Number 0/1 with a branch, and a
+    /// comparison counts as an integer, so `let s += i > 500` stays native.
+    #[test]
+    fn value_compare_loop_traces_on_jit() {
+        use crate::compile_viml::compile_program;
+        use crate::viml_parser::parse_program;
+        use fusevm::Op;
+
+        let src = "function! F()\n  let s = 0\n  for i in range(2000)\n    let s += i > 500\n  endfor\n  return s\nendfunction";
+        let prog = compile_program(&parse_program(src).unwrap()).unwrap();
+        let chunk = prog.funcs.iter().find(|f| f.name == "F").unwrap().chunk.clone();
+
+        let (header, back) = chunk
+            .ops
+            .iter()
+            .enumerate()
+            .find_map(|(i, o)| match o {
+                Op::JumpIfTrue(t) if (*t as usize) < i => Some((*t as usize, i)),
+                _ => None,
+            })
+            .expect("loop backedge");
+        assert!(
+            chunk.ops[header..=back].iter().any(|o| matches!(o, Op::NumGt)),
+            "value-position compare should use a native compare op"
+        );
+        assert!(
+            !chunk.ops[header..=back]
+                .iter()
+                .any(|o| matches!(o, Op::CallBuiltin(..) | Op::Extended(..))),
+            "value-compare loop body must be CallBuiltin-free, got {:?}",
+            &chunk.ops[header..=back]
+        );
+
+        let mut vm = VM::new(chunk.clone());
+        install(&mut vm);
+        while vm.frames.last().unwrap().slots.len() < 2 {
+            vm.frames.last_mut().unwrap().slots.push(fusevm::Value::Int(0));
+        }
+        let _ = vm.run();
+        assert!(
+            fusevm::JitCompiler::new().trace_is_compiled(&chunk, header),
+            "fusevm must compile a trace for the value-compare loop"
+        );
+    }
+
     /// Proof that a loop using integer `%` (e.g. `if i % 2 == 0`) trace-JITs —
     /// native `Op::Mod` (identical to VimL's `num_modulus` for ints).
     #[test]
@@ -2475,6 +2524,21 @@ mod tests {
     }
 
     #[test]
+    fn value_position_compare() {
+        // A comparison in value position yields VimL's Number 0/1 (verified vs nvim).
+        assert_eq!(run("echo 5 > 3"), "1\n");
+        assert_eq!(run("echo 3 > 5"), "0\n");
+        assert_eq!(run("echo 2 <= 2"), "1\n");
+        // Mixed Number/String still coerces via the builtin path (not native).
+        assert_eq!(run("echo 1 == '1'"), "1\n");
+        // Counting via a value-position compare in a loop (the native path).
+        assert_eq!(
+            run("let s=0\nfor i in range(10)\nlet s += i >= 5\nendfor\necho s"),
+            "5\n" // i = 5,6,7,8,9
+        );
+    }
+
+    #[test]
     fn ternary_native() {
         // Native-lowered ternary preserves VimL truthiness (incl. the string
         // truthiness fallback) and selects the right branch.
@@ -2486,6 +2550,19 @@ mod tests {
         assert_eq!(
             run("let s=0\nfor i in range(10)\nlet s += i % 2 == 0 ? i : 0\nendfor\necho s"),
             "20\n" // 0+2+4+6+8
+        );
+    }
+
+    #[test]
+    fn flatten_and_flattennew() {
+        // maxdepth-limited flatten (verified vs nvim).
+        assert_eq!(run("echo flatten([1, [2, [3]]], 1)"), "[1, 2, [3]]\n");
+        // flatten() mutates its argument in place...
+        assert_eq!(run("let k=[1,[2,[3]]]\ncall flatten(k)\necho k"), "[1, 2, 3]\n");
+        // ...flattennew() returns a flattened copy, leaving the source intact.
+        assert_eq!(
+            run("let l=[1,[2,[3]]]\nlet m=flattennew(l)\necho l\necho m"),
+            "[1, [2, [3]]]\n[1, 2, 3]\n"
         );
     }
 

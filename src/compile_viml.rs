@@ -392,6 +392,11 @@ fn slot_plan(stmts: &[Stmt], in_function: bool) -> SlotPlan {
             Expr::Ternary { then, otherwise, .. } => {
                 rhs_kind(then, set, is_int, in_function) && rhs_kind(otherwise, set, is_int, in_function)
             }
+            // A comparison reifies to Integer 0/1 when both operands are numeric
+            // (so it lowers natively); valid in either pass.
+            Expr::Compare { op, lhs, rhs, .. } if Compiler::native_cmp(*op).is_some() => {
+                rhs_kind(lhs, set, false, in_function) && rhs_kind(rhs, set, false, in_function)
+            }
             _ => false,
         }
     }
@@ -1078,6 +1083,10 @@ impl Compiler {
             Expr::Ternary { then, otherwise, .. } => {
                 self.expr_is_num(then) && self.expr_is_num(otherwise)
             }
+            // A native-lowered comparison reifies to Number 0/1.
+            Expr::Compare { op, lhs, rhs, .. } => {
+                Self::native_cmp(*op).is_some() && self.expr_is_num(lhs) && self.expr_is_num(rhs)
+            }
             _ => false,
         }
     }
@@ -1099,6 +1108,10 @@ impl Compiler {
             // A ternary is an Integer when both branches are.
             Expr::Ternary { then, otherwise, .. } => {
                 self.expr_is_int(then) && self.expr_is_int(otherwise)
+            }
+            // A native-lowered comparison yields Integer 0/1.
+            Expr::Compare { op, lhs, rhs, .. } => {
+                Self::native_cmp(*op).is_some() && self.expr_is_num(lhs) && self.expr_is_num(rhs)
             }
             _ => false,
         }
@@ -1284,6 +1297,26 @@ impl Compiler {
                 lhs,
                 rhs,
             } => {
+                // Value-position compare of numeric operands → native compare
+                // (`cond()`) reified to VimL's Number 0/1 with a tiny branch (all
+                // JIT-lowerable ops), so `let s += i > 5` keeps a loop traceable.
+                // The case flag is irrelevant for numbers. Non-numeric operands
+                // (or `is`/`isnot`) keep the builtin, which yields 0/1 directly.
+                if Self::native_cmp(*op).is_some()
+                    && self.expr_is_num(lhs)
+                    && self.expr_is_num(rhs)
+                {
+                    self.cond(e)?; // native compare → Bool on the stack
+                    let jf = self.emit(Op::JumpIfFalse(0));
+                    self.emit(Op::LoadInt(1));
+                    let jend = self.emit(Op::Jump(0));
+                    let lfalse = self.b.current_pos();
+                    self.b.patch_jump(jf, lfalse);
+                    self.emit(Op::LoadInt(0));
+                    let lend = self.b.current_pos();
+                    self.b.patch_jump(jend, lend);
+                    return Ok(());
+                }
                 self.expr(lhs)?;
                 self.expr(rhs)?;
                 self.emit(Op::CallBuiltin(h::cmp_id(*op, h::ic_flag(*case)), 2));
@@ -1519,6 +1552,7 @@ fn builtin_fn_id(name: &str) -> Option<u16> {
         "strftime" => h::VIML_FN_STRFTIME,
         "strptime" => h::VIML_FN_STRPTIME,
         "pathshorten" => h::VIML_FN_PATHSHORTEN,
+        "flattennew" => h::VIML_FN_FLATTENNEW,
         "sqrt" => h::VIML_FN_SQRT,
         "floor" => h::VIML_FN_FLOOR,
         "ceil" => h::VIML_FN_CEIL,
