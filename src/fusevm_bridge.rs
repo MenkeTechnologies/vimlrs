@@ -29,6 +29,7 @@ use crate::ported::eval::funcs::{
 };
 use crate::ported::eval::fs::f_pathshorten;
 use crate::ported::eval::list::{f_count, f_extend, f_extendnew};
+use crate::ported::eval::typval::{f_blob2list, f_list2blob};
 use crate::ported::strings::{
     f_string, f_strlen, f_strchars, f_strgetchar, f_strcharpart, f_byteidx, f_byteidxcomp,
     f_charidx, f_strpart, f_stridx, f_strridx, f_tolower, f_toupper, f_tr, f_trim, f_str2nr,
@@ -364,6 +365,10 @@ pub const VIML_FN_PATHSHORTEN: u16 = 3210;
 pub const VIML_FN_FLATTENNEW: u16 = 3211;
 /// `sha256()`
 pub const VIML_FN_SHA256: u16 = 3212;
+/// `blob2list()`
+pub const VIML_FN_BLOB2LIST: u16 = 3213;
+/// `list2blob()`
+pub const VIML_FN_LIST2BLOB: u16 = 3214;
 /// Debug line marker: pop a line number → notify the DAP `check_line` hook
 /// (emitted before each statement only in debug-compiled chunks).
 pub const VIML_SET_LINENO: u16 = 3070;
@@ -1328,6 +1333,20 @@ fn index_value(base: &typval_T, index: &typval_T) -> typval_T {
                 tv_str(chars[i as usize].to_string())
             }
         }
+        (VAR_BLOB, v_blob(Some(b))) => {
+            // Blob subscript → a single byte (Number), via the ported value layer.
+            let i = tv_get_number_chk(index, None);
+            let mut rettv = base.clone();
+            let _ = crate::ported::eval::typval::tv_blob_slice_or_index(
+                &b.borrow(),
+                false,
+                i,
+                0,
+                false,
+                &mut rettv,
+            );
+            rettv
+        }
         _ => {
             message::emsg("E909: Cannot index this type");
             tv_special()
@@ -1387,6 +1406,23 @@ fn slice_value(base: &typval_T, from: &typval_T, to: &typval_T) -> typval_T {
                         .collect(),
                 )
             }
+        }
+        (VAR_BLOB, v_blob(Some(b))) => {
+            // Blob slice → a sub-blob, via the ported value layer (inclusive
+            // bounds; an omitted bound is the whole-end default).
+            let len = crate::ported::eval::typval::tv_blob_len(&b.borrow()) as varnumber_T;
+            let n1 = if from.v_type == VAR_SPECIAL { 0 } else { tv_get_number_chk(from, None) };
+            let n2 = if to.v_type == VAR_SPECIAL { len - 1 } else { tv_get_number_chk(to, None) };
+            let mut rettv = base.clone();
+            let _ = crate::ported::eval::typval::tv_blob_slice_or_index(
+                &b.borrow(),
+                true,
+                n1,
+                n2,
+                false,
+                &mut rettv,
+            );
+            rettv
         }
         _ => {
             message::emsg("E909: Cannot slice this type");
@@ -1598,6 +1634,8 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FN_PATHSHORTEN, |vm, n| call_func(vm, n, f_pathshorten));
     vm.register_builtin(VIML_FN_FLATTENNEW, |vm, n| call_func(vm, n, f_flattennew));
     vm.register_builtin(VIML_FN_SHA256, |vm, n| call_func(vm, n, f_sha256));
+    vm.register_builtin(VIML_FN_BLOB2LIST, |vm, n| call_func(vm, n, f_blob2list));
+    vm.register_builtin(VIML_FN_LIST2BLOB, |vm, n| call_func(vm, n, f_list2blob));
     vm.register_builtin(VIML_SET_LINENO, b_set_lineno);
     vm.register_builtin(VIML_CALL_USER, b_call_user);
     vm.register_builtin(VIML_SET_RETURN, b_set_return);
@@ -2623,6 +2661,18 @@ mod tests {
             run("let l=[1,[2,[3]]]\nlet m=flattennew(l)\necho l\necho m"),
             "[1, [2, [3]]]\n[1, 2, 3]\n"
         );
+    }
+
+    #[test]
+    fn blob_builtins() {
+        // list2blob/blob2list round-trip + native rendering (verified vs nvim).
+        assert_eq!(run("echo blob2list(list2blob([10, 20, 30]))"), "[10, 20, 30]\n");
+        assert_eq!(run("echo list2blob([171, 205])"), "0zABCD\n");
+        // Blob subscript → a byte; negative index from the end.
+        assert_eq!(run("echo list2blob([10, 20, 30, 40])[2]"), "30\n");
+        assert_eq!(run("echo list2blob([10, 20, 30, 40])[-1]"), "40\n");
+        // Blob slice → a sub-blob (inclusive bounds).
+        assert_eq!(run("echo blob2list(list2blob([1, 2, 3, 4, 5])[1:3])"), "[2, 3, 4]\n");
     }
 
     #[test]

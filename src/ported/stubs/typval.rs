@@ -212,35 +212,9 @@ pub fn tv_dict_wrong_func_name() { unimplemented!("STUB tv_dict_wrong_func_name 
 /// C: `int tv_dict_add_func(dict_T *const d, const char *const key, const size_t key_len,`
 pub fn tv_dict_add_func() { unimplemented!("STUB tv_dict_add_func — csrc/eval/typval.c:2679") }
 
-/// Port of `tv_blob_slice()` — `csrc/eval/typval.c:2977`. STUB: not yet ported.
-/// C: `static int tv_blob_slice(const blob_T *blob, int len, varnumber_T n1, varnumber_T n2,`
-pub fn tv_blob_slice() { unimplemented!("STUB tv_blob_slice — csrc/eval/typval.c:2977") }
-
-/// Port of `tv_blob_index()` — `csrc/eval/typval.c:3016`. STUB: not yet ported.
-/// C: `static int tv_blob_index(const blob_T *blob, int len, varnumber_T idx, typval_T *rettv)`
-pub fn tv_blob_index() { unimplemented!("STUB tv_blob_index — csrc/eval/typval.c:3016") }
-
-/// Port of `tv_blob_slice_or_index()` — `csrc/eval/typval.c:3036`. STUB: not yet ported.
-/// C: `int tv_blob_slice_or_index(const blob_T *blob, bool is_range, varnumber_T n1, varnumber_T n2,`
-pub fn tv_blob_slice_or_index() { unimplemented!("STUB tv_blob_slice_or_index — csrc/eval/typval.c:3036") }
-
-/// Port of `tv_blob_check_index()` — `csrc/eval/typval.c:3049`. STUB: not yet ported.
-/// C: `int tv_blob_check_index(int bloblen, varnumber_T n1, bool quiet)`
-pub fn tv_blob_check_index() { unimplemented!("STUB tv_blob_check_index — csrc/eval/typval.c:3049") }
-
-/// Port of `tv_blob_check_range()` — `csrc/eval/typval.c:3061`. STUB: not yet ported.
-/// C: `int tv_blob_check_range(int bloblen, varnumber_T n1, varnumber_T n2, bool quiet)`
-pub fn tv_blob_check_range() { unimplemented!("STUB tv_blob_check_range — csrc/eval/typval.c:3061") }
-
 /// Port of `tv_blob_remove()` — `csrc/eval/typval.c:3106`. STUB: not yet ported.
 /// C: `void tv_blob_remove(typval_T *argvars, typval_T *rettv, const char *arg_errmsg)`
 pub fn tv_blob_remove() { unimplemented!("STUB tv_blob_remove — csrc/eval/typval.c:3106") }
-
-/// Port of `f_blob2list()` — `csrc/eval/typval.c:3165`. STUB: not yet ported.
-pub fn f_blob2list(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_blob2list — csrc/eval/typval.c:3165") }
-
-/// Port of `f_list2blob()` — `csrc/eval/typval.c:3181`. STUB: not yet ported.
-pub fn f_list2blob(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_list2blob — csrc/eval/typval.c:3181") }
 
 /// Port of `tv_dict_remove()` — `csrc/eval/typval.c:3344`. STUB: not yet ported.
 /// C: `void tv_dict_remove(typval_T *argvars, typval_T *rettv, const char *arg_errmsg)`

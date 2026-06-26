@@ -1578,6 +1578,8 @@ fn builtin_fn_id(name: &str) -> Option<u16> {
         "pathshorten" => h::VIML_FN_PATHSHORTEN,
         "flattennew" => h::VIML_FN_FLATTENNEW,
         "sha256" => h::VIML_FN_SHA256,
+        "blob2list" => h::VIML_FN_BLOB2LIST,
+        "list2blob" => h::VIML_FN_LIST2BLOB,
         "sqrt" => h::VIML_FN_SQRT,
         "floor" => h::VIML_FN_FLOOR,
         "ceil" => h::VIML_FN_CEIL,

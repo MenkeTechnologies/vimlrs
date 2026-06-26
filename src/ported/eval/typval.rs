@@ -874,6 +874,159 @@ pub fn tv_blob_set_append(blob: &mut blob_T, idx: i32, byte: u8) {
     }
 }
 
+/// Port of `f_blob2list()` from `Src/eval/typval.c:3165`.
+///
+/// "blob2list()" function — a List of the blob's byte values.
+pub fn f_blob2list(argvars: &[typval_T], rettv: &mut typval_T) {
+    let l = tv_list_alloc_ret(rettv, 0);
+    if tv_check_for_blob_arg(argvars, 0) == FAIL {
+        return;
+    }
+    if let v_blob(Some(blob)) = &argvars[0].vval {
+        let blob = blob.borrow();
+        let mut lb = l.borrow_mut();
+        for i in 0..tv_blob_len(&blob) {
+            tv_list_append_number(&mut lb, tv_blob_get(&blob, i) as varnumber_T);
+        }
+    }
+}
+
+/// Port of `f_list2blob()` from `Src/eval/typval.c:3181`.
+///
+/// "list2blob()" function — a Blob from a List of byte values (`0..=255`);
+/// `E1239` on an out-of-range value.
+pub fn f_list2blob(argvars: &[typval_T], rettv: &mut typval_T) {
+    let blob = tv_blob_alloc_ret(rettv);
+    if tv_check_for_list_arg(argvars, 0) == FAIL {
+        return;
+    }
+    if let v_list(Some(l)) = &argvars[0].vval {
+        let lb = l.borrow();
+        let mut bb = blob.borrow_mut();
+        for li in &lb.lv_items {
+            let mut error = false;
+            let n = tv_get_number_chk(&li.li_tv, Some(&mut error));
+            if error || n < 0 || n > 255 {
+                if !error {
+                    emsg(&format!("E1239: Invalid value for blob: 0x{n:X}"));
+                }
+                bb.bv_ga.clear();
+                return;
+            }
+            bb.bv_ga.push(n as u8);
+        }
+    }
+}
+
+/// Port of `tv_blob_check_index()` from `Src/eval/typval.c:3049`.
+///
+/// Check that `n1` is a valid index for assigning into a blob of length
+/// `bloblen` (`0..=bloblen`); `E979` unless `quiet`.
+pub fn tv_blob_check_index(bloblen: i32, n1: varnumber_T, quiet: bool) -> i32 {
+    // c: if (n1 < 0 || n1 > bloblen) { if (!quiet) semsg(e_blobidx, n1); return FAIL; }
+    if n1 < 0 || n1 > bloblen as varnumber_T {
+        if !quiet {
+            emsg(&format!("E979: Blob index out of range: {n1}"));
+        }
+        return FAIL;
+    }
+    OK
+}
+
+/// Port of `tv_blob_check_range()` from `Src/eval/typval.c:3061`.
+///
+/// Check that `[n1, n2]` is a valid range within a blob of length `bloblen`;
+/// `E979` (on `n2`) unless `quiet`.
+pub fn tv_blob_check_range(bloblen: i32, n1: varnumber_T, n2: varnumber_T, quiet: bool) -> i32 {
+    // c: if (n2 < 0 || n2 >= bloblen || n2 < n1) { if (!quiet) semsg(e_blobidx, n2); return FAIL; }
+    if n2 < 0 || n2 >= bloblen as varnumber_T || n2 < n1 {
+        if !quiet {
+            emsg(&format!("E979: Blob index out of range: {n2}"));
+        }
+        return FAIL;
+    }
+    OK
+}
+
+/// Port of `tv_blob_index()` from `Src/eval/typval.c` — index a blob, yielding
+/// the byte at `idx` as a Number in `rettv` (which holds the blob; `blob` is the
+/// same value, read from to avoid borrowing `rettv` twice). `E979` out of range.
+fn tv_blob_index(blob: &blob_T, len: i32, mut idx: varnumber_T, rettv: &mut typval_T) -> i32 {
+    // c: if (idx < 0) idx = len + idx;
+    if idx < 0 {
+        idx = len as varnumber_T + idx;
+    }
+    if idx < len as varnumber_T && idx >= 0 {
+        let v = tv_blob_get(blob, idx as i32) as varnumber_T;
+        tv_clear(rettv);
+        rettv.v_type = VAR_NUMBER;
+        rettv.vval = v_number(v);
+    } else {
+        emsg(&format!("E979: Blob index out of range: {idx}"));
+        return FAIL;
+    }
+    OK
+}
+
+/// Port of `tv_blob_slice()` from `Src/eval/typval.c` — slice a blob into a new
+/// sub-blob in `rettv`; out-of-range indices yield an empty (NULL) blob.
+fn tv_blob_slice(
+    blob: &blob_T,
+    len: i32,
+    mut n1: varnumber_T,
+    mut n2: varnumber_T,
+    exclusive: bool,
+    rettv: &mut typval_T,
+) -> i32 {
+    let len = len as varnumber_T;
+    // c: clamp n1/n2 (negative from end; n2 past end → last index, exclusive-aware).
+    if n1 < 0 {
+        n1 = len + n1;
+        if n1 < 0 {
+            n1 = 0;
+        }
+    }
+    if n2 < 0 {
+        n2 = len + n2;
+    } else if n2 >= len {
+        n2 = len - if exclusive { 0 } else { 1 };
+    }
+    if exclusive {
+        n2 -= 1;
+    }
+    if n1 >= len || n2 < 0 || n1 > n2 {
+        tv_clear(rettv);
+        rettv.v_type = VAR_BLOB;
+        rettv.vval = v_blob(None);
+    } else {
+        let new_blob = tv_blob_alloc();
+        new_blob.borrow_mut().bv_ga = (n1..=n2).map(|i| tv_blob_get(blob, i as i32)).collect();
+        tv_clear(rettv);
+        tv_blob_set_ret(rettv, new_blob);
+    }
+    OK
+}
+
+/// Port of `tv_blob_slice_or_index()` from `Src/eval/typval.c:3036`.
+///
+/// Dispatch a blob subscript to a single-byte index or a sub-blob slice.
+pub fn tv_blob_slice_or_index(
+    blob: &blob_T,
+    is_range: bool,
+    n1: varnumber_T,
+    n2: varnumber_T,
+    exclusive: bool,
+    rettv: &mut typval_T,
+) -> i32 {
+    // c: len = tv_blob_len(rettv->vval.v_blob);  (== `blob`)
+    let len = tv_blob_len(blob);
+    if is_range {
+        tv_blob_slice(blob, len, n1, n2, exclusive, rettv)
+    } else {
+        tv_blob_index(blob, len, n1, rettv)
+    }
+}
+
 // ── copy / extend / concat / slice / flatten / items (Src/eval/typval.c) ──
 //
 // The C linked-list walk + `copyID` cycle detection + `vimconv` reduce over the
@@ -1493,6 +1646,57 @@ mod tests {
             v_type: VAR_BLOB,
             v_lock: VarLockStatus::VAR_UNLOCKED,
             vval: v_blob(Some(tv_blob_alloc())),
+        }
+    }
+
+    #[test]
+    fn blob_index_and_slice() {
+        let mk = || {
+            let b = tv_blob_alloc();
+            b.borrow_mut().bv_ga = vec![10, 20, 30, 40];
+            typval_T {
+                v_type: VAR_BLOB,
+                v_lock: VarLockStatus::VAR_UNLOCKED,
+                vval: v_blob(Some(b)),
+            }
+        };
+
+        // index b[2] -> 30
+        let mut rt = mk();
+        let b = match &rt.vval {
+            v_blob(Some(b)) => b.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(tv_blob_slice_or_index(&b.borrow(), false, 2, 0, false, &mut rt), OK);
+        assert!(matches!((rt.v_type, &rt.vval), (VAR_NUMBER, v_number(30))));
+
+        // negative index b[-1] -> 40
+        let mut rt = mk();
+        let b = match &rt.vval {
+            v_blob(Some(b)) => b.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(tv_blob_slice_or_index(&b.borrow(), false, -1, 0, false, &mut rt), OK);
+        assert!(matches!((rt.v_type, &rt.vval), (VAR_NUMBER, v_number(40))));
+
+        // out of range b[10] -> E979 / FAIL
+        let mut rt = mk();
+        let b = match &rt.vval {
+            v_blob(Some(b)) => b.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(tv_blob_slice_or_index(&b.borrow(), false, 10, 0, false, &mut rt), FAIL);
+
+        // slice b[1:2] (inclusive) -> [20, 30]
+        let mut rt = mk();
+        let b = match &rt.vval {
+            v_blob(Some(b)) => b.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(tv_blob_slice_or_index(&b.borrow(), true, 1, 2, false, &mut rt), OK);
+        match (&rt.v_type, &rt.vval) {
+            (VAR_BLOB, v_blob(Some(nb))) => assert_eq!(nb.borrow().bv_ga, vec![20, 30]),
+            _ => panic!("expected a blob slice"),
         }
     }
 

@@ -71,7 +71,7 @@ Early / in development.
 | User functions — `:function`/`:return`, recursion, `a:`/`l:` scopes | Working |
 | Variable scopes — `g:`/`s:`/`b:`/`w:`/`t:`/`v:` + `:set`/`&opt` (`'ignorecase'` wired into regex) | Working |
 | `:try`/`:catch`/`:finally`/`:throw` exceptions, `v:exception` | Working |
-| `funcs.c` builtin table | In progress (~111 ported: string/list/dict, char-indexed string ops, float math + `isinf`/`isnan`, regex, `eval`/`execute`, `json_encode`/`json_decode`, env (`getenv`/`setenv`), `shellescape`, `getpid`/`localtime`/`soundfold`, `reltime`/`reltimestr`/`reltimefloat`, `rand`/`srand` (xoshiro128**, bit-exact vs Neovim), `strftime`/`strptime`, `pathshorten`, `flattennew`, `sha256` (FIPS-180-2), …) |
+| `funcs.c` builtin table | In progress (~113 ported: string/list/dict, char-indexed string ops, float math + `isinf`/`isnan`, regex, `eval`/`execute`, `json_encode`/`json_decode`, env (`getenv`/`setenv`), `shellescape`, `getpid`/`localtime`/`soundfold`, `reltime`/`reltimestr`/`reltimefloat`, `rand`/`srand` (xoshiro128**, bit-exact vs Neovim), `strftime`/`strptime`, `pathshorten`, `flattennew`, `sha256` (FIPS-180-2), `list2blob`/`blob2list` (+ blob index/slice), …) |
 | `map`/`filter`/`sort`/`reduce`/`call` (lists **and** dicts; string-expr + funcref) | Working |
 | `eval()` / `execute()` (run-string metaprogramming) | Working |
 | Regex engine — Vim magic dialect, backing `=~`/`matchstr`/`match`/`substitute`/`split`/`:catch` | Working |
