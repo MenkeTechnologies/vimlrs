@@ -22,13 +22,14 @@ use crate::ported::eval::funcs::{
     float_op_wrapper,
     f_abs, f_add, f_and, f_char2nr, f_copy, f_count, f_empty, f_exists, f_extend, f_float2nr, f_function, f_get, f_has, f_has_key, f_index, f_insert, f_invert,
     f_atan2, f_deepcopy, f_escape, f_flatten, f_fmod, f_items,
-    f_isinf, f_isnan, f_getpid, f_localtime, f_soundfold, f_byteidxcomp,
-    f_json_decode, f_json_encode, f_strgetchar, f_strcharpart, f_byteidx, f_charidx,
-    f_matchstrpos, f_extendnew, f_getenv, f_setenv, f_shellescape,
+    f_isinf, f_isnan, f_getpid, f_localtime, f_soundfold, f_json_decode, f_json_encode, f_matchstrpos, f_extendnew, f_getenv, f_setenv, f_shellescape,
     f_join, f_keys, f_len, f_list2str, f_match, f_matchend, f_matchlist, f_matchstr,
-    f_max, f_min, f_nr2char, f_or, f_pow, f_printf, f_range, f_remove, f_repeat, f_reverse, f_split, f_str2float, f_str2list, f_str2nr, f_strchars, f_stridx,
-    f_string, f_strlen, f_strpart, f_strridx, f_substitute, f_tolower, f_toupper,
-    f_tr, f_trim, f_type, f_uniq, f_values, f_xor,
+    f_max, f_min, f_nr2char, f_or, f_pow, f_printf, f_range, f_remove, f_repeat, f_reverse, f_split, f_str2float, f_substitute, f_type, f_uniq, f_values, f_xor,
+};
+use crate::ported::strings::{
+    f_string, f_strlen, f_strchars, f_strgetchar, f_strcharpart, f_byteidx, f_byteidxcomp,
+    f_charidx, f_strpart, f_stridx, f_strridx, f_tolower, f_toupper, f_tr, f_trim, f_str2nr,
+    f_str2list,
 };
 use crate::ported::eval::typval::{
     tv_get_float, tv_get_number_chk, tv_get_string, tv_list_alloc, tv_list_append_tv,

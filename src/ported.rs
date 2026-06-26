@@ -15,6 +15,10 @@ pub mod eval_h;
 pub mod eval;
 /// Port of `src/nvim/option.c` (subset: the option table, `&opt`, `:set`).
 pub mod option;
+/// Port of `src/nvim/strings.c` (the Vimscript string builtins `f_string`,
+/// `f_strlen`, `f_byteidx`, `f_tr`, …). Home file not under the vendored
+/// `csrc/eval/` tree; see `tests/data/fake_fn_allowlist.txt`.
+pub mod strings;
 /// Generated not-yet-ported surface: one stub per vendored C function
 /// definition (real name + `csrc/<file>:<line>` citation). Regenerate with
 /// `scripts/gen_port_stubs.sh`; ported functions drop out automatically.
