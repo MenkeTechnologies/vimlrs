@@ -135,8 +135,34 @@ pub fn f_float2nr(argvars: &[typval_T], rettv: &mut typval_T) {
 /// Port of `f_function()` from `Src/eval/funcs.c` — a Funcref to the named
 /// function.
 pub fn f_function(argvars: &[typval_T], rettv: &mut typval_T) {
-    rettv.v_type = VAR_FUNC;
-    rettv.vval = v_string(tv_get_string(&argvars[0]));
+    let name = tv_get_string(&argvars[0]);
+    // c: with no extra args this is a plain Funcref.
+    if argvars.len() < 2 {
+        rettv.v_type = VAR_FUNC;
+        rettv.vval = v_string(name);
+        return;
+    }
+    // c: function(name, [args]) / function(name, {dict}) / both → a Partial.
+    let mut pt_argv: Vec<typval_T> = Vec::new();
+    let mut pt_dict = None;
+    for a in &argvars[1..] {
+        match (a.v_type, &a.vval) {
+            (VAR_LIST, v_list(Some(l))) => {
+                pt_argv = l.borrow().lv_items.iter().map(|it| it.li_tv.clone()).collect();
+            }
+            (VAR_DICT, v_dict(Some(d))) => pt_dict = Some(d.clone()),
+            _ => {}
+        }
+    }
+    rettv.v_type = VAR_PARTIAL;
+    rettv.vval = v_partial(Some(std::rc::Rc::new(
+        crate::ported::eval::typval_defs_h::partial_T {
+            pt_refcount: 1,
+            pt_name: name,
+            pt_argv,
+            pt_dict,
+        },
+    )));
 }
 
 
@@ -1027,10 +1053,9 @@ fn reduce_list(argvars: &[typval_T], expr: &typval_T, rettv: &mut typval_T) {
         v_list(Some(l)) => l.clone(),
         _ => return,
     };
-    let name = tv_get_string(expr);
     // call `name(acc, item)` via the bridge hook.
     let call = |acc: &typval_T, item: &typval_T| -> Option<typval_T> {
-        CALL_FUNC_HOOK.with(|h| *h.borrow()).and_then(|f| f(&name, &[acc.clone(), item.clone()]))
+        CALL_FUNC_HOOK.with(|h| *h.borrow()).and_then(|f| f(expr, &[acc.clone(), item.clone()]))
     };
     let items: Vec<typval_T> = l.borrow().lv_items.iter().map(|it| it.li_tv.clone()).collect();
     let start = if argvars.len() < 3 {
@@ -1055,9 +1080,8 @@ fn reduce_list(argvars: &[typval_T], expr: &typval_T, rettv: &mut typval_T) {
 /// Port of `reduce_string()` from `Src/eval/funcs.c` — fold over the characters.
 fn reduce_string(argvars: &[typval_T], expr: &typval_T, rettv: &mut typval_T) {
     let s = tv_get_string(&argvars[0]);
-    let name = tv_get_string(expr);
     let call = |acc: &typval_T, item: &typval_T| -> Option<typval_T> {
-        CALL_FUNC_HOOK.with(|h| *h.borrow()).and_then(|f| f(&name, &[acc.clone(), item.clone()]))
+        CALL_FUNC_HOOK.with(|h| *h.borrow()).and_then(|f| f(expr, &[acc.clone(), item.clone()]))
     };
     let chars: Vec<char> = s.chars().collect();
     let start = if argvars.len() < 3 {
@@ -1097,9 +1121,8 @@ fn reduce_blob(argvars: &[typval_T], expr: &typval_T, rettv: &mut typval_T) {
         v_blob(Some(b)) => b.clone(),
         _ => return,
     };
-    let name = tv_get_string(expr);
     let call = |acc: &typval_T, item: &typval_T| -> Option<typval_T> {
-        CALL_FUNC_HOOK.with(|h| *h.borrow()).and_then(|f| f(&name, &[acc.clone(), item.clone()]))
+        CALL_FUNC_HOOK.with(|h| *h.borrow()).and_then(|f| f(expr, &[acc.clone(), item.clone()]))
     };
     let len = tv_blob_len(&b.borrow());
     let start = if argvars.len() < 3 {
@@ -1141,7 +1164,11 @@ pub fn f_reduce(argvars: &[typval_T], rettv: &mut typval_T) {
         emsg("E1098: String, List or Blob required");
         return;
     }
-    let func_name = tv_get_string(&argvars[1]); // VAR_FUNC string IS the name
+    // c: VAR_FUNC → v_string; VAR_PARTIAL → partial_name(partial); else tv_get_string.
+    let func_name = match (argvars[1].v_type, &argvars[1].vval) {
+        (VAR_PARTIAL, v_partial(Some(p))) => p.pt_name.clone(),
+        _ => tv_get_string(&argvars[1]),
+    };
     if func_name.is_empty() {
         emsg("E1132: Missing function argument");
         return;

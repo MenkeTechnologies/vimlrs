@@ -128,8 +128,26 @@ pub enum typval_vval_union {
     v_dict(Option<Rc<RefCell<dict_T>>>),
     /// `blob_T *v_blob` — for VAR_BLOB (can be NULL).
     v_blob(Option<Rc<RefCell<blob_T>>>),
+    /// `partial_T *v_partial` — for VAR_PARTIAL (can be NULL).
+    v_partial(Option<Rc<partial_T>>),
     /// Placeholder active member for VAR_UNKNOWN (`TV_INITIAL_VALUE`).
     v_unknown,
+}
+
+/// `struct partial_S { … } partial_T` — a Funcref with bound arguments and/or a
+/// `self` dict (`function(name, [args])` / `function(name, dict)`). `pt_func`
+/// (the resolved `ufunc_T`) is not modeled — `pt_name` is used to look the
+/// function up at call time.
+#[derive(Debug)]
+pub struct partial_T {
+    /// `int pt_refcount` — reference count (vestigial; `Rc`-managed).
+    pub pt_refcount: i32,
+    /// `char *pt_name` — the function name.
+    pub pt_name: String,
+    /// `typval_T *pt_argv` (with `pt_argc`) — the bound leading arguments.
+    pub pt_argv: Vec<typval_T>,
+    /// `dict_T *pt_dict` — the `self` dict, if bound.
+    pub pt_dict: Option<Rc<RefCell<dict_T>>>,
 }
 
 /// `typedef struct { VarType v_type; VarLockStatus v_lock; union … vval; }

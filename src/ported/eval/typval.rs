@@ -156,7 +156,18 @@ pub fn tv_get_string(tv: &typval_T) -> String {
 /// Scalars compare within type; List/Dict/Blob compare structurally; Funcref by
 /// name. Number and Float do NOT cross-compare equal here (that promotion lives
 /// in `typval_compare`).
-pub fn tv_equal(tv1: &typval_T, tv2: &typval_T, _ic: bool) -> bool {
+pub fn tv_equal(tv1: &typval_T, tv2: &typval_T, ic: bool) -> bool {
+    // c: VAR_FUNC/VAR_PARTIAL compare via func_equal() even across the two types;
+    // a NULL partial equals nothing.
+    let is_func = |t| matches!(t, VAR_FUNC | VAR_PARTIAL);
+    if is_func(tv1.v_type) && is_func(tv2.v_type) {
+        if (tv1.v_type == VAR_PARTIAL && matches!(&tv1.vval, v_partial(None)))
+            || (tv2.v_type == VAR_PARTIAL && matches!(&tv2.vval, v_partial(None)))
+        {
+            return false;
+        }
+        return crate::ported::eval::func_equal(tv1, tv2, ic);
+    }
     match (&tv1.vval, &tv2.vval) {
         (v_number(a), v_number(b)) => a == b,
         (v_float(a), v_float(b)) => a == b,
@@ -166,9 +177,9 @@ pub fn tv_equal(tv1: &typval_T, tv2: &typval_T, _ic: bool) -> bool {
         }
         (v_bool(a), v_bool(b)) => a == b,
         (v_special(a), v_special(b)) => a == b,
-        (v_list(Some(a)), v_list(Some(b))) => tv_list_equal(a, b, _ic),
+        (v_list(Some(a)), v_list(Some(b))) => tv_list_equal(a, b, ic),
         (v_list(None), v_list(None)) => true,
-        (v_dict(Some(a)), v_dict(Some(b))) => tv_dict_equal(a, b, _ic),
+        (v_dict(Some(a)), v_dict(Some(b))) => tv_dict_equal(a, b, ic),
         (v_dict(None), v_dict(None)) => true,
         (v_blob(Some(a)), v_blob(Some(b))) => tv_blob_equal(a, b),
         (v_blob(None), v_blob(None)) => true,
@@ -450,7 +461,9 @@ pub fn tv2bool(tv: &typval_T) -> bool {
         (VAR_BOOL, v_bool(b)) => *b == kBoolVarTrue,
         (VAR_SPECIAL, v_special(s)) => *s != kSpecialVarNull,
         (VAR_BLOB, v_blob(b)) => b.as_ref().is_some_and(|b| !b.borrow().bv_ga.is_empty()),
-        // VAR_PARTIAL (not modeled) and VAR_UNKNOWN are falsy.
+        // c: VAR_PARTIAL → v_partial != NULL.
+        (VAR_PARTIAL, v_partial(p)) => p.is_some(),
+        // VAR_UNKNOWN is falsy.
         _ => false,
     }
 }
@@ -1982,10 +1995,11 @@ thread_local! {
     pub static SORT_FUNCREF_HOOK: std::cell::RefCell<Option<fn(&str, &typval_T, &typval_T) -> Option<varnumber_T>>> =
         const { std::cell::RefCell::new(None) };
 
-    /// Generic "call a user function by name with args → result" hook, installed
+    /// Generic "call a Funcref/Partial typval with args → result" hook, installed
     /// by the bridge (the value layer can't call user functions itself). Used by
-    /// `reduce()`. `None` on a call error.
-    pub static CALL_FUNC_HOOK: std::cell::RefCell<Option<fn(&str, &[typval_T]) -> Option<typval_T>>> =
+    /// `reduce()`. The first argument is the callee typval (VAR_FUNC name or
+    /// VAR_PARTIAL), so bound partial args are honored. `None` on a call error.
+    pub static CALL_FUNC_HOOK: std::cell::RefCell<Option<fn(&typval_T, &[typval_T]) -> Option<typval_T>>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -2454,7 +2468,8 @@ pub fn tv_dict_watcher_notify(
     for cb in matching {
         if let Callback::Funcref(name) = cb {
             if let Some(f) = hook {
-                let _ = f(&name, &[dict_tv.clone(), key_tv.clone(), change_tv.clone()]);
+                let func_tv = mk(VAR_FUNC, v_string(name.clone()));
+                let _ = f(&func_tv, &[dict_tv.clone(), key_tv.clone(), change_tv.clone()]);
             }
         }
     }

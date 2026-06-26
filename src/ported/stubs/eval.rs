@@ -280,10 +280,6 @@ pub fn eval_lit_string() { unimplemented!("STUB eval_lit_string — csrc/eval.c:
 /// C: `int eval_interp_string(char **arg, typval_T *rettv, bool evaluate)`
 pub fn eval_interp_string() { unimplemented!("STUB eval_interp_string — csrc/eval.c:3759") }
 
-/// Port of `partial_name()` — `csrc/eval.c:3810`. STUB: not yet ported.
-/// C: `char *partial_name(partial_T *pt)`
-pub fn partial_name() { unimplemented!("STUB partial_name — csrc/eval.c:3810") }
-
 /// Port of `partial_free()` — `csrc/eval.c:3824`. STUB: not yet ported.
 /// C: `static void partial_free(partial_T *pt)`
 pub fn partial_free() { unimplemented!("STUB partial_free — csrc/eval.c:3824") }
@@ -295,10 +291,6 @@ pub fn partial_unref() { unimplemented!("STUB partial_unref — csrc/eval.c:3842
 /// Port of `eval_list()` — `csrc/eval.c:3857`. STUB: not yet ported.
 /// C: `static int eval_list(char **arg, typval_T *rettv, evalarg_T *const evalarg)`
 pub fn eval_list() { unimplemented!("STUB eval_list — csrc/eval.c:3857") }
-
-/// Port of `func_equal()` — `csrc/eval.c:3911`. STUB: not yet ported.
-/// C: `bool func_equal(typval_T *tv1, typval_T *tv2, bool ic)`
-pub fn func_equal() { unimplemented!("STUB func_equal — csrc/eval.c:3911") }
 
 /// Port of `get_copyID()` — `csrc/eval.c:3960`. STUB: not yet ported.
 /// C: `int get_copyID(void)`

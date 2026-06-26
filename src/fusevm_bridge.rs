@@ -1064,11 +1064,8 @@ fn eval_callback(
     V_VAL.with(|v| *v.borrow_mut() = Some(val.clone()));
     V_KEY.with(|v| *v.borrow_mut() = Some(key.clone()));
     match callback.v_type {
-        VAR_FUNC => {
-            let name = tv_get_string(callback);
-            call_user_function(&name, vec![key.clone(), val.clone()])
-                .unwrap_or_else(|| tv_num(0))
-        }
+        VAR_FUNC | VAR_PARTIAL => call_funcref(callback, vec![key.clone(), val.clone()])
+            .unwrap_or_else(|| tv_num(0)),
         _ => chunk
             .as_ref()
             .and_then(|c| run_chunk_capture(c.clone()))
@@ -1092,8 +1089,8 @@ fn sort_compare_funcref(name: &str, a: &typval_T, b: &typval_T) -> Option<varnum
 
 /// The generic "call user function" hook (installed into `CALL_FUNC_HOOK`), used
 /// by `reduce()`.
-fn call_func_hook(name: &str, args: &[typval_T]) -> Option<typval_T> {
-    call_user_function(name, args.to_vec())
+fn call_func_hook(funcref: &typval_T, args: &[typval_T]) -> Option<typval_T> {
+    call_funcref(funcref, args.to_vec())
 }
 
 /// The map()/filter()/foreach() per-item evaluator hook (installed into the
@@ -1119,13 +1116,25 @@ fn filter_map_cmd(cmd: &str, key: &typval_T, val: &typval_T) -> bool {
     run_source_nested(cmd).is_ok()
 }
 
+/// Call a Funcref/Partial typval with `extra` args. A Partial prepends its bound
+/// `pt_argv` (its `self` dict is not modeled).
+fn call_funcref(funcref: &typval_T, extra: Vec<typval_T>) -> Option<typval_T> {
+    match (funcref.v_type, &funcref.vval) {
+        (VAR_PARTIAL, v_partial(Some(p))) => {
+            let mut args = p.pt_argv.clone();
+            args.extend(extra);
+            call_user_function(&p.pt_name, args)
+        }
+        _ => call_user_function(&tv_get_string(funcref), extra),
+    }
+}
+
 fn b_call(vm: &mut VM, argc: u8) -> Value {
     let mut args = Vec::with_capacity(argc as usize);
     for _ in 0..argc {
         args.push(pop_tv(vm));
     }
     args.reverse();
-    let name = tv_get_string(&args[0]);
     // The arg list is the second argument (a List).
     let call_args: Vec<typval_T> = match args.get(1).map(|a| (a.v_type, &a.vval)) {
         Some((VAR_LIST, v_list(Some(l)))) => {
@@ -1133,10 +1142,10 @@ fn b_call(vm: &mut VM, argc: u8) -> Value {
         }
         _ => Vec::new(),
     };
-    match call_user_function(&name, call_args) {
+    match call_funcref(&args[0], call_args) {
         Some(rettv) => tv_to_value(rettv),
         None => {
-            message::semsg(&format!("E117: Unknown function: {name}"));
+            message::semsg(&format!("E117: Unknown function: {}", tv_get_string(&args[0])));
             Value::Undef
         }
     }
@@ -2728,6 +2737,44 @@ mod tests {
             run("function! Add(a,b)\nreturn a:a+a:b\nendfunction\necho reduce(list2blob([1,2,3]), function('Add'), 0)"),
             "6\n"
         );
+    }
+
+    #[test]
+    fn partials() {
+        // function() with bound args → a Partial; call() prepends them. Each
+        // assertion's expected value was verified against `nvim --clean`.
+        let add = "function! Add(a,b)\nreturn a:a+a:b\nendfunction\n";
+        let add3 = "function! Add3(x,a,b)\nreturn a:x+a:a+a:b\nendfunction\n";
+        // call(partial, args): Add(10, 5).
+        assert_eq!(run(&format!("{add}let P=function('Add',[10])\necho call(P,[5])")), "15\n");
+        // type() of a Partial is 2 (Funcref).
+        assert_eq!(run(&format!("{add}echo type(function('Add',[10]))")), "2\n");
+        // echo / string() render as function('name', [args]).
+        assert_eq!(run(&format!("{add}echo function('Add',[10])")), "function('Add', [10])\n");
+        assert_eq!(
+            run(&format!("{add}echo string(function('Add',[1,2]))")),
+            "function('Add', [1, 2])\n"
+        );
+        // Partial honored in reduce() — Add3(100, acc, item).
+        assert_eq!(
+            run(&format!("{add3}echo reduce([1,2,3], function('Add3',[100]), 0)")),
+            "306\n"
+        );
+        // Partial honored in map() — Add3(10, key, val).
+        assert_eq!(
+            run(&format!("{add3}echo map([1,2,3], function('Add3',[10]))")),
+            "[11, 13, 15]\n"
+        );
+        // func_equal(): same name+args equal; differing args/arity not.
+        assert_eq!(
+            run(&format!("{add}echo function('Add',[1,2])==function('Add',[1,2])")),
+            "1\n"
+        );
+        assert_eq!(
+            run(&format!("{add}echo function('Add',[1,2])==function('Add',[1,3])")),
+            "0\n"
+        );
+        assert_eq!(run(&format!("{add}echo function('Add',[1])==function('Add')")), "0\n");
     }
 
     #[test]

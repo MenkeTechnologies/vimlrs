@@ -34,8 +34,8 @@ use crate::ported::eval::typval::{
     tv_list_equal,
 };
 use crate::ported::eval::typval_defs_h::{
-    typval_T, typval_vval_union::*, varnumber_T, VarLockStatus, VarType::*, VARNUMBER_MAX,
-    VARNUMBER_MIN,
+    partial_T, typval_T, typval_vval_union::*, varnumber_T, VarLockStatus, VarType::*,
+    VARNUMBER_MAX, VARNUMBER_MIN,
 };
 use crate::ported::eval_h::{exprtype_T, exprtype_T::*, FAIL, OK};
 use crate::ported::message::emsg;
@@ -319,4 +319,62 @@ pub fn eval_isnamec(c: u8) -> bool {
 /// in an unquoted dictionary key (`[A-Za-z0-9_]`).
 pub fn eval_isdictc(c: u8) -> bool {
     c.is_ascii_alphanumeric() || c == b'_'
+}
+
+/// Port of `partial_name()` from `Src/eval.c:3810` — the function name a partial
+/// resolves to. RUST-PORT NOTE: `pt_func` (the resolved `ufunc_T`) is not
+/// modeled, so only the `pt_name` branch applies; an empty name yields `""`.
+pub fn partial_name(pt: &partial_T) -> &str {
+    &pt.pt_name
+}
+
+/// Port of `func_equal()` from `Src/eval.c:3911` — compare two Funcref/Partial
+/// values: equal when their names, `self` dicts, and bound argument lists all
+/// match (NULL/empty name and NULL/empty dict treated alike).
+pub fn func_equal(tv1: &typval_T, tv2: &typval_T, ic: bool) -> bool {
+    // c: empty and NULL function name considered the same.
+    let name = |tv: &typval_T| -> String {
+        match (tv.v_type, &tv.vval) {
+            (VAR_FUNC, v_string(s)) => s.clone(),
+            (VAR_PARTIAL, v_partial(Some(p))) => partial_name(p).to_string(),
+            _ => String::new(),
+        }
+    };
+    let s1 = name(tv1);
+    let s2 = name(tv2);
+    // c: if (s1 == NULL || s2 == NULL) { if (s1 != s2) return false; } else strcmp.
+    if s1 != s2 {
+        return false;
+    }
+
+    // c: empty dict and NULL dict is different — both NULL-equivalent here means equal.
+    let dict = |tv: &typval_T| -> Option<Rc<std::cell::RefCell<crate::ported::eval::typval_defs_h::dict_T>>> {
+        match (tv.v_type, &tv.vval) {
+            (VAR_PARTIAL, v_partial(Some(p))) => p.pt_dict.clone(),
+            _ => None,
+        }
+    };
+    match (dict(tv1), dict(tv2)) {
+        (None, None) => {}
+        (Some(d1), Some(d2)) => {
+            if !tv_dict_equal(&d1, &d2, ic) {
+                return false;
+            }
+        }
+        _ => return false,
+    }
+
+    // c: empty list and no list considered the same — compare bound args pairwise.
+    let argv = |tv: &typval_T| -> Vec<typval_T> {
+        match (tv.v_type, &tv.vval) {
+            (VAR_PARTIAL, v_partial(Some(p))) => p.pt_argv.clone(),
+            _ => Vec::new(),
+        }
+    };
+    let a1 = argv(tv1);
+    let a2 = argv(tv2);
+    if a1.len() != a2.len() {
+        return false;
+    }
+    a1.iter().zip(a2.iter()).all(|(x, y)| tv_equal(x, y, ic))
 }

@@ -63,6 +63,16 @@ pub fn encode_vim_to_string(tv: &typval_T) -> String {
         (VAR_STRING, v_string(s)) => format!("'{}'", s.replace('\'', "''")),
         // TYPVAL_ENCODE_CONV_FUNC_START — function('name').
         (VAR_FUNC, v_string(s)) => format!("function('{}')", s.replace('\'', "''")),
+        // A Partial — function('name'[, [args]]).
+        (VAR_PARTIAL, v_partial(Some(p))) => {
+            let name = p.pt_name.replace('\'', "''");
+            if p.pt_argv.is_empty() {
+                format!("function('{name}')")
+            } else {
+                let args: Vec<String> = p.pt_argv.iter().map(encode_tv2string).collect();
+                format!("function('{name}', [{}])", args.join(", "))
+            }
+        }
         (VAR_BOOL, v_bool(b)) => {
             if *b == kBoolVarTrue { "v:true" } else { "v:false" }.to_string()
         }
