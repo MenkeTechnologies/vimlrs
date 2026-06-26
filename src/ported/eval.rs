@@ -18,6 +18,8 @@ pub mod typval;
 pub mod encode;
 /// Port of `eval/decode.c`.
 pub mod decode;
+/// Port of `eval/fs.c` (subset: the pure path-string builtins).
+pub mod fs;
 /// Port of `eval/funcs.c`.
 pub mod funcs;
 /// Port of `eval/vars.c`.

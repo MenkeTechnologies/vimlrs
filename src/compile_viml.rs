@@ -388,6 +388,10 @@ fn slot_plan(stmts: &[Stmt], in_function: bool) -> SlotPlan {
             Expr::Call { name, args } if bitwise_native_op(name, args.len()).is_some() => {
                 args.iter().all(|a| rhs_kind(a, set, true, in_function))
             }
+            // A ternary's kind is its branches' kind (the test is irrelevant).
+            Expr::Ternary { then, otherwise, .. } => {
+                rhs_kind(then, set, is_int, in_function) && rhs_kind(otherwise, set, is_int, in_function)
+            }
             _ => false,
         }
     }
@@ -1069,6 +1073,11 @@ impl Compiler {
             Expr::Call { name, args } if bitwise_native_op(name, args.len()).is_some() => {
                 args.iter().all(|a| self.expr_is_int(a))
             }
+            // A ternary is a Number when both branches are (the test is irrelevant
+            // to the result type).
+            Expr::Ternary { then, otherwise, .. } => {
+                self.expr_is_num(then) && self.expr_is_num(otherwise)
+            }
             _ => false,
         }
     }
@@ -1086,6 +1095,10 @@ impl Compiler {
             // Bitwise builtins yield an Integer when every argument is an Integer.
             Expr::Call { name, args } if bitwise_native_op(name, args.len()).is_some() => {
                 args.iter().all(|a| self.expr_is_int(a))
+            }
+            // A ternary is an Integer when both branches are.
+            Expr::Ternary { then, otherwise, .. } => {
+                self.expr_is_int(then) && self.expr_is_int(otherwise)
             }
             _ => false,
         }
@@ -1396,8 +1409,11 @@ impl Compiler {
     }
 
     fn ternary(&mut self, cond: &Expr, then: &Expr, otherwise: &Expr) -> Result<(), VimlError> {
-        self.expr(cond)?;
-        self.emit(Op::CallBuiltin(h::VIML_TRUTHY, 1));
+        // Lower the test through `cond()` (native compare / short-circuit `&&`/`||`)
+        // so a numeric ternary like `i % 2 == 0 ? i : 0` stays CallBuiltin-free and
+        // keeps an enclosing loop trace-eligible; non-native tests fall back to
+        // `VIML_TRUTHY` inside `cond()`.
+        self.cond(cond)?;
         let jf = self.emit(Op::JumpIfFalse(0));
         self.expr(then)?;
         let jend = self.emit(Op::Jump(0));
@@ -1502,6 +1518,7 @@ fn builtin_fn_id(name: &str) -> Option<u16> {
         "srand" => h::VIML_FN_SRAND,
         "strftime" => h::VIML_FN_STRFTIME,
         "strptime" => h::VIML_FN_STRPTIME,
+        "pathshorten" => h::VIML_FN_PATHSHORTEN,
         "sqrt" => h::VIML_FN_SQRT,
         "floor" => h::VIML_FN_FLOOR,
         "ceil" => h::VIML_FN_CEIL,

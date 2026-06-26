@@ -75,9 +75,6 @@ pub fn f_isdirectory(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], 
 /// Port of `f_mkdir()` — `csrc/eval/fs.c:1072`. STUB: not yet ported.
 pub fn f_mkdir(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_mkdir — csrc/eval/fs.c:1072") }
 
-/// Port of `f_pathshorten()` — `csrc/eval/fs.c:1144`. STUB: not yet ported.
-pub fn f_pathshorten(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_pathshorten — csrc/eval/fs.c:1144") }
-
 /// Port of `readdir_checkitem()` — `csrc/eval/fs.c:1166`. STUB: not yet ported.
 /// C: `static varnumber_T readdir_checkitem(void *context, const char *name)`
 pub fn readdir_checkitem() { unimplemented!("STUB readdir_checkitem — csrc/eval/fs.c:1166") }

@@ -17,6 +17,9 @@ pub mod eval;
 pub mod option;
 /// Port of `src/nvim/os/` (subset: `os/time.c`'s `os_hrtime`).
 pub mod os;
+/// Port of `src/nvim/path.c` (subset: the path-component helpers behind
+/// `pathshorten()`).
+pub mod path;
 /// Port of `src/nvim/profile.c` (the `proftime_T` helpers backing `reltime()`).
 pub mod profile;
 /// Port of `src/nvim/strings.c` (the Vimscript string builtins `f_string`,

@@ -39,3 +39,10 @@ f_str2list
 do_set
 findoption
 set_option_value
+
+# ── path.c (not vendored) ──
+# Real Neovim path helpers behind pathshorten(). The others (vim_ispathsep,
+# get_past_head, path_tail, shorten_dir_len) appear as calls in the vendored
+# eval tree so the generator already recognizes them; vim_ispathsep_nocolon is
+# only called from within path.c, so it is listed here.
+vim_ispathsep_nocolon

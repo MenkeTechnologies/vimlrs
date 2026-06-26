@@ -27,6 +27,7 @@ use crate::ported::eval::funcs::{
     f_join, f_keys, f_len, f_list2str, f_match, f_matchend, f_matchlist, f_matchstr,
     f_max, f_min, f_nr2char, f_or, f_pow, f_printf, f_range, f_remove, f_repeat, f_reverse, f_split, f_str2float, f_substitute, f_type, f_uniq, f_values, f_xor,
 };
+use crate::ported::eval::fs::f_pathshorten;
 use crate::ported::strings::{
     f_string, f_strlen, f_strchars, f_strgetchar, f_strcharpart, f_byteidx, f_byteidxcomp,
     f_charidx, f_strpart, f_stridx, f_strridx, f_tolower, f_toupper, f_tr, f_trim, f_str2nr,
@@ -356,6 +357,8 @@ pub const VIML_FN_SRAND: u16 = 3207;
 pub const VIML_FN_STRFTIME: u16 = 3208;
 /// `strptime()`
 pub const VIML_FN_STRPTIME: u16 = 3209;
+/// `pathshorten()`
+pub const VIML_FN_PATHSHORTEN: u16 = 3210;
 /// Debug line marker: pop a line number → notify the DAP `check_line` hook
 /// (emitted before each statement only in debug-compiled chunks).
 pub const VIML_SET_LINENO: u16 = 3070;
@@ -1587,6 +1590,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FN_SRAND, |vm, n| call_func(vm, n, f_srand));
     vm.register_builtin(VIML_FN_STRFTIME, |vm, n| call_func(vm, n, f_strftime));
     vm.register_builtin(VIML_FN_STRPTIME, |vm, n| call_func(vm, n, f_strptime));
+    vm.register_builtin(VIML_FN_PATHSHORTEN, |vm, n| call_func(vm, n, f_pathshorten));
     vm.register_builtin(VIML_SET_LINENO, b_set_lineno);
     vm.register_builtin(VIML_CALL_USER, b_call_user);
     vm.register_builtin(VIML_SET_RETURN, b_set_return);
@@ -2100,6 +2104,48 @@ mod tests {
         );
     }
 
+    /// Proof that a numeric ternary in a loop trace-JITs: the `?:` test lowers
+    /// through `cond()` (native compare), and a ternary with numeric branches is
+    /// itself treated as a Number, so the enclosing `+=` stays native.
+    #[test]
+    fn ternary_loop_traces_on_jit() {
+        use crate::compile_viml::compile_program;
+        use crate::viml_parser::parse_program;
+        use fusevm::Op;
+
+        let src = "function! F()\n  let s = 0\n  for i in range(2000)\n    let s += i % 2 == 0 ? i : 0\n  endfor\n  return s\nendfunction";
+        let prog = compile_program(&parse_program(src).unwrap()).unwrap();
+        let chunk = prog.funcs.iter().find(|f| f.name == "F").unwrap().chunk.clone();
+
+        let (header, back) = chunk
+            .ops
+            .iter()
+            .enumerate()
+            .find_map(|(i, o)| match o {
+                Op::JumpIfTrue(t) if (*t as usize) < i => Some((*t as usize, i)),
+                _ => None,
+            })
+            .expect("loop backedge");
+        assert!(
+            !chunk.ops[header..=back]
+                .iter()
+                .any(|o| matches!(o, Op::CallBuiltin(..) | Op::Extended(..))),
+            "ternary loop body must be CallBuiltin-free, got {:?}",
+            &chunk.ops[header..=back]
+        );
+
+        let mut vm = VM::new(chunk.clone());
+        install(&mut vm);
+        while vm.frames.last().unwrap().slots.len() < 2 {
+            vm.frames.last_mut().unwrap().slots.push(fusevm::Value::Int(0));
+        }
+        let _ = vm.run();
+        assert!(
+            fusevm::JitCompiler::new().trace_is_compiled(&chunk, header),
+            "fusevm must compile a trace for the ternary loop"
+        );
+    }
+
     /// Proof that a loop using integer `%` (e.g. `if i % 2 == 0`) trace-JITs —
     /// native `Op::Mod` (identical to VimL's `num_modulus` for ints).
     #[test]
@@ -2426,6 +2472,31 @@ mod tests {
         );
         // Unparseable input → 0 (strptime fails / mktime == -1).
         assert_eq!(run("echo strptime('%Y', 'not-a-year')"), "0\n");
+    }
+
+    #[test]
+    fn ternary_native() {
+        // Native-lowered ternary preserves VimL truthiness (incl. the string
+        // truthiness fallback) and selects the right branch.
+        assert_eq!(run("echo 5 > 3 ? 100 : 200"), "100\n");
+        assert_eq!(run("echo 5 < 3 ? 100 : 200"), "200\n");
+        assert_eq!(run("echo 'abc' ? 1 : 2"), "2\n"); // non-numeric string is falsy
+        assert_eq!(run("echo '5' ? 1 : 2"), "1\n"); // numeric string is truthy
+        // Accumulating ternary in a loop (the JIT-lowered path).
+        assert_eq!(
+            run("let s=0\nfor i in range(10)\nlet s += i % 2 == 0 ? i : 0\nendfor\necho s"),
+            "20\n" // 0+2+4+6+8
+        );
+    }
+
+    #[test]
+    fn pathshorten_builtin() {
+        // Verified bit-exact against Neovim: each directory shortens to `len`
+        // chars (keeping a leading `~`/`.`); the final component is untouched.
+        assert_eq!(run("echo pathshorten('~/foo/bar/baz.vim')"), "~/f/b/baz.vim\n");
+        assert_eq!(run("echo pathshorten('/usr/local/bin/foo')"), "/u/l/b/foo\n");
+        assert_eq!(run("echo pathshorten('~/.config/nvim/init.vim', 2)"), "~/.co/nv/init.vim\n");
+        assert_eq!(run("echo pathshorten('noseps')"), "noseps\n");
     }
 
     #[test]
