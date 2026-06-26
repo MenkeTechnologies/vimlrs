@@ -1684,6 +1684,157 @@ pub fn tv_get_string_buf(tv: &typval_T) -> String {
     tv_get_string_buf_chk(tv).unwrap_or_default()
 }
 
+/// Port of `tv_list_remove()` from `Src/eval/typval.c:1127`.
+///
+/// `remove()` on a List: drop the item at `argvars[1]` (returning it), or the
+/// range `[argvars[1], argvars[2]]` (returning a new List). The C linked-list
+/// `tv_list_drop_items`/`tv_list_move_items` reduce to `Vec::remove`/`drain`.
+pub fn tv_list_remove(argvars: &[typval_T], rettv: &mut typval_T, arg_errmsg: &str) {
+    let l = match &argvars[0].vval {
+        v_list(Some(l)) => l.clone(),
+        _ => return,
+    };
+    // c: value_check_lock(tv_list_locked(l), arg_errmsg, TV_TRANSLATE)
+    if value_check_lock(l.borrow().lv_lock, Some(arg_errmsg), TV_TRANSLATE) {
+        return;
+    }
+    let mut error = false;
+    let idx = tv_get_number_chk(&argvars[1], Some(&mut error));
+    if error {
+        return;
+    }
+    let len = tv_list_len(&l.borrow());
+    // c: item = tv_list_find(l, idx); NULL → E684.
+    if tv_list_find(&l.borrow(), idx as i32).is_none() {
+        emsg(&format!("E684: List index out of range: {idx}"));
+        return;
+    }
+    let start = if idx < 0 { len as varnumber_T + idx } else { idx } as usize;
+
+    if argvars.len() < 3 {
+        // c: remove one item, return its value.
+        let mut lb = l.borrow_mut();
+        let it = lb.lv_items.remove(start);
+        lb.lv_len = lb.lv_items.len() as i32;
+        *rettv = it.li_tv;
+    } else {
+        // c: remove a range, return a List with the values.
+        let mut error2 = false;
+        let end = tv_get_number_chk(&argvars[2], Some(&mut error2));
+        if error2 {
+            return;
+        }
+        if tv_list_find(&l.borrow(), end as i32).is_none() {
+            emsg(&format!("E684: List index out of range: {end}"));
+            return;
+        }
+        let endi = if end < 0 { len as varnumber_T + end } else { end } as usize;
+        // c: "item2" must be at or after "item" (forward walk) → else E16.
+        if endi < start {
+            emsg("E16: Invalid range");
+            return;
+        }
+        let out = tv_list_alloc_ret(rettv, (endi - start + 1) as isize);
+        let drained: Vec<listitem_T> = {
+            let mut lb = l.borrow_mut();
+            let drained = lb.lv_items.drain(start..=endi).collect::<Vec<_>>();
+            lb.lv_len = lb.lv_items.len() as i32;
+            drained
+        };
+        let mut ob = out.borrow_mut();
+        ob.lv_len = drained.len() as i32;
+        ob.lv_items = drained;
+    }
+}
+
+/// Port of `tv_dict_remove()` from `Src/eval/typval.c:3344`.
+///
+/// `remove()` on a Dict: drop and return the value at key `argvars[1]`. The
+/// `di_flags` (ro/fixed) checks and watchers are not modeled.
+pub fn tv_dict_remove(argvars: &[typval_T], rettv: &mut typval_T, arg_errmsg: &str) {
+    // c: if (argvars[2] != UNKNOWN) semsg(e_toomanyarg, "remove()");
+    if argvars.len() > 2 {
+        emsg("E118: Too many arguments for function: remove()");
+        return;
+    }
+    let d = match &argvars[0].vval {
+        v_dict(Some(d)) => d.clone(),
+        _ => return,
+    };
+    // c: value_check_lock(d->dv_lock, arg_errmsg, TV_TRANSLATE)
+    if value_check_lock(d.borrow().dv_lock, Some(arg_errmsg), TV_TRANSLATE) {
+        return;
+    }
+    let key = match tv_get_string_chk(&argvars[1]) {
+        Some(k) => k,
+        None => return,
+    };
+    // c: di = tv_dict_find(d, key); NULL → E716; else remove + return.
+    let removed = d.borrow_mut().dv_hashtab.shift_remove(&key);
+    match removed {
+        Some(v) => *rettv = v,
+        None => emsg(&format!("E716: Key not present in Dictionary: \"{key}\"")),
+    }
+}
+
+/// Port of `tv_blob_remove()` from `Src/eval/typval.c` — `remove()` on a Blob:
+/// drop the byte at `argvars[1]` (returning it), or the range `[argvars[1],
+/// argvars[2]]` (returning a new Blob).
+pub fn tv_blob_remove(argvars: &[typval_T], rettv: &mut typval_T, arg_errmsg: &str) {
+    let b = match &argvars[0].vval {
+        v_blob(Some(b)) => b.clone(),
+        _ => return,
+    };
+    // c: value_check_lock(b->bv_lock, arg_errmsg, TV_TRANSLATE)
+    if value_check_lock(b.borrow().bv_lock, Some(arg_errmsg), TV_TRANSLATE) {
+        return;
+    }
+    let mut error = false;
+    let mut idx = tv_get_number_chk(&argvars[1], Some(&mut error));
+    if error {
+        return;
+    }
+    let len = tv_blob_len(&b.borrow());
+    // c: if (idx < 0) idx = len + idx;
+    if idx < 0 {
+        idx += len as varnumber_T;
+    }
+    if idx < 0 || idx >= len as varnumber_T {
+        emsg(&format!("E979: Blob index out of range: {idx}"));
+        return;
+    }
+    let idx = idx as usize;
+
+    if argvars.len() < 3 {
+        // c: remove one byte, return its value.
+        let mut bb = b.borrow_mut();
+        let v = bb.bv_ga[idx] as varnumber_T;
+        bb.bv_ga.remove(idx);
+        rettv.vval = v_number(v);
+    } else {
+        // c: remove a range, return a Blob with the values.
+        let mut error2 = false;
+        let mut end = tv_get_number_chk(&argvars[2], Some(&mut error2));
+        if error2 {
+            return;
+        }
+        if end < 0 {
+            end += len as varnumber_T;
+        }
+        if end >= len as varnumber_T || idx as varnumber_T > end {
+            emsg(&format!("E979: Blob index out of range: {end}"));
+            return;
+        }
+        let end = end as usize;
+        let new_blob = tv_blob_alloc();
+        {
+            let mut bb = b.borrow_mut();
+            new_blob.borrow_mut().bv_ga = bb.bv_ga.drain(idx..=end).collect();
+        }
+        tv_blob_set_ret(rettv, new_blob);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -6,8 +6,8 @@
 #![allow(non_snake_case)]
 
 use crate::ported::eval::typval::{
-    tv_dict_copy, tv_dict_extend, tv_equal, tv_get_number_chk, tv_get_string_chk, tv_list_copy,
-    tv_list_extend, tv_list_find, tv_list_len,
+    tv_blob_remove, tv_dict_copy, tv_dict_extend, tv_dict_remove, tv_equal, tv_get_number_chk,
+    tv_get_string_chk, tv_list_copy, tv_list_extend, tv_list_find, tv_list_len, tv_list_remove,
 };
 use crate::ported::eval::typval_defs_h::{
     dict_T, list_T, typval_T, typval_vval_union::*, varnumber_T, VarType::*,
@@ -248,4 +248,18 @@ pub fn f_extend(argvars: &[typval_T], rettv: &mut typval_T) {
 /// Port of `f_extendnew()` from `Src/eval/list.c:728`.
 pub fn f_extendnew(argvars: &[typval_T], rettv: &mut typval_T) {
     extend(argvars, rettv, true);
+}
+
+/// Port of `f_remove()` from `Src/eval/list.c:810`.
+///
+/// "remove()" function — drop an item/range from a List/Dict/Blob, returning it.
+pub fn f_remove(argvars: &[typval_T], rettv: &mut typval_T) {
+    let arg_errmsg = "remove() argument";
+    // c: dispatch by container type; otherwise E896.
+    match argvars[0].v_type {
+        VAR_DICT => tv_dict_remove(argvars, rettv, arg_errmsg),
+        VAR_BLOB => tv_blob_remove(argvars, rettv, arg_errmsg),
+        VAR_LIST => tv_list_remove(argvars, rettv, arg_errmsg),
+        _ => emsg("E896: Argument of remove() must be a List, Dictionary or Blob"),
+    }
 }

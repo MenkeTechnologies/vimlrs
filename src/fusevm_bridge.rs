@@ -25,10 +25,10 @@ use crate::ported::eval::funcs::{
     f_isinf, f_isnan, f_getpid, f_localtime, f_soundfold, f_json_decode, f_json_encode, f_matchstrpos, f_getenv, f_setenv, f_shellescape,
     f_reltime, f_reltimestr, f_reltimefloat, f_rand, f_srand, f_strftime, f_strptime, f_sha256,
     f_join, f_keys, f_len, f_list2str, f_match, f_matchend, f_matchlist, f_matchstr,
-    f_max, f_min, f_nr2char, f_or, f_pow, f_printf, f_range, f_remove, f_repeat, f_reverse, f_split, f_str2float, f_substitute, f_type, f_uniq, f_values, f_xor,
+    f_max, f_min, f_nr2char, f_or, f_pow, f_printf, f_range, f_repeat, f_reverse, f_split, f_str2float, f_substitute, f_type, f_uniq, f_values, f_xor,
 };
 use crate::ported::eval::fs::f_pathshorten;
-use crate::ported::eval::list::{f_count, f_extend, f_extendnew};
+use crate::ported::eval::list::{f_count, f_extend, f_extendnew, f_remove};
 use crate::ported::eval::typval::{f_blob2list, f_list2blob};
 use crate::ported::strings::{
     f_string, f_strlen, f_strchars, f_strgetchar, f_strcharpart, f_byteidx, f_byteidxcomp,
@@ -2698,6 +2698,24 @@ mod tests {
         assert_eq!(run("let e={'a':1}\ncall extend(e,{'a':99})\necho e"), "{'a': 99}\n");
         // extendnew returns a new value, leaving the source intact.
         assert_eq!(run("let n=[1,2]\nlet p=extendnew(n,[3])\necho n\necho p"), "[1, 2]\n[1, 2, 3]\n");
+    }
+
+    #[test]
+    fn remove_builtin() {
+        // List: single index (returns the item), and a range (returns a sub-list).
+        assert_eq!(run("let l=[1,2,3,4]\necho remove(l, 1)\necho l"), "2\n[1, 3, 4]\n");
+        assert_eq!(
+            run("let m=[10,20,30,40,50]\necho remove(m, 1, 3)\necho m"),
+            "[20, 30, 40]\n[10, 50]\n"
+        );
+        // Dict: by key.
+        assert_eq!(run("let d={'a':1,'b':2}\necho remove(d, 'a')\necho d"), "1\n{'b': 2}\n");
+        // Blob: single byte, and a range (returns a sub-blob).
+        assert_eq!(
+            run("let b=list2blob([1,2,3,4,5])\necho remove(b, 2)\necho blob2list(b)"),
+            "3\n[1, 2, 4, 5]\n"
+        );
+        assert_eq!(run("echo blob2list(remove(list2blob([1,2,3,4,5]), 1, 2))"), "[2, 3]\n");
     }
 
     #[test]

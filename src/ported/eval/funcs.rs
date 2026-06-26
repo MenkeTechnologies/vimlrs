@@ -581,30 +581,7 @@ pub fn f_insert(argvars: &[typval_T], rettv: &mut typval_T) {
 
 /// Port of `f_remove()` from `Src/eval/funcs.c` (subset) — remove and return an
 /// item from a `{list}` by index, or a value from a `{dict}` by key.
-pub fn f_remove(argvars: &[typval_T], rettv: &mut typval_T) {
-    match (argvars[0].v_type, &argvars[0].vval) {
-        (VAR_LIST, v_list(Some(l))) => {
-            let mut lb = l.borrow_mut();
-            let len = lb.lv_len as varnumber_T;
-            let mut idx = tv_get_number_chk(&argvars[1], None);
-            if idx < 0 {
-                idx += len;
-            }
-            if idx >= 0 && (idx as usize) < lb.lv_items.len() {
-                let it = lb.lv_items.remove(idx as usize);
-                lb.lv_len = lb.lv_items.len() as i32;
-                *rettv = it.li_tv;
-            }
-        }
-        (VAR_DICT, v_dict(Some(d))) => {
-            let key = tv_get_string(&argvars[1]);
-            if let Some(v) = d.borrow_mut().dv_hashtab.shift_remove(&key) {
-                *rettv = v;
-            }
-        }
-        _ => {}
-    }
-}
+// `f_remove` lives in its real home file, `src/ported/eval/list.rs` (eval/list.c).
 
 // `f_extend`/`f_extendnew` live in their real home file, `src/ported/eval/list.rs`.
 
