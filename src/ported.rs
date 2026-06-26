@@ -22,6 +22,8 @@ pub mod os;
 pub mod path;
 /// Port of `src/nvim/profile.c` (the `proftime_T` helpers backing `reltime()`).
 pub mod profile;
+/// Port of `src/nvim/sha256.c` (FIPS-180-2 SHA-256, behind `sha256()`).
+pub mod sha256;
 /// Port of `src/nvim/strings.c` (the Vimscript string builtins `f_string`,
 /// `f_strlen`, `f_byteidx`, `f_tr`, …). Home file not under the vendored
 /// `csrc/eval/` tree; see `tests/data/fake_fn_allowlist.txt`.

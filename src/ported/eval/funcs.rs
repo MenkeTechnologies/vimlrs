@@ -19,6 +19,7 @@ use crate::ported::eval::typval::{tv_get_number, tv_get_string_buf};
 use crate::ported::os::env::os_get_pid;
 use crate::ported::os::time::{os_hrtime, os_localtime_r, os_strptime};
 use crate::ported::profile::{profile_end, profile_msg, profile_signed, profile_start, profile_sub, proftime_T};
+use crate::ported::sha256::sha256_bytes;
 use crate::ported::eval::typval_defs_h::{
     typval_T, typval_vval_union::*, varnumber_T, BoolVarValue::*, SpecialVarValue::*, VarType::*,
     VAR_TYPE_BLOB,
@@ -1210,6 +1211,25 @@ pub fn f_strptime(argvars: &[typval_T], rettv: &mut typval_T) {
         -1
     };
     rettv.vval = v_number(if secs == -1 { 0 } else { secs as varnumber_T });
+}
+
+/// Port of `f_sha256()` from `Src/eval/funcs.c:6805`.
+///
+/// "sha256({string})" function — the SHA-256 hex digest of a String or Blob.
+pub fn f_sha256(argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.v_type = VAR_STRING;
+    if argvars[0].v_type == VAR_BLOB {
+        // c: hash the blob's bytes (empty if the blob is NULL).
+        let bytes: Vec<u8> = match &argvars[0].vval {
+            v_blob(Some(b)) => b.borrow().bv_ga.clone(),
+            _ => Vec::new(),
+        };
+        rettv.vval = v_string(sha256_bytes(&bytes, None));
+    } else {
+        // c: p = tv_get_string(&argvars[0]); sha256_bytes(p, strlen(p), NULL, 0);
+        let p = tv_get_string(&argvars[0]);
+        rettv.vval = v_string(sha256_bytes(p.as_bytes(), None));
+    }
 }
 
 /// Port of `init_srand()` from `Src/eval/funcs.c:4959`.

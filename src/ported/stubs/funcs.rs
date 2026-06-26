@@ -545,9 +545,6 @@ pub fn f_setreg(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rett
 /// Port of `f_settagstack()` — `csrc/eval/funcs.c:6751`. STUB: not yet ported.
 pub fn f_settagstack(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_settagstack — csrc/eval/funcs.c:6751") }
 
-/// Port of `f_sha256()` — `csrc/eval/funcs.c:6800`. STUB: not yet ported.
-pub fn f_sha256(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_sha256 — csrc/eval/funcs.c:6800") }
-
 /// Port of `f_shiftwidth()` — `csrc/eval/funcs.c:6828`. STUB: not yet ported.
 pub fn f_shiftwidth(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_shiftwidth — csrc/eval/funcs.c:6828") }
 

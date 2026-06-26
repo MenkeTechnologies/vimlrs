@@ -383,6 +383,8 @@ fn slot_plan(stmts: &[Stmt], in_function: bool) -> SlotPlan {
             Expr::Unary { op: UnaryOp::Neg | UnaryOp::Plus, expr } => {
                 rhs_kind(expr, set, is_int, in_function)
             }
+            // Logical-not yields Integer 0/1 when its operand is integer.
+            Expr::Unary { op: UnaryOp::Not, expr } => rhs_kind(expr, set, true, in_function),
             // The bitwise builtins always yield an Integer (so valid in either
             // pass) when every argument is itself provably integer.
             Expr::Call { name, args } if bitwise_native_op(name, args.len()).is_some() => {
@@ -1087,6 +1089,8 @@ impl Compiler {
             Expr::Compare { op, lhs, rhs, .. } => {
                 Self::native_cmp(*op).is_some() && self.expr_is_num(lhs) && self.expr_is_num(rhs)
             }
+            // Logical-not of an Integer reifies to 0/1 (also a Number).
+            Expr::Unary { op: UnaryOp::Not, expr } => self.expr_is_int(expr),
             _ => false,
         }
     }
@@ -1113,6 +1117,8 @@ impl Compiler {
             Expr::Compare { op, lhs, rhs, .. } => {
                 Self::native_cmp(*op).is_some() && self.expr_is_num(lhs) && self.expr_is_num(rhs)
             }
+            // Logical-not of an Integer yields Integer 0/1.
+            Expr::Unary { op: UnaryOp::Not, expr } => self.expr_is_int(expr),
             _ => false,
         }
     }
@@ -1233,6 +1239,24 @@ impl Compiler {
                 if matches!(op, UnaryOp::Neg) && self.expr_is_num(expr) {
                     self.expr(expr)?;
                     self.emit(Op::Negate);
+                    return Ok(());
+                }
+                // Native logical-not of an integer: `!x` == `x == 0`, reified to
+                // VimL's Number 0/1 with a branch (all JIT-lowerable), so `!flag`
+                // / `!(i % 2)` keep a loop traceable. (Restricted to Integer
+                // operands; a Float would diverge from Vim's E805.)
+                if matches!(op, UnaryOp::Not) && self.expr_is_int(expr) {
+                    self.expr(expr)?;
+                    self.emit(Op::LoadInt(0));
+                    self.emit(Op::NumEq);
+                    let jf = self.emit(Op::JumpIfFalse(0));
+                    self.emit(Op::LoadInt(1));
+                    let jend = self.emit(Op::Jump(0));
+                    let lfalse = self.b.current_pos();
+                    self.b.patch_jump(jf, lfalse);
+                    self.emit(Op::LoadInt(0));
+                    let lend = self.b.current_pos();
+                    self.b.patch_jump(jend, lend);
                     return Ok(());
                 }
                 self.expr(expr)?;
@@ -1553,6 +1577,7 @@ fn builtin_fn_id(name: &str) -> Option<u16> {
         "strptime" => h::VIML_FN_STRPTIME,
         "pathshorten" => h::VIML_FN_PATHSHORTEN,
         "flattennew" => h::VIML_FN_FLATTENNEW,
+        "sha256" => h::VIML_FN_SHA256,
         "sqrt" => h::VIML_FN_SQRT,
         "floor" => h::VIML_FN_FLOOR,
         "ceil" => h::VIML_FN_CEIL,

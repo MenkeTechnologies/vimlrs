@@ -40,6 +40,15 @@ do_set
 findoption
 set_option_value
 
+# ── sha256.c (not vendored) ──
+# Real Neovim SHA-256 helpers behind sha256(). Only sha256_bytes is called from
+# the vendored eval tree (so the generator already recognizes it); these four
+# are called only within sha256.c.
+sha256_start
+sha256_process
+sha256_update
+sha256_finish
+
 # ── path.c (not vendored) ──
 # Real Neovim path helpers behind pathshorten(). The others (vim_ispathsep,
 # get_past_head, path_tail, shorten_dir_len) appear as calls in the vendored
