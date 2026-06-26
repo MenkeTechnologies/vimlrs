@@ -130,6 +130,8 @@ pub const VIML_MAKE_DICT: u16 = 3051;
 pub const VIML_INDEX: u16 = 3052;
 /// `base[from:to]`
 pub const VIML_SLICE: u16 = 3053;
+/// `let base[index] = value` — pop index, base, value; set base[index]=value.
+pub const VIML_SETINDEX: u16 = 3054;
 /// `:echo`
 pub const VIML_ECHO: u16 = 3060;
 /// `:echon`
@@ -805,6 +807,52 @@ fn b_slice(vm: &mut VM, _: u8) -> Value {
     tv_to_value(slice_value(&base, &from, &to))
 }
 
+/// `let base[index] = value` — set a List/Dict/Blob element in place. For a Dict
+/// this also fires any registered watchers (the add/change side).
+fn b_setindex(vm: &mut VM, _: u8) -> Value {
+    let index = pop_tv(vm);
+    let base = pop_tv(vm);
+    let value = pop_tv(vm);
+    match (base.v_type, &base.vval) {
+        (VAR_DICT, v_dict(Some(d))) => {
+            let key = tv_get_string(&index);
+            let old = d.borrow().dv_hashtab.get(&key).cloned();
+            d.borrow_mut().dv_hashtab.insert(key.clone(), value.clone());
+            crate::ported::eval::typval::tv_dict_watcher_notify(d, &key, Some(&value), old.as_ref());
+        }
+        (VAR_LIST, v_list(Some(l))) => {
+            let len = l.borrow().lv_len as varnumber_T;
+            let mut i = tv_get_number_chk(&index, None);
+            if i < 0 {
+                i += len;
+            }
+            if i >= 0 && i < len {
+                l.borrow_mut().lv_items[i as usize].li_tv = value;
+            } else {
+                message::emsg("E684: list index out of range");
+            }
+        }
+        (VAR_BLOB, v_blob(Some(b))) => {
+            let len = crate::ported::eval::typval::tv_blob_len(&b.borrow()) as varnumber_T;
+            let mut i = tv_get_number_chk(&index, None);
+            if i < 0 {
+                i += len;
+            }
+            if i >= 0 && i < len {
+                crate::ported::eval::typval::tv_blob_set(
+                    &mut b.borrow_mut(),
+                    i as i32,
+                    tv_get_number_chk(&value, None) as u8,
+                );
+            } else {
+                message::emsg("E979: Blob index out of range");
+            }
+        }
+        _ => message::emsg("E689: Can only index a List, Dictionary or Blob"),
+    }
+    Value::Undef
+}
+
 fn b_echo(vm: &mut VM, argc: u8) -> Value {
     echo_impl(vm, argc, true);
     Value::Undef
@@ -1426,6 +1474,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_MAKE_DICT, b_make_dict);
     vm.register_builtin(VIML_INDEX, b_index);
     vm.register_builtin(VIML_SLICE, b_slice);
+    vm.register_builtin(VIML_SETINDEX, b_setindex);
     vm.register_builtin(VIML_ECHO, b_echo);
     vm.register_builtin(VIML_ECHON, b_echon);
     vm.register_builtin(VIML_SET_RESULT, b_set_result);
@@ -2620,6 +2669,24 @@ mod tests {
         assert_eq!(run("let e={'a':1}\ncall extend(e,{'a':99})\necho e"), "{'a': 99}\n");
         // extendnew returns a new value, leaving the source intact.
         assert_eq!(run("let n=[1,2]\nlet p=extendnew(n,[3])\necho n\necho p"), "[1, 2]\n[1, 2, 3]\n");
+    }
+
+    #[test]
+    fn index_assignment() {
+        // Dict key set (bracket + member), and overwrite — verified vs nvim.
+        assert_eq!(
+            run("let d={'a':1}\nlet d['b']=2\nlet d.c=3\nlet d['a']=99\necho d"),
+            "{'a': 99, 'b': 2, 'c': 3}\n"
+        );
+        // List element set, including a negative index.
+        assert_eq!(run("let l=[1,2,3]\nlet l[1]=20\nlet l[-1]=30\necho l"), "[1, 20, 30]\n");
+        // Compound index-assign (desugars to d[k] = d[k] op rhs).
+        assert_eq!(run("let d={'n':5}\nlet d['n']+=10\necho d['n']"), "15\n");
+        // A dict-set fires a registered watcher (the add side).
+        assert_eq!(
+            run("let g:log=[]\nfunction! Cb(d,k,ch)\ncall add(g:log,a:k)\nendfunction\nlet w={}\ncall dictwatcheradd(w,'x',function('Cb'))\nlet w['x']=5\nlet w['y']=6\necho g:log"),
+            "['x']\n"
+        );
     }
 
     #[test]

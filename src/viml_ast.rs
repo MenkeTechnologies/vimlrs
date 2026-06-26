@@ -152,6 +152,13 @@ pub enum LetTarget {
     Env(String),
     /// `let @x = …`.
     Register(char),
+    /// `let base[index] = …` / `let base.key = …` — index/member assignment.
+    Index {
+        /// The container variable name (possibly scoped).
+        base: String,
+        /// The index/key expression.
+        index: Box<Expr>,
+    },
     /// `let [a, b] = list` / `let [a, b; rest] = list` — list-unpack.
     List {
         /// Leading target names.

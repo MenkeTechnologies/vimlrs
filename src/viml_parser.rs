@@ -453,6 +453,22 @@ fn parse_let(rest: &str) -> Result<Stmt, VimlError> {
         LetTarget::Env(name.to_string())
     } else if let Some(reg) = lhs.strip_prefix('@') {
         LetTarget::Register(reg.chars().next().unwrap_or('"'))
+    } else if lhs.ends_with(']') && lhs.contains('[') {
+        // `base[index] = …` (single-level subscript assignment).
+        let br = lhs.find('[').unwrap();
+        let base = lhs[..br].trim().to_string();
+        let index_src = &lhs[br + 1..lhs.len() - 1];
+        LetTarget::Index { base, index: Box::new(parse_expr(index_src)?) }
+    } else if !lhs.contains('[')
+        && lhs.contains('.')
+        && lhs.rsplit_once('.').is_some_and(|(_, k)| !k.is_empty() && k.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
+    {
+        // `base.key = …` (single-level Dict member assignment; key is an ident).
+        let (base, key) = lhs.rsplit_once('.').unwrap();
+        LetTarget::Index {
+            base: base.to_string(),
+            index: Box::new(Expr::Str(key.to_string())),
+        }
     } else {
         LetTarget::Var(lhs.to_string())
     };
@@ -480,6 +496,10 @@ fn let_target_expr(target: &LetTarget) -> Result<Expr, VimlError> {
         LetTarget::Option(n) => Expr::Option(n.clone()),
         LetTarget::Env(n) => Expr::Env(n.clone()),
         LetTarget::Register(c) => Expr::Register(*c),
+        LetTarget::Index { base, index } => Expr::Index {
+            base: Box::new(Expr::Var(base.clone())),
+            index: index.clone(),
+        },
         LetTarget::List { .. } => {
             return Err(VimlError::msg("E734: Wrong variable type for +="))
         }

@@ -1053,6 +1053,16 @@ impl Compiler {
                 }
                 Ok(())
             }
+            LetTarget::Index { base, index } => {
+                // `let base[index] = value` — push value, base, index; the bridge
+                // sets base[index] = value (and fires Dict watchers).
+                self.expr(expr)?;
+                self.get_var(base);
+                self.expr(index)?;
+                self.emit(Op::CallBuiltin(h::VIML_SETINDEX, 3));
+                self.emit(Op::Pop);
+                Ok(())
+            }
             LetTarget::Option(_) | LetTarget::Register(_) => Err(VimlError::msg(
                 "E15: :let on options/registers arrives with the option-table port",
             )),

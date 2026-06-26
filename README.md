@@ -67,6 +67,7 @@ Early / in development.
 | Control flow — `:if`/`:elseif`/`:else`, `:while`, `:for`, `:break`/`:continue` | Working |
 | `:execute`, `:let [a, b; rest] = …` & `:for [k, v] in …` destructuring | Working |
 | `:let` compound assignment (`+=`/`-=`/`*=`/`/=`/`%=`/`.=`) — desugars to `target = target op rhs`, so accumulator loops trace-JIT | Working |
+| `:let` index/member assignment (`let d['k']=v`, `let d.k=v`, `let l[i]=v`, compound forms) — Dict/List/Blob element set; Dict-set fires `dictwatcheradd()` watchers | Working |
 | `\|` command separator (`let l = [1] \| echo l`) — strings/`\|\|`/`\\\|`/comment-aware | Working |
 | User functions — `:function`/`:return`, recursion, `a:`/`l:` scopes | Working |
 | Variable scopes — `g:`/`s:`/`b:`/`w:`/`t:`/`v:` + `:set`/`&opt` (`'ignorecase'` wired into regex) | Working |
