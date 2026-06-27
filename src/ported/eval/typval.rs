@@ -58,7 +58,17 @@ pub fn tv_get_number_chk(tv: &typval_T, ret_error: Option<&mut bool>) -> varnumb
             //    return n;
             let mut n: varnumber_T = 0;
             if let v_string(s) = &tv.vval {
-                vim_str2nr(s, None, None, STR2NR_ALL, Some(&mut n), None, 0, false, None);
+                vim_str2nr(
+                    s,
+                    None,
+                    None,
+                    STR2NR_ALL,
+                    Some(&mut n),
+                    None,
+                    0,
+                    false,
+                    None,
+                );
             }
             return n;
         }
@@ -133,9 +143,14 @@ pub fn tv_get_string_buf_chk(tv: &typval_T) -> Option<String> {
         (VAR_STRING, v_string(s)) => Some(s.clone()),
         (VAR_FUNC, v_string(s)) => Some(s.clone()),
         // c: STRCPY(buf, encode_bool_var_names[tv->vval.v_bool]);
-        (VAR_BOOL, v_bool(b)) => {
-            Some(if *b == kBoolVarTrue { "v:true" } else { "v:false" }.to_string())
-        }
+        (VAR_BOOL, v_bool(b)) => Some(
+            if *b == kBoolVarTrue {
+                "v:true"
+            } else {
+                "v:false"
+            }
+            .to_string(),
+        ),
         // c: STRCPY(buf, encode_special_var_names[tv->vval.v_special]);
         (VAR_SPECIAL, _) => Some("v:null".to_string()),
         // c: emsg(_(str_errors[tv->v_type])); return NULL;
@@ -315,7 +330,11 @@ fn tv_list_find_index(l: &list_T, idx: &mut i32) -> Option<usize> {
 
 /// Port of `tv_list_check_range_index_one()` from `Src/eval/typval.c:633` — the
 /// item at `n1`, adjusting `n1` if needed; `E684` (unless `quiet`) when absent.
-pub(crate) fn tv_list_check_range_index_one(l: &list_T, n1: &mut i32, quiet: bool) -> Option<usize> {
+pub(crate) fn tv_list_check_range_index_one(
+    l: &list_T,
+    n1: &mut i32,
+    quiet: bool,
+) -> Option<usize> {
     let r = tv_list_find_index(l, n1);
     if r.is_none() && !quiet {
         semsg(&format!("E684: List index out of range: {n1}"));
@@ -326,7 +345,13 @@ pub(crate) fn tv_list_check_range_index_one(l: &list_T, n1: &mut i32, quiet: boo
 /// Port of `tv_list_check_range_index_two()` from `Src/eval/typval.c:650` — check
 /// that `n2` is a valid second range index (negative → positive) and `n2 >= n1`.
 /// `pos1` is the resolved index of `n1`. Returns OK/FAIL.
-pub(crate) fn tv_list_check_range_index_two(l: &list_T, n1: &mut i32, pos1: usize, n2: &mut i32, quiet: bool) -> i32 {
+pub(crate) fn tv_list_check_range_index_two(
+    l: &list_T,
+    n1: &mut i32,
+    pos1: usize,
+    n2: &mut i32,
+    quiet: bool,
+) -> i32 {
     if *n2 < 0 {
         let ni = tv_list_uidx(l, *n2);
         if ni == -1 {
@@ -493,7 +518,11 @@ pub fn tv_dict_add_nr(d: &mut dict_T, key: &str, nr: varnumber_T) -> i32 {
     tv_dict_add(
         d,
         key,
-        typval_T { v_type: VAR_NUMBER, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_number(nr) },
+        typval_T {
+            v_type: VAR_NUMBER,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_number(nr),
+        },
     )
 }
 
@@ -502,7 +531,11 @@ pub fn tv_dict_add_float(d: &mut dict_T, key: &str, nr: float_T) -> i32 {
     tv_dict_add(
         d,
         key,
-        typval_T { v_type: VAR_FLOAT, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_float(nr) },
+        typval_T {
+            v_type: VAR_FLOAT,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_float(nr),
+        },
     )
 }
 
@@ -511,7 +544,11 @@ pub fn tv_dict_add_bool(d: &mut dict_T, key: &str, val: BoolVarValue) -> i32 {
     tv_dict_add(
         d,
         key,
-        typval_T { v_type: VAR_BOOL, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_bool(val) },
+        typval_T {
+            v_type: VAR_BOOL,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_bool(val),
+        },
     )
 }
 
@@ -527,7 +564,11 @@ pub fn tv_dict_add_allocated_str(d: &mut dict_T, key: &str, val: String) -> i32 
     tv_dict_add(
         d,
         key,
-        typval_T { v_type: VAR_STRING, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_string(val) },
+        typval_T {
+            v_type: VAR_STRING,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_string(val),
+        },
     )
 }
 
@@ -581,7 +622,9 @@ pub fn tv2bool(tv: &typval_T) -> bool {
         (VAR_FLOAT, v_float(f)) => *f != 0.0,
         (VAR_FUNC, v_string(s)) | (VAR_STRING, v_string(s)) => !s.is_empty(),
         (VAR_LIST, v_list(l)) => l.as_ref().is_some_and(|l| l.borrow().lv_len > 0),
-        (VAR_DICT, v_dict(d)) => d.as_ref().is_some_and(|d| !d.borrow().dv_hashtab.is_empty()),
+        (VAR_DICT, v_dict(d)) => d
+            .as_ref()
+            .is_some_and(|d| !d.borrow().dv_hashtab.is_empty()),
         (VAR_BOOL, v_bool(b)) => *b == kBoolVarTrue,
         (VAR_SPECIAL, v_special(s)) => *s != kSpecialVarNull,
         (VAR_BLOB, v_blob(b)) => b.as_ref().is_some_and(|b| !b.borrow().bv_ga.is_empty()),
@@ -724,7 +767,10 @@ pub fn tv_check_for_nonempty_string_arg(args: &[typval_T], idx: usize) -> i32 {
     }
     let empty = matches!(args.get(idx).map(|a| &a.vval), Some(v_string(s)) if s.is_empty());
     if empty {
-        semsg(&format!("E1175: Non-empty string required for argument {}", idx + 1));
+        semsg(&format!(
+            "E1175: Non-empty string required for argument {}",
+            idx + 1
+        ));
         return FAIL;
     }
     OK
@@ -765,7 +811,10 @@ pub fn tv_check_for_opt_number_arg(args: &[typval_T], idx: usize) -> i32 {
 pub fn tv_check_for_float_or_nr_arg(args: &[typval_T], idx: usize) -> i32 {
     let t = args.get(idx).map(|a| a.v_type);
     if t != Some(VAR_FLOAT) && t != Some(VAR_NUMBER) {
-        semsg(&format!("E1219: Float or Number required for argument {}", idx + 1));
+        semsg(&format!(
+            "E1219: Float or Number required for argument {}",
+            idx + 1
+        ));
         return FAIL;
     }
     OK
@@ -817,7 +866,10 @@ pub fn tv_check_for_list_arg(args: &[typval_T], idx: usize) -> i32 {
 /// Port of `tv_check_for_dict_arg()` from `Src/eval/typval.c` (c:4455).
 pub fn tv_check_for_dict_arg(args: &[typval_T], idx: usize) -> i32 {
     if args.get(idx).map(|a| a.v_type) != Some(VAR_DICT) {
-        semsg(&format!("E1206: Dictionary required for argument {}", idx + 1));
+        semsg(&format!(
+            "E1206: Dictionary required for argument {}",
+            idx + 1
+        ));
         return FAIL;
     }
     OK
@@ -838,7 +890,10 @@ pub fn tv_check_for_opt_dict_arg(args: &[typval_T], idx: usize) -> i32 {
 pub fn tv_check_for_string_or_number_arg(args: &[typval_T], idx: usize) -> i32 {
     let t = args.get(idx).map(|a| a.v_type);
     if t != Some(VAR_STRING) && t != Some(VAR_NUMBER) {
-        semsg(&format!("E1220: String or Number required for argument {}", idx + 1));
+        semsg(&format!(
+            "E1220: String or Number required for argument {}",
+            idx + 1
+        ));
         return FAIL;
     }
     OK
@@ -860,7 +915,10 @@ pub fn tv_check_for_lnum_arg(args: &[typval_T], idx: usize) -> i32 {
 pub fn tv_check_for_string_or_list_arg(args: &[typval_T], idx: usize) -> i32 {
     let t = args.get(idx).map(|a| a.v_type);
     if t != Some(VAR_STRING) && t != Some(VAR_LIST) {
-        semsg(&format!("E1222: String or List required for argument {}", idx + 1));
+        semsg(&format!(
+            "E1222: String or List required for argument {}",
+            idx + 1
+        ));
         return FAIL;
     }
     OK
@@ -871,7 +929,10 @@ pub fn tv_check_for_string_or_list_arg(args: &[typval_T], idx: usize) -> i32 {
 pub fn tv_check_for_string_or_list_or_blob_arg(args: &[typval_T], idx: usize) -> i32 {
     let t = args.get(idx).map(|a| a.v_type);
     if t != Some(VAR_STRING) && t != Some(VAR_LIST) && t != Some(VAR_BLOB) {
-        semsg(&format!("E1252: String, List or Blob required for argument {}", idx + 1));
+        semsg(&format!(
+            "E1252: String, List or Blob required for argument {}",
+            idx + 1
+        ));
         return FAIL;
     }
     OK
@@ -893,7 +954,10 @@ pub fn tv_check_for_opt_string_or_list_arg(args: &[typval_T], idx: usize) -> i32
 pub fn tv_check_for_string_or_func_arg(args: &[typval_T], idx: usize) -> i32 {
     let t = args.get(idx).map(|a| a.v_type);
     if t != Some(VAR_PARTIAL) && t != Some(VAR_FUNC) && t != Some(VAR_STRING) {
-        semsg(&format!("E1256: String or function required for argument {}", idx + 1));
+        semsg(&format!(
+            "E1256: String or function required for argument {}",
+            idx + 1
+        ));
         return FAIL;
     }
     OK
@@ -903,7 +967,10 @@ pub fn tv_check_for_string_or_func_arg(args: &[typval_T], idx: usize) -> i32 {
 pub fn tv_check_for_list_or_blob_arg(args: &[typval_T], idx: usize) -> i32 {
     let t = args.get(idx).map(|a| a.v_type);
     if t != Some(VAR_LIST) && t != Some(VAR_BLOB) {
-        semsg(&format!("E1226: List or Blob required for argument {}", idx + 1));
+        semsg(&format!(
+            "E1226: List or Blob required for argument {}",
+            idx + 1
+        ));
         return FAIL;
     }
     OK
@@ -1044,7 +1111,7 @@ pub fn f_list2blob(argvars: &[typval_T], rettv: &mut typval_T) {
         for li in &lb.lv_items {
             let mut error = false;
             let n = tv_get_number_chk(&li.li_tv, Some(&mut error));
-            if error || n < 0 || n > 255 {
+            if error || !(0..=255).contains(&n) {
                 if !error {
                     emsg(&format!("E1239: Invalid value for blob: 0x{n:X}"));
                 }
@@ -1092,7 +1159,7 @@ pub fn tv_blob_check_range(bloblen: i32, n1: varnumber_T, n2: varnumber_T, quiet
 fn tv_blob_index(blob: &blob_T, len: i32, mut idx: varnumber_T, rettv: &mut typval_T) -> i32 {
     // c: if (idx < 0) idx = len + idx;
     if idx < 0 {
-        idx = len as varnumber_T + idx;
+        idx += len as varnumber_T;
     }
     if idx < len as varnumber_T && idx >= 0 {
         let v = tv_blob_get(blob, idx as i32) as varnumber_T;
@@ -1119,13 +1186,13 @@ fn tv_blob_slice(
     let len = len as varnumber_T;
     // c: clamp n1/n2 (negative from end; n2 past end → last index, exclusive-aware).
     if n1 < 0 {
-        n1 = len + n1;
+        n1 += len;
         if n1 < 0 {
             n1 = 0;
         }
     }
     if n2 < 0 {
-        n2 = len + n2;
+        n2 += len;
     } else if n2 >= len {
         n2 = len - if exclusive { 0 } else { 1 };
     }
@@ -1184,7 +1251,11 @@ pub fn tv_list_copy(orig: &Rc<RefCell<list_T>>, deep: bool) -> Rc<RefCell<list_T
             if deep {
                 crate::ported::eval::funcs::var_item_copy(&it.li_tv)
             } else {
-                { let mut t = it.li_tv.clone(); t.v_lock = VarLockStatus::VAR_UNLOCKED; t }
+                {
+                    let mut t = it.li_tv.clone();
+                    t.v_lock = VarLockStatus::VAR_UNLOCKED;
+                    t
+                }
             }
         })
         .collect();
@@ -1209,7 +1280,11 @@ pub fn tv_dict_copy(orig: &Rc<RefCell<dict_T>>, deep: bool) -> Rc<RefCell<dict_T
             let nv = if deep {
                 crate::ported::eval::funcs::var_item_copy(v)
             } else {
-                { let mut t = v.clone(); t.v_lock = VarLockStatus::VAR_UNLOCKED; t }
+                {
+                    let mut t = v.clone();
+                    t.v_lock = VarLockStatus::VAR_UNLOCKED;
+                    t
+                }
             };
             (k.clone(), nv)
         })
@@ -1229,7 +1304,15 @@ pub fn tv_dict_copy(orig: &Rc<RefCell<dict_T>>, deep: bool) -> Rc<RefCell<dict_T
 /// `None`). The C self-extend guard is unnecessary: `l1` and `l2` are distinct
 /// borrows here.
 pub fn tv_list_extend(l1: &mut list_T, l2: &list_T, bef: Option<usize>) {
-    let add: Vec<typval_T> = l2.lv_items.iter().map(|it| { let mut t = it.li_tv.clone(); t.v_lock = VarLockStatus::VAR_UNLOCKED; t }).collect();
+    let add: Vec<typval_T> = l2
+        .lv_items
+        .iter()
+        .map(|it| {
+            let mut t = it.li_tv.clone();
+            t.v_lock = VarLockStatus::VAR_UNLOCKED;
+            t
+        })
+        .collect();
     match bef {
         None => {
             for tv in add {
@@ -1281,7 +1364,11 @@ pub fn tv_list_slice(ol: &list_T, n1: varnumber_T, n2: varnumber_T) -> Rc<RefCel
         let mut i = n1;
         while i <= n2 {
             if let Some(it) = ol.lv_items.get(i as usize) {
-                tv_list_append_tv(&mut lb, { let mut t = it.li_tv.clone(); t.v_lock = VarLockStatus::VAR_UNLOCKED; t });
+                tv_list_append_tv(&mut lb, {
+                    let mut t = it.li_tv.clone();
+                    t.v_lock = VarLockStatus::VAR_UNLOCKED;
+                    t
+                });
             }
             i += 1;
         }
@@ -1303,11 +1390,20 @@ pub fn tv_list_flatten(list: &mut list_T, maxitems: i64, maxdepth: i64) {
             _ => None,
         };
         if let Some(inner) = inner {
-            let mut sub: Vec<typval_T> =
-                inner.borrow().lv_items.iter().map(|it| { let mut t = it.li_tv.clone(); t.v_lock = VarLockStatus::VAR_UNLOCKED; t }).collect();
+            let mut sub: Vec<typval_T> = inner
+                .borrow()
+                .lv_items
+                .iter()
+                .map(|it| {
+                    let mut t = it.li_tv.clone();
+                    t.v_lock = VarLockStatus::VAR_UNLOCKED;
+                    t
+                })
+                .collect();
             if maxdepth > 0 {
                 let tmp = tv_list_alloc(0);
-                let items: Vec<listitem_T> = sub.into_iter().map(|tv| listitem_T { li_tv: tv }).collect();
+                let items: Vec<listitem_T> =
+                    sub.into_iter().map(|tv| listitem_T { li_tv: tv }).collect();
                 let n = items.len() as i32;
                 {
                     let mut t = tmp.borrow_mut();
@@ -1316,7 +1412,12 @@ pub fn tv_list_flatten(list: &mut list_T, maxitems: i64, maxdepth: i64) {
                 }
                 let inner_len = inner.borrow().lv_len as i64;
                 tv_list_flatten(&mut tmp.borrow_mut(), inner_len, maxdepth - 1);
-                sub = tmp.borrow().lv_items.iter().map(|it| it.li_tv.clone()).collect();
+                sub = tmp
+                    .borrow()
+                    .lv_items
+                    .iter()
+                    .map(|it| it.li_tv.clone())
+                    .collect();
             }
             list.lv_items.remove(i);
             for tv in sub {
@@ -1363,14 +1464,22 @@ pub fn tv_dict2list(argvars: &[typval_T], rettv: &mut typval_T, what: DictListTy
         tv_list_alloc_ret(rettv, 0);
         return;
     };
-    let pairs: Vec<(String, typval_T)> =
-        d.borrow().dv_hashtab.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let pairs: Vec<(String, typval_T)> = d
+        .borrow()
+        .dv_hashtab
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     let out = tv_list_alloc_ret(rettv, pairs.len() as isize);
     let mut ob = out.borrow_mut();
     for (k, v) in pairs {
         match what {
             kDict2ListKeys => tv_list_append_string(&mut ob, &k),
-            kDict2ListValues => tv_list_append_tv(&mut ob, { let mut t = v.clone(); t.v_lock = VarLockStatus::VAR_UNLOCKED; t }),
+            kDict2ListValues => tv_list_append_tv(&mut ob, {
+                let mut t = v.clone();
+                t.v_lock = VarLockStatus::VAR_UNLOCKED;
+                t
+            }),
             kDict2ListItems => {
                 let sub = tv_list_alloc(2);
                 {
@@ -1408,7 +1517,12 @@ pub fn tv_blob2items(argvars: &[typval_T], rettv: &mut typval_T) {
 /// of `[index, value]` pairs.
 pub fn tv_list2items(argvars: &[typval_T], rettv: &mut typval_T) {
     let items: Vec<typval_T> = match (argvars[0].v_type, &argvars[0].vval) {
-        (VAR_LIST, v_list(Some(l))) => l.borrow().lv_items.iter().map(|it| it.li_tv.clone()).collect(),
+        (VAR_LIST, v_list(Some(l))) => l
+            .borrow()
+            .lv_items
+            .iter()
+            .map(|it| it.li_tv.clone())
+            .collect(),
         _ => Vec::new(),
     };
     let out = tv_list_alloc_ret(rettv, items.len() as isize);
@@ -1522,7 +1636,11 @@ pub fn tv_blob_free(b: &mut blob_T) {
 pub fn tv_list_append_list(l: &mut list_T, itemlist: Rc<RefCell<list_T>>) {
     tv_list_append_tv(
         l,
-        typval_T { v_type: VAR_LIST, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_list(Some(itemlist)) },
+        typval_T {
+            v_type: VAR_LIST,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_list(Some(itemlist)),
+        },
     );
 }
 
@@ -1531,7 +1649,11 @@ pub fn tv_list_append_list(l: &mut list_T, itemlist: Rc<RefCell<list_T>>) {
 pub fn tv_list_append_dict(l: &mut list_T, dict: Rc<RefCell<dict_T>>) {
     tv_list_append_tv(
         l,
-        typval_T { v_type: VAR_DICT, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_dict(Some(dict)) },
+        typval_T {
+            v_type: VAR_DICT,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_dict(Some(dict)),
+        },
     );
 }
 
@@ -1540,7 +1662,11 @@ pub fn tv_list_append_dict(l: &mut list_T, dict: Rc<RefCell<dict_T>>) {
 pub fn tv_list_append_allocated_string(l: &mut list_T, str: String) {
     tv_list_append_tv(
         l,
-        typval_T { v_type: VAR_STRING, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_string(str) },
+        typval_T {
+            v_type: VAR_STRING,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_string(str),
+        },
     );
 }
 
@@ -1556,7 +1682,11 @@ pub fn tv_dict_clear(d: &mut dict_T) {
 /// optimization, watchers and scope-name validation are not modeled.)
 pub fn tv_dict_extend(d1: &mut dict_T, d2: &dict_T, action: &str) {
     let act = action.as_bytes().first().copied().unwrap_or(b'f');
-    let pairs: Vec<_> = d2.dv_hashtab.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let pairs: Vec<_> = d2
+        .dv_hashtab
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     for (k, v) in pairs {
         if d1.dv_hashtab.contains_key(&k) {
             match act {
@@ -1581,7 +1711,11 @@ pub fn tv_dict_add_list(d: &mut dict_T, key: &str, list: Rc<RefCell<list_T>>) ->
     tv_dict_add(
         d,
         key,
-        typval_T { v_type: VAR_LIST, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_list(Some(list)) },
+        typval_T {
+            v_type: VAR_LIST,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_list(Some(list)),
+        },
     )
 }
 
@@ -1591,7 +1725,11 @@ pub fn tv_dict_add_dict(d: &mut dict_T, key: &str, dict: Rc<RefCell<dict_T>>) ->
     tv_dict_add(
         d,
         key,
-        typval_T { v_type: VAR_DICT, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_dict(Some(dict)) },
+        typval_T {
+            v_type: VAR_DICT,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_dict(Some(dict)),
+        },
     )
 }
 
@@ -1637,7 +1775,10 @@ pub fn tv_dict_get_tv(d: &dict_T, key: &str, rettv: &mut typval_T) -> i32 {
 /// Port of `tv_dict_to_env()` from `Src/eval/typval.c` (c:2334) — render the
 /// dict as `KEY=VALUE` environment strings.
 pub fn tv_dict_to_env(denv: &dict_T) -> Vec<String> {
-    denv.dv_hashtab.iter().map(|(k, v)| format!("{k}={}", tv_get_string(v))).collect()
+    denv.dv_hashtab
+        .iter()
+        .map(|(k, v)| format!("{k}={}", tv_get_string(v)))
+        .collect()
 }
 
 // ── clear / free / get ──
@@ -1648,7 +1789,11 @@ pub fn tv_clear(tv: &mut typval_T) {
     if tv.v_type == VAR_UNKNOWN {
         return;
     }
-    *tv = typval_T { v_type: VAR_UNKNOWN, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_number(0) };
+    *tv = typval_T {
+        v_type: VAR_UNKNOWN,
+        v_lock: VarLockStatus::VAR_UNLOCKED,
+        vval: v_number(0),
+    };
 }
 
 /// Port of `tv_free()` from `Src/eval/typval.c` (c:3677) — free `tv` and the
@@ -1769,7 +1914,7 @@ pub fn tv_item_lock(tv: &mut typval_T, deep: i32, lock: bool, check_refcount: bo
                 let mut lb = l.borrow_mut();
                 if !(check_refcount && lb.lv_refcount > 1) {
                     lb.lv_lock = change_lock(lb.lv_lock);
-                    deep < 0 || deep > 1
+                    !(0..=1).contains(&deep)
                 } else {
                     false
                 }
@@ -1786,7 +1931,7 @@ pub fn tv_item_lock(tv: &mut typval_T, deep: i32, lock: bool, check_refcount: bo
                 let mut db = d.borrow_mut();
                 if !(check_refcount && db.dv_refcount > 1) {
                     db.dv_lock = change_lock(db.dv_lock);
-                    deep < 0 || deep > 1
+                    !(0..=1).contains(&deep)
                 } else {
                     false
                 }
@@ -1847,7 +1992,11 @@ pub fn tv_list_remove(argvars: &[typval_T], rettv: &mut typval_T, arg_errmsg: &s
         emsg(&format!("E684: List index out of range: {idx}"));
         return;
     }
-    let start = if idx < 0 { len as varnumber_T + idx } else { idx } as usize;
+    let start = if idx < 0 {
+        len as varnumber_T + idx
+    } else {
+        idx
+    } as usize;
 
     if argvars.len() < 3 {
         // c: remove one item, return its value.
@@ -1866,7 +2015,11 @@ pub fn tv_list_remove(argvars: &[typval_T], rettv: &mut typval_T, arg_errmsg: &s
             emsg(&format!("E684: List index out of range: {end}"));
             return;
         }
-        let endi = if end < 0 { len as varnumber_T + end } else { end } as usize;
+        let endi = if end < 0 {
+            len as varnumber_T + end
+        } else {
+            end
+        } as usize;
         // c: "item2" must be at or after "item" (forward walk) → else E16.
         if endi < start {
             emsg("E16: Invalid range");
@@ -2054,7 +2207,7 @@ pub fn tv_list_slice_or_index(
     let mut n2 = n2_arg;
 
     if n1 < 0 {
-        n1 = len as varnumber_T + n1;
+        n1 += len as varnumber_T;
     }
     if n1 < 0 || n1 >= len as varnumber_T {
         // c: a range tolerates invalid bounds (→ empty); an index is an error.
@@ -2068,7 +2221,7 @@ pub fn tv_list_slice_or_index(
     }
     if range {
         if n2 < 0 {
-            n2 = len as varnumber_T + n2;
+            n2 += len as varnumber_T;
         } else if n2 >= len as varnumber_T {
             n2 = len as varnumber_T - if exclusive { 0 } else { 1 };
         }
@@ -2132,22 +2285,42 @@ fn item_compare(tv1: &typval_T, tv2: &typval_T, info: &sortinfo_T) -> i32 {
     if info.item_compare_numbers {
         let v1 = tv_get_number(tv1);
         let v2 = tv_get_number(tv2);
-        return if v1 == v2 { 0 } else if v1 > v2 { 1 } else { -1 };
+        return if v1 == v2 {
+            0
+        } else if v1 > v2 {
+            1
+        } else {
+            -1
+        };
     }
     if info.item_compare_float {
         let v1 = tv_get_float(tv1);
         let v2 = tv_get_float(tv2);
-        return if v1 == v2 { 0 } else if v1 > v2 { 1 } else { -1 };
+        return if v1 == v2 {
+            0
+        } else if v1 > v2 {
+            1
+        } else {
+            -1
+        };
     }
     // c: a String uses its raw value; other types render via encode_tv2string;
     //    a String vs a non-String uses "'" (Vim's documented quirk).
     let p1 = if tv1.v_type == VAR_STRING {
-        if tv2.v_type != VAR_STRING || info.item_compare_numeric { "'".to_string() } else { tv_get_string(tv1) }
+        if tv2.v_type != VAR_STRING || info.item_compare_numeric {
+            "'".to_string()
+        } else {
+            tv_get_string(tv1)
+        }
     } else {
         encode_tv2string(tv1)
     };
     let p2 = if tv2.v_type == VAR_STRING {
-        if tv1.v_type != VAR_STRING || info.item_compare_numeric { "'".to_string() } else { tv_get_string(tv2) }
+        if tv1.v_type != VAR_STRING || info.item_compare_numeric {
+            "'".to_string()
+        } else {
+            tv_get_string(tv2)
+        }
     } else {
         encode_tv2string(tv2)
     };
@@ -2171,7 +2344,13 @@ fn item_compare(tv1: &typval_T, tv2: &typval_T, info: &sortinfo_T) -> i32 {
         let cs2 = std::ffi::CString::new(p2).unwrap_or_default();
         let n1 = unsafe { nix::libc::strtod(cs1.as_ptr(), std::ptr::null_mut()) };
         let n2 = unsafe { nix::libc::strtod(cs2.as_ptr(), std::ptr::null_mut()) };
-        if n1 == n2 { 0 } else if n1 > n2 { 1 } else { -1 }
+        if n1 == n2 {
+            0
+        } else if n1 > n2 {
+            1
+        } else {
+            -1
+        }
     }
 }
 
@@ -2362,7 +2541,11 @@ fn do_sort_uniq(argvars: &[typval_T], rettv: &mut typval_T, sort: bool) {
             return;
         }
     };
-    let arg_errmsg = if sort { "sort() argument" } else { "uniq() argument" };
+    let arg_errmsg = if sort {
+        "sort() argument"
+    } else {
+        "uniq() argument"
+    };
     if value_check_lock(l.borrow().lv_lock, Some(arg_errmsg), TV_TRANSLATE) {
         return;
     }
@@ -2486,7 +2669,11 @@ pub fn callback_from_typval(callback: &mut Callback, tv: &typval_T) -> bool {
         }
         VAR_STRING => {
             let s = tv_get_string(tv);
-            *callback = if s.is_empty() { Callback::None } else { Callback::Funcref(s) };
+            *callback = if s.is_empty() {
+                Callback::None
+            } else {
+                Callback::Funcref(s)
+            };
             true
         }
         VAR_SPECIAL => {
@@ -2513,9 +2700,10 @@ pub struct DictWatcher {
 
 /// Port of `tv_dict_watcher_add()` from `Src/eval/typval.c`.
 pub fn tv_dict_watcher_add(dict: &Rc<RefCell<dict_T>>, key_pattern: &str, callback: Callback) {
-    dict.borrow_mut()
-        .dv_watchers
-        .push(DictWatcher { callback, key_pattern: key_pattern.to_string() });
+    dict.borrow_mut().dv_watchers.push(DictWatcher {
+        callback,
+        key_pattern: key_pattern.to_string(),
+    });
 }
 
 /// Port of `tv_dict_watcher_matches()` from `Src/eval/typval.c` — a trailing `*`
@@ -2584,7 +2772,11 @@ pub fn tv_dict_watcher_notify(
             tv_dict_add_tv(&mut change.borrow_mut(), "old", o.clone());
         }
     }
-    let mk = |t, v| typval_T { v_type: t, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v };
+    let mk = |t, v| typval_T {
+        v_type: t,
+        v_lock: VarLockStatus::VAR_UNLOCKED,
+        vval: v,
+    };
     let dict_tv = mk(VAR_DICT, v_dict(Some(dict.clone())));
     let key_tv = mk(VAR_STRING, v_string(key.to_string()));
     let change_tv = mk(VAR_DICT, v_dict(Some(change)));
@@ -2593,7 +2785,10 @@ pub fn tv_dict_watcher_notify(
         if let Callback::Funcref(name) = cb {
             if let Some(f) = hook {
                 let func_tv = mk(VAR_FUNC, v_string(name.clone()));
-                let _ = f(&func_tv, &[dict_tv.clone(), key_tv.clone(), change_tv.clone()]);
+                let _ = f(
+                    &func_tv,
+                    &[dict_tv.clone(), key_tv.clone(), change_tv.clone()],
+                );
             }
         }
     }
@@ -2604,7 +2799,11 @@ mod tests {
     use super::*;
 
     fn nr(n: varnumber_T) -> typval_T {
-        typval_T { v_type: VAR_NUMBER, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_number(n) }
+        typval_T {
+            v_type: VAR_NUMBER,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_number(n),
+        }
     }
 
     #[test]
@@ -2710,7 +2909,10 @@ mod tests {
         assert_eq!(c, Callback::Funcref("Foo".to_string()));
         assert_eq!(callback_to_string(&c), "<vim function: Foo>");
         assert!(tv_callback_equal(&c, &Callback::Funcref("Foo".to_string())));
-        assert!(!tv_callback_equal(&c, &Callback::Funcref("Bar".to_string())));
+        assert!(!tv_callback_equal(
+            &c,
+            &Callback::Funcref("Bar".to_string())
+        ));
         // put → a VAR_FUNC typval.
         let mut tv = nr(0);
         callback_put(&c, &mut tv);
@@ -2785,7 +2987,10 @@ mod tests {
             v_blob(Some(b)) => b.clone(),
             _ => unreachable!(),
         };
-        assert_eq!(tv_blob_slice_or_index(&b.borrow(), false, 2, 0, false, &mut rt), OK);
+        assert_eq!(
+            tv_blob_slice_or_index(&b.borrow(), false, 2, 0, false, &mut rt),
+            OK
+        );
         assert!(matches!((rt.v_type, &rt.vval), (VAR_NUMBER, v_number(30))));
 
         // negative index b[-1] -> 40
@@ -2794,7 +2999,10 @@ mod tests {
             v_blob(Some(b)) => b.clone(),
             _ => unreachable!(),
         };
-        assert_eq!(tv_blob_slice_or_index(&b.borrow(), false, -1, 0, false, &mut rt), OK);
+        assert_eq!(
+            tv_blob_slice_or_index(&b.borrow(), false, -1, 0, false, &mut rt),
+            OK
+        );
         assert!(matches!((rt.v_type, &rt.vval), (VAR_NUMBER, v_number(40))));
 
         // out of range b[10] -> E979 / FAIL
@@ -2803,7 +3011,10 @@ mod tests {
             v_blob(Some(b)) => b.clone(),
             _ => unreachable!(),
         };
-        assert_eq!(tv_blob_slice_or_index(&b.borrow(), false, 10, 0, false, &mut rt), FAIL);
+        assert_eq!(
+            tv_blob_slice_or_index(&b.borrow(), false, 10, 0, false, &mut rt),
+            FAIL
+        );
 
         // slice b[1:2] (inclusive) -> [20, 30]
         let mut rt = mk();
@@ -2811,7 +3022,10 @@ mod tests {
             v_blob(Some(b)) => b.clone(),
             _ => unreachable!(),
         };
-        assert_eq!(tv_blob_slice_or_index(&b.borrow(), true, 1, 2, false, &mut rt), OK);
+        assert_eq!(
+            tv_blob_slice_or_index(&b.borrow(), true, 1, 2, false, &mut rt),
+            OK
+        );
         match (&rt.v_type, &rt.vval) {
             (VAR_BLOB, v_blob(Some(nb))) => assert_eq!(nb.borrow().bv_ga, vec![20, 30]),
             _ => panic!("expected a blob slice"),
@@ -2888,9 +3102,15 @@ mod tests {
         // set_range: length must match, else FAIL.
         let src = tv_blob_alloc();
         src.borrow_mut().bv_ga = vec![1, 2];
-        assert_eq!(tv_blob_set_range(&mut b.borrow_mut(), 0, 1, &src.borrow()), OK);
+        assert_eq!(
+            tv_blob_set_range(&mut b.borrow_mut(), 0, 1, &src.borrow()),
+            OK
+        );
         assert_eq!(b.borrow().bv_ga[..2], [1, 2]);
-        assert_eq!(tv_blob_set_range(&mut b.borrow_mut(), 0, 2, &src.borrow()), FAIL);
+        assert_eq!(
+            tv_blob_set_range(&mut b.borrow_mut(), 0, 2, &src.borrow()),
+            FAIL
+        );
     }
 
     #[test]

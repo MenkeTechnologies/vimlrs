@@ -128,10 +128,7 @@ fn tv_op_nr_or_string(tv1: &mut typval_T, tv2: &typval_T, op: char) -> i32 {
 
 /// Port of `tv_op_float()` from `Src/eval/executor.c:167` — `f1 op= f2`.
 fn tv_op_float(tv1: &mut typval_T, tv2: &typval_T, op: char) -> i32 {
-    if op == '%'
-        || op == '.'
-        || !matches!(tv2.v_type, VAR_FLOAT | VAR_NUMBER | VAR_STRING)
-    {
+    if op == '%' || op == '.' || !matches!(tv2.v_type, VAR_FLOAT | VAR_NUMBER | VAR_STRING) {
         return FAIL;
     }
     let f = match (tv2.v_type, &tv2.vval) {
@@ -189,10 +186,18 @@ mod tests {
     use std::rc::Rc;
 
     fn num(n: i64) -> typval_T {
-        typval_T { v_type: VAR_NUMBER, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_number(n) }
+        typval_T {
+            v_type: VAR_NUMBER,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_number(n),
+        }
     }
     fn s(t: &str) -> typval_T {
-        typval_T { v_type: VAR_STRING, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_string(t.to_string()) }
+        typval_T {
+            v_type: VAR_STRING,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_string(t.to_string()),
+        }
     }
 
     #[test]
@@ -215,11 +220,19 @@ mod tests {
     fn list_extends_in_place_for_aliases() {
         let l = tv_list_alloc(0);
         tv_list_append_number(&mut l.borrow_mut(), 1);
-        let a = typval_T { v_type: VAR_LIST, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_list(Some(l.clone())) };
+        let a = typval_T {
+            v_type: VAR_LIST,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_list(Some(l.clone())),
+        };
         let b = a.clone(); // alias (shared Rc)
         let src = tv_list_alloc(0);
         tv_list_append_number(&mut src.borrow_mut(), 2);
-        let src_tv = typval_T { v_type: VAR_LIST, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_list(Some(src)) };
+        let src_tv = typval_T {
+            v_type: VAR_LIST,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_list(Some(src)),
+        };
         let mut a = a;
         assert_eq!(eexe_mod_op(&mut a, &src_tv, '+'), OK);
         // The alias `b` observes the in-place extension.
@@ -235,7 +248,11 @@ mod tests {
         let mk = |bytes: &[u8]| {
             let b = Rc::new(RefCell::new(blob_T::default()));
             b.borrow_mut().bv_ga = bytes.to_vec();
-            typval_T { v_type: VAR_BLOB, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_blob(Some(b)) }
+            typval_T {
+                v_type: VAR_BLOB,
+                v_lock: VarLockStatus::VAR_UNLOCKED,
+                vval: v_blob(Some(b)),
+            }
         };
         let mut a = mk(&[0x01]);
         assert_eq!(eexe_mod_op(&mut a, &mk(&[0x02, 0x03]), '+'), OK);
@@ -249,15 +266,27 @@ mod tests {
     #[test]
     fn rejects_bad_combinations() {
         // dict on the right → E734/FAIL.
-        let d = typval_T { v_type: VAR_DICT, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_dict(None) };
+        let d = typval_T {
+            v_type: VAR_DICT,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_dict(None),
+        };
         let mut a = num(1);
         assert_eq!(eexe_mod_op(&mut a, &d, '+'), FAIL);
         // %= with a float operand → FAIL.
         let mut n = num(10);
-        let f = typval_T { v_type: VAR_FLOAT, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_float(3.0) };
+        let f = typval_T {
+            v_type: VAR_FLOAT,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_float(3.0),
+        };
         assert_eq!(eexe_mod_op(&mut n, &f, '%'), FAIL);
         // list += non-list → FAIL.
-        let mut l = typval_T { v_type: VAR_LIST, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_list(Some(tv_list_alloc(0))) };
+        let mut l = typval_T {
+            v_type: VAR_LIST,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_list(Some(tv_list_alloc(0))),
+        };
         assert_eq!(eexe_mod_op(&mut l, &num(1), '+'), FAIL);
         let _ = list_T::default();
     }

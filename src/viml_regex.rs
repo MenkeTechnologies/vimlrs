@@ -512,7 +512,11 @@ impl Regex {
             Node::WordB(start) => {
                 let before = pos > 0 && is_word(text[pos - 1]);
                 let after = pos < text.len() && is_word(text[pos]);
-                let ok = if *start { !before && after } else { before && !after };
+                let ok = if *start {
+                    !before && after
+                } else {
+                    before && !after
+                };
                 ok.then_some(pos)
             }
             Node::Group(branches, capidx) => {
@@ -618,8 +622,13 @@ pub fn regex_substitute(subject: &str, pat: &str, sub: &str, flags: &str) -> Str
         let mut found = None;
         for start in pos..=chars.len() {
             let mut groups = vec![None; re.ngroups + 1];
-            if let Some(end) = re.match_alt(&re.branches, &chars, start, &mut groups, re.effective_ic(ic))
-            {
+            if let Some(end) = re.match_alt(
+                &re.branches,
+                &chars,
+                start,
+                &mut groups,
+                re.effective_ic(ic),
+            ) {
                 groups[0] = Some((start, end));
                 found = Some((start, end, groups));
                 break;
@@ -763,6 +772,9 @@ mod tests {
 
     #[test]
     fn split_on_pattern() {
-        assert_eq!(regex_split("a1b2c", "\\d", false, false), vec!["a", "b", "c"]);
+        assert_eq!(
+            regex_split("a1b2c", "\\d", false, false),
+            vec!["a", "b", "c"]
+        );
     }
 }

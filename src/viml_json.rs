@@ -10,10 +10,12 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::ported::eval::typval::{tv_dict_alloc, tv_dict_add_tv, tv_list_alloc, tv_list_append_tv};
+use crate::ported::eval::typval::{
+    tv_dict_add_tv, tv_dict_alloc, tv_list_alloc, tv_list_append_tv,
+};
 use crate::ported::eval::typval_defs_h::{
-    typval_T, typval_vval_union::*, BoolVarValue::*, SpecialVarValue::*, VarLockStatus::VAR_UNLOCKED,
-    VarType::*,
+    typval_T, typval_vval_union::*, BoolVarValue::*, SpecialVarValue::*,
+    VarLockStatus::VAR_UNLOCKED, VarType::*,
 };
 
 /// Decode a JSON document into a `typval_T`, or `None` on malformed input.
@@ -269,7 +271,10 @@ mod tests {
     fn decode_encode_roundtrip() {
         assert_eq!(roundtrip("42"), "42");
         assert_eq!(roundtrip("[1,2,3]"), "[1,2,3]");
-        assert_eq!(roundtrip(r#"{"a":1,"b":[true,null]}"#), r#"{"a":1,"b":[true,null]}"#);
+        assert_eq!(
+            roundtrip(r#"{"a":1,"b":[true,null]}"#),
+            r#"{"a":1,"b":[true,null]}"#
+        );
         assert_eq!(roundtrip(r#""he\"llo""#), r#""he\"llo""#);
         assert_eq!(roundtrip("3.5"), "3.5");
     }

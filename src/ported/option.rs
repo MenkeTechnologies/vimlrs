@@ -55,7 +55,9 @@ thread_local! {
 /// Port of `findoption()` (`option.c`) — resolve an option name or abbreviation
 /// to its `OPTIONS` row.
 fn findoption(name: &str) -> Option<&'static (&'static str, &'static str, Kind, varnumber_T)> {
-    OPTIONS.iter().find(|(n, abbr, _, _)| *n == name || *abbr == name)
+    OPTIONS
+        .iter()
+        .find(|(n, abbr, _, _)| *n == name || *abbr == name)
 }
 
 /// Port of `set_option_value()` (`option.c`) reduced — store option `canon`'s
@@ -73,10 +75,13 @@ pub fn get_option_value(name: &str) -> typval_T {
         return typval_T::from(String::new());
     };
     option_values.with(|m| {
-        m.borrow().get(*canon).cloned().unwrap_or_else(|| match kind {
-            Kind::String => typval_T::from(String::new()),
-            _ => typval_T::from(*default),
-        })
+        m.borrow()
+            .get(*canon)
+            .cloned()
+            .unwrap_or_else(|| match kind {
+                Kind::String => typval_T::from(String::new()),
+                _ => typval_T::from(*default),
+            })
     })
 }
 

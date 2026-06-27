@@ -20,7 +20,14 @@ use crate::viml_lexer::{lex, CaseFlag, CmpOp, Tok, Token, VimlError};
 /// The small set of names Phase 3 recognizes as builtin function calls. The
 /// full `funcs.c` table is ported in Phase 5.
 pub const PHASE3_BUILTINS: &[&str] = &[
-    "len", "type", "string", "empty", "abs", "str2nr", "str2float", "float2nr",
+    "len",
+    "type",
+    "string",
+    "empty",
+    "abs",
+    "str2nr",
+    "str2float",
+    "float2nr",
 ];
 
 /// Parse one statement line into a [`Stmt`].
@@ -63,7 +70,9 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
 /// expression (empty command word).
 fn cmd_word(line: &str) -> (&str, &str) {
     let line = line.trim();
-    let end = line.find(|c: char| !c.is_ascii_alphabetic()).unwrap_or(line.len());
+    let end = line
+        .find(|c: char| !c.is_ascii_alphabetic())
+        .unwrap_or(line.len());
     (&line[..end], line[end..].trim_start())
 }
 
@@ -72,15 +81,27 @@ fn cmd_word(line: &str) -> (&str, &str) {
 fn is_block_terminator(cmd: &str) -> bool {
     matches!(
         cmd,
-        "endif" | "elseif" | "else" | "endwhile" | "endwh" | "endfor" | "endfunction" | "endfunc"
-            | "catch" | "finally" | "endtry"
+        "endif"
+            | "elseif"
+            | "else"
+            | "endwhile"
+            | "endwh"
+            | "endfor"
+            | "endfunction"
+            | "endfunc"
+            | "catch"
+            | "finally"
+            | "endtry"
     )
 }
 
 /// Parse a whole source block into a flat statement list with block structure
 /// (the `:if`/`:while`/`:for`/`:function`/`:try` bodies nested inside).
 pub fn parse_program(src: &str) -> Result<Vec<Stmt>, VimlError> {
-    Ok(parse_program_lines(src)?.into_iter().map(|(_, s)| s).collect())
+    Ok(parse_program_lines(src)?
+        .into_iter()
+        .map(|(_, s)| s)
+        .collect())
 }
 
 /// Like [`parse_program`] but pairs each TOP-LEVEL statement with its 1-based
@@ -93,7 +114,9 @@ pub fn parse_program_lines(src: &str) -> Result<Vec<(u32, Stmt)>, VimlError> {
         let Some(line) = cur.peek() else { break };
         let (cmd, _) = cmd_word(line);
         if is_block_terminator(cmd) {
-            return Err(VimlError::msg(format!("E580: `:{cmd}` without matching block opener")));
+            return Err(VimlError::msg(format!(
+                "E580: `:{cmd}` without matching block opener"
+            )));
         }
         let lineno = cur.line_no();
         for s in parse_one(&mut cur)? {
@@ -257,7 +280,10 @@ fn split_commands(line: &str) -> Vec<&str> {
 
 /// Parse statements until a terminator in `terms`. Returns the body and the
 /// terminator `(cmd, rest)` it stopped on (`None` at EOF).
-fn parse_block(cur: &mut Lines, terms: &[&str]) -> Result<(Vec<Stmt>, Option<(String, String)>), VimlError> {
+fn parse_block(
+    cur: &mut Lines,
+    terms: &[&str],
+) -> Result<(Vec<Stmt>, Option<(String, String)>), VimlError> {
     let mut stmts = Vec::new();
     loop {
         cur.skip_blanks();
@@ -480,7 +506,11 @@ fn parse_let(rest: &str) -> Result<Stmt, VimlError> {
             Some((a, b)) => {
                 let parse_opt = |s: &str| -> Result<Option<Box<Expr>>, VimlError> {
                     let s = s.trim();
-                    Ok(if s.is_empty() { None } else { Some(Box::new(parse_expr(s)?)) })
+                    Ok(if s.is_empty() {
+                        None
+                    } else {
+                        Some(Box::new(parse_expr(s)?))
+                    })
                 };
                 LetTarget::Range {
                     base: Box::new(parse_expr(base_src)?),
@@ -495,7 +525,9 @@ fn parse_let(rest: &str) -> Result<Stmt, VimlError> {
         }
     } else if !lhs.contains('[')
         && lhs.contains('.')
-        && lhs.rsplit_once('.').is_some_and(|(_, k)| !k.is_empty() && k.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
+        && lhs.rsplit_once('.').is_some_and(|(_, k)| {
+            !k.is_empty() && k.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        })
     {
         // `base.key = …` — split at the last `.` (nested `d.a.b` → base `d.a`).
         let (base, key) = lhs.rsplit_once('.').unwrap();
@@ -548,7 +580,10 @@ fn split_top_colon(s: &str) -> Option<(&str, &str)> {
                     // that's a scoped variable index, not a range separator.
                     let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
                     let scope_prefix = i >= 1
-                        && matches!(bytes[i - 1], b's' | b'g' | b'b' | b'w' | b't' | b'l' | b'a' | b'v')
+                        && matches!(
+                            bytes[i - 1],
+                            b's' | b'g' | b'b' | b'w' | b't' | b'l' | b'a' | b'v'
+                        )
                         && (i == 1 || !is_ident(bytes[i - 2]))
                         && i + 1 < bytes.len()
                         && is_ident(bytes[i + 1]);

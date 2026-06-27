@@ -12,9 +12,7 @@ use crate::ported::eval::encode::encode_tv2string;
 use crate::ported::eval::typval::{
     tv_get_number_chk, tv_get_string, tv_list_alloc_ret, tv_list_append_number,
 };
-use crate::ported::eval::typval_defs_h::{
-    typval_T, typval_vval_union::*, varnumber_T, VarType::*,
-};
+use crate::ported::eval::typval_defs_h::{typval_T, typval_vval_union::*, varnumber_T, VarType::*};
 
 /// "string(expr)" function — the `string()` rendering of `expr`.
 pub fn f_string(argvars: &[typval_T], rettv: &mut typval_T) {
@@ -27,7 +25,17 @@ pub fn f_string(argvars: &[typval_T], rettv: &mut typval_T) {
 pub fn f_str2nr(argvars: &[typval_T], rettv: &mut typval_T) {
     let s = tv_get_string(&argvars[0]);
     let mut n: varnumber_T = 0;
-    vim_str2nr(&s, None, None, STR2NR_ALL, Some(&mut n), None, 0, false, None);
+    vim_str2nr(
+        &s,
+        None,
+        None,
+        STR2NR_ALL,
+        Some(&mut n),
+        None,
+        0,
+        false,
+        None,
+    );
     rettv.vval = v_number(n);
 }
 
@@ -78,9 +86,13 @@ pub fn f_strpart(argvars: &[typval_T], rettv: &mut typval_T) {
 pub fn f_stridx(argvars: &[typval_T], rettv: &mut typval_T) {
     let hay = tv_get_string(&argvars[0]);
     let needle = tv_get_string(&argvars[1]);
-    let start = argvars.get(2).map_or(0, |t| tv_get_number_chk(t, None).max(0) as usize);
+    let start = argvars
+        .get(2)
+        .map_or(0, |t| tv_get_number_chk(t, None).max(0) as usize);
     let idx = if start <= hay.len() {
-        hay[start..].find(&needle).map(|i| (i + start) as varnumber_T)
+        hay[start..]
+            .find(&needle)
+            .map(|i| (i + start) as varnumber_T)
     } else {
         None
     };
@@ -208,4 +220,3 @@ pub fn f_charidx(argvars: &[typval_T], rettv: &mut typval_T) {
 pub fn f_byteidxcomp(argvars: &[typval_T], rettv: &mut typval_T) {
     f_byteidx(argvars, rettv);
 }
-

@@ -66,7 +66,12 @@ fn sha256_process(ctx: &mut context_sha256_T, data: &[u8; SHA256_BUFFER_SIZE]) {
     let mut w = [0u32; SHA256_BUFFER_SIZE];
     for i in 0..16 {
         // c: GET_UINT32(W[i], data, i*4) — big-endian.
-        w[i] = u32::from_be_bytes([data[i * 4], data[i * 4 + 1], data[i * 4 + 2], data[i * 4 + 3]]);
+        w[i] = u32::from_be_bytes([
+            data[i * 4],
+            data[i * 4 + 1],
+            data[i * 4 + 2],
+            data[i * 4 + 3],
+        ]);
     }
     for t in 16..64 {
         // c: R(t): W[t] = S1(W[t-2]) + W[t-7] + S0(W[t-15]) + W[t-16]

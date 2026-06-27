@@ -14,16 +14,14 @@ use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
     PublishDiagnostics,
 };
-use lsp_types::request::{
-    Completion, DocumentSymbolRequest, HoverRequest, Request as _,
-};
+use lsp_types::request::{Completion, DocumentSymbolRequest, HoverRequest, Request as _};
 use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams, CompletionResponse,
     Diagnostic, DiagnosticSeverity, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
     DidOpenTextDocumentParams, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, Hover,
-    HoverContents, HoverParams, HoverProviderCapability, MarkupContent, MarkupKind, OneOf, Position,
-    PublishDiagnosticsParams, Range, ServerCapabilities, SymbolKind, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextDocumentSyncOptions, Uri,
+    HoverContents, HoverParams, HoverProviderCapability, MarkupContent, MarkupKind, OneOf,
+    Position, PublishDiagnosticsParams, Range, ServerCapabilities, SymbolKind,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions, Uri,
 };
 
 use crate::viml_parser::{parse_stmt, PHASE3_BUILTINS};
@@ -37,12 +35,24 @@ const V_VARS: &[&str] = &["v:true", "v:false", "v:null"];
 const BUILTIN_DOCS: &[(&str, &str)] = &[
     ("len", "len({expr}) — length of a String/List/Dict/Blob"),
     ("type", "type({expr}) — the type() code of {expr}"),
-    ("string", "string({expr}) — string() rendering, quoting strings"),
+    (
+        "string",
+        "string({expr}) — string() rendering, quoting strings",
+    ),
     ("empty", "empty({expr}) — 1 if {expr} is empty, else 0"),
     ("abs", "abs({expr}) — absolute value (Float in → Float out)"),
-    ("str2nr", "str2nr({string}) — leading number parsed from {string}"),
-    ("str2float", "str2float({string}) — float parsed from {string}"),
-    ("float2nr", "float2nr({float}) — {float} truncated to a Number"),
+    (
+        "str2nr",
+        "str2nr({string}) — leading number parsed from {string}",
+    ),
+    (
+        "str2float",
+        "str2float({string}) — float parsed from {string}",
+    ),
+    (
+        "float2nr",
+        "float2nr({float}) — {float} truncated to a Number",
+    ),
 ];
 
 /// Open-document store: uri string → full buffer text (FULL text sync).
@@ -66,7 +76,10 @@ pub fn run_stdio() -> Result<(), String> {
     for msg in &conn.receiver {
         match msg {
             Message::Request(req) => {
-                if conn.handle_shutdown(&req).map_err(|e| format!("lsp shutdown: {e}"))? {
+                if conn
+                    .handle_shutdown(&req)
+                    .map_err(|e| format!("lsp shutdown: {e}"))?
+                {
                     break;
                 }
                 dispatch_request(&conn, &docs, req);
@@ -82,11 +95,13 @@ pub fn run_stdio() -> Result<(), String> {
 
 fn server_capabilities() -> ServerCapabilities {
     ServerCapabilities {
-        text_document_sync: Some(TextDocumentSyncCapability::Options(TextDocumentSyncOptions {
-            open_close: Some(true),
-            change: Some(TextDocumentSyncKind::FULL),
-            ..Default::default()
-        })),
+        text_document_sync: Some(TextDocumentSyncCapability::Options(
+            TextDocumentSyncOptions {
+                open_close: Some(true),
+                change: Some(TextDocumentSyncKind::FULL),
+                ..Default::default()
+            },
+        )),
         completion_provider: Some(CompletionOptions {
             resolve_provider: Some(false),
             ..Default::default()
@@ -110,9 +125,9 @@ where
             let _ = conn.sender.send(Response::new_ok(id, value).into());
         }
         Err(ExtractError::JsonError { error, .. }) => {
-            let _ = conn
-                .sender
-                .send(Response::new_err(id, ErrorCode::InvalidParams as i32, error.to_string()).into());
+            let _ = conn.sender.send(
+                Response::new_err(id, ErrorCode::InvalidParams as i32, error.to_string()).into(),
+            );
         }
         Err(ExtractError::MethodMismatch(_)) => unreachable!("method matched before extract"),
     }
@@ -122,12 +137,13 @@ fn dispatch_request(conn: &Connection, docs: &Docs, req: Request) {
     match req.method.as_str() {
         Completion::METHOD => handle(conn, req, |p: CompletionParams| completions(docs, p)),
         HoverRequest::METHOD => handle(conn, req, |p: HoverParams| hover(docs, p)),
-        DocumentSymbolRequest::METHOD => {
-            handle(conn, req, |p: DocumentSymbolParams| document_symbols(docs, p))
-        }
+        DocumentSymbolRequest::METHOD => handle(conn, req, |p: DocumentSymbolParams| {
+            document_symbols(docs, p)
+        }),
         _ => {
             let _ = conn.sender.send(
-                Response::new_err(req.id, ErrorCode::MethodNotFound as i32, "unhandled".into()).into(),
+                Response::new_err(req.id, ErrorCode::MethodNotFound as i32, "unhandled".into())
+                    .into(),
             );
         }
     }
@@ -188,7 +204,10 @@ fn compute_diagnostics(text: &str) -> Vec<Diagnostic> {
             let l = i as u32;
             out.push(Diagnostic {
                 range: Range {
-                    start: Position { line: l, character: 0 },
+                    start: Position {
+                        line: l,
+                        character: 0,
+                    },
                     end: Position {
                         line: l,
                         character: line.chars().count() as u32,
@@ -251,7 +270,10 @@ fn hover(docs: &Docs, params: HoverParams) -> Option<Hover> {
     let pos = params.text_document_position_params.position;
     let text = docs.get(uri.as_str())?;
     let word = word_at(text, pos)?;
-    let doc = BUILTIN_DOCS.iter().find(|(n, _)| *n == word).map(|(_, d)| *d)?;
+    let doc = BUILTIN_DOCS
+        .iter()
+        .find(|(n, _)| *n == word)
+        .map(|(_, d)| *d)?;
     Some(Hover {
         contents: HoverContents::Markup(MarkupContent {
             kind: MarkupKind::Markdown,
@@ -273,9 +295,15 @@ fn document_symbols(docs: &Docs, params: DocumentSymbolParams) -> DocumentSymbol
         let t = line.trim();
         // `let <name> = …` and `function <name>(…)`.
         let (kind, name) = if let Some(rest) = t.strip_prefix("let ") {
-            (SymbolKind::VARIABLE, rest.split(['=', ' ']).next().unwrap_or("").trim())
+            (
+                SymbolKind::VARIABLE,
+                rest.split(['=', ' ']).next().unwrap_or("").trim(),
+            )
         } else if let Some(rest) = t.strip_prefix("function ") {
-            (SymbolKind::FUNCTION, rest.split('(').next().unwrap_or("").trim())
+            (
+                SymbolKind::FUNCTION,
+                rest.split('(').next().unwrap_or("").trim(),
+            )
         } else {
             continue;
         };
@@ -284,8 +312,14 @@ fn document_symbols(docs: &Docs, params: DocumentSymbolParams) -> DocumentSymbol
         }
         let l = i as u32;
         let range = Range {
-            start: Position { line: l, character: 0 },
-            end: Position { line: l, character: line.chars().count() as u32 },
+            start: Position {
+                line: l,
+                character: 0,
+            },
+            end: Position {
+                line: l,
+                character: line.chars().count() as u32,
+            },
         };
         syms.push(DocumentSymbol {
             name: name.to_string(),

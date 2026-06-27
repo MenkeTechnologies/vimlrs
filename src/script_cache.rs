@@ -147,7 +147,9 @@ impl ScriptCache {
         let parent = path.parent().unwrap_or_else(|| Path::new("/tmp"));
         let lock_path = parent.join(format!(
             "{}.lock",
-            path.file_name().and_then(|s| s.to_str()).unwrap_or("scripts.rkyv")
+            path.file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("scripts.rkyv")
         ));
         Ok(Self {
             path: path.to_path_buf(),
@@ -310,7 +312,9 @@ fn write_shard_atomic(path: &Path, shard: &ScriptShard) -> std::io::Result<()> {
         .unwrap_or(0);
     let tmp_path = parent.join(format!(
         "{}.tmp.{pid}.{nanos}",
-        path.file_name().and_then(|s| s.to_str()).unwrap_or("scripts.rkyv")
+        path.file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("scripts.rkyv")
     ));
     {
         let mut f = File::create(&tmp_path)?;

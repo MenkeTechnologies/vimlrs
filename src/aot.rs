@@ -49,7 +49,10 @@ pub struct EmbeddedFiles(pub Vec<EmbeddedFile>);
 
 fn encode_payload_v2(files: &[EmbeddedFile]) -> Vec<u8> {
     let mut out = Vec::with_capacity(
-        64 + files.iter().map(|f| f.name.len() + f.source.len() + 8).sum::<usize>(),
+        64 + files
+            .iter()
+            .map(|f| f.name.len() + f.source.len() + 8)
+            .sum::<usize>(),
     );
     let count = u32::try_from(files.len()).expect("file count fits in u32");
     out.extend_from_slice(&count.to_le_bytes());
@@ -81,7 +84,9 @@ fn decode_payload_v2(bytes: &[u8]) -> Option<EmbeddedFiles> {
         if pos + name_len > bytes.len() {
             return None;
         }
-        let name = std::str::from_utf8(&bytes[pos..pos + name_len]).ok()?.to_string();
+        let name = std::str::from_utf8(&bytes[pos..pos + name_len])
+            .ok()?
+            .to_string();
         pos += name_len;
         if pos + 4 > bytes.len() {
             return None;
@@ -91,7 +96,9 @@ fn decode_payload_v2(bytes: &[u8]) -> Option<EmbeddedFiles> {
         if pos + src_len > bytes.len() {
             return None;
         }
-        let source = std::str::from_utf8(&bytes[pos..pos + src_len]).ok()?.to_string();
+        let source = std::str::from_utf8(&bytes[pos..pos + src_len])
+            .ok()?
+            .to_string();
         pos += src_len;
         out.push(EmbeddedFile { name, source });
     }
@@ -108,8 +115,12 @@ fn decode_payload_v1(bytes: &[u8]) -> Option<EmbeddedFiles> {
     if 4 + name_len > bytes.len() {
         return None;
     }
-    let name = std::str::from_utf8(&bytes[4..4 + name_len]).ok()?.to_string();
-    let source = std::str::from_utf8(&bytes[4 + name_len..]).ok()?.to_string();
+    let name = std::str::from_utf8(&bytes[4..4 + name_len])
+        .ok()?
+        .to_string();
+    let source = std::str::from_utf8(&bytes[4 + name_len..])
+        .ok()?
+        .to_string();
     Some(EmbeddedFiles(vec![EmbeddedFile { name, source }]))
 }
 
@@ -129,7 +140,11 @@ pub fn append_embedded_files(out_path: &Path, files: &[EmbeddedFile]) -> io::Res
     let compressed = zstd::stream::encode_all(&payload[..], 3)?;
     let mut f = OpenOptions::new().append(true).open(out_path)?;
     f.write_all(&compressed)?;
-    let trailer = build_trailer(compressed.len() as u64, payload.len() as u64, AOT_VERSION_V2);
+    let trailer = build_trailer(
+        compressed.len() as u64,
+        payload.len() as u64,
+        AOT_VERSION_V2,
+    );
     f.write_all(&trailer)?;
     f.sync_all()?;
     Ok(())
@@ -226,8 +241,8 @@ pub fn build(script_paths: &[PathBuf], out_path: &Path) -> Result<PathBuf, Strin
     }
     let mut files: Vec<EmbeddedFile> = Vec::with_capacity(script_paths.len());
     for p in script_paths {
-        let source =
-            fs::read_to_string(p).map_err(|e| format!("vimlrs --build: cannot read {}: {e}", p.display()))?;
+        let source = fs::read_to_string(p)
+            .map_err(|e| format!("vimlrs --build: cannot read {}: {e}", p.display()))?;
         let name = p
             .file_name()
             .and_then(|s| s.to_str())
@@ -237,8 +252,13 @@ pub fn build(script_paths: &[PathBuf], out_path: &Path) -> Result<PathBuf, Strin
     }
     let exe = std::env::current_exe()
         .map_err(|e| format!("vimlrs --build: locating current executable: {e}"))?;
-    copy_exe_without_trailer(&exe, out_path)
-        .map_err(|e| format!("vimlrs --build: copy {} -> {}: {e}", exe.display(), out_path.display()))?;
+    copy_exe_without_trailer(&exe, out_path).map_err(|e| {
+        format!(
+            "vimlrs --build: copy {} -> {}: {e}",
+            exe.display(),
+            out_path.display()
+        )
+    })?;
     append_embedded_files(out_path, &files)
         .map_err(|e| format!("vimlrs --build: write trailer: {e}"))?;
     set_executable(out_path);
@@ -373,8 +393,14 @@ mod tests {
     #[test]
     fn payload_v2_roundtrip_preserves_order() {
         let files = vec![
-            EmbeddedFile { name: "a.vim".into(), source: "echo 1\n".into() },
-            EmbeddedFile { name: "b.vim".into(), source: "echo 2\n".into() },
+            EmbeddedFile {
+                name: "a.vim".into(),
+                source: "echo 1\n".into(),
+            },
+            EmbeddedFile {
+                name: "b.vim".into(),
+                source: "echo 2\n".into(),
+            },
         ];
         let decoded = decode_payload_v2(&encode_payload_v2(&files)).unwrap();
         assert_eq!(decoded.0.len(), 2);

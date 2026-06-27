@@ -197,13 +197,18 @@ struct Compiler {
 /// `:let` target other than a bare name. A name is slotted only if *every*
 /// assignment to it provably evaluates to a Number (fixed-point over the set,
 /// so `let s = s + i` keeps `s` a slot only while `i` is one too).
-type SlotPlan = (std::collections::HashMap<String, u16>, std::collections::HashSet<String>);
+type SlotPlan = (
+    std::collections::HashMap<String, u16>,
+    std::collections::HashSet<String>,
+);
 
 fn slot_plan(stmts: &[Stmt], in_function: bool) -> SlotPlan {
     use std::collections::{HashMap, HashSet};
 
     fn is_bare(name: &str) -> bool {
-        !name.is_empty() && !name.contains(':') && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        !name.is_empty()
+            && !name.contains(':')
+            && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
     }
 
     // The function-local slot key for a name, or None if it lives in another
@@ -264,7 +269,11 @@ fn slot_plan(stmts: &[Stmt], in_function: bool) -> SlotPlan {
                 walk_expr(a, cx);
                 walk_expr(b, cx);
             }
-            Expr::Ternary { cond, then, otherwise } => {
+            Expr::Ternary {
+                cond,
+                then,
+                otherwise,
+            } => {
                 walk_expr(cond, cx);
                 walk_expr(then, cx);
                 walk_expr(otherwise, cx);
@@ -302,9 +311,12 @@ fn slot_plan(stmts: &[Stmt], in_function: bool) -> SlotPlan {
                 }
                 // `for VAR in range(...)` keeps its var slottable (range yields
                 // Numbers) — bare or, in a function, `l:`-scoped; recurse the body.
-                Stmt::For { vars: ForVars::One(name), iter, body }
-                    if slot_key(name, cx.in_function).is_some()
-                        && matches!(iter, Expr::Call { name: f, .. } if f == "range") =>
+                Stmt::For {
+                    vars: ForVars::One(name),
+                    iter,
+                    body,
+                } if slot_key(name, cx.in_function).is_some()
+                    && matches!(iter, Expr::Call { name: f, .. } if f == "range") =>
                 {
                     if let Expr::Call { args, .. } = iter {
                         args.iter().for_each(|a| walk_expr(a, cx));
@@ -319,7 +331,8 @@ fn slot_plan(stmts: &[Stmt], in_function: bool) -> SlotPlan {
                 Stmt::For { vars, iter, body } => {
                     walk_expr(iter, cx);
                     let mut disq_var = |n: &str| {
-                        cx.disq.insert(slot_key(n, cx.in_function).unwrap_or(n).to_string());
+                        cx.disq
+                            .insert(slot_key(n, cx.in_function).unwrap_or(n).to_string());
                     };
                     match vars {
                         ForVars::One(n) => disq_var(n),
@@ -327,10 +340,16 @@ fn slot_plan(stmts: &[Stmt], in_function: bool) -> SlotPlan {
                     }
                     walk(body, cx);
                 }
-                Stmt::Let { target: LetTarget::Var(name), expr } => {
+                Stmt::Let {
+                    target: LetTarget::Var(name),
+                    expr,
+                } => {
                     walk_expr(expr, cx);
                     if let Some(key) = slot_key(name, cx.in_function) {
-                        cx.assigns.entry(key.to_string()).or_default().push(expr.clone());
+                        cx.assigns
+                            .entry(key.to_string())
+                            .or_default()
+                            .push(expr.clone());
                     }
                 }
                 Stmt::Let { .. } => *cx.bail = true, // non-bare target: be safe
@@ -360,7 +379,12 @@ fn slot_plan(stmts: &[Stmt], in_function: bool) -> SlotPlan {
     let mut disq: HashSet<String> = HashSet::new();
     walk(
         stmts,
-        &mut Ctx { bail: &mut bail, assigns: &mut assigns, disq: &mut disq, in_function },
+        &mut Ctx {
+            bail: &mut bail,
+            assigns: &mut assigns,
+            disq: &mut disq,
+            in_function,
+        },
     );
     if bail || assigns.is_empty() {
         return (HashMap::new(), HashSet::new());
@@ -380,19 +404,26 @@ fn slot_plan(stmts: &[Stmt], in_function: bool) -> SlotPlan {
                     && rhs_kind(lhs, set, is_int, in_function)
                     && rhs_kind(rhs, set, is_int, in_function)
             }
-            Expr::Unary { op: UnaryOp::Neg | UnaryOp::Plus, expr } => {
-                rhs_kind(expr, set, is_int, in_function)
-            }
+            Expr::Unary {
+                op: UnaryOp::Neg | UnaryOp::Plus,
+                expr,
+            } => rhs_kind(expr, set, is_int, in_function),
             // Logical-not yields Integer 0/1 when its operand is integer.
-            Expr::Unary { op: UnaryOp::Not, expr } => rhs_kind(expr, set, true, in_function),
+            Expr::Unary {
+                op: UnaryOp::Not,
+                expr,
+            } => rhs_kind(expr, set, true, in_function),
             // The bitwise builtins always yield an Integer (so valid in either
             // pass) when every argument is itself provably integer.
             Expr::Call { name, args } if bitwise_native_op(name, args.len()).is_some() => {
                 args.iter().all(|a| rhs_kind(a, set, true, in_function))
             }
             // A ternary's kind is its branches' kind (the test is irrelevant).
-            Expr::Ternary { then, otherwise, .. } => {
-                rhs_kind(then, set, is_int, in_function) && rhs_kind(otherwise, set, is_int, in_function)
+            Expr::Ternary {
+                then, otherwise, ..
+            } => {
+                rhs_kind(then, set, is_int, in_function)
+                    && rhs_kind(otherwise, set, is_int, in_function)
             }
             // A comparison reifies to Integer 0/1 when both operands are numeric
             // (so it lowers natively); valid in either pass.
@@ -409,7 +440,10 @@ fn slot_plan(stmts: &[Stmt], in_function: bool) -> SlotPlan {
         loop {
             let mut changed = false;
             for name in set.iter().cloned().collect::<Vec<_>>() {
-                if !assigns[&name].iter().all(|rhs| rhs_kind(rhs, &set, is_int, in_function)) {
+                if !assigns[&name]
+                    .iter()
+                    .all(|rhs| rhs_kind(rhs, &set, is_int, in_function))
+                {
                     set.remove(&name);
                     changed = true;
                 }
@@ -448,7 +482,11 @@ fn slot_plan(stmts: &[Stmt], in_function: bool) -> SlotPlan {
                 scoped_e(a, in_function, out);
                 scoped_e(b, in_function, out);
             }
-            Expr::Ternary { cond, then, otherwise } => {
+            Expr::Ternary {
+                cond,
+                then,
+                otherwise,
+            } => {
                 scoped_e(cond, in_function, out);
                 scoped_e(then, in_function, out);
                 scoped_e(otherwise, in_function, out);
@@ -478,7 +516,10 @@ fn slot_plan(stmts: &[Stmt], in_function: bool) -> SlotPlan {
     fn scoped_s(stmts: &[Stmt], in_function: bool, out: &mut HashSet<String>) {
         for s in stmts {
             match s {
-                Stmt::Let { target: LetTarget::Var(n), expr } => {
+                Stmt::Let {
+                    target: LetTarget::Var(n),
+                    expr,
+                } => {
                     scoped_var(n, in_function, out);
                     scoped_e(expr, in_function, out);
                 }
@@ -514,11 +555,16 @@ fn slot_plan(stmts: &[Stmt], in_function: bool) -> SlotPlan {
 
     let mut names: Vec<String> = num.iter().cloned().collect();
     names.sort();
-    let slots: HashMap<String, u16> =
-        names.into_iter().enumerate().map(|(i, n)| (n, i as u16)).collect();
+    let slots: HashMap<String, u16> = names
+        .into_iter()
+        .enumerate()
+        .map(|(i, n)| (n, i as u16))
+        .collect();
     // Integer subset, restricted to the names that actually got slotted.
-    let int_slots: HashSet<String> =
-        int_only.into_iter().filter(|n| slots.contains_key(n)).collect();
+    let int_slots: HashSet<String> = int_only
+        .into_iter()
+        .filter(|n| slots.contains_key(n))
+        .collect();
     (slots, int_slots)
 }
 
@@ -1109,22 +1155,28 @@ impl Compiler {
             Expr::Arith { op, lhs, rhs } => {
                 !matches!(op, ArithOp::Concat) && self.expr_is_num(lhs) && self.expr_is_num(rhs)
             }
-            Expr::Unary { op: UnaryOp::Neg | UnaryOp::Plus, expr } => self.expr_is_num(expr),
+            Expr::Unary {
+                op: UnaryOp::Neg | UnaryOp::Plus,
+                expr,
+            } => self.expr_is_num(expr),
             // Bitwise builtins of integer args yield an Integer (so also a Number).
             Expr::Call { name, args } if bitwise_native_op(name, args.len()).is_some() => {
                 args.iter().all(|a| self.expr_is_int(a))
             }
             // A ternary is a Number when both branches are (the test is irrelevant
             // to the result type).
-            Expr::Ternary { then, otherwise, .. } => {
-                self.expr_is_num(then) && self.expr_is_num(otherwise)
-            }
+            Expr::Ternary {
+                then, otherwise, ..
+            } => self.expr_is_num(then) && self.expr_is_num(otherwise),
             // A native-lowered comparison reifies to Number 0/1.
             Expr::Compare { op, lhs, rhs, .. } => {
                 Self::native_cmp(*op).is_some() && self.expr_is_num(lhs) && self.expr_is_num(rhs)
             }
             // Logical-not of an Integer reifies to 0/1 (also a Number).
-            Expr::Unary { op: UnaryOp::Not, expr } => self.expr_is_int(expr),
+            Expr::Unary {
+                op: UnaryOp::Not,
+                expr,
+            } => self.expr_is_int(expr),
             _ => false,
         }
     }
@@ -1138,21 +1190,27 @@ impl Compiler {
             Expr::Arith { op, lhs, rhs } => {
                 !matches!(op, ArithOp::Concat) && self.expr_is_int(lhs) && self.expr_is_int(rhs)
             }
-            Expr::Unary { op: UnaryOp::Neg | UnaryOp::Plus, expr } => self.expr_is_int(expr),
+            Expr::Unary {
+                op: UnaryOp::Neg | UnaryOp::Plus,
+                expr,
+            } => self.expr_is_int(expr),
             // Bitwise builtins yield an Integer when every argument is an Integer.
             Expr::Call { name, args } if bitwise_native_op(name, args.len()).is_some() => {
                 args.iter().all(|a| self.expr_is_int(a))
             }
             // A ternary is an Integer when both branches are.
-            Expr::Ternary { then, otherwise, .. } => {
-                self.expr_is_int(then) && self.expr_is_int(otherwise)
-            }
+            Expr::Ternary {
+                then, otherwise, ..
+            } => self.expr_is_int(then) && self.expr_is_int(otherwise),
             // A native-lowered comparison yields Integer 0/1.
             Expr::Compare { op, lhs, rhs, .. } => {
                 Self::native_cmp(*op).is_some() && self.expr_is_num(lhs) && self.expr_is_num(rhs)
             }
             // Logical-not of an Integer yields Integer 0/1.
-            Expr::Unary { op: UnaryOp::Not, expr } => self.expr_is_int(expr),
+            Expr::Unary {
+                op: UnaryOp::Not,
+                expr,
+            } => self.expr_is_int(expr),
             _ => false,
         }
     }
@@ -1349,20 +1407,13 @@ impl Compiler {
                 };
                 self.emit(Op::CallBuiltin(id, 2));
             }
-            Expr::Compare {
-                op,
-                case,
-                lhs,
-                rhs,
-            } => {
+            Expr::Compare { op, case, lhs, rhs } => {
                 // Value-position compare of numeric operands → native compare
                 // (`cond()`) reified to VimL's Number 0/1 with a tiny branch (all
                 // JIT-lowerable ops), so `let s += i > 5` keeps a loop traceable.
                 // The case flag is irrelevant for numbers. Non-numeric operands
                 // (or `is`/`isnot`) keep the builtin, which yields 0/1 directly.
-                if Self::native_cmp(*op).is_some()
-                    && self.expr_is_num(lhs)
-                    && self.expr_is_num(rhs)
+                if Self::native_cmp(*op).is_some() && self.expr_is_num(lhs) && self.expr_is_num(rhs)
                 {
                     self.cond(e)?; // native compare → Bool on the stack
                     let jf = self.emit(Op::JumpIfFalse(0));
@@ -1452,7 +1503,10 @@ impl Compiler {
                     for a in args {
                         self.expr(a)?;
                     }
-                    self.emit(Op::CallBuiltin(h::VIML_CALL_USER, Self::argc(args.len() + 1)?));
+                    self.emit(Op::CallBuiltin(
+                        h::VIML_CALL_USER,
+                        Self::argc(args.len() + 1)?,
+                    ));
                     self.emit_call_unwind_check();
                 }
             },

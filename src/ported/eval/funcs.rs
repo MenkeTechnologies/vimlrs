@@ -8,37 +8,38 @@
 //! functions returning another type set `v_type`. Phase 3 ports a subset.
 #![allow(non_snake_case)]
 
+use crate::ported::eval::list::FILTER_MAP_EVAL_HOOK;
 use crate::ported::eval::typval::{
-    tv_blob_len, tv_get_bool, tv_dict_add_tv, tv_dict_find, tv_dict_len, tv_get_float,
+    callback_from_typval, tv_blob_get, tv_check_for_number_arg, tv_check_for_string_arg,
+    tv_dict_watcher_add, tv_dict_watcher_remove, tv_get_number, tv_get_string_buf,
+    tv_get_string_chk, Callback, CALL_FUNC_HOOK,
+};
+use crate::ported::eval::typval::{
+    tv_blob_len, tv_dict_add_tv, tv_dict_find, tv_dict_len, tv_get_bool, tv_get_float,
     tv_get_number_chk, tv_get_string, tv_list_alloc_ret, tv_list_append_number,
     tv_list_append_string, tv_list_append_tv, tv_list_copy, tv_list_find_nr, tv_list_flatten,
     tv_list_len, tv_list_ref,
 };
-use crate::ported::eval_h::{FAIL, OK};
-use crate::ported::eval::typval::{
-    callback_from_typval, tv_blob_get, tv_check_for_number_arg, tv_check_for_string_arg,
-    tv_dict_watcher_add, tv_dict_watcher_remove, tv_get_number, tv_get_string_buf, tv_get_string_chk,
-    Callback, CALL_FUNC_HOOK,
-};
-use crate::ported::os::env::os_get_pid;
-use crate::ported::os::time::{os_hrtime, os_localtime_r, os_strptime};
-use crate::ported::profile::{profile_end, profile_msg, profile_signed, profile_start, profile_sub, proftime_T};
-use crate::ported::sha256::sha256_bytes;
+use crate::ported::eval::typval::{tv_dict_alloc, tv_dict_alloc_ret, tv_list_alloc};
 use crate::ported::eval::typval_defs_h::{
     typval_T, typval_vval_union::*, varnumber_T, BoolVarValue::*, SpecialVarValue::*, VarType::*,
-    VAR_TYPE_BLOB,
-    VAR_TYPE_BOOL, VAR_TYPE_DICT, VAR_TYPE_FLOAT, VAR_TYPE_FUNC, VAR_TYPE_LIST, VAR_TYPE_NUMBER,
-    VAR_TYPE_SPECIAL, VAR_TYPE_STRING,
+    VAR_TYPE_BLOB, VAR_TYPE_BOOL, VAR_TYPE_DICT, VAR_TYPE_FLOAT, VAR_TYPE_FUNC, VAR_TYPE_LIST,
+    VAR_TYPE_NUMBER, VAR_TYPE_SPECIAL, VAR_TYPE_STRING,
 };
+use crate::ported::eval::vars::{get_vim_var_str, vv::VV_REG};
+use crate::ported::eval_h::{FAIL, OK};
 use crate::ported::message::emsg;
-use crate::ported::option::get_option_value;
 use crate::ported::ops::{
     format_reg_type, get_reg_contents, get_reg_type, get_yank_type, write_reg_contents_lst,
     MotionType,
 };
-use crate::ported::eval::vars::{get_vim_var_str, vv::VV_REG};
-use crate::ported::eval::list::FILTER_MAP_EVAL_HOOK;
-use crate::ported::eval::typval::{tv_dict_alloc, tv_dict_alloc_ret, tv_list_alloc};
+use crate::ported::option::get_option_value;
+use crate::ported::os::env::os_get_pid;
+use crate::ported::os::time::{os_hrtime, os_localtime_r, os_strptime};
+use crate::ported::profile::{
+    profile_end, profile_msg, profile_signed, profile_start, profile_sub, proftime_T,
+};
+use crate::ported::sha256::sha256_bytes;
 use crate::viml_regex::{regex_matchlist, regex_matchstrpos};
 
 /// Port of `f_len()` from `Src/eval/funcs.c`.
@@ -88,7 +89,6 @@ pub fn f_type(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.vval = v_number(n);
 }
 
-
 /// Port of `f_empty()` from `Src/eval/funcs.c`.
 ///
 /// "empty(expr)" function — whether `expr` is empty.
@@ -100,7 +100,9 @@ pub fn f_empty(argvars: &[typval_T], rettv: &mut typval_T) {
         (VAR_NUMBER, v_number(x)) => *x == 0,
         (VAR_FLOAT, v_float(f)) => *f == 0.0,
         (VAR_LIST, v_list(l)) => l.as_ref().map_or(true, |l| l.borrow().lv_len == 0),
-        (VAR_DICT, v_dict(d)) => d.as_ref().map_or(true, |d| d.borrow().dv_hashtab.is_empty()),
+        (VAR_DICT, v_dict(d)) => d
+            .as_ref()
+            .map_or(true, |d| d.borrow().dv_hashtab.is_empty()),
         (VAR_BLOB, v_blob(b)) => b.as_ref().map_or(true, |b| b.borrow().bv_ga.is_empty()),
         (VAR_BOOL, v_bool(b)) => *b == kBoolVarFalse,
         (VAR_SPECIAL, _) => true,
@@ -122,7 +124,6 @@ pub fn f_abs(argvars: &[typval_T], rettv: &mut typval_T) {
         rettv.vval = v_number(tv_get_number_chk(&argvars[0], None).abs());
     }
 }
-
 
 /// Port of `f_str2float()` from `Src/eval/funcs.c`.
 ///
@@ -156,7 +157,12 @@ pub fn f_function(argvars: &[typval_T], rettv: &mut typval_T) {
     for a in &argvars[1..] {
         match (a.v_type, &a.vval) {
             (VAR_LIST, v_list(Some(l))) => {
-                pt_argv = l.borrow().lv_items.iter().map(|it| it.li_tv.clone()).collect();
+                pt_argv = l
+                    .borrow()
+                    .lv_items
+                    .iter()
+                    .map(|it| it.li_tv.clone())
+                    .collect();
             }
             (VAR_DICT, v_dict(Some(d))) => pt_dict = Some(d.clone()),
             _ => {}
@@ -173,19 +179,21 @@ pub fn f_function(argvars: &[typval_T], rettv: &mut typval_T) {
     )));
 }
 
-
-
-
 /// Port of `f_char2nr()` from `Src/eval/funcs.c` — code point of the first char.
 pub fn f_char2nr(argvars: &[typval_T], rettv: &mut typval_T) {
-    let n = tv_get_string(&argvars[0]).chars().next().map_or(0, |c| c as varnumber_T);
+    let n = tv_get_string(&argvars[0])
+        .chars()
+        .next()
+        .map_or(0, |c| c as varnumber_T);
     rettv.vval = v_number(n);
 }
 
 /// Port of `f_nr2char()` from `Src/eval/funcs.c` — char for a code point.
 pub fn f_nr2char(argvars: &[typval_T], rettv: &mut typval_T) {
     let n = tv_get_number_chk(&argvars[0], None);
-    let s = char::from_u32(n as u32).map(String::from).unwrap_or_default();
+    let s = char::from_u32(n as u32)
+        .map(String::from)
+        .unwrap_or_default();
     rettv.v_type = VAR_STRING;
     rettv.vval = v_string(s);
 }
@@ -215,10 +223,17 @@ pub fn f_repeat(argvars: &[typval_T], rettv: &mut typval_T) {
 /// (default whitespace `\s\+`), dropping empty pieces unless `{keepempty}`.
 pub fn f_split(argvars: &[typval_T], rettv: &mut typval_T) {
     let s = tv_get_string(&argvars[0]);
-    let keepempty = argvars.get(2).map_or(false, |t| tv_get_number_chk(t, None) != 0);
+    let keepempty = argvars
+        .get(2)
+        .is_some_and(|t| tv_get_number_chk(t, None) != 0);
     let pat = argvars.get(1).map(tv_get_string).filter(|p| !p.is_empty());
     let parts: Vec<String> = match pat {
-        Some(p) => crate::viml_regex::regex_split(&s, &p, tv_get_bool(&get_option_value("ignorecase")) != 0, keepempty),
+        Some(p) => crate::viml_regex::regex_split(
+            &s,
+            &p,
+            tv_get_bool(&get_option_value("ignorecase")) != 0,
+            keepempty,
+        ),
         None => s.split_whitespace().map(String::from).collect(),
     };
     let l = tv_list_alloc_ret(rettv, parts.len() as isize);
@@ -234,7 +249,11 @@ pub fn f_matchstr(argvars: &[typval_T], rettv: &mut typval_T) {
     let s = tv_get_string(&argvars[0]);
     let pat = tv_get_string(&argvars[1]);
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(crate::viml_regex::regex_matchstr(&pat, &s, tv_get_bool(&get_option_value("ignorecase")) != 0));
+    rettv.vval = v_string(crate::viml_regex::regex_matchstr(
+        &pat,
+        &s,
+        tv_get_bool(&get_option_value("ignorecase")) != 0,
+    ));
 }
 
 /// Port of `f_match()` from `Src/eval/funcs.c` — the char index of the first
@@ -242,7 +261,11 @@ pub fn f_matchstr(argvars: &[typval_T], rettv: &mut typval_T) {
 pub fn f_match(argvars: &[typval_T], rettv: &mut typval_T) {
     let s = tv_get_string(&argvars[0]);
     let pat = tv_get_string(&argvars[1]);
-    rettv.vval = v_number(crate::viml_regex::regex_match_index(&pat, &s, tv_get_bool(&get_option_value("ignorecase")) != 0));
+    rettv.vval = v_number(crate::viml_regex::regex_match_index(
+        &pat,
+        &s,
+        tv_get_bool(&get_option_value("ignorecase")) != 0,
+    ));
 }
 
 /// Port of `f_substitute()` from `Src/eval/funcs.c` — replace matches of `{pat}`
@@ -452,7 +475,7 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
             continue;
         }
         i += 1; // past '%'
-        // Flags.
+                // Flags.
         let mut left = false;
         let mut zero = false;
         while i < bytes.len() && matches!(bytes[i], '-' | '0' | '+' | ' ' | '#') {
@@ -554,15 +577,18 @@ pub fn f_pow(argvars: &[typval_T], rettv: &mut typval_T) {
 
 /// Port of `f_and()` from `Src/eval/funcs.c` — bitwise AND.
 pub fn f_and(argvars: &[typval_T], rettv: &mut typval_T) {
-    rettv.vval = v_number(tv_get_number_chk(&argvars[0], None) & tv_get_number_chk(&argvars[1], None));
+    rettv.vval =
+        v_number(tv_get_number_chk(&argvars[0], None) & tv_get_number_chk(&argvars[1], None));
 }
 /// Port of `f_or()` from `Src/eval/funcs.c` — bitwise OR.
 pub fn f_or(argvars: &[typval_T], rettv: &mut typval_T) {
-    rettv.vval = v_number(tv_get_number_chk(&argvars[0], None) | tv_get_number_chk(&argvars[1], None));
+    rettv.vval =
+        v_number(tv_get_number_chk(&argvars[0], None) | tv_get_number_chk(&argvars[1], None));
 }
 /// Port of `f_xor()` from `Src/eval/funcs.c` — bitwise XOR.
 pub fn f_xor(argvars: &[typval_T], rettv: &mut typval_T) {
-    rettv.vval = v_number(tv_get_number_chk(&argvars[0], None) ^ tv_get_number_chk(&argvars[1], None));
+    rettv.vval =
+        v_number(tv_get_number_chk(&argvars[0], None) ^ tv_get_number_chk(&argvars[1], None));
 }
 /// Port of `f_invert()` from `Src/eval/funcs.c` — bitwise NOT.
 pub fn f_invert(argvars: &[typval_T], rettv: &mut typval_T) {
@@ -570,10 +596,6 @@ pub fn f_invert(argvars: &[typval_T], rettv: &mut typval_T) {
 }
 
 // ── more string functions (Src/eval/funcs.c) ──
-
-
-
-
 
 // ── more list / dict functions (Src/eval/funcs.c) ──
 
@@ -609,7 +631,12 @@ pub fn f_insert(argvars: &[typval_T], rettv: &mut typval_T) {
 pub fn f_copy(argvars: &[typval_T], rettv: &mut typval_T) {
     match (argvars[0].v_type, &argvars[0].vval) {
         (VAR_LIST, v_list(Some(l))) => {
-            let items: Vec<_> = l.borrow().lv_items.iter().map(|it| it.li_tv.clone()).collect();
+            let items: Vec<_> = l
+                .borrow()
+                .lv_items
+                .iter()
+                .map(|it| it.li_tv.clone())
+                .collect();
             let out = tv_list_alloc_ret(rettv, items.len() as isize);
             let mut ob = out.borrow_mut();
             for tv in items {
@@ -636,7 +663,9 @@ pub fn f_copy(argvars: &[typval_T], rettv: &mut typval_T) {
 /// Port of `f_items()` from `Src/eval/funcs.c` — `[index/key, value]` pairs of a
 /// String/List/Blob/Dict.
 pub fn f_items(argvars: &[typval_T], rettv: &mut typval_T) {
-    use crate::ported::eval::typval::{tv_blob2items, tv_dict2items, tv_list2items, tv_string2items};
+    use crate::ported::eval::typval::{
+        tv_blob2items, tv_dict2items, tv_list2items, tv_string2items,
+    };
     match argvars[0].v_type {
         VAR_STRING => tv_string2items(argvars, rettv),
         VAR_LIST => tv_list2items(argvars, rettv),
@@ -657,7 +686,11 @@ pub fn f_items(argvars: &[typval_T], rettv: &mut typval_T) {
 pub fn f_matchlist(argvars: &[typval_T], rettv: &mut typval_T) {
     let s = tv_get_string(&argvars[0]);
     let pat = tv_get_string(&argvars[1]);
-    let parts = crate::viml_regex::regex_matchlist(&pat, &s, tv_get_bool(&get_option_value("ignorecase")) != 0);
+    let parts = crate::viml_regex::regex_matchlist(
+        &pat,
+        &s,
+        tv_get_bool(&get_option_value("ignorecase")) != 0,
+    );
     let l = tv_list_alloc_ret(rettv, parts.len() as isize);
     let mut lb = l.borrow_mut();
     for p in &parts {
@@ -670,9 +703,12 @@ pub fn f_matchlist(argvars: &[typval_T], rettv: &mut typval_T) {
 pub fn f_matchend(argvars: &[typval_T], rettv: &mut typval_T) {
     let s = tv_get_string(&argvars[0]);
     let pat = tv_get_string(&argvars[1]);
-    rettv.vval = v_number(crate::viml_regex::regex_matchend(&pat, &s, tv_get_bool(&get_option_value("ignorecase")) != 0));
+    rettv.vval = v_number(crate::viml_regex::regex_matchend(
+        &pat,
+        &s,
+        tv_get_bool(&get_option_value("ignorecase")) != 0,
+    ));
 }
-
 
 /// Port of `f_escape()` from `Src/eval/funcs.c` — prefix each character of
 /// `{string}` that occurs in `{chars}` with a backslash.
@@ -689,8 +725,6 @@ pub fn f_escape(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.v_type = VAR_STRING;
     rettv.vval = v_string(out);
 }
-
-
 
 /// Port of `f_list2str()` from `Src/eval/funcs.c` — a String from a List of code
 /// points.
@@ -776,8 +810,12 @@ pub fn f_flattennew(argvars: &[typval_T], rettv: &mut typval_T) {
 pub(crate) fn var_item_copy(from: &typval_T) -> typval_T {
     match (from.v_type, &from.vval) {
         (VAR_LIST, v_list(Some(l))) => {
-            let items: Vec<typval_T> =
-                l.borrow().lv_items.iter().map(|it| var_item_copy(&it.li_tv)).collect();
+            let items: Vec<typval_T> = l
+                .borrow()
+                .lv_items
+                .iter()
+                .map(|it| var_item_copy(&it.li_tv))
+                .collect();
             let out = crate::ported::eval::typval::tv_list_alloc(items.len() as isize);
             {
                 let mut ob = out.borrow_mut();
@@ -853,10 +891,6 @@ pub fn f_json_decode(argvars: &[typval_T], rettv: &mut typval_T) {
 }
 
 // ── batch 5: char-indexed string ops (Src/strings.c), regex pos, env, paths ──
-
-
-
-
 
 /// Port of `f_matchstrpos()` from `Src/eval/funcs.c` — `[match, start, end]`
 /// (character indices) of the first match of `{pat}` in `{expr}`, or `['', -1,
@@ -1063,9 +1097,16 @@ fn reduce_list(argvars: &[typval_T], expr: &typval_T, rettv: &mut typval_T) {
     };
     // call `name(acc, item)` via the bridge hook.
     let call = |acc: &typval_T, item: &typval_T| -> Option<typval_T> {
-        CALL_FUNC_HOOK.with(|h| *h.borrow()).and_then(|f| f(expr, &[acc.clone(), item.clone()]))
+        CALL_FUNC_HOOK
+            .with(|h| *h.borrow())
+            .and_then(|f| f(expr, &[acc.clone(), item.clone()]))
     };
-    let items: Vec<typval_T> = l.borrow().lv_items.iter().map(|it| it.li_tv.clone()).collect();
+    let items: Vec<typval_T> = l
+        .borrow()
+        .lv_items
+        .iter()
+        .map(|it| it.li_tv.clone())
+        .collect();
     let start = if argvars.len() < 3 {
         if items.is_empty() {
             emsg("E998: Reduce of an empty List with no initial value");
@@ -1089,7 +1130,9 @@ fn reduce_list(argvars: &[typval_T], expr: &typval_T, rettv: &mut typval_T) {
 fn reduce_string(argvars: &[typval_T], expr: &typval_T, rettv: &mut typval_T) {
     let s = tv_get_string(&argvars[0]);
     let call = |acc: &typval_T, item: &typval_T| -> Option<typval_T> {
-        CALL_FUNC_HOOK.with(|h| *h.borrow()).and_then(|f| f(expr, &[acc.clone(), item.clone()]))
+        CALL_FUNC_HOOK
+            .with(|h| *h.borrow())
+            .and_then(|f| f(expr, &[acc.clone(), item.clone()]))
     };
     let chars: Vec<char> = s.chars().collect();
     let start = if argvars.len() < 3 {
@@ -1130,7 +1173,9 @@ fn reduce_blob(argvars: &[typval_T], expr: &typval_T, rettv: &mut typval_T) {
         _ => return,
     };
     let call = |acc: &typval_T, item: &typval_T| -> Option<typval_T> {
-        CALL_FUNC_HOOK.with(|h| *h.borrow()).and_then(|f| f(expr, &[acc.clone(), item.clone()]))
+        CALL_FUNC_HOOK
+            .with(|h| *h.borrow())
+            .and_then(|f| f(expr, &[acc.clone(), item.clone()]))
     };
     let len = tv_blob_len(&b.borrow());
     let start = if argvars.len() < 3 {
@@ -1453,7 +1498,10 @@ pub fn f_rand(argvars: &[typval_T], rettv: &mut typval_T) {
             None => {
                 // c: theend: semsg(_(e_invarg2), …) → E475; rettv = -1.
                 drop(lb);
-                emsg(&format!("E475: Invalid argument: {}", tv_get_string(&argvars[0])));
+                emsg(&format!(
+                    "E475: Invalid argument: {}",
+                    tv_get_string(&argvars[0])
+                ));
                 rettv.v_type = VAR_NUMBER;
                 rettv.vval = v_number(-1);
                 return;
@@ -1461,7 +1509,10 @@ pub fn f_rand(argvars: &[typval_T], rettv: &mut typval_T) {
         }
     } else {
         // c: theend: semsg(_(e_invarg2), …) → E475; rettv = -1.
-        emsg(&format!("E475: Invalid argument: {}", tv_get_string(&argvars[0])));
+        emsg(&format!(
+            "E475: Invalid argument: {}",
+            tv_get_string(&argvars[0])
+        ));
         rettv.v_type = VAR_NUMBER;
         rettv.vval = v_number(-1);
         return;
@@ -1469,7 +1520,6 @@ pub fn f_rand(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.v_type = VAR_NUMBER;
     rettv.vval = v_number(result as varnumber_T);
 }
-
 
 // ── registers (funcs.c, backed by the ops.c carve-out in `ported::ops`) ──────
 
@@ -1539,14 +1589,34 @@ pub fn f_getreginfo(argvars: &[typval_T], rettv: &mut typval_T) {
     for line in lines {
         tv_list_append_string(&mut lst.borrow_mut(), &line);
     }
-    let mk = |t, v| typval_T { v_type: t, v_lock: crate::ported::eval::typval_defs_h::VarLockStatus::VAR_UNLOCKED, vval: v };
-    tv_dict_add_tv(&mut d.borrow_mut(), "regcontents", mk(VAR_LIST, v_list(Some(lst))));
+    let mk = |t, v| typval_T {
+        v_type: t,
+        v_lock: crate::ported::eval::typval_defs_h::VarLockStatus::VAR_UNLOCKED,
+        vval: v,
+    };
+    tv_dict_add_tv(
+        &mut d.borrow_mut(),
+        "regcontents",
+        mk(VAR_LIST, v_list(Some(lst))),
+    );
     let (t, len) = get_reg_type(regname);
-    tv_dict_add_tv(&mut d.borrow_mut(), "regtype", typval_T::from(format_reg_type(t, len)));
+    tv_dict_add_tv(
+        &mut d.borrow_mut(),
+        "regtype",
+        typval_T::from(format_reg_type(t, len)),
+    );
     if regname == '"' {
-        tv_dict_add_tv(&mut d.borrow_mut(), "points_to", typval_T::from("\"".to_string()));
+        tv_dict_add_tv(
+            &mut d.borrow_mut(),
+            "points_to",
+            typval_T::from("\"".to_string()),
+        );
     } else {
-        tv_dict_add_tv(&mut d.borrow_mut(), "isunnamed", mk(VAR_BOOL, v_bool(kBoolVarFalse)));
+        tv_dict_add_tv(
+            &mut d.borrow_mut(),
+            "isunnamed",
+            mk(VAR_BOOL, v_bool(kBoolVarFalse)),
+        );
     }
 }
 
@@ -1602,16 +1672,26 @@ pub fn f_setreg(argvars: &[typval_T], rettv: &mut typval_T) {
     // Build the lines + the default motion type from the value's shape.
     let (lines, default_type) = match (contents.v_type, &contents.vval) {
         (VAR_LIST, v_list(Some(l))) => (
-            l.borrow().lv_items.iter().map(|it| tv_get_string(&it.li_tv)).collect::<Vec<_>>(),
+            l.borrow()
+                .lv_items
+                .iter()
+                .map(|it| tv_get_string(&it.li_tv))
+                .collect::<Vec<_>>(),
             MotionType::LineWise,
         ),
         _ => {
             let s = tv_get_string(&contents);
             // A trailing newline makes a string register linewise (Vim).
             if let Some(stripped) = s.strip_suffix('\n') {
-                (stripped.split('\n').map(str::to_string).collect(), MotionType::LineWise)
+                (
+                    stripped.split('\n').map(str::to_string).collect(),
+                    MotionType::LineWise,
+                )
             } else {
-                (s.split('\n').map(str::to_string).collect(), MotionType::CharWise)
+                (
+                    s.split('\n').map(str::to_string).collect(),
+                    MotionType::CharWise,
+                )
             }
         }
     };
@@ -1668,7 +1748,11 @@ pub fn f_id(argvars: &[typval_T], rettv: &mut typval_T) {
         v_partial(Some(p)) => std::rc::Rc::as_ptr(p) as *const () as usize,
         _ => 0,
     };
-    *rettv = typval_T::from(if addr == 0 { String::new() } else { format!("{addr:#018x}") });
+    *rettv = typval_T::from(if addr == 0 {
+        String::new()
+    } else {
+        format!("{addr:#018x}")
+    });
 }
 
 /// Port of `f_indexof()` from `Src/eval/funcs.c` — the index of the first
@@ -1699,8 +1783,17 @@ pub fn f_indexof(argvars: &[typval_T], rettv: &mut typval_T) {
     };
     match (argvars[0].v_type, &argvars[0].vval) {
         (VAR_LIST, v_list(Some(l))) => {
-            let items: Vec<typval_T> = l.borrow().lv_items.iter().map(|it| it.li_tv.clone()).collect();
-            let start = if startidx < 0 { (items.len() as i64 + startidx).max(0) } else { startidx };
+            let items: Vec<typval_T> = l
+                .borrow()
+                .lv_items
+                .iter()
+                .map(|it| it.li_tv.clone())
+                .collect();
+            let start = if startidx < 0 {
+                (items.len() as i64 + startidx).max(0)
+            } else {
+                startidx
+            };
             for (i, item) in items.iter().enumerate().skip(start as usize) {
                 if test(i as i64, item) {
                     *rettv = typval_T::from(i as varnumber_T);
@@ -1710,7 +1803,11 @@ pub fn f_indexof(argvars: &[typval_T], rettv: &mut typval_T) {
         }
         (VAR_BLOB, v_blob(Some(b))) => {
             let bytes = b.borrow().bv_ga.clone();
-            let start = if startidx < 0 { (bytes.len() as i64 + startidx).max(0) } else { startidx };
+            let start = if startidx < 0 {
+                (bytes.len() as i64 + startidx).max(0)
+            } else {
+                startidx
+            };
             for (i, byte) in bytes.iter().enumerate().skip(start as usize) {
                 if test(i as i64, &typval_T::from(*byte as varnumber_T)) {
                     *rettv = typval_T::from(i as varnumber_T);
@@ -1739,11 +1836,27 @@ pub fn f_matchstrlist(argvars: &[typval_T], rettv: &mut typval_T) {
     let pat = tv_get_string(&argvars[1]);
     let ic = tv_get_number(&get_option_value("ignorecase")) != 0;
     let submatches = argvars.get(2).is_some_and(|d| match &d.vval {
-        v_dict(Some(dd)) => dd.borrow().dv_hashtab.get("submatches").map(tv_get_bool).unwrap_or(0) != 0,
+        v_dict(Some(dd)) => {
+            dd.borrow()
+                .dv_hashtab
+                .get("submatches")
+                .map(tv_get_bool)
+                .unwrap_or(0)
+                != 0
+        }
         _ => false,
     });
-    let items: Vec<typval_T> = list.borrow().lv_items.iter().map(|it| it.li_tv.clone()).collect();
-    let mk = |t, v| typval_T { v_type: t, v_lock: crate::ported::eval::typval_defs_h::VarLockStatus::VAR_UNLOCKED, vval: v };
+    let items: Vec<typval_T> = list
+        .borrow()
+        .lv_items
+        .iter()
+        .map(|it| it.li_tv.clone())
+        .collect();
+    let mk = |t, v| typval_T {
+        v_type: t,
+        v_lock: crate::ported::eval::typval_defs_h::VarLockStatus::VAR_UNLOCKED,
+        vval: v,
+    };
     for (idx, item) in items.iter().enumerate() {
         let s = tv_get_string(item);
         let (text, cstart, _) = regex_matchstrpos(&pat, &s, ic);
@@ -1753,17 +1866,32 @@ pub fn f_matchstrlist(argvars: &[typval_T], rettv: &mut typval_T) {
         // c: byteidx is a BYTE offset; regex returns a char index.
         let byteidx: usize = s.chars().take(cstart as usize).map(char::len_utf8).sum();
         let d = tv_dict_alloc();
-        tv_dict_add_tv(&mut d.borrow_mut(), "idx", typval_T::from(idx as varnumber_T));
-        tv_dict_add_tv(&mut d.borrow_mut(), "byteidx", typval_T::from(byteidx as varnumber_T));
+        tv_dict_add_tv(
+            &mut d.borrow_mut(),
+            "idx",
+            typval_T::from(idx as varnumber_T),
+        );
+        tv_dict_add_tv(
+            &mut d.borrow_mut(),
+            "byteidx",
+            typval_T::from(byteidx as varnumber_T),
+        );
         tv_dict_add_tv(&mut d.borrow_mut(), "text", typval_T::from(text));
         if submatches {
             // c: always the 9 \1..\9 backrefs, "" for groups that didn't match.
             let groups = regex_matchlist(&pat, &s, ic);
             let sub = tv_list_alloc(0);
             for i in 1..=9 {
-                tv_list_append_string(&mut sub.borrow_mut(), groups.get(i).map_or("", |g| g.as_str()));
+                tv_list_append_string(
+                    &mut sub.borrow_mut(),
+                    groups.get(i).map_or("", |g| g.as_str()),
+                );
             }
-            tv_dict_add_tv(&mut d.borrow_mut(), "submatches", mk(VAR_LIST, v_list(Some(sub))));
+            tv_dict_add_tv(
+                &mut d.borrow_mut(),
+                "submatches",
+                mk(VAR_LIST, v_list(Some(sub))),
+            );
         }
         tv_list_append_tv(&mut l.borrow_mut(), mk(VAR_DICT, v_dict(Some(d))));
     }

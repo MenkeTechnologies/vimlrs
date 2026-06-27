@@ -9,10 +9,10 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::ported::eval::typval::{
-    tv_blob_alloc, tv_blob_get, tv_blob_len, tv_blob_remove, tv_blob_set,
-    tv_dict_add_tv, tv_dict_alloc_ret, tv_dict_copy, tv_dict_extend, tv_dict_remove, tv_equal,
-    tv_get_number_chk, tv_get_string, tv_get_string_chk, tv_list_alloc_ret, tv_list_copy,
-    tv_list_extend, tv_list_find, tv_list_len, tv_list_remove, value_check_lock, TV_TRANSLATE,
+    tv_blob_alloc, tv_blob_get, tv_blob_len, tv_blob_remove, tv_blob_set, tv_dict_add_tv,
+    tv_dict_alloc_ret, tv_dict_copy, tv_dict_extend, tv_dict_remove, tv_equal, tv_get_number_chk,
+    tv_get_string, tv_get_string_chk, tv_list_alloc_ret, tv_list_copy, tv_list_extend,
+    tv_list_find, tv_list_len, tv_list_remove, value_check_lock, TV_TRANSLATE,
 };
 use crate::ported::eval::typval_defs_h::{
     blob_T, dict_T, list_T, listitem_T, typval_T, typval_vval_union::*, varnumber_T, VarLockStatus,
@@ -64,7 +64,11 @@ fn count_list(l: &list_T, needle: &typval_T, idx: i64, ic: bool) -> varnumber_T 
         emsg(&format!("E684: List index out of range: {idx}"));
         return 0;
     }
-    let start = if idx < 0 { tv_list_len(l) as i64 + idx } else { idx } as usize;
+    let start = if idx < 0 {
+        tv_list_len(l) as i64 + idx
+    } else {
+        idx
+    } as usize;
     // c: for (; li != NULL; li = NEXT) if (tv_equal(li, needle, ic)) n++;
     let mut n: varnumber_T = 0;
     for li in l.lv_items.iter().skip(start) {
@@ -149,7 +153,11 @@ fn extend_list(argvars: &[typval_T], is_new: bool, rettv: &mut typval_T) {
         v_list(Some(l)) => l.clone(),
         _ => return,
     };
-    let l1 = if is_new { tv_list_copy(&l1_orig, false) } else { l1_orig };
+    let l1 = if is_new {
+        tv_list_copy(&l1_orig, false)
+    } else {
+        l1_orig
+    };
 
     // c: before-index (argvars[2]): NULL ⇒ append; `before == len` ⇒ append;
     //    out of range ⇒ E684.
@@ -165,7 +173,11 @@ fn extend_list(argvars: &[typval_T], is_new: bool, rettv: &mut typval_T) {
             emsg(&format!("E684: List index out of range: {before}"));
             return;
         } else {
-            Some(if before < 0 { (len + before) as usize } else { before as usize })
+            Some(if before < 0 {
+                (len + before) as usize
+            } else {
+                before as usize
+            })
         }
     } else {
         None
@@ -203,7 +215,11 @@ fn extend_dict(argvars: &[typval_T], is_new: bool, rettv: &mut typval_T) {
             return;
         }
     };
-    let d1 = if is_new { tv_dict_copy(&d1_orig, false) } else { d1_orig };
+    let d1 = if is_new {
+        tv_dict_copy(&d1_orig, false)
+    } else {
+        d1_orig
+    };
 
     // c: action default "force"; validate against {keep,force,error} → E475.
     let mut action = String::from("force");
@@ -242,7 +258,9 @@ fn extend(argvars: &[typval_T], rettv: &mut typval_T, is_new: bool) {
     } else {
         // c: semsg(e_listdictarg, is_new ? "extendnew()" : "extend()");
         let name = if is_new { "extendnew" } else { "extend" };
-        emsg(&format!("E712: Argument of {name}() must be a List or Dictionary"));
+        emsg(&format!(
+            "E712: Argument of {name}() must be a List or Dictionary"
+        ));
     }
 }
 
@@ -334,7 +352,12 @@ fn filter_map_list(
     {
         return;
     }
-    let items: Vec<typval_T> = l.borrow().lv_items.iter().map(|it| it.li_tv.clone()).collect();
+    let items: Vec<typval_T> = l
+        .borrow()
+        .lv_items
+        .iter()
+        .map(|it| it.li_tv.clone())
+        .collect();
     let mut out: Vec<listitem_T> = Vec::with_capacity(items.len());
     let mut i = 0;
     let mut failed = false;
@@ -349,7 +372,9 @@ fn filter_map_list(
                 FILTERMAP_MAP | FILTERMAP_MAPNEW => out.push(listitem_T { li_tv: newtv }),
                 FILTERMAP_FILTER => {
                     if !rem {
-                        out.push(listitem_T { li_tv: items[i].clone() });
+                        out.push(listitem_T {
+                            li_tv: items[i].clone(),
+                        });
                     }
                 }
                 FILTERMAP_FOREACH => {}
@@ -397,7 +422,11 @@ fn filter_map_dict(
         v_lock: VarLockStatus::VAR_UNLOCKED,
         vval: v_string(s),
     };
-    let d_ret = if filtermap == FILTERMAP_MAPNEW { Some(tv_dict_alloc_ret(rettv)) } else { None };
+    let d_ret = if filtermap == FILTERMAP_MAPNEW {
+        Some(tv_dict_alloc_ret(rettv))
+    } else {
+        None
+    };
     let keys: Vec<String> = d.borrow().dv_hashtab.keys().cloned().collect();
     for k in keys {
         let val = match d.borrow().dv_hashtab.get(&k) {
@@ -540,8 +569,13 @@ fn filter_map(argvars: &[typval_T], rettv: &mut typval_T, filtermap: filtermap_T
     if filtermap != FILTERMAP_MAPNEW && argvars[0].v_type != VAR_STRING {
         *rettv = argvars[0].clone();
     }
-    if !matches!(argvars[0].v_type, VAR_BLOB | VAR_LIST | VAR_DICT | VAR_STRING) {
-        emsg(&format!("E1250: Argument of {func_name} must be a List, String, Dictionary or Blob"));
+    if !matches!(
+        argvars[0].v_type,
+        VAR_BLOB | VAR_LIST | VAR_DICT | VAR_STRING
+    ) {
+        emsg(&format!(
+            "E1250: Argument of {func_name} must be a List, String, Dictionary or Blob"
+        ));
         return;
     }
     if argvars.len() < 2 || argvars[1].v_type == VAR_UNKNOWN {

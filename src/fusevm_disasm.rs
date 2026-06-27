@@ -37,7 +37,11 @@ fn append_chunk(out: &mut String, chunk: &Chunk, indent: &str) {
     if !chunk.sub_entries.is_empty() {
         let _ = writeln!(out, "{indent}; sub_entries:");
         for (ni, ip) in &chunk.sub_entries {
-            let name = chunk.names.get(*ni as usize).map(String::as_str).unwrap_or("?");
+            let name = chunk
+                .names
+                .get(*ni as usize)
+                .map(String::as_str)
+                .unwrap_or("?");
             let _ = writeln!(out, "{indent};   {name} @ {ip}");
         }
     }

@@ -10,22 +10,22 @@
 #![allow(non_snake_case)]
 
 // The `eval/` subtree (ports of `csrc/eval/*.c` + the header).
-/// Port of `eval/typval_defs.h`.
-pub mod typval_defs_h;
-/// Port of `eval/typval.c`.
-pub mod typval;
+/// Port of `eval/decode.c`.
+pub mod decode;
 /// Port of `eval/encode.c`.
 pub mod encode;
 /// Port of `eval/executor.c` (the `tv_op` compound-assignment operators).
 pub mod executor;
-/// Port of `eval/decode.c`.
-pub mod decode;
 /// Port of `eval/fs.c` (subset: the pure path-string builtins).
 pub mod fs;
 /// Port of `eval/funcs.c`.
 pub mod funcs;
 /// Port of `eval/list.c` (the `count()` family; callback ops stay bridge-side).
 pub mod list;
+/// Port of `eval/typval.c`.
+pub mod typval;
+/// Port of `eval/typval_defs.h`.
+pub mod typval_defs_h;
 /// Port of `eval/vars.c`.
 pub mod vars;
 
@@ -83,12 +83,7 @@ pub fn num_modulus(n1: varnumber_T, n2: varnumber_T) -> varnumber_T {
 /// Compare `typ1` and `typ2` per `type`. On success, `typ1` is overwritten with
 /// the `VAR_NUMBER` boolean result and `OK` is returned; incompatible operations
 /// raise `emsg` and return `FAIL`.
-pub fn typval_compare(
-    typ1: &mut typval_T,
-    typ2: &typval_T,
-    r#type: exprtype_T,
-    ic: bool,
-) -> i32 {
+pub fn typval_compare(typ1: &mut typval_T, typ2: &typval_T, r#type: exprtype_T, ic: bool) -> i32 {
     let mut n1: varnumber_T; // c: varnumber_T n1, n2;
     let n2: varnumber_T;
     let type_is = r#type == EXPR_IS || r#type == EXPR_ISNOT; // c:6797
@@ -109,9 +104,7 @@ pub fn typval_compare(
             if r#type == EXPR_ISNOT {
                 n1 = (n1 == 0) as varnumber_T;
             }
-        } else if typ1.v_type != typ2.v_type
-            || (r#type != EXPR_EQUAL && r#type != EXPR_NEQUAL)
-        {
+        } else if typ1.v_type != typ2.v_type || (r#type != EXPR_EQUAL && r#type != EXPR_NEQUAL) {
             if typ1.v_type != typ2.v_type {
                 emsg("E977: Can only compare Blob with Blob");
             } else {
@@ -141,9 +134,7 @@ pub fn typval_compare(
             if r#type == EXPR_ISNOT {
                 n1 = (n1 == 0) as varnumber_T;
             }
-        } else if typ1.v_type != typ2.v_type
-            || (r#type != EXPR_EQUAL && r#type != EXPR_NEQUAL)
-        {
+        } else if typ1.v_type != typ2.v_type || (r#type != EXPR_EQUAL && r#type != EXPR_NEQUAL) {
             if typ1.v_type != typ2.v_type {
                 emsg("E691: Can only compare List with List");
             } else {
@@ -173,9 +164,7 @@ pub fn typval_compare(
             if r#type == EXPR_ISNOT {
                 n1 = (n1 == 0) as varnumber_T;
             }
-        } else if typ1.v_type != typ2.v_type
-            || (r#type != EXPR_EQUAL && r#type != EXPR_NEQUAL)
-        {
+        } else if typ1.v_type != typ2.v_type || (r#type != EXPR_EQUAL && r#type != EXPR_NEQUAL) {
             if typ1.v_type != typ2.v_type {
                 emsg("E735: Can only compare Dictionary with Dictionary");
             } else {
@@ -297,7 +286,10 @@ fn mb_strcmp_ic(ic: bool, s1: &str, s2: &str) -> i32 {
 /// (it replaces the C engine's bytecode-program matcher).
 fn pattern_match(pat: &str, subject: &str, ic: bool) -> bool {
     // `'ignorecase'` makes a plain `=~` match case-insensitively.
-    let ic = ic || crate::ported::eval::typval::tv_get_bool(&crate::ported::option::get_option_value("ignorecase")) != 0;
+    let ic = ic
+        || crate::ported::eval::typval::tv_get_bool(&crate::ported::option::get_option_value(
+            "ignorecase",
+        )) != 0;
     crate::viml_regex::regex_match(pat, subject, ic)
 }
 

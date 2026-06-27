@@ -184,7 +184,11 @@ fn answer_variables(request_seq: i64) {
 fn answer_evaluate(request_seq: i64, expr: &str) {
     let result = crate::fusevm_bridge::dap_eval_var(expr.trim())
         .unwrap_or_else(|| "<not a variable in scope>".to_string());
-    send_response(request_seq, "evaluate", json!({ "result": result, "variablesReference": 0 }));
+    send_response(
+        request_seq,
+        "evaluate",
+        json!({ "result": result, "variablesReference": 0 }),
+    );
 }
 
 // ── server entry point ──
@@ -199,7 +203,11 @@ pub fn run_stdio() -> Result<(), String> {
     let mut executor: Option<std::thread::JoinHandle<()>> = None;
 
     while let Some(msg) = read_message(&mut reader) {
-        let command = msg.get("command").and_then(Value::as_str).unwrap_or("").to_string();
+        let command = msg
+            .get("command")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         let seq = msg.get("seq").and_then(Value::as_i64).unwrap_or(0);
         let args = msg.get("arguments").cloned().unwrap_or(Value::Null);
         match command.as_str() {
@@ -247,7 +255,11 @@ pub fn run_stdio() -> Result<(), String> {
                     .map(str::to_string);
                 let source = match program.as_deref() {
                     Some(p) => std::fs::read_to_string(p).unwrap_or_default(),
-                    None => args.get("source").and_then(Value::as_str).unwrap_or("").to_string(),
+                    None => args
+                        .get("source")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
                 };
                 executor = Some(std::thread::spawn(move || {
                     // Capture `:echo` on THIS (executor) thread so it streams as
@@ -291,7 +303,11 @@ pub fn run_stdio() -> Result<(), String> {
                 shared().cv.notify_all();
             }
             "evaluate" => {
-                let expr = args.get("expression").and_then(Value::as_str).unwrap_or("").to_string();
+                let expr = args
+                    .get("expression")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
                 let mut st = shared().state.lock().unwrap();
                 st.pending.push_back(Pending::Evaluate(seq, expr));
                 shared().cv.notify_all();

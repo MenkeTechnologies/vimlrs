@@ -17,26 +17,28 @@ use std::cell::RefCell;
 
 use fusevm::{Value, VM};
 
+use crate::compile_viml::compile_program;
 use crate::ported::eval::encode::encode_tv2echo;
-use crate::ported::eval::funcs::{
-    float_op_wrapper,
-    f_abs, f_add, f_and, f_char2nr, f_copy, f_empty, f_exists, f_float2nr, f_function, f_get, f_has, f_has_key, f_index, f_insert, f_invert,
-    f_atan2, f_deepcopy, f_escape, f_flatten, f_flattennew, f_fmod, f_items,
-    f_dictwatcheradd, f_dictwatcherdel, f_isinf, f_isnan, f_getpid, f_localtime, f_soundfold, f_json_decode, f_json_encode, f_matchstrpos, f_getenv, f_setenv, f_shellescape,
-    f_reltime, f_reltimestr, f_reltimefloat, f_rand, f_srand, f_strftime, f_strptime, f_sha256,
-    f_keys, f_len, f_list2str, f_match, f_matchend, f_matchlist, f_matchstr,
-    f_max, f_min, f_nr2char, f_or, f_pow, f_printf, f_range, f_reduce, f_repeat, f_reverse, f_split, f_str2float, f_substitute, f_type, f_values, f_xor,
-    f_getreg, f_getregtype, f_getreginfo, f_setreg, f_reg_recording, f_reg_executing, f_reg_recorded,
-    f_gettext, f_garbagecollect, f_funcref, f_id, f_indexof,
-    f_matchstrlist, f_fnameescape, f_shiftwidth, f_mode, f_state, f_visualmode, f_pumvisible,
-    f_wildmenumode, f_did_filetype, f_eventhandler, f_hlexists, f_windowsversion, f_getfontname,
-    f_foreground, f_prompt_getprompt, f_pum_getpos, f_serverlist,
-};
 use crate::ported::eval::fs::{
     f_chdir, f_delete, f_executable, f_exepath, f_filecopy, f_filereadable, f_filewritable,
     f_fnamemodify, f_getcwd, f_getfperm, f_getfsize, f_getftime, f_getftype, f_glob2regpat,
     f_haslocaldir, f_isabsolutepath, f_isdirectory, f_mkdir, f_pathshorten, f_readblob, f_readdir,
     f_readfile, f_rename, f_resolve, f_setfperm, f_simplify, f_tempname, f_writefile,
+};
+use crate::ported::eval::funcs::{
+    f_abs, f_add, f_and, f_atan2, f_char2nr, f_copy, f_deepcopy, f_dictwatcheradd,
+    f_dictwatcherdel, f_did_filetype, f_empty, f_escape, f_eventhandler, f_exists, f_flatten,
+    f_flattennew, f_float2nr, f_fmod, f_fnameescape, f_foreground, f_funcref, f_function,
+    f_garbagecollect, f_get, f_getenv, f_getfontname, f_getpid, f_getreg, f_getreginfo,
+    f_getregtype, f_gettext, f_has, f_has_key, f_hlexists, f_id, f_index, f_indexof, f_insert,
+    f_invert, f_isinf, f_isnan, f_items, f_json_decode, f_json_encode, f_keys, f_len, f_list2str,
+    f_localtime, f_match, f_matchend, f_matchlist, f_matchstr, f_matchstrlist, f_matchstrpos,
+    f_max, f_min, f_mode, f_nr2char, f_or, f_pow, f_printf, f_prompt_getprompt, f_pum_getpos,
+    f_pumvisible, f_rand, f_range, f_reduce, f_reg_executing, f_reg_recorded, f_reg_recording,
+    f_reltime, f_reltimefloat, f_reltimestr, f_repeat, f_reverse, f_serverlist, f_setenv, f_setreg,
+    f_sha256, f_shellescape, f_shiftwidth, f_soundfold, f_split, f_srand, f_state, f_str2float,
+    f_strftime, f_strptime, f_substitute, f_type, f_values, f_visualmode, f_wildmenumode,
+    f_windowsversion, f_xor, float_op_wrapper,
 };
 use crate::ported::eval::list::{
     f_count, f_extend, f_extendnew, f_filter, f_foreach, f_map, f_mapnew, f_remove,
@@ -45,11 +47,6 @@ use crate::ported::eval::list::{
 use crate::ported::eval::typval::{
     f_blob2list, f_join, f_list2blob, f_sort, f_uniq, tv_list_slice_or_index, CALL_FUNC_HOOK,
     SORT_FUNCREF_HOOK,
-};
-use crate::ported::strings::{
-    f_string, f_strlen, f_strchars, f_strgetchar, f_strcharpart, f_byteidx, f_byteidxcomp,
-    f_charidx, f_strpart, f_stridx, f_strridx, f_tolower, f_toupper, f_tr, f_trim, f_str2nr,
-    f_str2list,
 };
 use crate::ported::eval::typval::{
     tv_get_float, tv_get_number_chk, tv_get_string, tv_list_alloc, tv_list_append_tv,
@@ -60,8 +57,12 @@ use crate::ported::eval::typval_defs_h::{
 };
 use crate::ported::eval::vars::{eval_variable, set_var};
 use crate::ported::eval_h::exprtype_T::{self, *};
-use crate::compile_viml::compile_program;
 use crate::ported::message;
+use crate::ported::strings::{
+    f_byteidx, f_byteidxcomp, f_charidx, f_str2list, f_str2nr, f_strcharpart, f_strchars,
+    f_strgetchar, f_stridx, f_string, f_strlen, f_strpart, f_strridx, f_tolower, f_toupper, f_tr,
+    f_trim,
+};
 use crate::viml_ast::Stmt;
 use crate::viml_lexer::{CaseFlag, CmpOp, VimlError};
 use crate::viml_parser::parse_expr;
@@ -708,10 +709,14 @@ fn b_getvar(vm: &mut VM, _: u8) -> Value {
         return Value::str(V_EXCEPTION.with(|e| e.borrow().clone()));
     }
     if name == "v:val" {
-        return V_VAL.with(|v| v.borrow().clone()).map_or(Value::Int(0), tv_to_value);
+        return V_VAL
+            .with(|v| v.borrow().clone())
+            .map_or(Value::Int(0), tv_to_value);
     }
     if name == "v:key" {
-        return V_KEY.with(|v| v.borrow().clone()).map_or(Value::Int(0), tv_to_value);
+        return V_KEY
+            .with(|v| v.borrow().clone())
+            .map_or(Value::Int(0), tv_to_value);
     }
     match eval_variable(&name) {
         Some(tv) => tv_to_value(tv),
@@ -942,7 +947,12 @@ fn b_setindex(vm: &mut VM, _: u8) -> Value {
             let key = tv_get_string(&index);
             let old = d.borrow().dv_hashtab.get(&key).cloned();
             d.borrow_mut().dv_hashtab.insert(key.clone(), value.clone());
-            crate::ported::eval::typval::tv_dict_watcher_notify(d, &key, Some(&value), old.as_ref());
+            crate::ported::eval::typval::tv_dict_watcher_notify(
+                d,
+                &key,
+                Some(&value),
+                old.as_ref(),
+            );
         }
         (VAR_LIST, v_list(Some(l))) => {
             let len = l.borrow().lv_len as varnumber_T;
@@ -1009,7 +1019,11 @@ fn b_setrange(vm: &mut VM, _: u8) -> Value {
     // second index (`l[i:]`), meaning "to the end".
     let empty_idx2 = matches!(idx2_tv.v_type, VAR_SPECIAL | VAR_UNKNOWN);
     let mut n1 = tv_get_number_chk(&idx1_tv, None) as i32;
-    let mut n2 = if empty_idx2 { 0 } else { tv_get_number_chk(&idx2_tv, None) as i32 };
+    let mut n2 = if empty_idx2 {
+        0
+    } else {
+        tv_get_number_chk(&idx2_tv, None) as i32
+    };
     let pos1 = match tv_list_check_range_index_one(&dest.borrow(), &mut n1, false) {
         Some(p) => p,
         None => return Value::Undef, // E684 already emitted
@@ -1117,7 +1131,11 @@ fn call_user_function(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
     } else {
         Vec::new()
     };
-    crate::ported::eval::typval::tv_dict_add_tv(&mut avars, "0", tv_num(extra.len() as varnumber_T));
+    crate::ported::eval::typval::tv_dict_add_tv(
+        &mut avars,
+        "0",
+        tv_num(extra.len() as varnumber_T),
+    );
     crate::ported::eval::typval::tv_dict_add_tv(&mut avars, "000", new_list(extra));
 
     crate::ported::eval::vars::funccal_stack.with(|s| {
@@ -1204,9 +1222,7 @@ fn b_execute(vm: &mut VM, argc: u8) -> Value {
     }
     args.reverse();
     let cmds: Vec<String> = match (args[0].v_type, &args[0].vval) {
-        (VAR_LIST, v_list(Some(l))) => {
-            l.borrow().lv_items.iter().map(tv_string_item).collect()
-        }
+        (VAR_LIST, v_list(Some(l))) => l.borrow().lv_items.iter().map(tv_string_item).collect(),
         _ => vec![tv_get_string(&args[0])],
     };
     // Redirect output into a fresh capture buffer, run, then restore the sink.
@@ -1235,8 +1251,9 @@ fn eval_callback(
     V_VAL.with(|v| *v.borrow_mut() = Some(val.clone()));
     V_KEY.with(|v| *v.borrow_mut() = Some(key.clone()));
     match callback.v_type {
-        VAR_FUNC | VAR_PARTIAL => call_funcref(callback, vec![key.clone(), val.clone()])
-            .unwrap_or_else(|| tv_num(0)),
+        VAR_FUNC | VAR_PARTIAL => {
+            call_funcref(callback, vec![key.clone(), val.clone()]).unwrap_or_else(|| tv_num(0))
+        }
         _ => chunk
             .as_ref()
             .and_then(|c| run_chunk_capture(c.clone()))
@@ -1308,15 +1325,21 @@ fn b_call(vm: &mut VM, argc: u8) -> Value {
     args.reverse();
     // The arg list is the second argument (a List).
     let call_args: Vec<typval_T> = match args.get(1).map(|a| (a.v_type, &a.vval)) {
-        Some((VAR_LIST, v_list(Some(l)))) => {
-            l.borrow().lv_items.iter().map(|it| it.li_tv.clone()).collect()
-        }
+        Some((VAR_LIST, v_list(Some(l)))) => l
+            .borrow()
+            .lv_items
+            .iter()
+            .map(|it| it.li_tv.clone())
+            .collect(),
         _ => Vec::new(),
     };
     match call_funcref(&args[0], call_args) {
         Some(rettv) => tv_to_value(rettv),
         None => {
-            message::semsg(&format!("E117: Unknown function: {}", tv_get_string(&args[0])));
+            message::semsg(&format!(
+                "E117: Unknown function: {}",
+                tv_get_string(&args[0])
+            ));
             Value::Undef
         }
     }
@@ -1325,7 +1348,10 @@ fn b_call(vm: &mut VM, argc: u8) -> Value {
 fn b_getopt(vm: &mut VM, _: u8) -> Value {
     let name = tv_get_string(&pop_tv(vm));
     // The option name may carry a `&l:`/`&g:` scope prefix; strip it.
-    let name = name.strip_prefix("l:").or_else(|| name.strip_prefix("g:")).unwrap_or(&name);
+    let name = name
+        .strip_prefix("l:")
+        .or_else(|| name.strip_prefix("g:"))
+        .unwrap_or(&name);
     tv_to_value(crate::ported::option::get_option_value(name))
 }
 
@@ -1527,8 +1553,16 @@ fn slice_value(base: &typval_T, from: &typval_T, to: &typval_T) -> typval_T {
             // Faithful list slice via the ported value layer (inclusive bounds;
             // an omitted bound is the whole-start/whole-end default).
             let len = l.borrow().lv_len as varnumber_T;
-            let n1 = if from.v_type == VAR_SPECIAL { 0 } else { tv_get_number_chk(from, None) };
-            let n2 = if to.v_type == VAR_SPECIAL { len - 1 } else { tv_get_number_chk(to, None) };
+            let n1 = if from.v_type == VAR_SPECIAL {
+                0
+            } else {
+                tv_get_number_chk(from, None)
+            };
+            let n2 = if to.v_type == VAR_SPECIAL {
+                len - 1
+            } else {
+                tv_get_number_chk(to, None)
+            };
             let mut rettv = base.clone();
             let _ = tv_list_slice_or_index(l, true, n1, n2, false, &mut rettv, true);
             rettv
@@ -1551,8 +1585,16 @@ fn slice_value(base: &typval_T, from: &typval_T, to: &typval_T) -> typval_T {
             // Blob slice → a sub-blob, via the ported value layer (inclusive
             // bounds; an omitted bound is the whole-end default).
             let len = crate::ported::eval::typval::tv_blob_len(&b.borrow()) as varnumber_T;
-            let n1 = if from.v_type == VAR_SPECIAL { 0 } else { tv_get_number_chk(from, None) };
-            let n2 = if to.v_type == VAR_SPECIAL { len - 1 } else { tv_get_number_chk(to, None) };
+            let n1 = if from.v_type == VAR_SPECIAL {
+                0
+            } else {
+                tv_get_number_chk(from, None)
+            };
+            let n2 = if to.v_type == VAR_SPECIAL {
+                len - 1
+            } else {
+                tv_get_number_chk(to, None)
+            };
             let mut rettv = base.clone();
             let _ = crate::ported::eval::typval::tv_blob_slice_or_index(
                 &b.borrow(),
@@ -1702,8 +1744,12 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FN_FILTER, |vm, n| call_func(vm, n, f_filter));
     vm.register_builtin(VIML_FN_MAPNEW, |vm, n| call_func(vm, n, f_mapnew));
     vm.register_builtin(VIML_FN_FOREACH, |vm, n| call_func(vm, n, f_foreach));
-    vm.register_builtin(VIML_FN_DICTWATCHERADD, |vm, n| call_func(vm, n, f_dictwatcheradd));
-    vm.register_builtin(VIML_FN_DICTWATCHERDEL, |vm, n| call_func(vm, n, f_dictwatcherdel));
+    vm.register_builtin(VIML_FN_DICTWATCHERADD, |vm, n| {
+        call_func(vm, n, f_dictwatcheradd)
+    });
+    vm.register_builtin(VIML_FN_DICTWATCHERDEL, |vm, n| {
+        call_func(vm, n, f_dictwatcherdel)
+    });
     // Let the value layer's sort()/uniq() call user comparator functions.
     SORT_FUNCREF_HOOK.with(|h| *h.borrow_mut() = Some(sort_compare_funcref));
     vm.register_builtin(VIML_FN_SORT, |vm, n| call_func(vm, n, f_sort));
@@ -1780,16 +1826,24 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FN_BYTEIDXCOMP, |vm, n| call_func(vm, n, f_byteidxcomp));
     vm.register_builtin(VIML_FN_RELTIME, |vm, n| call_func(vm, n, f_reltime));
     vm.register_builtin(VIML_FN_RELTIMESTR, |vm, n| call_func(vm, n, f_reltimestr));
-    vm.register_builtin(VIML_FN_RELTIMEFLOAT, |vm, n| call_func(vm, n, f_reltimefloat));
+    vm.register_builtin(VIML_FN_RELTIMEFLOAT, |vm, n| {
+        call_func(vm, n, f_reltimefloat)
+    });
     vm.register_builtin(VIML_FN_RAND, |vm, n| call_func(vm, n, f_rand));
     vm.register_builtin(VIML_FN_SRAND, |vm, n| call_func(vm, n, f_srand));
     vm.register_builtin(VIML_FN_STRFTIME, |vm, n| call_func(vm, n, f_strftime));
     vm.register_builtin(VIML_FN_STRPTIME, |vm, n| call_func(vm, n, f_strptime));
     vm.register_builtin(VIML_FN_PATHSHORTEN, |vm, n| call_func(vm, n, f_pathshorten));
-    vm.register_builtin(VIML_FN_ISABSOLUTEPATH, |vm, n| call_func(vm, n, f_isabsolutepath));
+    vm.register_builtin(VIML_FN_ISABSOLUTEPATH, |vm, n| {
+        call_func(vm, n, f_isabsolutepath)
+    });
     vm.register_builtin(VIML_FN_SIMPLIFY, |vm, n| call_func(vm, n, f_simplify));
-    vm.register_builtin(VIML_FN_FILEREADABLE, |vm, n| call_func(vm, n, f_filereadable));
-    vm.register_builtin(VIML_FN_FILEWRITABLE, |vm, n| call_func(vm, n, f_filewritable));
+    vm.register_builtin(VIML_FN_FILEREADABLE, |vm, n| {
+        call_func(vm, n, f_filereadable)
+    });
+    vm.register_builtin(VIML_FN_FILEWRITABLE, |vm, n| {
+        call_func(vm, n, f_filewritable)
+    });
     vm.register_builtin(VIML_FN_ISDIRECTORY, |vm, n| call_func(vm, n, f_isdirectory));
     vm.register_builtin(VIML_FN_GETFSIZE, |vm, n| call_func(vm, n, f_getfsize));
     vm.register_builtin(VIML_FN_GETFTYPE, |vm, n| call_func(vm, n, f_getftype));
@@ -1817,29 +1871,49 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FN_GETREGTYPE, |vm, n| call_func(vm, n, f_getregtype));
     vm.register_builtin(VIML_FN_GETREGINFO, |vm, n| call_func(vm, n, f_getreginfo));
     vm.register_builtin(VIML_FN_SETREG, |vm, n| call_func(vm, n, f_setreg));
-    vm.register_builtin(VIML_FN_REG_RECORDING, |vm, n| call_func(vm, n, f_reg_recording));
-    vm.register_builtin(VIML_FN_REG_EXECUTING, |vm, n| call_func(vm, n, f_reg_executing));
-    vm.register_builtin(VIML_FN_REG_RECORDED, |vm, n| call_func(vm, n, f_reg_recorded));
+    vm.register_builtin(VIML_FN_REG_RECORDING, |vm, n| {
+        call_func(vm, n, f_reg_recording)
+    });
+    vm.register_builtin(VIML_FN_REG_EXECUTING, |vm, n| {
+        call_func(vm, n, f_reg_executing)
+    });
+    vm.register_builtin(VIML_FN_REG_RECORDED, |vm, n| {
+        call_func(vm, n, f_reg_recorded)
+    });
     vm.register_builtin(VIML_FN_GETTEXT, |vm, n| call_func(vm, n, f_gettext));
-    vm.register_builtin(VIML_FN_GARBAGECOLLECT, |vm, n| call_func(vm, n, f_garbagecollect));
+    vm.register_builtin(VIML_FN_GARBAGECOLLECT, |vm, n| {
+        call_func(vm, n, f_garbagecollect)
+    });
     vm.register_builtin(VIML_FN_FUNCREF, |vm, n| call_func(vm, n, f_funcref));
     vm.register_builtin(VIML_FN_ID, |vm, n| call_func(vm, n, f_id));
     vm.register_builtin(VIML_FN_INDEXOF, |vm, n| call_func(vm, n, f_indexof));
-    vm.register_builtin(VIML_FN_MATCHSTRLIST, |vm, n| call_func(vm, n, f_matchstrlist));
+    vm.register_builtin(VIML_FN_MATCHSTRLIST, |vm, n| {
+        call_func(vm, n, f_matchstrlist)
+    });
     vm.register_builtin(VIML_FN_FNAMEESCAPE, |vm, n| call_func(vm, n, f_fnameescape));
     vm.register_builtin(VIML_FN_SHIFTWIDTH, |vm, n| call_func(vm, n, f_shiftwidth));
     vm.register_builtin(VIML_FN_MODE, |vm, n| call_func(vm, n, f_mode));
     vm.register_builtin(VIML_FN_STATE, |vm, n| call_func(vm, n, f_state));
     vm.register_builtin(VIML_FN_VISUALMODE, |vm, n| call_func(vm, n, f_visualmode));
     vm.register_builtin(VIML_FN_PUMVISIBLE, |vm, n| call_func(vm, n, f_pumvisible));
-    vm.register_builtin(VIML_FN_WILDMENUMODE, |vm, n| call_func(vm, n, f_wildmenumode));
-    vm.register_builtin(VIML_FN_DID_FILETYPE, |vm, n| call_func(vm, n, f_did_filetype));
-    vm.register_builtin(VIML_FN_EVENTHANDLER, |vm, n| call_func(vm, n, f_eventhandler));
+    vm.register_builtin(VIML_FN_WILDMENUMODE, |vm, n| {
+        call_func(vm, n, f_wildmenumode)
+    });
+    vm.register_builtin(VIML_FN_DID_FILETYPE, |vm, n| {
+        call_func(vm, n, f_did_filetype)
+    });
+    vm.register_builtin(VIML_FN_EVENTHANDLER, |vm, n| {
+        call_func(vm, n, f_eventhandler)
+    });
     vm.register_builtin(VIML_FN_HLEXISTS, |vm, n| call_func(vm, n, f_hlexists));
-    vm.register_builtin(VIML_FN_WINDOWSVERSION, |vm, n| call_func(vm, n, f_windowsversion));
+    vm.register_builtin(VIML_FN_WINDOWSVERSION, |vm, n| {
+        call_func(vm, n, f_windowsversion)
+    });
     vm.register_builtin(VIML_FN_GETFONTNAME, |vm, n| call_func(vm, n, f_getfontname));
     vm.register_builtin(VIML_FN_FOREGROUND, |vm, n| call_func(vm, n, f_foreground));
-    vm.register_builtin(VIML_FN_PROMPT_GETPROMPT, |vm, n| call_func(vm, n, f_prompt_getprompt));
+    vm.register_builtin(VIML_FN_PROMPT_GETPROMPT, |vm, n| {
+        call_func(vm, n, f_prompt_getprompt)
+    });
     vm.register_builtin(VIML_FN_PUM_GETPOS, |vm, n| call_func(vm, n, f_pum_getpos));
     vm.register_builtin(VIML_FN_SERVERLIST, |vm, n| call_func(vm, n, f_serverlist));
     vm.register_builtin(VIML_FN_FLATTENNEW, |vm, n| call_func(vm, n, f_flattennew));
@@ -1924,9 +1998,7 @@ fn jit_stats_report(main: &fusevm::Chunk) {
             .iter()
             .enumerate()
             .filter_map(|(i, o)| match o {
-                Op::Jump(t) | Op::JumpIfTrue(t) | Op::JumpIfFalse(t) if (*t as usize) < i => {
-                    Some(*t as usize)
-                }
+                Op::Jump(t) | Op::JumpIfTrue(t) | Op::JumpIfFalse(t) if *t < i => Some(*t),
                 _ => None,
             })
             .filter(|&h| jc.trace_is_compiled(chunk, h))
@@ -2004,12 +2076,27 @@ mod tests {
 
         let src = "function! Count()\n  let i = 0\n  while i < 1000\n    let i = i + 1\n  endwhile\n  return i\nendfunction";
         let prog = compile_program(&parse_program(src).unwrap()).unwrap();
-        let chunk = prog.funcs.iter().find(|f| f.name == "Count").unwrap().chunk.clone();
+        let chunk = prog
+            .funcs
+            .iter()
+            .find(|f| f.name == "Count")
+            .unwrap()
+            .chunk
+            .clone();
 
         // The loop lowers to native slot/compare/arith ops.
-        assert!(chunk.ops.iter().any(|o| matches!(o, Op::GetSlot(_))), "slotted reads");
-        assert!(chunk.ops.iter().any(|o| matches!(o, Op::SetSlot(_))), "slotted writes");
-        assert!(chunk.ops.iter().any(|o| matches!(o, Op::NumLt)), "native compare");
+        assert!(
+            chunk.ops.iter().any(|o| matches!(o, Op::GetSlot(_))),
+            "slotted reads"
+        );
+        assert!(
+            chunk.ops.iter().any(|o| matches!(o, Op::SetSlot(_))),
+            "slotted writes"
+        );
+        assert!(
+            chunk.ops.iter().any(|o| matches!(o, Op::NumLt)),
+            "native compare"
+        );
         assert!(chunk.ops.iter().any(|o| matches!(o, Op::Add)), "native add");
 
         // The loop body (loop header .. backedge) is CallBuiltin-free → trace-eligible.
@@ -2018,9 +2105,7 @@ mod tests {
             .iter()
             .enumerate()
             .find_map(|(i, o)| match o {
-                Op::Jump(t) | Op::JumpIfTrue(t) | Op::JumpIfFalse(t) if (*t as usize) < i => {
-                    Some((*t as usize, i))
-                }
+                Op::Jump(t) | Op::JumpIfTrue(t) | Op::JumpIfFalse(t) if *t < i => Some(((*t), i)),
                 _ => None,
             })
             .expect("loop backedge");
@@ -2034,7 +2119,7 @@ mod tests {
         );
 
         assert!(
-            matches!(chunk.ops[back], Op::JumpIfTrue(t) if t as usize == header),
+            matches!(chunk.ops[back], Op::JumpIfTrue(t) if t == header),
             "loop closes with a conditional backward branch to the header"
         );
 
@@ -2043,8 +2128,12 @@ mod tests {
         // it — vimlrs numeric loops execute as native machine code.
         let mut vm = VM::new(chunk.clone());
         install(&mut vm); // registers VIML_SET_RETURN + enables the JIT
-        while vm.frames.last().unwrap().slots.len() < 1 {
-            vm.frames.last_mut().unwrap().slots.push(fusevm::Value::Int(0));
+        while vm.frames.last().unwrap().slots.is_empty() {
+            vm.frames
+                .last_mut()
+                .unwrap()
+                .slots
+                .push(fusevm::Value::Int(0));
         }
         let _ = vm.run();
         assert!(
@@ -2064,7 +2153,13 @@ mod tests {
 
         let src = "function! S()\n  let s = 0\n  for i in range(1000)\n    let s = s + i\n  endfor\n  return s\nendfunction";
         let prog = compile_program(&parse_program(src).unwrap()).unwrap();
-        let chunk = prog.funcs.iter().find(|f| f.name == "S").unwrap().chunk.clone();
+        let chunk = prog
+            .funcs
+            .iter()
+            .find(|f| f.name == "S")
+            .unwrap()
+            .chunk
+            .clone();
 
         // No list materialization — range() never calls VIML_FN_RANGE/VIML_INDEX.
         assert!(
@@ -2077,7 +2172,7 @@ mod tests {
             .iter()
             .enumerate()
             .find_map(|(i, o)| match o {
-                Op::JumpIfTrue(t) if (*t as usize) < i => Some((*t as usize, i)),
+                Op::JumpIfTrue(t) if *t < i => Some(((*t), i)),
                 _ => None,
             })
             .expect("loop backedge");
@@ -2092,7 +2187,11 @@ mod tests {
         let mut vm = VM::new(chunk.clone());
         install(&mut vm);
         while vm.frames.last().unwrap().slots.len() < 2 {
-            vm.frames.last_mut().unwrap().slots.push(fusevm::Value::Int(0));
+            vm.frames
+                .last_mut()
+                .unwrap()
+                .slots
+                .push(fusevm::Value::Int(0));
         }
         let _ = vm.run();
         assert!(
@@ -2117,7 +2216,7 @@ mod tests {
             .iter()
             .enumerate()
             .find_map(|(i, o)| match o {
-                Op::JumpIfTrue(t) if (*t as usize) < i => Some((*t as usize, i)),
+                Op::JumpIfTrue(t) if *t < i => Some(((*t), i)),
                 _ => None,
             })
             .expect("loop backedge");
@@ -2132,7 +2231,11 @@ mod tests {
         let mut vm = VM::new(chunk.clone());
         install(&mut vm);
         while vm.frames.last().unwrap().slots.len() < 3 {
-            vm.frames.last_mut().unwrap().slots.push(fusevm::Value::Int(0));
+            vm.frames
+                .last_mut()
+                .unwrap()
+                .slots
+                .push(fusevm::Value::Int(0));
         }
         let _ = vm.run();
         assert!(
@@ -2158,7 +2261,7 @@ mod tests {
             .iter()
             .enumerate()
             .find_map(|(i, o)| match o {
-                Op::JumpIfTrue(t) if (*t as usize) < i => Some(*t as usize),
+                Op::JumpIfTrue(t) if *t < i => Some(*t),
                 _ => None,
             })
             .expect("loop backedge");
@@ -2188,7 +2291,7 @@ mod tests {
             .iter()
             .enumerate()
             .find_map(|(i, o)| match o {
-                Op::JumpIfTrue(t) if (*t as usize) < i => Some(*t as usize),
+                Op::JumpIfTrue(t) if *t < i => Some(*t),
                 _ => None,
             })
             .expect("loop backedge");
@@ -2215,7 +2318,7 @@ mod tests {
             .iter()
             .enumerate()
             .find_map(|(i, o)| match o {
-                Op::JumpIfTrue(t) if (*t as usize) < i => Some(*t as usize),
+                Op::JumpIfTrue(t) if *t < i => Some(*t),
                 _ => None,
             })
             .expect("loop backedge");
@@ -2237,14 +2340,20 @@ mod tests {
 
         let src = "function! Helper()\n  return 99\nendfunction\nfunction! F()\n  let s = 0\n  for i in range(1000)\n    let s = s + i\n  endfor\n  let x = Helper()\n  return s + x\nendfunction";
         let prog = compile_program(&parse_program(src).unwrap()).unwrap();
-        let chunk = prog.funcs.iter().find(|f| f.name == "F").unwrap().chunk.clone();
+        let chunk = prog
+            .funcs
+            .iter()
+            .find(|f| f.name == "F")
+            .unwrap()
+            .chunk
+            .clone();
 
         let (header, back) = chunk
             .ops
             .iter()
             .enumerate()
             .find_map(|(i, o)| match o {
-                Op::JumpIfTrue(t) if (*t as usize) < i => Some((*t as usize, i)),
+                Op::JumpIfTrue(t) if *t < i => Some(((*t), i)),
                 _ => None,
             })
             .expect("loop backedge");
@@ -2259,7 +2368,11 @@ mod tests {
         let mut vm = VM::new(chunk.clone());
         install(&mut vm);
         while vm.frames.last().unwrap().slots.len() < 2 {
-            vm.frames.last_mut().unwrap().slots.push(fusevm::Value::Int(0));
+            vm.frames
+                .last_mut()
+                .unwrap()
+                .slots
+                .push(fusevm::Value::Int(0));
         }
         let _ = vm.run();
         assert!(
@@ -2280,20 +2393,28 @@ mod tests {
 
         let src = "function! F(n)\n  let s = 0\n  for i in range(a:n)\n    let s += i\n  endfor\n  return s\nendfunction\ncall F(3000)";
         let prog = compile_program(&parse_program(src).unwrap()).unwrap();
-        let chunk = prog.funcs.iter().find(|f| f.name == "F").unwrap().chunk.clone();
+        let chunk = prog
+            .funcs
+            .iter()
+            .find(|f| f.name == "F")
+            .unwrap()
+            .chunk
+            .clone();
 
         let (header, back) = chunk
             .ops
             .iter()
             .enumerate()
             .find_map(|(i, o)| match o {
-                Op::JumpIfTrue(t) if (*t as usize) < i => Some((*t as usize, i)),
+                Op::JumpIfTrue(t) if *t < i => Some(((*t), i)),
                 _ => None,
             })
             .expect("loop backedge");
         // The bound coercion is in the prologue; the loop body is native.
         assert!(
-            chunk.ops[header..=back].iter().any(|o| matches!(o, Op::NumLt)),
+            chunk.ops[header..=back]
+                .iter()
+                .any(|o| matches!(o, Op::NumLt)),
             "native counter compare"
         );
         assert!(
@@ -2323,20 +2444,30 @@ mod tests {
 
         let src = "function! H()\n  let h = 0\n  for i in range(2000)\n    let h = xor(h, i)\n    let h = and(h, 65535)\n  endfor\n  return h\nendfunction";
         let prog = compile_program(&parse_program(src).unwrap()).unwrap();
-        let chunk = prog.funcs.iter().find(|f| f.name == "H").unwrap().chunk.clone();
+        let chunk = prog
+            .funcs
+            .iter()
+            .find(|f| f.name == "H")
+            .unwrap()
+            .chunk
+            .clone();
 
         let (header, back) = chunk
             .ops
             .iter()
             .enumerate()
             .find_map(|(i, o)| match o {
-                Op::JumpIfTrue(t) if (*t as usize) < i => Some((*t as usize, i)),
+                Op::JumpIfTrue(t) if *t < i => Some(((*t), i)),
                 _ => None,
             })
             .expect("loop backedge");
         assert!(
-            chunk.ops[header..=back].iter().any(|o| matches!(o, Op::BitXor))
-                && chunk.ops[header..=back].iter().any(|o| matches!(o, Op::BitAnd)),
+            chunk.ops[header..=back]
+                .iter()
+                .any(|o| matches!(o, Op::BitXor))
+                && chunk.ops[header..=back]
+                    .iter()
+                    .any(|o| matches!(o, Op::BitAnd)),
             "loop body should use native bitwise ops"
         );
         assert!(
@@ -2350,7 +2481,11 @@ mod tests {
         let mut vm = VM::new(chunk.clone());
         install(&mut vm);
         while vm.frames.last().unwrap().slots.len() < 2 {
-            vm.frames.last_mut().unwrap().slots.push(fusevm::Value::Int(0));
+            vm.frames
+                .last_mut()
+                .unwrap()
+                .slots
+                .push(fusevm::Value::Int(0));
         }
         let _ = vm.run();
         assert!(
@@ -2370,14 +2505,20 @@ mod tests {
 
         let src = "function! F()\n  let s = 0\n  for i in range(2000)\n    let s += i % 2 == 0 ? i : 0\n  endfor\n  return s\nendfunction";
         let prog = compile_program(&parse_program(src).unwrap()).unwrap();
-        let chunk = prog.funcs.iter().find(|f| f.name == "F").unwrap().chunk.clone();
+        let chunk = prog
+            .funcs
+            .iter()
+            .find(|f| f.name == "F")
+            .unwrap()
+            .chunk
+            .clone();
 
         let (header, back) = chunk
             .ops
             .iter()
             .enumerate()
             .find_map(|(i, o)| match o {
-                Op::JumpIfTrue(t) if (*t as usize) < i => Some((*t as usize, i)),
+                Op::JumpIfTrue(t) if *t < i => Some(((*t), i)),
                 _ => None,
             })
             .expect("loop backedge");
@@ -2392,7 +2533,11 @@ mod tests {
         let mut vm = VM::new(chunk.clone());
         install(&mut vm);
         while vm.frames.last().unwrap().slots.len() < 2 {
-            vm.frames.last_mut().unwrap().slots.push(fusevm::Value::Int(0));
+            vm.frames
+                .last_mut()
+                .unwrap()
+                .slots
+                .push(fusevm::Value::Int(0));
         }
         let _ = vm.run();
         assert!(
@@ -2412,19 +2557,27 @@ mod tests {
 
         let src = "function! F()\n  let s = 0\n  for i in range(2000)\n    let s += i > 500\n  endfor\n  return s\nendfunction";
         let prog = compile_program(&parse_program(src).unwrap()).unwrap();
-        let chunk = prog.funcs.iter().find(|f| f.name == "F").unwrap().chunk.clone();
+        let chunk = prog
+            .funcs
+            .iter()
+            .find(|f| f.name == "F")
+            .unwrap()
+            .chunk
+            .clone();
 
         let (header, back) = chunk
             .ops
             .iter()
             .enumerate()
             .find_map(|(i, o)| match o {
-                Op::JumpIfTrue(t) if (*t as usize) < i => Some((*t as usize, i)),
+                Op::JumpIfTrue(t) if *t < i => Some(((*t), i)),
                 _ => None,
             })
             .expect("loop backedge");
         assert!(
-            chunk.ops[header..=back].iter().any(|o| matches!(o, Op::NumGt)),
+            chunk.ops[header..=back]
+                .iter()
+                .any(|o| matches!(o, Op::NumGt)),
             "value-position compare should use a native compare op"
         );
         assert!(
@@ -2438,7 +2591,11 @@ mod tests {
         let mut vm = VM::new(chunk.clone());
         install(&mut vm);
         while vm.frames.last().unwrap().slots.len() < 2 {
-            vm.frames.last_mut().unwrap().slots.push(fusevm::Value::Int(0));
+            vm.frames
+                .last_mut()
+                .unwrap()
+                .slots
+                .push(fusevm::Value::Int(0));
         }
         let _ = vm.run();
         assert!(
@@ -2457,14 +2614,20 @@ mod tests {
 
         let src = "function! F()\n  let s = 0\n  for i in range(2000)\n    let s += !(i % 2)\n  endfor\n  return s\nendfunction";
         let prog = compile_program(&parse_program(src).unwrap()).unwrap();
-        let chunk = prog.funcs.iter().find(|f| f.name == "F").unwrap().chunk.clone();
+        let chunk = prog
+            .funcs
+            .iter()
+            .find(|f| f.name == "F")
+            .unwrap()
+            .chunk
+            .clone();
 
         let (header, back) = chunk
             .ops
             .iter()
             .enumerate()
             .find_map(|(i, o)| match o {
-                Op::JumpIfTrue(t) if (*t as usize) < i => Some((*t as usize, i)),
+                Op::JumpIfTrue(t) if *t < i => Some(((*t), i)),
                 _ => None,
             })
             .expect("loop backedge");
@@ -2479,7 +2642,11 @@ mod tests {
         let mut vm = VM::new(chunk.clone());
         install(&mut vm);
         while vm.frames.last().unwrap().slots.len() < 2 {
-            vm.frames.last_mut().unwrap().slots.push(fusevm::Value::Int(0));
+            vm.frames
+                .last_mut()
+                .unwrap()
+                .slots
+                .push(fusevm::Value::Int(0));
         }
         let _ = vm.run();
         assert!(
@@ -2496,19 +2663,22 @@ mod tests {
         use crate::viml_parser::parse_program;
         use fusevm::Op;
 
-        let src = "let s = 0\nfor i in range(5000)\n  if i % 2 == 0\n    let s = s + i\n  endif\nendfor";
+        let src =
+            "let s = 0\nfor i in range(5000)\n  if i % 2 == 0\n    let s = s + i\n  endif\nendfor";
         let chunk = compile_program(&parse_program(src).unwrap()).unwrap().main;
         let (header, back) = chunk
             .ops
             .iter()
             .enumerate()
             .find_map(|(i, o)| match o {
-                Op::JumpIfTrue(t) if (*t as usize) < i => Some((*t as usize, i)),
+                Op::JumpIfTrue(t) if *t < i => Some(((*t), i)),
                 _ => None,
             })
             .expect("loop backedge");
         assert!(
-            chunk.ops[header..=back].iter().any(|o| matches!(o, Op::Mod)),
+            chunk.ops[header..=back]
+                .iter()
+                .any(|o| matches!(o, Op::Mod)),
             "loop body should use native Op::Mod"
         );
         run_chunk(chunk.clone());
@@ -2533,12 +2703,14 @@ mod tests {
             .iter()
             .enumerate()
             .find_map(|(i, o)| match o {
-                Op::JumpIfTrue(t) if (*t as usize) < i => Some((*t as usize, i)),
+                Op::JumpIfTrue(t) if *t < i => Some(((*t), i)),
                 _ => None,
             })
             .expect("loop backedge");
         assert!(
-            chunk.ops[header..=back].iter().any(|o| matches!(o, Op::Negate)),
+            chunk.ops[header..=back]
+                .iter()
+                .any(|o| matches!(o, Op::Negate)),
             "loop body should use native Op::Negate"
         );
         run_chunk(chunk.clone());
@@ -2559,18 +2731,30 @@ mod tests {
 
         let src = "function! S()\n  let l:s = 0\n  for l:i in range(2000)\n    let l:s += l:i\n  endfor\n  return l:s\nendfunction";
         let prog = compile_program(&parse_program(src).unwrap()).unwrap();
-        let chunk = prog.funcs.iter().find(|f| f.name == "S").unwrap().chunk.clone();
+        let chunk = prog
+            .funcs
+            .iter()
+            .find(|f| f.name == "S")
+            .unwrap()
+            .chunk
+            .clone();
 
         // Both the accumulator (`l:s`) and the induction var (`l:i`) are slotted.
-        assert!(chunk.ops.iter().any(|o| matches!(o, Op::GetSlot(_))), "slotted reads");
-        assert!(chunk.ops.iter().any(|o| matches!(o, Op::SetSlot(_))), "slotted writes");
+        assert!(
+            chunk.ops.iter().any(|o| matches!(o, Op::GetSlot(_))),
+            "slotted reads"
+        );
+        assert!(
+            chunk.ops.iter().any(|o| matches!(o, Op::SetSlot(_))),
+            "slotted writes"
+        );
 
         let (header, back) = chunk
             .ops
             .iter()
             .enumerate()
             .find_map(|(i, o)| match o {
-                Op::JumpIfTrue(t) if (*t as usize) < i => Some((*t as usize, i)),
+                Op::JumpIfTrue(t) if *t < i => Some(((*t), i)),
                 _ => None,
             })
             .expect("loop backedge");
@@ -2585,7 +2769,11 @@ mod tests {
         let mut vm = VM::new(chunk.clone());
         install(&mut vm);
         while vm.frames.last().unwrap().slots.len() < 2 {
-            vm.frames.last_mut().unwrap().slots.push(fusevm::Value::Int(0));
+            vm.frames
+                .last_mut()
+                .unwrap()
+                .slots
+                .push(fusevm::Value::Int(0));
         }
         let _ = vm.run();
         assert!(
@@ -2610,12 +2798,14 @@ mod tests {
             .iter()
             .enumerate()
             .find_map(|(i, o)| match o {
-                Op::JumpIfTrue(t) if (*t as usize) < i => Some((*t as usize, i)),
+                Op::JumpIfTrue(t) if *t < i => Some(((*t), i)),
                 _ => None,
             })
             .expect("loop backedge");
         assert!(
-            chunk.ops[header..=back].iter().any(|o| matches!(o, Op::Add))
+            chunk.ops[header..=back]
+                .iter()
+                .any(|o| matches!(o, Op::Add))
                 && !chunk.ops[header..=back]
                     .iter()
                     .any(|o| matches!(o, Op::CallBuiltin(..) | Op::Extended(..))),
@@ -2723,10 +2913,16 @@ mod tests {
         assert_eq!(run("let g:n = 5\nexecute 'echo' 'g:n * 2'"), "10\n");
         assert_eq!(run("execute 'let g:z = ' . (3 * 7)\necho g:z"), "21\n");
         // :let list-unpack (+ ;rest).
-        assert_eq!(run("let [g:a, g:b] = [10, 20]\necho g:a . ',' . g:b"), "10,20\n");
+        assert_eq!(
+            run("let [g:a, g:b] = [10, 20]\necho g:a . ',' . g:b"),
+            "10,20\n"
+        );
         assert_eq!(run("let [g:x; g:r] = [1, 2, 3]\necho g:r"), "[2, 3]\n");
         // :for destructuring over a list of pairs and over items().
-        assert_eq!(run("for [x, y] in [[1, 2], [3, 4]]\necho x + y\nendfor"), "3\n7\n");
+        assert_eq!(
+            run("for [x, y] in [[1, 2], [3, 4]]\necho x + y\nendfor"),
+            "3\n7\n"
+        );
     }
 
     #[test]
@@ -2743,7 +2939,10 @@ mod tests {
         // Tight spacing (no blanks around `+=`).
         assert_eq!(run("let n=1\nlet n+=41\necho n"), "42\n");
         // Accumulation inside a loop — the common idiom that was silently a no-op.
-        assert_eq!(run("let s = 0\nfor i in range(101)\n  let s += i\nendfor\necho s"), "5050\n");
+        assert_eq!(
+            run("let s = 0\nfor i in range(101)\n  let s += i\nendfor\necho s"),
+            "5050\n"
+        );
         // Scoped target.
         assert_eq!(run("let g:c = 5\nlet g:c += 10\necho g:c"), "15\n");
     }
@@ -2853,7 +3052,7 @@ mod tests {
         assert_eq!(run("echo 5 < 3 ? 100 : 200"), "200\n");
         assert_eq!(run("echo 'abc' ? 1 : 2"), "2\n"); // non-numeric string is falsy
         assert_eq!(run("echo '5' ? 1 : 2"), "1\n"); // numeric string is truthy
-        // Accumulating ternary in a loop (the JIT-lowered path).
+                                                    // Accumulating ternary in a loop (the JIT-lowered path).
         assert_eq!(
             run("let s=0\nfor i in range(10)\nlet s += i % 2 == 0 ? i : 0\nendfor\necho s"),
             "20\n" // 0+2+4+6+8
@@ -2865,7 +3064,10 @@ mod tests {
         // maxdepth-limited flatten (verified vs nvim).
         assert_eq!(run("echo flatten([1, [2, [3]]], 1)"), "[1, 2, [3]]\n");
         // flatten() mutates its argument in place...
-        assert_eq!(run("let k=[1,[2,[3]]]\ncall flatten(k)\necho k"), "[1, 2, 3]\n");
+        assert_eq!(
+            run("let k=[1,[2,[3]]]\ncall flatten(k)\necho k"),
+            "[1, 2, 3]\n"
+        );
         // ...flattennew() returns a flattened copy, leaving the source intact.
         assert_eq!(
             run("let l=[1,[2,[3]]]\nlet m=flattennew(l)\necho l\necho m"),
@@ -2876,13 +3078,19 @@ mod tests {
     #[test]
     fn blob_builtins() {
         // list2blob/blob2list round-trip + native rendering (verified vs nvim).
-        assert_eq!(run("echo blob2list(list2blob([10, 20, 30]))"), "[10, 20, 30]\n");
+        assert_eq!(
+            run("echo blob2list(list2blob([10, 20, 30]))"),
+            "[10, 20, 30]\n"
+        );
         assert_eq!(run("echo list2blob([171, 205])"), "0zABCD\n");
         // Blob subscript → a byte; negative index from the end.
         assert_eq!(run("echo list2blob([10, 20, 30, 40])[2]"), "30\n");
         assert_eq!(run("echo list2blob([10, 20, 30, 40])[-1]"), "40\n");
         // Blob slice → a sub-blob (inclusive bounds).
-        assert_eq!(run("echo blob2list(list2blob([1, 2, 3, 4, 5])[1:3])"), "[2, 3, 4]\n");
+        assert_eq!(
+            run("echo blob2list(list2blob([1, 2, 3, 4, 5])[1:3])"),
+            "[2, 3, 4]\n"
+        );
     }
 
     #[test]
@@ -2898,16 +3106,28 @@ mod tests {
     #[test]
     fn extend_builtins() {
         // List: append, and insert at an index (verified vs nvim).
-        assert_eq!(run("let l=[1,2,3]\ncall extend(l,[4,5])\necho l"), "[1, 2, 3, 4, 5]\n");
-        assert_eq!(run("let m=[1,2,3]\ncall extend(m,[9],1)\necho m"), "[1, 9, 2, 3]\n");
+        assert_eq!(
+            run("let l=[1,2,3]\ncall extend(l,[4,5])\necho l"),
+            "[1, 2, 3, 4, 5]\n"
+        );
+        assert_eq!(
+            run("let m=[1,2,3]\ncall extend(m,[9],1)\necho m"),
+            "[1, 9, 2, 3]\n"
+        );
         // Dict: keep (don't overwrite) vs force (default, overwrite).
         assert_eq!(
             run("let d={'a':1,'b':2}\ncall extend(d,{'b':20,'c':3},'keep')\necho d"),
             "{'a': 1, 'b': 2, 'c': 3}\n"
         );
-        assert_eq!(run("let e={'a':1}\ncall extend(e,{'a':99})\necho e"), "{'a': 99}\n");
+        assert_eq!(
+            run("let e={'a':1}\ncall extend(e,{'a':99})\necho e"),
+            "{'a': 99}\n"
+        );
         // extendnew returns a new value, leaving the source intact.
-        assert_eq!(run("let n=[1,2]\nlet p=extendnew(n,[3])\necho n\necho p"), "[1, 2]\n[1, 2, 3]\n");
+        assert_eq!(
+            run("let n=[1,2]\nlet p=extendnew(n,[3])\necho n\necho p"),
+            "[1, 2]\n[1, 2, 3]\n"
+        );
     }
 
     #[test]
@@ -2918,7 +3138,10 @@ mod tests {
             "{'a': 99, 'b': 2, 'c': 3}\n"
         );
         // List element set, including a negative index.
-        assert_eq!(run("let l=[1,2,3]\nlet l[1]=20\nlet l[-1]=30\necho l"), "[1, 20, 30]\n");
+        assert_eq!(
+            run("let l=[1,2,3]\nlet l[1]=20\nlet l[-1]=30\necho l"),
+            "[1, 20, 30]\n"
+        );
         // Nested subscript assignment (shared-Rc propagation through containers).
         assert_eq!(
             run("let d={'a':{'b':1},'l':[10,20]}\nlet d['a']['b']=99\nlet d['l'][0]=100\necho [d['a']['b'], d['l'][0]]"),
@@ -2988,7 +3211,10 @@ mod tests {
         // shiftwidth: 'shiftwidth', or 'tabstop' when sw==0.
         assert_eq!(run("echo shiftwidth()"), "8\n");
         assert_eq!(run("set shiftwidth=4\necho shiftwidth()"), "4\n");
-        assert_eq!(run("set shiftwidth=0\nset tabstop=2\necho shiftwidth()"), "2\n");
+        assert_eq!(
+            run("set shiftwidth=0\nset tabstop=2\necho shiftwidth()"),
+            "2\n"
+        );
     }
 
     #[test]
@@ -3013,8 +3239,14 @@ mod tests {
         // setreg/getreg/getregtype (values verified against `nvim --clean`).
         assert_eq!(run("call setreg('a','hello')\necho getreg('a')"), "hello\n");
         assert_eq!(run("call setreg('a','hello')\necho getregtype('a')"), "v\n");
-        assert_eq!(run("call setreg('b',['x','y','z'])\necho getreg('b',1,1)"), "['x', 'y', 'z']\n");
-        assert_eq!(run("call setreg('b',['x','y'])\necho getregtype('b')"), "V\n");
+        assert_eq!(
+            run("call setreg('b',['x','y','z'])\necho getreg('b',1,1)"),
+            "['x', 'y', 'z']\n"
+        );
+        assert_eq!(
+            run("call setreg('b',['x','y'])\necho getregtype('b')"),
+            "V\n"
+        );
         // charwise append continues the last line.
         assert_eq!(
             run("call setreg('a','hello')\ncall setreg('a',' world','a')\necho getreg('a')"),
@@ -3023,7 +3255,10 @@ mod tests {
         // dict form + getreginfo (unset → {}); bracket access (the `.member`
         // concat ambiguity means tests use ['key']).
         assert_eq!(run("echo getreginfo('z')"), "{}\n");
-        assert_eq!(run("call setreg('b',['x','y'])\necho getreginfo('b')['regcontents']"), "['x', 'y']\n");
+        assert_eq!(
+            run("call setreg('b',['x','y'])\necho getreginfo('b')['regcontents']"),
+            "['x', 'y']\n"
+        );
         assert_eq!(
             run("call setreg('e',{'regcontents':['p','q'],'regtype':'V'})\necho getreg('e',1,1)\necho getregtype('e')"),
             "['p', 'q']\nV\n"
@@ -3037,7 +3272,10 @@ mod tests {
         assert_eq!(run("echo gettext('hello')"), "hello\n");
         // indexof: first item where the expr (v:val/v:key) is true, else -1.
         assert_eq!(run("echo indexof([1,2,3,4], 'v:val > 2')"), "2\n");
-        assert_eq!(run("echo indexof(['a','bb','ccc'], 'len(v:val) == 2')"), "1\n");
+        assert_eq!(
+            run("echo indexof(['a','bb','ccc'], 'len(v:val) == 2')"),
+            "1\n"
+        );
         assert_eq!(run("echo indexof([1,2,3], 'v:val > 9')"), "-1\n");
         // id() is non-empty and stable for a container, empty for a scalar.
         assert_eq!(run("let l=[1,2]\necho id(l) == id(l)"), "1\n");
@@ -3050,15 +3288,30 @@ mod tests {
     #[test]
     fn fnamemodify_and_glob() {
         // Filename modifiers (verified against `nvim --clean`).
-        assert_eq!(run("echo fnamemodify('/home/u/file.txt.gz', ':t')"), "file.txt.gz\n");
-        assert_eq!(run("echo fnamemodify('/home/u/file.txt.gz', ':h')"), "/home/u\n");
-        assert_eq!(run("echo fnamemodify('/home/u/file.txt.gz', ':r')"), "/home/u/file.txt\n");
+        assert_eq!(
+            run("echo fnamemodify('/home/u/file.txt.gz', ':t')"),
+            "file.txt.gz\n"
+        );
+        assert_eq!(
+            run("echo fnamemodify('/home/u/file.txt.gz', ':h')"),
+            "/home/u\n"
+        );
+        assert_eq!(
+            run("echo fnamemodify('/home/u/file.txt.gz', ':r')"),
+            "/home/u/file.txt\n"
+        );
         assert_eq!(run("echo fnamemodify('/home/u/file.txt.gz', ':e')"), "gz\n");
         assert_eq!(run("echo fnamemodify('a.b.c', ':e:e')"), "b.c\n");
         assert_eq!(run("echo fnamemodify('a.b.c', ':r:r')"), "a\n");
-        assert_eq!(run("echo fnamemodify('path/to/this.file.ext', ':e:e')"), "file.ext\n");
+        assert_eq!(
+            run("echo fnamemodify('path/to/this.file.ext', ':e:e')"),
+            "file.ext\n"
+        );
         assert_eq!(run("echo fnamemodify('foo/bar.txt', ':t:r')"), "bar\n");
-        assert_eq!(run("echo fnamemodify('foo/bar.txt', ':s?bar?baz?')"), "foo/baz.txt\n");
+        assert_eq!(
+            run("echo fnamemodify('foo/bar.txt', ':s?bar?baz?')"),
+            "foo/baz.txt\n"
+        );
         // glob2regpat (pure string transform).
         assert_eq!(run("echo glob2regpat('*.txt')"), "\\.txt$\n");
         assert_eq!(run("echo glob2regpat('foo?bar')"), "^foo.bar$\n");
@@ -3108,14 +3361,29 @@ mod tests {
     #[test]
     fn list_range_assign() {
         // `let l[i:j] = list` — values verified against `nvim --clean`.
-        assert_eq!(run("let l=[1,2,3,4,5]\nlet l[1:3]=[20,30,40]\necho l"), "[1, 20, 30, 40, 5]\n");
+        assert_eq!(
+            run("let l=[1,2,3,4,5]\nlet l[1:3]=[20,30,40]\necho l"),
+            "[1, 20, 30, 40, 5]\n"
+        );
         // `l[i:]` replaces from i to the end (grows when the source is longer).
-        assert_eq!(run("let m=[0,0,0,0]\nlet m[1:]=[7,8,9]\necho m"), "[0, 7, 8, 9]\n");
-        assert_eq!(run("let g=[1,2]\nlet g[1:]=[5,6,7,8]\necho g"), "[1, 5, 6, 7, 8]\n");
+        assert_eq!(
+            run("let m=[0,0,0,0]\nlet m[1:]=[7,8,9]\necho m"),
+            "[0, 7, 8, 9]\n"
+        );
+        assert_eq!(
+            run("let g=[1,2]\nlet g[1:]=[5,6,7,8]\necho g"),
+            "[1, 5, 6, 7, 8]\n"
+        );
         // `l[:j]` replaces from the start; single-element range; negative index.
         assert_eq!(run("let p=[1,2,3]\nlet p[:1]=[8,9]\necho p"), "[8, 9, 3]\n");
-        assert_eq!(run("let q=[1,2,3]\nlet q[1:1]=[99]\necho q"), "[1, 99, 3]\n");
-        assert_eq!(run("let l=[1,2,3,4]\nlet l[-2:]=[88,99]\necho l"), "[1, 2, 88, 99]\n");
+        assert_eq!(
+            run("let q=[1,2,3]\nlet q[1:1]=[99]\necho q"),
+            "[1, 99, 3]\n"
+        );
+        assert_eq!(
+            run("let l=[1,2,3,4]\nlet l[-2:]=[88,99]\necho l"),
+            "[1, 2, 88, 99]\n"
+        );
     }
 
     #[test]
@@ -3123,10 +3391,15 @@ mod tests {
         // v: variable store (vimvars[]). Expected values verified against nvim.
         assert_eq!(run("echo v:version"), "801\n");
         assert_eq!(
-            run("echo v:t_number v:t_string v:t_func v:t_list v:t_dict v:t_float v:t_bool v:t_blob"),
+            run(
+                "echo v:t_number v:t_string v:t_func v:t_list v:t_dict v:t_float v:t_bool v:t_blob"
+            ),
             "0 1 2 3 4 5 6 10\n"
         );
-        assert_eq!(run("echo v:numbermax v:numbermin v:numbersize"), "9223372036854775807 -9223372036854775808 64\n");
+        assert_eq!(
+            run("echo v:numbermax v:numbermin v:numbersize"),
+            "9223372036854775807 -9223372036854775808 64\n"
+        );
         assert_eq!(run("echo v:maxcol"), "2147483647\n");
         assert_eq!(run("echo v:true v:false v:null"), "v:true v:false v:null\n");
         assert_eq!(run("echo v:searchforward v:hlsearch v:count1"), "1 1 1\n");
@@ -3145,18 +3418,28 @@ mod tests {
         let add = "function! Add(a,b)\nreturn a:a+a:b\nendfunction\n";
         let add3 = "function! Add3(x,a,b)\nreturn a:x+a:a+a:b\nendfunction\n";
         // call(partial, args): Add(10, 5).
-        assert_eq!(run(&format!("{add}let P=function('Add',[10])\necho call(P,[5])")), "15\n");
+        assert_eq!(
+            run(&format!(
+                "{add}let P=function('Add',[10])\necho call(P,[5])"
+            )),
+            "15\n"
+        );
         // type() of a Partial is 2 (Funcref).
         assert_eq!(run(&format!("{add}echo type(function('Add',[10]))")), "2\n");
         // echo / string() render as function('name', [args]).
-        assert_eq!(run(&format!("{add}echo function('Add',[10])")), "function('Add', [10])\n");
+        assert_eq!(
+            run(&format!("{add}echo function('Add',[10])")),
+            "function('Add', [10])\n"
+        );
         assert_eq!(
             run(&format!("{add}echo string(function('Add',[1,2]))")),
             "function('Add', [1, 2])\n"
         );
         // Partial honored in reduce() — Add3(100, acc, item).
         assert_eq!(
-            run(&format!("{add3}echo reduce([1,2,3], function('Add3',[100]), 0)")),
+            run(&format!(
+                "{add3}echo reduce([1,2,3], function('Add3',[100]), 0)"
+            )),
             "306\n"
         );
         // Partial honored in map() — Add3(10, key, val).
@@ -3166,14 +3449,21 @@ mod tests {
         );
         // func_equal(): same name+args equal; differing args/arity not.
         assert_eq!(
-            run(&format!("{add}echo function('Add',[1,2])==function('Add',[1,2])")),
+            run(&format!(
+                "{add}echo function('Add',[1,2])==function('Add',[1,2])"
+            )),
             "1\n"
         );
         assert_eq!(
-            run(&format!("{add}echo function('Add',[1,2])==function('Add',[1,3])")),
+            run(&format!(
+                "{add}echo function('Add',[1,2])==function('Add',[1,3])"
+            )),
             "0\n"
         );
-        assert_eq!(run(&format!("{add}echo function('Add',[1])==function('Add')")), "0\n");
+        assert_eq!(
+            run(&format!("{add}echo function('Add',[1])==function('Add')")),
+            "0\n"
+        );
     }
 
     #[test]
@@ -3182,12 +3472,18 @@ mod tests {
         assert_eq!(run("echo map([1,2,3], 'v:val * 2')"), "[2, 4, 6]\n");
         assert_eq!(run("echo filter([1,2,3,4], 'v:val % 2 == 0')"), "[2, 4]\n");
         // Dict map.
-        assert_eq!(run("echo map({'a':1,'b':2}, 'v:val + 10')"), "{'a': 11, 'b': 12}\n");
+        assert_eq!(
+            run("echo map({'a':1,'b':2}, 'v:val + 10')"),
+            "{'a': 11, 'b': 12}\n"
+        );
         // String map / filter (new — char-by-char).
         assert_eq!(run("echo map('abc', 'toupper(v:val)')"), "ABC\n");
         assert_eq!(run("echo filter('hello', 'v:val != \"l\"')"), "heo\n");
         // Blob map.
-        assert_eq!(run("echo blob2list(map(list2blob([1,2,3]), 'v:val + 1'))"), "[2, 3, 4]\n");
+        assert_eq!(
+            run("echo blob2list(map(list2blob([1,2,3]), 'v:val + 1'))"),
+            "[2, 3, 4]\n"
+        );
         // mapnew leaves the source intact.
         assert_eq!(
             run("let l=[1,2,3]\nlet m=mapnew(l, 'v:val*10')\necho l\necho m"),
@@ -3200,7 +3496,9 @@ mod tests {
         );
         // map with a funcref.
         assert_eq!(
-            run("function! Dbl(k,v)\nreturn a:v*2\nendfunction\necho map([5,6,7], function('Dbl'))"),
+            run(
+                "function! Dbl(k,v)\nreturn a:v*2\nendfunction\necho map([5,6,7], function('Dbl'))"
+            ),
             "[10, 12, 14]\n"
         );
     }
@@ -3238,19 +3536,28 @@ mod tests {
     #[test]
     fn remove_builtin() {
         // List: single index (returns the item), and a range (returns a sub-list).
-        assert_eq!(run("let l=[1,2,3,4]\necho remove(l, 1)\necho l"), "2\n[1, 3, 4]\n");
+        assert_eq!(
+            run("let l=[1,2,3,4]\necho remove(l, 1)\necho l"),
+            "2\n[1, 3, 4]\n"
+        );
         assert_eq!(
             run("let m=[10,20,30,40,50]\necho remove(m, 1, 3)\necho m"),
             "[20, 30, 40]\n[10, 50]\n"
         );
         // Dict: by key.
-        assert_eq!(run("let d={'a':1,'b':2}\necho remove(d, 'a')\necho d"), "1\n{'b': 2}\n");
+        assert_eq!(
+            run("let d={'a':1,'b':2}\necho remove(d, 'a')\necho d"),
+            "1\n{'b': 2}\n"
+        );
         // Blob: single byte, and a range (returns a sub-blob).
         assert_eq!(
             run("let b=list2blob([1,2,3,4,5])\necho remove(b, 2)\necho blob2list(b)"),
             "3\n[1, 2, 4, 5]\n"
         );
-        assert_eq!(run("echo blob2list(remove(list2blob([1,2,3,4,5]), 1, 2))"), "[2, 3]\n");
+        assert_eq!(
+            run("echo blob2list(remove(list2blob([1,2,3,4,5]), 1, 2))"),
+            "[2, 3]\n"
+        );
     }
 
     #[test]
@@ -3275,9 +3582,18 @@ mod tests {
     fn pathshorten_builtin() {
         // Verified bit-exact against Neovim: each directory shortens to `len`
         // chars (keeping a leading `~`/`.`); the final component is untouched.
-        assert_eq!(run("echo pathshorten('~/foo/bar/baz.vim')"), "~/f/b/baz.vim\n");
-        assert_eq!(run("echo pathshorten('/usr/local/bin/foo')"), "/u/l/b/foo\n");
-        assert_eq!(run("echo pathshorten('~/.config/nvim/init.vim', 2)"), "~/.co/nv/init.vim\n");
+        assert_eq!(
+            run("echo pathshorten('~/foo/bar/baz.vim')"),
+            "~/f/b/baz.vim\n"
+        );
+        assert_eq!(
+            run("echo pathshorten('/usr/local/bin/foo')"),
+            "/u/l/b/foo\n"
+        );
+        assert_eq!(
+            run("echo pathshorten('~/.config/nvim/init.vim', 2)"),
+            "~/.co/nv/init.vim\n"
+        );
         assert_eq!(run("echo pathshorten('noseps')"), "noseps\n");
     }
 
@@ -3290,7 +3606,10 @@ mod tests {
         assert_eq!(run("echo invert(0)"), "-1\n");
         // Nested + a slotted accumulator loop (the native-lowered path).
         assert_eq!(run("echo and(255, xor(170, 85))"), "255\n");
-        assert_eq!(run("let h=0\nfor i in range(8)\nlet h=xor(h,i)\nendfor\necho h"), "0\n");
+        assert_eq!(
+            run("let h=0\nfor i in range(8)\nlet h=xor(h,i)\nendfor\necho h"),
+            "0\n"
+        );
     }
 
     #[test]
@@ -3314,16 +3633,28 @@ mod tests {
         // reltime() with no args → a 2-element [high, low] list.
         assert_eq!(run("echo len(reltime())"), "2\n");
         // Difference of a timestamp with itself is exactly zero, in both forms.
-        assert_eq!(run("let s = reltime()\necho reltimefloat(reltime(s, s))"), "0.0\n");
+        assert_eq!(
+            run("let s = reltime()\necho reltimefloat(reltime(s, s))"),
+            "0.0\n"
+        );
         // reltimestr formats seconds as %10.6f (right-justified width 10).
-        assert_eq!(run("let s = reltime()\necho reltimestr(reltime(s, s))"), "  0.000000\n");
+        assert_eq!(
+            run("let s = reltime()\necho reltimestr(reltime(s, s))"),
+            "  0.000000\n"
+        );
     }
 
     #[test]
     fn eval_execute_dictmap() {
         assert_eq!(run("echo eval('1 + 2 * 3')"), "7\n");
-        assert_eq!(run("echo map({'a': 1, 'b': 2}, 'v:val * 10')"), "{'a': 10, 'b': 20}\n");
-        assert_eq!(run("echo filter({'a': 1, 'b': 2, 'c': 3}, 'v:val > 1')"), "{'b': 2, 'c': 3}\n");
+        assert_eq!(
+            run("echo map({'a': 1, 'b': 2}, 'v:val * 10')"),
+            "{'a': 10, 'b': 20}\n"
+        );
+        assert_eq!(
+            run("echo filter({'a': 1, 'b': 2, 'c': 3}, 'v:val > 1')"),
+            "{'b': 2, 'c': 3}\n"
+        );
         assert_eq!(run("echo execute('echo 41 + 1')"), "42\n\n"); // captured "42\n" + echo's \n
         assert_eq!(run("echo deepcopy([[1], [2]])"), "[[1], [2]]\n");
         assert_eq!(run("echo fmod(10.0, 3.0)"), "1.0\n");
@@ -3368,7 +3699,10 @@ mod tests {
 
     #[test]
     fn math_string_list_builtins() {
-        assert_eq!(run("echo float2nr(sqrt(16.0)) . float2nr(pow(2.0, 5.0))"), "432\n");
+        assert_eq!(
+            run("echo float2nr(sqrt(16.0)) . float2nr(pow(2.0, 5.0))"),
+            "432\n"
+        );
         assert_eq!(run("echo and(12, 10) . or(12, 10) . xor(12, 10)"), "8146\n");
         assert_eq!(run("echo strpart('hello world', 6)"), "world\n");
         assert_eq!(run("echo stridx('abcabc', 'c', 3)"), "5\n");
@@ -3386,7 +3720,10 @@ mod tests {
         // map with a string expression binding v:val.
         assert_eq!(run("echo map([1, 2, 3], 'v:val * 10')"), "[10, 20, 30]\n");
         // filter.
-        assert_eq!(run("echo filter([1, 2, 3, 4], 'v:val % 2 == 0')"), "[2, 4]\n");
+        assert_eq!(
+            run("echo filter([1, 2, 3, 4], 'v:val % 2 == 0')"),
+            "[2, 4]\n"
+        );
         // sort: default string order vs numeric.
         assert_eq!(run("echo sort([10, 9, 2])"), "[10, 2, 9]\n");
         assert_eq!(run("echo sort([10, 9, 2], 'n')"), "[2, 9, 10]\n");
@@ -3415,7 +3752,10 @@ mod tests {
         assert_eq!(run("echo has_key({'x': 1}, 'x')"), "1\n");
         assert_eq!(run("echo get([10, 20, 30], 1)"), "20\n");
         assert_eq!(run("echo printf('%s=%05X', 'n', 255)"), "n=000FF\n");
-        assert_eq!(run("echo count([1, 2, 2, 3], 2) . index([1, 2, 3], 3)"), "22\n");
+        assert_eq!(
+            run("echo count([1, 2, 2, 3], 2) . index([1, 2, 3], 3)"),
+            "22\n"
+        );
         assert_eq!(run("echo reverse([1, 2, 3])"), "[3, 2, 1]\n");
     }
 

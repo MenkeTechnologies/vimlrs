@@ -70,7 +70,10 @@ fn path_is_absolute(fname: &str) -> bool {
 
 /// Port of `f_isabsolutepath()` from `Src/eval/fs.c`.
 pub fn f_isabsolutepath(argvars: &[typval_T], rettv: &mut typval_T) {
-    ret_nr!(rettv, path_is_absolute(&tv_get_string(&argvars[0])) as varnumber_T);
+    ret_nr!(
+        rettv,
+        path_is_absolute(&tv_get_string(&argvars[0])) as varnumber_T
+    );
 }
 
 /// Port of `simplify_filename()` (path.c) — collapse `//` and `/./`, resolve
@@ -78,23 +81,27 @@ pub fn f_isabsolutepath(argvars: &[typval_T], rettv: &mut typval_T) {
 fn simplify_filename(p: &str) -> String {
     let absolute = p.starts_with('/');
     // Vim preserves a leading "//" (two slashes); otherwise one.
-    let lead = if p.starts_with("//") && !p.starts_with("///") { "//" } else if absolute { "/" } else { "" };
+    let lead = if p.starts_with("//") && !p.starts_with("///") {
+        "//"
+    } else if absolute {
+        "/"
+    } else {
+        ""
+    };
     let mut out: Vec<&str> = Vec::new();
     for comp in p.split('/') {
         match comp {
             "" | "." => {} // collapse // and ./
-            ".." => {
-                match out.last() {
-                    Some(&last) if last != ".." => {
-                        out.pop();
-                    }
-                    _ => {
-                        if !absolute {
-                            out.push("..");
-                        }
+            ".." => match out.last() {
+                Some(&last) if last != ".." => {
+                    out.pop();
+                }
+                _ => {
+                    if !absolute {
+                        out.push("..");
                     }
                 }
-            }
+            },
             c => out.push(c),
         }
     }
@@ -141,7 +148,10 @@ pub fn f_filewritable(argvars: &[typval_T], rettv: &mut typval_T) {
 
 /// Port of `f_isdirectory()` from `Src/eval/fs.c`.
 pub fn f_isdirectory(argvars: &[typval_T], rettv: &mut typval_T) {
-    ret_nr!(rettv, Path::new(&tv_get_string(&argvars[0])).is_dir() as varnumber_T);
+    ret_nr!(
+        rettv,
+        Path::new(&tv_get_string(&argvars[0])).is_dir() as varnumber_T
+    );
 }
 
 /// Port of `f_getfsize()` from `Src/eval/fs.c` — bytes, 0 for a dir, -1 if absent.
@@ -230,12 +240,19 @@ pub fn f_getfperm(argvars: &[typval_T], rettv: &mut typval_T) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let s = std::fs::metadata(&fname).ok().map(|m| perm_string!(m.permissions().mode()));
+        let s = std::fs::metadata(&fname)
+            .ok()
+            .map(|m| perm_string!(m.permissions().mode()));
         ret_str!(rettv, s);
     }
     #[cfg(not(unix))]
     {
-        ret_str!(rettv, std::fs::metadata(&fname).ok().map(|_| "rw-rw-rw-".to_string()));
+        ret_str!(
+            rettv,
+            std::fs::metadata(&fname)
+                .ok()
+                .map(|_| "rw-rw-rw-".to_string())
+        );
     }
 }
 
@@ -273,7 +290,9 @@ pub fn f_setfperm(argvars: &[typval_T], rettv: &mut typval_T) {
 /// RUST-PORT NOTE: the window/tabpage scope arguments collapse to the single
 /// global CWD in the standalone interpreter.
 pub fn f_getcwd(_argvars: &[typval_T], rettv: &mut typval_T) {
-    let cwd = std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned());
+    let cwd = std::env::current_dir()
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned());
     ret_str!(rettv, cwd);
 }
 
@@ -335,7 +354,10 @@ pub fn f_executable(argvars: &[typval_T], rettv: &mut typval_T) {
     if tv_check_for_string_arg(argvars, 0) == FAIL {
         return;
     }
-    ret_nr!(rettv, os_can_exe(&tv_get_string(&argvars[0])).is_some() as varnumber_T);
+    ret_nr!(
+        rettv,
+        os_can_exe(&tv_get_string(&argvars[0])).is_some() as varnumber_T
+    );
 }
 
 /// Port of `f_exepath()` from `Src/eval/fs.c` — the full path of `name` on `$PATH`.
@@ -398,7 +420,11 @@ pub fn f_delete(argvars: &[typval_T], rettv: &mut typval_T) {
         emsg("E474: Invalid argument");
         return;
     }
-    let flags = if argvars.len() > 1 { tv_get_string(&argvars[1]) } else { String::new() };
+    let flags = if argvars.len() > 1 {
+        tv_get_string(&argvars[1])
+    } else {
+        String::new()
+    };
     let res = match flags.as_str() {
         "" => std::fs::remove_file(&name),
         "d" => std::fs::remove_dir(&name),
@@ -415,7 +441,14 @@ pub fn f_delete(argvars: &[typval_T], rettv: &mut typval_T) {
 pub fn f_rename(argvars: &[typval_T], rettv: &mut typval_T) {
     let from = tv_get_string(&argvars[0]);
     let to = tv_get_string(&argvars[1]);
-    ret_nr!(rettv, if std::fs::rename(&from, &to).is_ok() { 0 } else { -1 });
+    ret_nr!(
+        rettv,
+        if std::fs::rename(&from, &to).is_ok() {
+            0
+        } else {
+            -1
+        }
+    );
 }
 
 /// Port of `f_readfile()` from `Src/eval/fs.c` — read a file into a List of
@@ -464,11 +497,20 @@ pub fn f_writefile(argvars: &[typval_T], rettv: &mut typval_T) {
         }
     };
     let fname = tv_get_string(&argvars[1]);
-    let flags = if argvars.len() > 2 { tv_get_string(&argvars[2]) } else { String::new() };
+    let flags = if argvars.len() > 2 {
+        tv_get_string(&argvars[2])
+    } else {
+        String::new()
+    };
     let append = flags.contains('a');
     let binary = flags.contains('b');
 
-    let items: Vec<String> = lines.borrow().lv_items.iter().map(|it| tv_get_string(&it.li_tv)).collect();
+    let items: Vec<String> = lines
+        .borrow()
+        .lv_items
+        .iter()
+        .map(|it| tv_get_string(&it.li_tv))
+        .collect();
     let mut buf = items.join("\n");
     if !binary && !buf.is_empty() {
         buf.push('\n');
@@ -489,40 +531,14 @@ pub fn f_writefile(argvars: &[typval_T], rettv: &mut typval_T) {
             return;
         }
     };
-    ret_nr!(rettv, if f.write_all(buf.as_bytes()).is_ok() { 0 } else { -1 });
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn simplify_paths() {
-        assert_eq!(simplify_filename("/a/b/../c"), "/a/c");
-        assert_eq!(simplify_filename("a/./b//c"), "a/b/c");
-        assert_eq!(simplify_filename("/a/b/../../c"), "/c");
-        assert_eq!(simplify_filename("./a"), "a");
-        assert_eq!(simplify_filename("a/.."), ".");
-        assert_eq!(simplify_filename("/"), "/");
-    }
-
-    #[test]
-    fn absolute_paths() {
-        assert!(path_is_absolute("/usr/bin"));
-        assert!(path_is_absolute("~/foo"));
-        assert!(!path_is_absolute("foo/bar"));
-    }
-
-    #[test]
-    fn getfperm_format() {
-        #[cfg(unix)]
-        {
-            assert_eq!(perm_string!(0o644u32), "rw-r--r--");
-            assert_eq!(perm_string!(0o755u32), "rwxr-xr-x");
-            assert_eq!(perm_string!(0o000u32), "---------");
+    ret_nr!(
+        rettv,
+        if f.write_all(buf.as_bytes()).is_ok() {
+            0
+        } else {
+            -1
         }
-    }
-
+    );
 }
 
 // ── fnamemodify / glob / readdir / blob IO (eval/fs.c) ───────────────────────
@@ -602,7 +618,10 @@ pub fn modify_fname(mods: &str, fname: &str) -> String {
             if c == b'.' {
                 if let Ok(cwd) = std::env::current_dir() {
                     let prefix = format!("{}/", cwd.to_string_lossy());
-                    name = full.strip_prefix(&prefix).map(str::to_string).unwrap_or(full);
+                    name = full
+                        .strip_prefix(&prefix)
+                        .map(str::to_string)
+                        .unwrap_or(full);
                 }
             } else if let Some(home) = std::env::var_os("HOME") {
                 let home = home.to_string_lossy();
@@ -712,7 +731,11 @@ pub fn f_fnamemodify(argvars: &[typval_T], rettv: &mut typval_T) {
     let mods = tv_get_string_chk(&argvars[1]);
     match (fname, mods) {
         (Some(fname), Some(mods)) => {
-            let r = if mods.is_empty() { fname } else { modify_fname(&mods, &fname) };
+            let r = if mods.is_empty() {
+                fname
+            } else {
+                modify_fname(&mods, &fname)
+            };
             ret_str!(rettv, Some(r));
         }
         _ => ret_str!(rettv, None::<String>),
@@ -815,7 +838,10 @@ fn file_pat_to_reg_pat(pat: &str) -> String {
 
 /// Port of `f_glob2regpat()` from `Src/eval/fs.c`.
 pub fn f_glob2regpat(argvars: &[typval_T], rettv: &mut typval_T) {
-    ret_str!(rettv, tv_get_string_chk(&argvars[0]).map(|p| file_pat_to_reg_pat(&p)));
+    ret_str!(
+        rettv,
+        tv_get_string_chk(&argvars[0]).map(|p| file_pat_to_reg_pat(&p))
+    );
 }
 
 /// Port of `f_readdir()` from `Src/eval/fs.c` — directory entries (sorted), with
@@ -824,7 +850,9 @@ pub fn f_readdir(argvars: &[typval_T], rettv: &mut typval_T) {
     let l = tv_list_alloc_ret(rettv, 0);
     let path = tv_get_string(&argvars[0]);
     let mut names: Vec<String> = match std::fs::read_dir(&path) {
-        Ok(rd) => rd.filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned())).collect(),
+        Ok(rd) => rd
+            .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+            .collect(),
         Err(_) => return,
     };
     names.sort();
@@ -862,7 +890,11 @@ pub fn f_readblob(argvars: &[typval_T], rettv: &mut typval_T) {
     };
     // c: offset (negative → from EOF), then size.
     let len = data.len() as i64;
-    let mut off = if argvars.len() > 1 { tv_get_number(&argvars[1]) } else { 0 };
+    let mut off = if argvars.len() > 1 {
+        tv_get_number(&argvars[1])
+    } else {
+        0
+    };
     if off < 0 {
         off += len;
         if off < 0 {
@@ -880,5 +912,39 @@ pub fn f_readblob(argvars: &[typval_T], rettv: &mut typval_T) {
     } else {
         data.len() - off
     };
-    b.borrow_mut().bv_ga.extend_from_slice(&data[off..off + size]);
+    b.borrow_mut()
+        .bv_ga
+        .extend_from_slice(&data[off..off + size]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn simplify_paths() {
+        assert_eq!(simplify_filename("/a/b/../c"), "/a/c");
+        assert_eq!(simplify_filename("a/./b//c"), "a/b/c");
+        assert_eq!(simplify_filename("/a/b/../../c"), "/c");
+        assert_eq!(simplify_filename("./a"), "a");
+        assert_eq!(simplify_filename("a/.."), ".");
+        assert_eq!(simplify_filename("/"), "/");
+    }
+
+    #[test]
+    fn absolute_paths() {
+        assert!(path_is_absolute("/usr/bin"));
+        assert!(path_is_absolute("~/foo"));
+        assert!(!path_is_absolute("foo/bar"));
+    }
+
+    #[test]
+    fn getfperm_format() {
+        #[cfg(unix)]
+        {
+            assert_eq!(perm_string!(0o644u32), "rw-r--r--");
+            assert_eq!(perm_string!(0o755u32), "rwxr-xr-x");
+            assert_eq!(perm_string!(0o000u32), "---------");
+        }
+    }
 }

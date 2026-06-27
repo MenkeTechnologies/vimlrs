@@ -54,7 +54,10 @@ pub fn write_reg_contents_lst(name: char, mut lines: Vec<String>, mtype: MotionT
             if let Some(reg) = regs.get_mut(&name) {
                 // c: a charwise register continues on its last line (no newline
                 // inserted); a linewise register gains new lines.
-                if reg.y_type == MotionType::CharWise && !reg.y_array.is_empty() && !lines.is_empty() {
+                if reg.y_type == MotionType::CharWise
+                    && !reg.y_array.is_empty()
+                    && !lines.is_empty()
+                {
                     let head = lines.remove(0);
                     reg.y_array.last_mut().unwrap().push_str(&head);
                 }
@@ -63,7 +66,13 @@ pub fn write_reg_contents_lst(name: char, mut lines: Vec<String>, mtype: MotionT
                 return;
             }
         }
-        regs.insert(name, Register { y_array: lines, y_type: mtype });
+        regs.insert(
+            name,
+            Register {
+                y_array: lines,
+                y_type: mtype,
+            },
+        );
     });
 }
 
@@ -112,12 +121,23 @@ mod tests {
         assert_eq!(format_reg_type(get_reg_type('a').0, 0), "v");
         assert_eq!(get_reg_contents('q'), None); // unset register
 
-        write_reg_contents_lst('b', vec!["x".into(), "y".into()], MotionType::LineWise, false);
-        assert_eq!(get_reg_contents('b'), Some(vec!["x".to_string(), "y".to_string()]));
+        write_reg_contents_lst(
+            'b',
+            vec!["x".into(), "y".into()],
+            MotionType::LineWise,
+            false,
+        );
+        assert_eq!(
+            get_reg_contents('b'),
+            Some(vec!["x".to_string(), "y".to_string()])
+        );
         assert_eq!(format_reg_type(get_reg_type('b').0, 0), "V");
 
         // append (linewise adds lines)
         write_reg_contents_lst('b', vec!["z".into()], MotionType::LineWise, true);
-        assert_eq!(get_reg_contents('b'), Some(vec!["x".to_string(), "y".to_string(), "z".to_string()]));
+        assert_eq!(
+            get_reg_contents('b'),
+            Some(vec!["x".to_string(), "y".to_string(), "z".to_string()])
+        );
     }
 }

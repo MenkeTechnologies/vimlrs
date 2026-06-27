@@ -17,8 +17,25 @@ use std::path::{Path, PathBuf};
 
 /// Trait-impl / std method names that legitimately appear without a C origin.
 const TRAIT_EXEMPT: &[&str] = &[
-    "default", "new", "fmt", "clone", "drop", "from", "into", "eq", "ne", "cmp", "partial_cmp",
-    "hash", "as_ref", "as_mut", "deref", "deref_mut", "next", "borrow", "borrow_mut",
+    "default",
+    "new",
+    "fmt",
+    "clone",
+    "drop",
+    "from",
+    "into",
+    "eq",
+    "ne",
+    "cmp",
+    "partial_cmp",
+    "hash",
+    "as_ref",
+    "as_mut",
+    "deref",
+    "deref_mut",
+    "next",
+    "borrow",
+    "borrow_mut",
 ];
 
 fn read_set(path: &Path) -> HashSet<String> {
@@ -49,7 +66,10 @@ fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
 /// lifetimes like `tv_dict_find<'d>`). Returns `None` if the line isn't a fn def.
 fn fn_name(line: &str) -> Option<String> {
     let t = line.trim_start();
-    let rest = t.strip_prefix("pub(crate) ").or_else(|| t.strip_prefix("pub ")).unwrap_or(t);
+    let rest = t
+        .strip_prefix("pub(crate) ")
+        .or_else(|| t.strip_prefix("pub "))
+        .unwrap_or(t);
     let rest = rest.strip_prefix("fn ")?;
     let name: String = rest
         .chars()

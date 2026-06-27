@@ -48,10 +48,7 @@ pub fn os_localtime_r(clock: &libc::time_t) -> Option<libc::tm> {
 /// is treated as a parse failure.
 pub fn os_strptime(str: &str, format: &str, tm: &mut libc::tm) -> bool {
     // c: #ifdef HAVE_STRPTIME return strptime(str, format, tm); #else NULL
-    let (Ok(s), Ok(f)) = (
-        std::ffi::CString::new(str),
-        std::ffi::CString::new(format),
-    ) else {
+    let (Ok(s), Ok(f)) = (std::ffi::CString::new(str), std::ffi::CString::new(format)) else {
         return false;
     };
     unsafe { !libc::strptime(s.as_ptr(), f.as_ptr(), tm).is_null() }

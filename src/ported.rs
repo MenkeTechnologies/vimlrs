@@ -7,16 +7,16 @@
 
 /// Port of `src/nvim/charset.c` (extern: `vim_str2nr`).
 pub mod charset;
-/// Port of `src/nvim/message.c` (extern: `emsg`/`did_emsg`).
-pub mod message;
-/// Port of `src/nvim/eval.h` (header types: `exprtype_T`, `OK`/`FAIL`).
-pub mod eval_h;
 /// Port of `src/nvim/eval.c` and its `eval/` subtree.
 pub mod eval;
-/// Port of `src/nvim/option.c` (subset: the option table, `&opt`, `:set`).
-pub mod option;
+/// Port of `src/nvim/eval.h` (header types: `exprtype_T`, `OK`/`FAIL`).
+pub mod eval_h;
+/// Port of `src/nvim/message.c` (extern: `emsg`/`did_emsg`).
+pub mod message;
 /// Port of `src/nvim/ops.c` (subset: the yank-register store for `getreg`/`setreg`).
 pub mod ops;
+/// Port of `src/nvim/option.c` (subset: the option table, `&opt`, `:set`).
+pub mod option;
 /// Port of `src/nvim/os/` (subset: `os/time.c`'s `os_hrtime`).
 pub mod os;
 /// Port of `src/nvim/path.c` (subset: the path-component helpers behind

@@ -73,9 +73,12 @@ pub fn encode_vim_to_string(tv: &typval_T) -> String {
                 format!("function('{name}', [{}])", args.join(", "))
             }
         }
-        (VAR_BOOL, v_bool(b)) => {
-            if *b == kBoolVarTrue { "v:true" } else { "v:false" }.to_string()
+        (VAR_BOOL, v_bool(b)) => if *b == kBoolVarTrue {
+            "v:true"
+        } else {
+            "v:false"
         }
+        .to_string(),
         (VAR_SPECIAL, _) => "v:null".to_string(),
         // TYPVAL_ENCODE_CONV_LIST_START / _BETWEEN_ITEMS / _END
         (VAR_LIST, v_list(l)) => match l {
@@ -183,9 +186,7 @@ pub fn encode_vim_to_json(tv: &typval_T) -> String {
             }
         }
         (VAR_STRING, v_string(s)) => convert_to_json_string(s),
-        (VAR_BOOL, v_bool(b)) => {
-            if *b == kBoolVarTrue { "true" } else { "false" }.to_string()
-        }
+        (VAR_BOOL, v_bool(b)) => if *b == kBoolVarTrue { "true" } else { "false" }.to_string(),
         (VAR_SPECIAL, _) => "null".to_string(),
         (VAR_LIST, v_list(l)) => match l {
             None => "[]".to_string(),
@@ -222,4 +223,3 @@ pub fn encode_vim_to_json(tv: &typval_T) -> String {
         _ => "null".to_string(),
     }
 }
-

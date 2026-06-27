@@ -3,168 +3,352 @@
 
 /// Port of `win_has_winnr()` — `csrc/eval/window.c:42`. STUB: not yet ported.
 /// C: `bool win_has_winnr(win_T *wp, tabpage_T *tp)`
-pub fn win_has_winnr() { unimplemented!("STUB win_has_winnr — csrc/eval/window.c:42") }
+pub fn win_has_winnr() {
+    unimplemented!("STUB win_has_winnr — csrc/eval/window.c:42")
+}
 
 /// Port of `win_getid()` — `csrc/eval/window.c:49`. STUB: not yet ported.
 /// C: `static int win_getid(typval_T *argvars)`
-pub fn win_getid() { unimplemented!("STUB win_getid — csrc/eval/window.c:49") }
+pub fn win_getid() {
+    unimplemented!("STUB win_getid — csrc/eval/window.c:49")
+}
 
 /// Port of `win_id2tabwin()` — `csrc/eval/window.c:89`. STUB: not yet ported.
 /// C: `static void win_id2tabwin(typval_T *const argvars, typval_T *const rettv)`
-pub fn win_id2tabwin() { unimplemented!("STUB win_id2tabwin — csrc/eval/window.c:89") }
+pub fn win_id2tabwin() {
+    unimplemented!("STUB win_id2tabwin — csrc/eval/window.c:89")
+}
 
 /// Port of `win_id2wp()` — `csrc/eval/window.c:102`. STUB: not yet ported.
 /// C: `win_T *win_id2wp(int id)`
-pub fn win_id2wp() { unimplemented!("STUB win_id2wp — csrc/eval/window.c:102") }
+pub fn win_id2wp() {
+    unimplemented!("STUB win_id2wp — csrc/eval/window.c:102")
+}
 
 /// Port of `win_id2wp_tp()` — `csrc/eval/window.c:109`. STUB: not yet ported.
 /// C: `win_T *win_id2wp_tp(int id, tabpage_T **tpp)`
-pub fn win_id2wp_tp() { unimplemented!("STUB win_id2wp_tp — csrc/eval/window.c:109") }
+pub fn win_id2wp_tp() {
+    unimplemented!("STUB win_id2wp_tp — csrc/eval/window.c:109")
+}
 
 /// Port of `win_id2win()` — `csrc/eval/window.c:123`. STUB: not yet ported.
 /// C: `static int win_id2win(typval_T *argvars)`
-pub fn win_id2win() { unimplemented!("STUB win_id2win — csrc/eval/window.c:123") }
+pub fn win_id2win() {
+    unimplemented!("STUB win_id2win — csrc/eval/window.c:123")
+}
 
 /// Port of `win_findbuf()` — `csrc/eval/window.c:137`. STUB: not yet ported.
 /// C: `void win_findbuf(typval_T *argvars, list_T *list)`
-pub fn win_findbuf() { unimplemented!("STUB win_findbuf — csrc/eval/window.c:137") }
+pub fn win_findbuf() {
+    unimplemented!("STUB win_findbuf — csrc/eval/window.c:137")
+}
 
 /// Port of `find_win_by_nr()` — `csrc/eval/window.c:153`. STUB: not yet ported.
 /// C: `win_T *find_win_by_nr(typval_T *vp, tabpage_T *tp)`
-pub fn find_win_by_nr() { unimplemented!("STUB find_win_by_nr — csrc/eval/window.c:153") }
+pub fn find_win_by_nr() {
+    unimplemented!("STUB find_win_by_nr — csrc/eval/window.c:153")
+}
 
 /// Port of `find_win_by_nr_or_id()` — `csrc/eval/window.c:185`. STUB: not yet ported.
 /// C: `win_T *find_win_by_nr_or_id(typval_T *vp)`
-pub fn find_win_by_nr_or_id() { unimplemented!("STUB find_win_by_nr_or_id — csrc/eval/window.c:185") }
+pub fn find_win_by_nr_or_id() {
+    unimplemented!("STUB find_win_by_nr_or_id — csrc/eval/window.c:185")
+}
 
 /// Port of `find_tabwin()` — `csrc/eval/window.c:197`. STUB: not yet ported.
 /// C: `win_T *find_tabwin(typval_T *wvp, typval_T *tvp)`
-pub fn find_tabwin() { unimplemented!("STUB find_tabwin — csrc/eval/window.c:197") }
+pub fn find_tabwin() {
+    unimplemented!("STUB find_tabwin — csrc/eval/window.c:197")
+}
 
 /// Port of `get_framelayout()` — `csrc/eval/window.c:223`. STUB: not yet ported.
 /// C: `static void get_framelayout(const frame_T *fr, list_T *l, bool outer)`
-pub fn get_framelayout() { unimplemented!("STUB get_framelayout — csrc/eval/window.c:223") }
+pub fn get_framelayout() {
+    unimplemented!("STUB get_framelayout — csrc/eval/window.c:223")
+}
 
 /// Port of `get_winnr()` — `csrc/eval/window.c:261`. STUB: not yet ported.
 /// C: `static int get_winnr(tabpage_T *tp, typval_T *argvar)`
-pub fn get_winnr() { unimplemented!("STUB get_winnr — csrc/eval/window.c:261") }
+pub fn get_winnr() {
+    unimplemented!("STUB get_winnr — csrc/eval/window.c:261")
+}
 
 /// Port of `get_win_info()` — `csrc/eval/window.c:330`. STUB: not yet ported.
 /// C: `static dict_T *get_win_info(win_T *wp, int16_t tpnr, int16_t winnr)`
-pub fn get_win_info() { unimplemented!("STUB get_win_info — csrc/eval/window.c:330") }
+pub fn get_win_info() {
+    unimplemented!("STUB get_win_info — csrc/eval/window.c:330")
+}
 
 /// Port of `get_tabpage_info()` — `csrc/eval/window.c:364`. STUB: not yet ported.
 /// C: `static dict_T *get_tabpage_info(tabpage_T *tp, int tp_idx)`
-pub fn get_tabpage_info() { unimplemented!("STUB get_tabpage_info — csrc/eval/window.c:364") }
+pub fn get_tabpage_info() {
+    unimplemented!("STUB get_tabpage_info — csrc/eval/window.c:364")
+}
 
 /// Port of `f_gettabinfo()` — `csrc/eval/window.c:383`. STUB: not yet ported.
-pub fn f_gettabinfo(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_gettabinfo — csrc/eval/window.c:383") }
+pub fn f_gettabinfo(
+    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
+    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
+) {
+    unimplemented!("STUB f_gettabinfo — csrc/eval/window.c:383")
+}
 
 /// Port of `f_getwininfo()` — `csrc/eval/window.c:415`. STUB: not yet ported.
-pub fn f_getwininfo(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_getwininfo — csrc/eval/window.c:415") }
+pub fn f_getwininfo(
+    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
+    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
+) {
+    unimplemented!("STUB f_getwininfo — csrc/eval/window.c:415")
+}
 
 /// Port of `f_getwinpos()` — `csrc/eval/window.c:450`. STUB: not yet ported.
-pub fn f_getwinpos(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_getwinpos — csrc/eval/window.c:450") }
+pub fn f_getwinpos(
+    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
+    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
+) {
+    unimplemented!("STUB f_getwinpos — csrc/eval/window.c:450")
+}
 
 /// Port of `f_getwinposx()` — `csrc/eval/window.c:458`. STUB: not yet ported.
-pub fn f_getwinposx(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_getwinposx — csrc/eval/window.c:458") }
+pub fn f_getwinposx(
+    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
+    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
+) {
+    unimplemented!("STUB f_getwinposx — csrc/eval/window.c:458")
+}
 
 /// Port of `f_getwinposy()` — `csrc/eval/window.c:464`. STUB: not yet ported.
-pub fn f_getwinposy(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_getwinposy — csrc/eval/window.c:464") }
+pub fn f_getwinposy(
+    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
+    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
+) {
+    unimplemented!("STUB f_getwinposy — csrc/eval/window.c:464")
+}
 
 /// Port of `f_tabpagenr()` — `csrc/eval/window.c:470`. STUB: not yet ported.
-pub fn f_tabpagenr(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_tabpagenr — csrc/eval/window.c:470") }
+pub fn f_tabpagenr(
+    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
+    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
+) {
+    unimplemented!("STUB f_tabpagenr — csrc/eval/window.c:470")
+}
 
 /// Port of `f_tabpagewinnr()` — `csrc/eval/window.c:493`. STUB: not yet ported.
-pub fn f_tabpagewinnr(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_tabpagewinnr — csrc/eval/window.c:493") }
+pub fn f_tabpagewinnr(
+    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
+    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
+) {
+    unimplemented!("STUB f_tabpagewinnr — csrc/eval/window.c:493")
+}
 
 /// Port of `win_execute_before()` — `csrc/eval/window.c:509`. STUB: not yet ported.
 /// C: `bool win_execute_before(win_execute_T *args, win_T *wp, tabpage_T *tp)`
-pub fn win_execute_before() { unimplemented!("STUB win_execute_before — csrc/eval/window.c:509") }
+pub fn win_execute_before() {
+    unimplemented!("STUB win_execute_before — csrc/eval/window.c:509")
+}
 
 /// Port of `win_execute_after()` — `csrc/eval/window.c:548`. STUB: not yet ported.
 /// C: `void win_execute_after(win_execute_T *args)`
-pub fn win_execute_after() { unimplemented!("STUB win_execute_after — csrc/eval/window.c:548") }
+pub fn win_execute_after() {
+    unimplemented!("STUB win_execute_after — csrc/eval/window.c:548")
+}
 
 /// Port of `f_win_execute()` — `csrc/eval/window.c:578`. STUB: not yet ported.
-pub fn f_win_execute(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_win_execute — csrc/eval/window.c:578") }
+pub fn f_win_execute(
+    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
+    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
+) {
+    unimplemented!("STUB f_win_execute — csrc/eval/window.c:578")
+}
 
 /// Port of `f_win_findbuf()` — `csrc/eval/window.c:599`. STUB: not yet ported.
-pub fn f_win_findbuf(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_win_findbuf — csrc/eval/window.c:599") }
+pub fn f_win_findbuf(
+    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
+    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
+) {
+    unimplemented!("STUB f_win_findbuf — csrc/eval/window.c:599")
+}
 
 /// Port of `f_win_getid()` — `csrc/eval/window.c:606`. STUB: not yet ported.
-pub fn f_win_getid(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_win_getid — csrc/eval/window.c:606") }
+pub fn f_win_getid(
+    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
+    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
+) {
+    unimplemented!("STUB f_win_getid — csrc/eval/window.c:606")
+}
 
 /// Port of `f_win_gotoid()` — `csrc/eval/window.c:612`. STUB: not yet ported.
-pub fn f_win_gotoid(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_win_gotoid — csrc/eval/window.c:612") }
+pub fn f_win_gotoid(
+    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
+    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
+) {
+    unimplemented!("STUB f_win_gotoid — csrc/eval/window.c:612")
+}
 
 /// Port of `f_win_id2tabwin()` — `csrc/eval/window.c:638`. STUB: not yet ported.
-pub fn f_win_id2tabwin(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_win_id2tabwin — csrc/eval/window.c:638") }
+pub fn f_win_id2tabwin(
+    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
+    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
+) {
+    unimplemented!("STUB f_win_id2tabwin — csrc/eval/window.c:638")
+}
 
 /// Port of `f_win_id2win()` — `csrc/eval/window.c:644`. STUB: not yet ported.
-pub fn f_win_id2win(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_win_id2win — csrc/eval/window.c:644") }
+pub fn f_win_id2win(
+    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
+    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
+) {
+    unimplemented!("STUB f_win_id2win — csrc/eval/window.c:644")
+}
 
 /// Port of `f_win_move_separator()` — `csrc/eval/window.c:650`. STUB: not yet ported.
-pub fn f_win_move_separator(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_win_move_separator — csrc/eval/window.c:650") }
+pub fn f_win_move_separator(
+    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
+    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
+) {
+    unimplemented!("STUB f_win_move_separator — csrc/eval/window.c:650")
+}
 
 /// Port of `f_win_move_statusline()` — `csrc/eval/window.c:669`. STUB: not yet ported.
-pub fn f_win_move_statusline(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_win_move_statusline — csrc/eval/window.c:669") }
+pub fn f_win_move_statusline(
+    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
+    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
+) {
+    unimplemented!("STUB f_win_move_statusline — csrc/eval/window.c:669")
+}
 
 /// Port of `f_win_screenpos()` — `csrc/eval/window.c:691`. STUB: not yet ported.
-pub fn f_win_screenpos(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_win_screenpos — csrc/eval/window.c:691") }
+pub fn f_win_screenpos(
+    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
+    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
+) {
+    unimplemented!("STUB f_win_screenpos — csrc/eval/window.c:691")
+}
 
 /// Port of `f_win_splitmove()` — `csrc/eval/window.c:700`. STUB: not yet ported.
-pub fn f_win_splitmove(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_win_splitmove — csrc/eval/window.c:700") }
+pub fn f_win_splitmove(
+    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
+    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
+) {
+    unimplemented!("STUB f_win_splitmove — csrc/eval/window.c:700")
+}
 
 /// Port of `f_win_gettype()` — `csrc/eval/window.c:760`. STUB: not yet ported.
-pub fn f_win_gettype(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_win_gettype — csrc/eval/window.c:760") }
+pub fn f_win_gettype(
+    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
+    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
+) {
+    unimplemented!("STUB f_win_gettype — csrc/eval/window.c:760")
+}
 
 /// Port of `f_getcmdwintype()` — `csrc/eval/window.c:787`. STUB: not yet ported.
-pub fn f_getcmdwintype(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_getcmdwintype — csrc/eval/window.c:787") }
+pub fn f_getcmdwintype(
+    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
+    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
+) {
+    unimplemented!("STUB f_getcmdwintype — csrc/eval/window.c:787")
+}
 
 /// Port of `f_winbufnr()` — `csrc/eval/window.c:796`. STUB: not yet ported.
-pub fn f_winbufnr(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_winbufnr — csrc/eval/window.c:796") }
+pub fn f_winbufnr(
+    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
+    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
+) {
+    unimplemented!("STUB f_winbufnr — csrc/eval/window.c:796")
+}
 
 /// Port of `f_wincol()` — `csrc/eval/window.c:807`. STUB: not yet ported.
-pub fn f_wincol(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_wincol — csrc/eval/window.c:807") }
+pub fn f_wincol(
+    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
+    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
+) {
+    unimplemented!("STUB f_wincol — csrc/eval/window.c:807")
+}
 
 /// Port of `f_winheight()` — `csrc/eval/window.c:814`. STUB: not yet ported.
-pub fn f_winheight(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_winheight — csrc/eval/window.c:814") }
+pub fn f_winheight(
+    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
+    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
+) {
+    unimplemented!("STUB f_winheight — csrc/eval/window.c:814")
+}
 
 /// Port of `f_winlayout()` — `csrc/eval/window.c:825`. STUB: not yet ported.
-pub fn f_winlayout(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_winlayout — csrc/eval/window.c:825") }
+pub fn f_winlayout(
+    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
+    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
+) {
+    unimplemented!("STUB f_winlayout — csrc/eval/window.c:825")
+}
 
 /// Port of `f_winline()` — `csrc/eval/window.c:844`. STUB: not yet ported.
-pub fn f_winline(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_winline — csrc/eval/window.c:844") }
+pub fn f_winline(
+    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
+    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
+) {
+    unimplemented!("STUB f_winline — csrc/eval/window.c:844")
+}
 
 /// Port of `f_winnr()` — `csrc/eval/window.c:851`. STUB: not yet ported.
-pub fn f_winnr(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_winnr — csrc/eval/window.c:851") }
+pub fn f_winnr(
+    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
+    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
+) {
+    unimplemented!("STUB f_winnr — csrc/eval/window.c:851")
+}
 
 /// Port of `f_winrestcmd()` — `csrc/eval/window.c:857`. STUB: not yet ported.
-pub fn f_winrestcmd(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_winrestcmd — csrc/eval/window.c:857") }
+pub fn f_winrestcmd(
+    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
+    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
+) {
+    unimplemented!("STUB f_winrestcmd — csrc/eval/window.c:857")
+}
 
 /// Port of `f_winrestview()` — `csrc/eval/window.c:887`. STUB: not yet ported.
-pub fn f_winrestview(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_winrestview — csrc/eval/window.c:887") }
+pub fn f_winrestview(
+    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
+    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
+) {
+    unimplemented!("STUB f_winrestview — csrc/eval/window.c:887")
+}
 
 /// Port of `f_winsaveview()` — `csrc/eval/window.c:936`. STUB: not yet ported.
-pub fn f_winsaveview(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_winsaveview — csrc/eval/window.c:936") }
+pub fn f_winsaveview(
+    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
+    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
+) {
+    unimplemented!("STUB f_winsaveview — csrc/eval/window.c:936")
+}
 
 /// Port of `f_winwidth()` — `csrc/eval/window.c:954`. STUB: not yet ported.
-pub fn f_winwidth(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_winwidth — csrc/eval/window.c:954") }
+pub fn f_winwidth(
+    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
+    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
+) {
+    unimplemented!("STUB f_winwidth — csrc/eval/window.c:954")
+}
 
 /// Port of `switch_win()` — `csrc/eval/window.c:972`. STUB: not yet ported.
 /// C: `int switch_win(switchwin_T *switchwin, win_T *win, tabpage_T *tp, bool no_display)`
-pub fn switch_win() { unimplemented!("STUB switch_win — csrc/eval/window.c:972") }
+pub fn switch_win() {
+    unimplemented!("STUB switch_win — csrc/eval/window.c:972")
+}
 
 /// Port of `switch_win_noblock()` — `csrc/eval/window.c:979`. STUB: not yet ported.
 /// C: `int switch_win_noblock(switchwin_T *switchwin, win_T *win, tabpage_T *tp, bool no_display)`
-pub fn switch_win_noblock() { unimplemented!("STUB switch_win_noblock — csrc/eval/window.c:979") }
+pub fn switch_win_noblock() {
+    unimplemented!("STUB switch_win_noblock — csrc/eval/window.c:979")
+}
 
 /// Port of `restore_win()` — `csrc/eval/window.c:1011`. STUB: not yet ported.
 /// C: `void restore_win(switchwin_T *switchwin, bool no_display)`
-pub fn restore_win() { unimplemented!("STUB restore_win — csrc/eval/window.c:1011") }
+pub fn restore_win() {
+    unimplemented!("STUB restore_win — csrc/eval/window.c:1011")
+}
 
 /// Port of `restore_win_noblock()` — `csrc/eval/window.c:1018`. STUB: not yet ported.
 /// C: `void restore_win_noblock(switchwin_T *switchwin, bool no_display)`
-pub fn restore_win_noblock() { unimplemented!("STUB restore_win_noblock — csrc/eval/window.c:1018") }
-
+pub fn restore_win_noblock() {
+    unimplemented!("STUB restore_win_noblock — csrc/eval/window.c:1018")
+}

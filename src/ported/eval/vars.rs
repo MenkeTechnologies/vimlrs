@@ -9,7 +9,9 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::ported::eval::typval::{tv_dict_add_tv, tv_dict_alloc, tv_dict_find, tv_get_string, tv_list_alloc};
+use crate::ported::eval::typval::{
+    tv_dict_add_tv, tv_dict_alloc, tv_dict_find, tv_get_string, tv_list_alloc,
+};
 use crate::ported::eval::typval_defs_h::{
     dict_T, list_T, partial_T, typval_T, typval_vval_union::*, varnumber_T, BoolVarValue,
     BoolVarValue::*, SpecialVarValue, SpecialVarValue::*, VarLockStatus, VarType, VarType::*,
@@ -152,12 +154,18 @@ pub fn eval_variable(name: &str) -> Option<typval_T> {
         return tabpage_vars.with(|d| tv_dict_find(&d.borrow(), key).cloned());
     }
     if let Some(key) = name.strip_prefix("a:") {
-        return funccal_stack
-            .with(|s| s.borrow().last().and_then(|f| tv_dict_find(&f.fc_l_avars, key).cloned()));
+        return funccal_stack.with(|s| {
+            s.borrow()
+                .last()
+                .and_then(|f| tv_dict_find(&f.fc_l_avars, key).cloned())
+        });
     }
     if let Some(key) = name.strip_prefix("l:") {
-        return funccal_stack
-            .with(|s| s.borrow().last().and_then(|f| tv_dict_find(&f.fc_l_vars, key).cloned()));
+        return funccal_stack.with(|s| {
+            s.borrow()
+                .last()
+                .and_then(|f| tv_dict_find(&f.fc_l_vars, key).cloned())
+        });
     }
     // c: v: variables live in `vimvardict` — consult the vimvars store. Returns
     // None for VAR_UNKNOWN entries (v:val/v:key, which the bridge supplies
@@ -219,23 +227,114 @@ pub mod vv {
             pub const VV_LEN: VimVarIndex = $n; };
     }
     vv_indices!(
-        VV_COUNT, VV_COUNT1, VV_PREVCOUNT, VV_ERRMSG, VV_WARNINGMSG, VV_STATUSMSG, VV_SHELL_ERROR,
-        VV_THIS_SESSION, VV_VERSION, VV_LNUM, VV_TERMREQUEST, VV_TERMRESPONSE, VV_FNAME, VV_LANG,
-        VV_LC_TIME, VV_CTYPE, VV_CC_FROM, VV_CC_TO, VV_FNAME_IN, VV_FNAME_OUT, VV_FNAME_NEW,
-        VV_FNAME_DIFF, VV_CMDARG, VV_FOLDSTART, VV_FOLDEND, VV_FOLDDASHES, VV_FOLDLEVEL, VV_PROGNAME,
-        VV_SEND_SERVER, VV_DYING, VV_EXCEPTION, VV_THROWPOINT, VV_REG, VV_CMDBANG, VV_INSERTMODE,
-        VV_VAL, VV_KEY, VV_PROFILING, VV_FCS_REASON, VV_FCS_CHOICE, VV_BEVAL_BUFNR, VV_BEVAL_WINNR,
-        VV_BEVAL_WINID, VV_BEVAL_LNUM, VV_BEVAL_COL, VV_BEVAL_TEXT, VV_SCROLLSTART, VV_SWAPNAME,
-        VV_SWAPCHOICE, VV_SWAPCOMMAND, VV_CHAR, VV_MOUSE_WIN, VV_MOUSE_WINID, VV_MOUSE_LNUM,
-        VV_MOUSE_COL, VV_OP, VV_SEARCHFORWARD, VV_HLSEARCH, VV_OLDFILES, VV_WINDOWID, VV_PROGPATH,
-        VV_COMPLETED_ITEM, VV_OPTION_NEW, VV_OPTION_OLD, VV_OPTION_OLDLOCAL, VV_OPTION_OLDGLOBAL,
-        VV_OPTION_COMMAND, VV_OPTION_TYPE, VV_ERRORS, VV_FALSE, VV_TRUE, VV_NULL, VV_NUMBERMAX,
-        VV_NUMBERMIN, VV_NUMBERSIZE, VV_VIM_DID_ENTER, VV_TESTING, VV_TYPE_NUMBER, VV_TYPE_STRING,
-        VV_TYPE_FUNC, VV_TYPE_LIST, VV_TYPE_DICT, VV_TYPE_FLOAT, VV_TYPE_BOOL, VV_TYPE_BLOB,
-        VV_EVENT, VV_VERSIONLONG, VV_ECHOSPACE, VV_ARGF, VV_ARGV, VV_COLLATE, VV_EXITING, VV_MAXCOL,
-        VV_STACKTRACE, VV_VIM_DID_INIT, VV_STDERR, VV_MSGPACK_TYPES, VV_NULL_STRING, VV_NULL_LIST,
-        VV_NULL_DICT, VV_NULL_BLOB, VV_LUA, VV_RELNUM, VV_VIRTNUM, VV_STARTTIME, VV_EXITREASON,
-        VV_USERACTIVE, VV_STARTREASON,
+        VV_COUNT,
+        VV_COUNT1,
+        VV_PREVCOUNT,
+        VV_ERRMSG,
+        VV_WARNINGMSG,
+        VV_STATUSMSG,
+        VV_SHELL_ERROR,
+        VV_THIS_SESSION,
+        VV_VERSION,
+        VV_LNUM,
+        VV_TERMREQUEST,
+        VV_TERMRESPONSE,
+        VV_FNAME,
+        VV_LANG,
+        VV_LC_TIME,
+        VV_CTYPE,
+        VV_CC_FROM,
+        VV_CC_TO,
+        VV_FNAME_IN,
+        VV_FNAME_OUT,
+        VV_FNAME_NEW,
+        VV_FNAME_DIFF,
+        VV_CMDARG,
+        VV_FOLDSTART,
+        VV_FOLDEND,
+        VV_FOLDDASHES,
+        VV_FOLDLEVEL,
+        VV_PROGNAME,
+        VV_SEND_SERVER,
+        VV_DYING,
+        VV_EXCEPTION,
+        VV_THROWPOINT,
+        VV_REG,
+        VV_CMDBANG,
+        VV_INSERTMODE,
+        VV_VAL,
+        VV_KEY,
+        VV_PROFILING,
+        VV_FCS_REASON,
+        VV_FCS_CHOICE,
+        VV_BEVAL_BUFNR,
+        VV_BEVAL_WINNR,
+        VV_BEVAL_WINID,
+        VV_BEVAL_LNUM,
+        VV_BEVAL_COL,
+        VV_BEVAL_TEXT,
+        VV_SCROLLSTART,
+        VV_SWAPNAME,
+        VV_SWAPCHOICE,
+        VV_SWAPCOMMAND,
+        VV_CHAR,
+        VV_MOUSE_WIN,
+        VV_MOUSE_WINID,
+        VV_MOUSE_LNUM,
+        VV_MOUSE_COL,
+        VV_OP,
+        VV_SEARCHFORWARD,
+        VV_HLSEARCH,
+        VV_OLDFILES,
+        VV_WINDOWID,
+        VV_PROGPATH,
+        VV_COMPLETED_ITEM,
+        VV_OPTION_NEW,
+        VV_OPTION_OLD,
+        VV_OPTION_OLDLOCAL,
+        VV_OPTION_OLDGLOBAL,
+        VV_OPTION_COMMAND,
+        VV_OPTION_TYPE,
+        VV_ERRORS,
+        VV_FALSE,
+        VV_TRUE,
+        VV_NULL,
+        VV_NUMBERMAX,
+        VV_NUMBERMIN,
+        VV_NUMBERSIZE,
+        VV_VIM_DID_ENTER,
+        VV_TESTING,
+        VV_TYPE_NUMBER,
+        VV_TYPE_STRING,
+        VV_TYPE_FUNC,
+        VV_TYPE_LIST,
+        VV_TYPE_DICT,
+        VV_TYPE_FLOAT,
+        VV_TYPE_BOOL,
+        VV_TYPE_BLOB,
+        VV_EVENT,
+        VV_VERSIONLONG,
+        VV_ECHOSPACE,
+        VV_ARGF,
+        VV_ARGV,
+        VV_COLLATE,
+        VV_EXITING,
+        VV_MAXCOL,
+        VV_STACKTRACE,
+        VV_VIM_DID_INIT,
+        VV_STDERR,
+        VV_MSGPACK_TYPES,
+        VV_NULL_STRING,
+        VV_NULL_LIST,
+        VV_NULL_DICT,
+        VV_NULL_BLOB,
+        VV_LUA,
+        VV_RELNUM,
+        VV_VIRTNUM,
+        VV_STARTTIME,
+        VV_EXITREASON,
+        VV_USERACTIVE,
+        VV_STARTREASON,
     );
 }
 use vv::*;
@@ -410,9 +509,15 @@ pub fn evalvars_init() {
     // Containers are allocated here (no `vimvars` borrow involved).
     // c: v:msgpack_types — {nil:[], boolean:[], …, ext:[]} (8 empty lists).
     let mpd = tv_dict_alloc();
-    for name in ["nil", "boolean", "integer", "float", "string", "array", "map", "ext"] {
+    for name in [
+        "nil", "boolean", "integer", "float", "string", "array", "map", "ext",
+    ] {
         let lst = tv_list_alloc(0);
-        let tv = typval_T { v_type: VAR_LIST, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_list(Some(lst)) };
+        let tv = typval_T {
+            v_type: VAR_LIST,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_list(Some(lst)),
+        };
         tv_dict_add_tv(&mut mpd.borrow_mut(), name, tv);
     }
 
@@ -433,7 +538,15 @@ pub fn evalvars_init() {
                 VAR_PARTIAL => v_partial(None),
                 _ => v_unknown,
             };
-            VimVar { vv_name: name, vv_tv: typval_T { v_type: t, v_lock: VarLockStatus::VAR_UNLOCKED, vval }, vv_flags: flags }
+            VimVar {
+                vv_name: name,
+                vv_tv: typval_T {
+                    v_type: t,
+                    v_lock: VarLockStatus::VAR_UNLOCKED,
+                    vval,
+                },
+                vv_flags: flags,
+            }
         })
         .collect();
     {
@@ -446,17 +559,37 @@ pub fn evalvars_init() {
         // c: vim_version * 10000 + highest_patch(); no patch table standalone → 0.
         v[VV_VERSIONLONG].vv_tv = num(vim_version * 10000);
 
-        v[VV_MSGPACK_TYPES].vv_tv = typval_T { v_type: VAR_DICT, v_lock: VarLockStatus::VAR_FIXED, vval: v_dict(Some(mpd)) };
-        v[VV_COMPLETED_ITEM].vv_tv = typval_T { v_type: VAR_DICT, v_lock: VarLockStatus::VAR_FIXED, vval: v_dict(Some(tv_dict_alloc())) };
-        v[VV_EVENT].vv_tv = typval_T { v_type: VAR_DICT, v_lock: VarLockStatus::VAR_FIXED, vval: v_dict(Some(tv_dict_alloc())) };
-        v[VV_ERRORS].vv_tv = typval_T { v_type: VAR_LIST, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_list(Some(tv_list_alloc(0))) };
+        v[VV_MSGPACK_TYPES].vv_tv = typval_T {
+            v_type: VAR_DICT,
+            v_lock: VarLockStatus::VAR_FIXED,
+            vval: v_dict(Some(mpd)),
+        };
+        v[VV_COMPLETED_ITEM].vv_tv = typval_T {
+            v_type: VAR_DICT,
+            v_lock: VarLockStatus::VAR_FIXED,
+            vval: v_dict(Some(tv_dict_alloc())),
+        };
+        v[VV_EVENT].vv_tv = typval_T {
+            v_type: VAR_DICT,
+            v_lock: VarLockStatus::VAR_FIXED,
+            vval: v_dict(Some(tv_dict_alloc())),
+        };
+        v[VV_ERRORS].vv_tv = typval_T {
+            v_type: VAR_LIST,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_list(Some(tv_list_alloc(0))),
+        };
 
         v[VV_STDERR].vv_tv = num(2); // CHAN_STDERR
         v[VV_SEARCHFORWARD].vv_tv = num(1);
         v[VV_HLSEARCH].vv_tv = num(1);
         v[VV_COUNT1].vv_tv = num(1);
         v[VV_STARTREASON].vv_tv = typval_T::from("normal".to_string());
-        v[VV_EXITING].vv_tv = typval_T { v_type: VAR_SPECIAL, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_special(SpecialVarValue::kSpecialVarNull) };
+        v[VV_EXITING].vv_tv = typval_T {
+            v_type: VAR_SPECIAL,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_special(SpecialVarValue::kSpecialVarNull),
+        };
 
         v[VV_TYPE_NUMBER].vv_tv = num(VAR_TYPE_NUMBER);
         v[VV_TYPE_STRING].vv_tv = num(VAR_TYPE_STRING);
@@ -467,9 +600,21 @@ pub fn evalvars_init() {
         v[VV_TYPE_BOOL].vv_tv = num(VAR_TYPE_BOOL);
         v[VV_TYPE_BLOB].vv_tv = num(VAR_TYPE_BLOB);
 
-        v[VV_FALSE].vv_tv = typval_T { v_type: VAR_BOOL, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_bool(BoolVarValue::kBoolVarFalse) };
-        v[VV_TRUE].vv_tv = typval_T { v_type: VAR_BOOL, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_bool(BoolVarValue::kBoolVarTrue) };
-        v[VV_NULL].vv_tv = typval_T { v_type: VAR_SPECIAL, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_special(SpecialVarValue::kSpecialVarNull) };
+        v[VV_FALSE].vv_tv = typval_T {
+            v_type: VAR_BOOL,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_bool(BoolVarValue::kBoolVarFalse),
+        };
+        v[VV_TRUE].vv_tv = typval_T {
+            v_type: VAR_BOOL,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_bool(BoolVarValue::kBoolVarTrue),
+        };
+        v[VV_NULL].vv_tv = typval_T {
+            v_type: VAR_SPECIAL,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_special(SpecialVarValue::kSpecialVarNull),
+        };
         v[VV_NUMBERMAX].vv_tv = num(VARNUMBER_MAX);
         v[VV_NUMBERMIN].vv_tv = num(VARNUMBER_MIN);
         v[VV_NUMBERSIZE].vv_tv = num(64); // sizeof(varnumber_T) * 8
@@ -479,7 +624,12 @@ pub fn evalvars_init() {
         v[VV_LUA].vv_tv = typval_T {
             v_type: VAR_PARTIAL,
             v_lock: VarLockStatus::VAR_UNLOCKED,
-            vval: v_partial(Some(Rc::new(partial_T { pt_refcount: 1, pt_name: String::new(), pt_argv: Vec::new(), pt_dict: None }))),
+            vval: v_partial(Some(Rc::new(partial_T {
+                pt_refcount: 1,
+                pt_name: String::new(),
+                pt_argv: Vec::new(),
+                pt_dict: None,
+            }))),
         };
         // c: set_reg_var(0) → v:register defaults to '"'.
         v[VV_REG].vv_tv = typval_T::from("\"".to_string());
@@ -547,17 +697,38 @@ pub fn set_vim_var_type(idx: VimVarIndex, t: VarType) {
 
 /// Port of `set_vim_var_nr()` from `Src/eval/vars.c:2061`.
 pub fn set_vim_var_nr(idx: VimVarIndex, val: varnumber_T) {
-    set_vim_var_tv(idx, typval_T { v_type: get_vim_var_tv(idx).v_type, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_number(val) });
+    set_vim_var_tv(
+        idx,
+        typval_T {
+            v_type: get_vim_var_tv(idx).v_type,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_number(val),
+        },
+    );
 }
 
 /// Port of `set_vim_var_bool()` from `Src/eval/vars.c:2072`.
 pub fn set_vim_var_bool(idx: VimVarIndex, val: BoolVarValue) {
-    set_vim_var_tv(idx, typval_T { v_type: VAR_BOOL, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_bool(val) });
+    set_vim_var_tv(
+        idx,
+        typval_T {
+            v_type: VAR_BOOL,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_bool(val),
+        },
+    );
 }
 
 /// Port of `set_vim_var_special()` from `Src/eval/vars.c:2084`.
 pub fn set_vim_var_special(idx: VimVarIndex, val: SpecialVarValue) {
-    set_vim_var_tv(idx, typval_T { v_type: VAR_SPECIAL, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_special(val) });
+    set_vim_var_tv(
+        idx,
+        typval_T {
+            v_type: VAR_SPECIAL,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_special(val),
+        },
+    );
 }
 
 /// Port of `set_vim_var_char()` from `Src/eval/vars.c:2093` — set v:char.
@@ -573,12 +744,26 @@ pub fn set_vim_var_string(idx: VimVarIndex, val: &str) {
 
 /// Port of `set_vim_var_list()` from `Src/eval/vars.c:2125`.
 pub fn set_vim_var_list(idx: VimVarIndex, val: Option<Rc<RefCell<list_T>>>) {
-    set_vim_var_tv(idx, typval_T { v_type: VAR_LIST, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_list(val) });
+    set_vim_var_tv(
+        idx,
+        typval_T {
+            v_type: VAR_LIST,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_list(val),
+        },
+    );
 }
 
 /// Port of `set_vim_var_dict()` from `Src/eval/vars.c:2141`.
 pub fn set_vim_var_dict(idx: VimVarIndex, val: Option<Rc<RefCell<dict_T>>>) {
-    set_vim_var_tv(idx, typval_T { v_type: VAR_DICT, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_dict(val) });
+    set_vim_var_tv(
+        idx,
+        typval_T {
+            v_type: VAR_DICT,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_dict(val),
+        },
+    );
 }
 
 /// Port of `set_vim_var_partial()` from `Src/eval/vars.c:2161`. Note: does not
@@ -586,4 +771,3 @@ pub fn set_vim_var_dict(idx: VimVarIndex, val: Option<Rc<RefCell<dict_T>>>) {
 pub fn set_vim_var_partial(idx: VimVarIndex, val: Option<Rc<partial_T>>) {
     vimvars.with(|s| s.borrow_mut()[idx].vv_tv.vval = v_partial(val));
 }
-
