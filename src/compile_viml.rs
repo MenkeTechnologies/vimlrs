@@ -64,7 +64,12 @@ fn collect_free_vars(
 ) {
     match e {
         Expr::Var(n) => {
-            if !n.contains(':') && !bound.contains(n) {
+            // A lambda closes over the enclosing function's local scope: bare
+            // names and the function-tied scopes `a:` (arguments) and `l:`
+            // (locals). The dynamic scopes (`g:`/`b:`/`w:`/`t:`/`v:`/`s:`)
+            // resolve globally when the lambda runs, so they are not captured.
+            let capturable = !n.contains(':') || n.starts_with("a:") || n.starts_with("l:");
+            if capturable && !bound.contains(n) {
                 out.insert(n.clone());
             }
         }
@@ -1551,8 +1556,20 @@ impl Compiler {
                 collect_free_vars(body, &mut bound, &mut free);
                 let captures: Vec<String> = free.into_iter().collect();
 
+                // Each capture becomes a leading parameter of the anonymous
+                // function. A scoped capture (`a:n`/`l:n`) maps to the bare param
+                // `n`, so the body's `a:n`/`l:n`/`n` reference resolves to the
+                // rebound argument/local inside the lambda; the captured VALUE is
+                // still read from the scoped name in the enclosing scope.
+                let cap_param = |c: &str| -> String {
+                    c.strip_prefix("a:")
+                        .or_else(|| c.strip_prefix("l:"))
+                        .unwrap_or(c)
+                        .to_string()
+                };
+                let cap_params: Vec<String> = captures.iter().map(|c| cap_param(c)).collect();
                 let all_params: Vec<String> =
-                    captures.iter().chain(params.iter()).cloned().collect();
+                    cap_params.iter().chain(params.iter()).cloned().collect();
                 let mut stmts: Vec<Stmt> = all_params
                     .iter()
                     .map(|p| Stmt::Let {
