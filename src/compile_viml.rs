@@ -1719,6 +1719,7 @@ impl Compiler {
                 }
                 match builtin_fn_id(name) {
                     Some(id) => {
+                        check_builtin_argc(name, args.len())?;
                         for a in args {
                             self.expr(a)?;
                         }
@@ -1751,6 +1752,7 @@ impl Compiler {
             }
             Expr::Method { base, name, args } => match builtin_fn_id(name) {
                 Some(id) => {
+                    check_builtin_argc(name, args.len() + 1)?;
                     self.expr(base)?;
                     for a in args {
                         self.expr(a)?;
@@ -1860,6 +1862,44 @@ fn bitwise_native_op(name: &str, argc: usize) -> Option<Op> {
         ("xor", 2) => Some(Op::BitXor),
         ("invert", 1) => Some(Op::BitNot),
         _ => None,
+    }
+}
+
+/// Reject a builtin call whose argument count is outside the range Vim accepts.
+/// Vim validates this at parse time (E118 too many / E119 too few) against the
+/// `funcs[]` table before the leaf `f_*` runs; we mirror that with the generated
+/// [`BUILTIN_ARGC`] table so a mis-arity call is reported here instead of
+/// panicking in a leaf that indexes `argvars[]` assuming the count was checked.
+/// Names absent from the table (vimlrs-only builtins) are left unchecked.
+/// The accepted `(min, max)` argument count for a builtin, or `None` when the
+/// name is not in the generated table (vimlrs-only builtins, left unchecked).
+pub(crate) fn builtin_argc_range(name: &str) -> Option<(u8, u8)> {
+    use crate::ported::eval::funcs_argc::BUILTIN_ARGC;
+    BUILTIN_ARGC
+        .binary_search_by(|(n, _, _)| (*n).cmp(name))
+        .ok()
+        .map(|i| (BUILTIN_ARGC[i].1, BUILTIN_ARGC[i].2))
+}
+
+/// The Vim error a builtin call with `argc` arguments would raise, or `None`
+/// when the count is acceptable (or the name is unknown). Shared by the
+/// compile-time check and the runtime `call()`/funcref dispatch so both report
+/// E118/E119 instead of letting a leaf `f_*` panic on a short slice.
+pub(crate) fn builtin_argc_error(name: &str, argc: usize) -> Option<String> {
+    let (min, max) = builtin_argc_range(name)?;
+    if argc < min as usize {
+        Some(format!("E119: Not enough arguments for function: {name}"))
+    } else if argc > max as usize {
+        Some(format!("E118: Too many arguments for function: {name}"))
+    } else {
+        None
+    }
+}
+
+fn check_builtin_argc(name: &str, argc: usize) -> Result<(), VimlError> {
+    match builtin_argc_error(name, argc) {
+        Some(msg) => Err(VimlError::msg(msg)),
+        None => Ok(()),
     }
 }
 

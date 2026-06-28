@@ -20,6 +20,9 @@ pub mod executor;
 pub mod fs;
 /// Port of `eval/funcs.c`.
 pub mod funcs;
+/// Generated builtin arg-count table (from `csrc/eval.lua`); see
+/// `scripts/gen_builtin_argc.sh`.
+pub mod funcs_argc;
 /// Port of `eval/list.c` (the `count()` family; callback ops stay bridge-side).
 pub mod list;
 /// Port of `eval/typval.c`.

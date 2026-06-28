@@ -2355,6 +2355,13 @@ fn call_named(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
 /// thread_local, so converting compound args across the nested VM is safe.
 fn call_builtin_by_name(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
     let id = crate::compile_viml::builtin_fn_id(name)?;
+    // Vim validates arg counts before dispatch; the direct-call path checks at
+    // compile time, but `call()`/funcref invocation arrives here at runtime, so
+    // re-check to keep a short arg slice from panicking inside the leaf f_*.
+    if let Some(msg) = crate::compile_viml::builtin_argc_error(name, args.len()) {
+        message::semsg(&msg);
+        return None;
+    }
     let argc = args.len() as u8;
     let mut b = fusevm::ChunkBuilder::new();
     b.emit(fusevm::Op::CallBuiltin(id, argc), 0);
