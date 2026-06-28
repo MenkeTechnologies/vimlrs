@@ -82,9 +82,21 @@ pub fn f_toupper(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.vval = v_string(tv_get_string(&argvars[0]).to_uppercase());
 }
 
-/// Port of `f_strchars()` from `Src/strings.c` — character count.
+/// Port of `f_strchars()` from `Src/strings.c` — character count. The optional
+/// `{skipcc}` (argvars[1]); when truthy, composing characters are not counted
+/// (the same folding `strcharlen()` always applies).
 pub fn f_strchars(argvars: &[typval_T], rettv: &mut typval_T) {
-    rettv.vval = v_number(tv_get_string(&argvars[0]).chars().count() as varnumber_T);
+    let s = tv_get_string(&argvars[0]);
+    // c: skip_count_composing = (argvars[1] != UNKNOWN) ? tv_get_bool(...) : 0;
+    let skipcc = argvars
+        .get(1)
+        .is_some_and(|t| tv_get_number_chk(t, None) != 0);
+    let n = if skipcc {
+        s.chars().filter(|c| !utf_iscomposing(*c)).count()
+    } else {
+        s.chars().count()
+    };
+    rettv.vval = v_number(n as varnumber_T);
 }
 
 /// Port of `f_strpart()` from `Src/strings.c` — byte substring

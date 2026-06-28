@@ -57,6 +57,14 @@ call assert_equal('0x0000ff', printf('%#08x', 255))
 call assert_equal(6, len('héllo'))
 call assert_equal(5, strchars('héllo'))
 
+" ── strchars() {skipcc}: a truthy 2nd arg folds composing chars (like
+"    strcharlen); the default counts every codepoint ──
+let s = 'e' . nr2char(0x301)
+call assert_equal(2, strchars(s))
+call assert_equal(1, strchars(s, 1))
+call assert_equal(1, strcharlen(s))
+call assert_equal(3, strchars('abc', 1))
+
 " ── strpart() byte substring; a negative {start} clamps to 0 AND folds its
 "    offset into the length, so strpart('hello',-2,3) keeps only 'h' ──
 call assert_equal('hel', strpart('hello', 0, 3))
