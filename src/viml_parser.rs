@@ -49,7 +49,9 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
         "echon" => Ok(Stmt::Echon(parse_expr_list(rest)?)),
         "echomsg" | "echom" => Ok(Stmt::Echo(parse_expr_list(rest)?)),
         "execute" | "exe" => Ok(Stmt::Execute(parse_expr_list(rest)?)),
-        "set" | "se" => Ok(Stmt::Set(rest.to_string())),
+        "set" | "se" | "setlocal" | "setl" | "setglobal" | "setg" => {
+            Ok(Stmt::Set(rest.to_string()))
+        }
         "source" | "so" => Ok(Stmt::Source(rest.trim().to_string())),
         "unlet" | "unl" => {
             // `:unlet[!] x y …` — the optional `!` suppresses the missing-var error.

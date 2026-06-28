@@ -207,6 +207,8 @@ pub const VIML_GETOPT: u16 = 3064;
 pub const VIML_GETREG: u16 = 3065;
 /// `:let @reg = …`
 pub const VIML_SETREG: u16 = 3570;
+/// `:let &opt = …`
+pub const VIML_SETOPT: u16 = 3571;
 /// `:let $ENV = …`
 pub const VIML_SETENV: u16 = 3066;
 /// `len()`
@@ -2274,6 +2276,14 @@ fn b_set(vm: &mut VM, _: u8) -> Value {
     Value::Undef
 }
 
+/// `:let &opt = value` — apply via `option::do_set` as `name=value`.
+fn b_setopt(vm: &mut VM, _: u8) -> Value {
+    let val = tv_get_string(&pop_tv(vm));
+    let name = tv_get_string(&pop_tv(vm));
+    crate::ported::option::do_set(&format!("{name}={val}"));
+    Value::Undef
+}
+
 /// `:map`-family statement: pop the raw command line, split off its command
 /// word, and apply via the ported `get_map_mode()` + `do_map()`.
 fn b_map(vm: &mut VM, _: u8) -> Value {
@@ -2728,6 +2738,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_GETOPT, b_getopt);
     vm.register_builtin(VIML_GETREG, |vm, n| call_func(vm, n, f_getreg));
     vm.register_builtin(VIML_SETREG, |vm, n| call_func(vm, n, f_setreg));
+    vm.register_builtin(VIML_SETOPT, b_setopt);
     vm.register_builtin(VIML_FN_LEN, b_fn_len);
     vm.register_builtin(VIML_FN_TYPE, b_fn_type);
     vm.register_builtin(VIML_FN_STRING, b_fn_string);

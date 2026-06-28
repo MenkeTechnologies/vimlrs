@@ -1310,9 +1310,15 @@ impl Compiler {
                 self.emit(Op::Pop);
                 Ok(())
             }
-            LetTarget::Option(_) => Err(VimlError::msg(
-                "E15: :let on options arrives with the option-table port",
-            )),
+            LetTarget::Option(name) => {
+                // `:let &opt = expr` → set the option. Push the option name then
+                // the value; the bridge applies it via `option::do_set`.
+                self.load_str(name);
+                self.expr(expr)?;
+                self.emit(Op::CallBuiltin(h::VIML_SETOPT, 2));
+                self.emit(Op::Pop);
+                Ok(())
+            }
         }
     }
 
@@ -2127,7 +2133,6 @@ pub(crate) fn builtin_fn_id(name: &str) -> Option<u16> {
         "rpcstart" => h::VIML_FN_RPCSTART,
         "rpcstop" => h::VIML_FN_RPCSTOP,
         "stdioopen" => h::VIML_FN_STDIOOPEN,
-        "submatch" => h::VIML_FN_SUBMATCH,
         "prompt_appendbuf" => h::VIML_FN_PROMPT_APPENDBUF,
         "py3eval" => h::VIML_FN_PY3EVAL,
         "perleval" => h::VIML_FN_PERLEVAL,

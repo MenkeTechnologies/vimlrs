@@ -3123,9 +3123,31 @@ pub fn f_getregion(argvars: &[typval_T], rettv: &mut typval_T) {
 pub fn f_getregionpos(_argvars: &[typval_T], rettv: &mut typval_T) {
     tv_list_alloc_ret(rettv, 0);
 }
-/// Port of `f_matchbufline()` — no buffer → empty List.
-pub fn f_matchbufline(_argvars: &[typval_T], rettv: &mut typval_T) {
-    tv_list_alloc_ret(rettv, 0);
+/// Port of `f_matchbufline()` (buffer.c) — every match of `{pat}` in buffer
+/// lines `{lnum}`..`{end}` as a List of `{lnum, byteidx, text}` (single buffer,
+/// so `{buf}` is ignored).
+pub fn f_matchbufline(argvars: &[typval_T], rettv: &mut typval_T) {
+    let pat = tv_get_string(&argvars[1]);
+    let lnum = tv_get_lnum(&argvars[2]);
+    let end = tv_get_lnum(&argvars[3]);
+    let ic = tv_get_number_chk(&get_option_value("ignorecase"), None) != 0;
+    let out = tv_list_alloc_ret(rettv, 0);
+    let mut ob = out.borrow_mut();
+    for (i, line) in get_buffer_lines(lnum, end).iter().enumerate() {
+        let ln = lnum + i as varnumber_T;
+        let mut from = 0usize;
+        while let Some((s, e)) = line_match_from(&pat, line, from, ic) {
+            let d = tv_dict_alloc();
+            {
+                let mut db = d.borrow_mut();
+                tv_dict_add_nr(&mut db, "lnum", ln);
+                tv_dict_add_nr(&mut db, "byteidx", s as varnumber_T);
+                tv_dict_add_str(&mut db, "text", &line[s..e]);
+            }
+            tv_list_append_tv(&mut ob, match_dict_val(d));
+            from = if e > s { e } else { s + 1 };
+        }
+    }
 }
 /// Port of `f_menu_get()` — no menus → empty List.
 pub fn f_menu_get(_argvars: &[typval_T], rettv: &mut typval_T) {
@@ -3641,7 +3663,37 @@ pub fn f_getbufoneline(argvars: &[typval_T], rettv: &mut typval_T) {
 }
 /// Port of `f_getbufinfo()` (buffer.c) — no buffers → empty List.
 pub fn f_getbufinfo(_argvars: &[typval_T], rettv: &mut typval_T) {
-    tv_list_alloc_ret(rettv, 0);
+    // vimlrs has a single virtual buffer (number 1); report it.
+    let out = tv_list_alloc_ret(rettv, 1);
+    let mut ob = out.borrow_mut();
+    let d = tv_dict_alloc();
+    {
+        let mut db = d.borrow_mut();
+        tv_dict_add_nr(&mut db, "bufnr", 1);
+        tv_dict_add_str(&mut db, "name", "");
+        tv_dict_add_nr(&mut db, "lnum", CURPOS.with(|c| c.borrow().0));
+        tv_dict_add_nr(&mut db, "linecount", curbuf_len());
+        tv_dict_add_nr(&mut db, "loaded", 1);
+        tv_dict_add_nr(&mut db, "listed", 1);
+        tv_dict_add_nr(&mut db, "hidden", 0);
+        tv_dict_add_nr(&mut db, "changed", 0);
+        tv_dict_add_nr(&mut db, "changedtick", 1);
+        let empty_list = |db: &mut crate::ported::eval::typval_defs_h::dict_T, k: &str| {
+            let l = tv_list_alloc(0);
+            tv_dict_add_tv(
+                db,
+                k,
+                typval_T {
+                    v_type: VAR_LIST,
+                    v_lock: VarLockStatus::VAR_UNLOCKED,
+                    vval: v_list(Some(l)),
+                },
+            );
+        };
+        empty_list(&mut db, "windows");
+        empty_list(&mut db, "popups");
+    }
+    tv_list_append_tv(&mut ob, match_dict_val(d));
 }
 /// Port of `f_setline()`/`set_buffer_lines()` (buffer.c) — replace line(s) from
 /// `{lnum}` with `{text}` (a String or List). Returns 0 on success, 1 on error.
