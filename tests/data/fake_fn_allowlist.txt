@@ -84,3 +84,11 @@ assert_bool
 # function name (extension plumbing), so they are sanctioned here.
 capture_errors_begin
 capture_errors_take
+
+# ── os/shell.c + os/env.c (not vendored) — system()/systemlist()/environ() ──
+# Real Neovim builtins whose home files (os/shell.c, os/env.c) are outside the
+# vendored eval tree; faithful std-only ports (shell out / read the environment).
+f_system
+f_systemlist
+f_environ
+get_cmd_output

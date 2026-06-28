@@ -28,7 +28,7 @@ dependencies {
         // (lib/modules/intellij.spellchecker.jar), not an embedded
         // platform class. Declare it as a bundled-module dep so the
         // SpellcheckingStrategy class resolves at compile + runtime.
-        // Required by ZshrsSpellcheckingStrategy / the
+        // Required by VimlrsSpellcheckingStrategy / the
         // `spellchecker.support` EP registration in plugin.xml.
         bundledModule("intellij.spellchecker")
         pluginVerifier()

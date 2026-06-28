@@ -18,6 +18,7 @@ cargo build
 | [`interactive.vim`](interactive.vim) | `input()` / `inputlist()` / `confirm()` reading from the terminal (stdin) |
 | [`wordfreq.vim`](wordfreq.vim) | text pipeline: `writefile`/`readfile`, `split`, frequency dict, `sort` with a Funcref |
 | [`testing.vim`](testing.vim) | the test framework itself: `assert_fails` (a command must error) and `assert_exception` (inside `:catch`), plus `:try`/`:throw` |
+| [`system.vim`](system.vim) | OS interaction: `system()`/`systemlist()` (shell out, with stdin), `v:shell_error`, `environ()` |
 
 Run any script with `VIMLRS_JIT_STATS=1` to see JIT activity, or `VIMLRS_NO_JIT=1`
 to force the interpreter baseline.

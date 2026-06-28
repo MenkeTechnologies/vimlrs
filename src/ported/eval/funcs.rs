@@ -32,8 +32,8 @@ use crate::ported::eval::typval_defs_h::{
     VAR_TYPE_NUMBER, VAR_TYPE_SPECIAL, VAR_TYPE_STRING,
 };
 use crate::ported::eval::vars::{
-    assert_error, get_vim_var_str,
-    vv::{VV_EXCEPTION, VV_REG},
+    assert_error, get_vim_var_str, set_vim_var_nr,
+    vv::{VV_EXCEPTION, VV_REG, VV_SHELL_ERROR},
 };
 use crate::ported::eval_h::{FAIL, OK};
 use crate::ported::message::emsg;
@@ -2669,5 +2669,93 @@ pub fn f_assert_exception(argvars: &[typval_T], rettv: &mut typval_T) {
         *rettv = typval_T::from(1 as varnumber_T);
     } else {
         *rettv = typval_T::from(0 as varnumber_T);
+    }
+}
+
+// ── OS interaction: system()/systemlist()/environ() (os/shell.c, os/env.c) ──
+//
+// Not part of the vendored eval tree (their home files are os/shell.c and
+// os/env.c). Faithful standalone ports: run a command through the shell and
+// capture its stdout, or read the process environment. `system()` sets
+// `v:shell_error` to the command's exit status, as in Vim.
+
+/// Run `{cmd}` (argvars[0]) through `sh -c`, writing `{input}` (argvars[1], if
+/// any) to its stdin, and return the captured stdout bytes. Sets `v:shell_error`
+/// to the exit status (-1 if the shell could not be run). stderr is inherited
+/// (shown), as Vim does by default.
+fn get_cmd_output(argvars: &[typval_T]) -> Vec<u8> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let cmd = tv_get_string(&argvars[0]);
+    let input = if argvars.len() > 1 && argvars[1].v_type != VAR_UNKNOWN {
+        Some(tv_get_string(&argvars[1]))
+    } else {
+        None
+    };
+
+    let mut command = Command::new("sh");
+    command.arg("-c").arg(&cmd).stdout(Stdio::piped());
+    command.stdin(if input.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
+
+    let mut child = match command.spawn() {
+        Ok(c) => c,
+        Err(_) => {
+            set_vim_var_nr(VV_SHELL_ERROR, -1);
+            return Vec::new();
+        }
+    };
+    if let Some(text) = input {
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(text.as_bytes());
+        }
+    }
+    match child.wait_with_output() {
+        Ok(out) => {
+            set_vim_var_nr(
+                VV_SHELL_ERROR,
+                out.status.code().unwrap_or(-1) as varnumber_T,
+            );
+            out.stdout
+        }
+        Err(_) => {
+            set_vim_var_nr(VV_SHELL_ERROR, -1);
+            Vec::new()
+        }
+    }
+}
+
+/// Port of `f_system()` — run `{cmd}` and return its output as a String
+/// (trailing newline preserved, as in Vim).
+pub fn f_system(argvars: &[typval_T], rettv: &mut typval_T) {
+    let out = get_cmd_output(argvars);
+    *rettv = typval_T::from(String::from_utf8_lossy(&out).into_owned());
+}
+
+/// Port of `f_systemlist()` — like `system()` but the output is split into a
+/// List of lines (a single trailing newline does not add an empty element).
+pub fn f_systemlist(argvars: &[typval_T], rettv: &mut typval_T) {
+    let out = String::from_utf8_lossy(&get_cmd_output(argvars)).into_owned();
+    let l = tv_list_alloc_ret(rettv, 0);
+    let mut lb = l.borrow_mut();
+    let trimmed = out.strip_suffix('\n').unwrap_or(&out);
+    if !trimmed.is_empty() || out.contains('\n') {
+        for line in trimmed.split('\n') {
+            tv_list_append_string(&mut lb, line);
+        }
+    }
+}
+
+/// Port of `f_environ()` — a Dict of every environment variable. Uses the
+/// OS-native form and lossily decodes non-UTF-8 names/values.
+pub fn f_environ(_argvars: &[typval_T], rettv: &mut typval_T) {
+    let d = tv_dict_alloc_ret(rettv);
+    let mut db = d.borrow_mut();
+    for (k, v) in std::env::vars_os() {
+        tv_dict_add_str(&mut db, &k.to_string_lossy(), &v.to_string_lossy());
     }
 }

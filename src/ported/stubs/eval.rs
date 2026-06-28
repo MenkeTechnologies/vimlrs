@@ -543,22 +543,6 @@ pub fn get_system_output_as_rettv() {
     unimplemented!("STUB get_system_output_as_rettv — csrc/eval.c:4714")
 }
 
-/// Port of `f_system()` — `csrc/eval.c:4813`. STUB: not yet ported.
-pub fn f_system(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_system — csrc/eval.c:4813")
-}
-
-/// Port of `f_systemlist()` — `csrc/eval.c:4818`. STUB: not yet ported.
-pub fn f_systemlist(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_systemlist — csrc/eval.c:4818")
-}
-
 /// Port of `get_callback_depth()` — `csrc/eval.c:4882`. STUB: not yet ported.
 /// C: `int get_callback_depth(void)`
 pub fn get_callback_depth() {
