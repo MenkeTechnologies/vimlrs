@@ -37,6 +37,13 @@ call assert_equal(' 7', printf('% d', 7))
 call assert_equal('+0007', printf('%+05d', 7))
 call assert_equal('+3.10', printf('%+.2f', 3.1))
 
+" ── printf positional args: %N$ selects the Nth argument (1-based) and may be
+"    reused or reordered; flags/width still apply, sequential args unaffected ──
+call assert_equal('b a', printf('%2$s %1$s', 'a', 'b'))
+call assert_equal('x x', printf('%1$s %1$s', 'x'))
+call assert_equal('00042', printf('%2$05d', 7, 42))
+call assert_equal('1 x', printf('%d %s', 1, 'x'))
+
 " ── len() of a String is its BYTE length (multibyte counts each byte) ──
 call assert_equal(6, len('héllo'))
 call assert_equal(5, strchars('héllo'))
