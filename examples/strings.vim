@@ -102,6 +102,13 @@ call assert_equal(15, str2nr('17', 8))
 call assert_equal(-42, str2nr('  -42  '))
 call assert_equal(0, str2nr('0xff'))
 
+" ── str2nr() {quote}: a truthy 3rd arg ignores embedded ' digit separators ──
+call assert_equal(1000000, str2nr("1'000'000", 10, 1))
+call assert_equal(1, str2nr("1'000", 10, 0))
+call assert_equal(1, str2nr("1'000"))
+call assert_equal(65535, str2nr("ff'ff", 16, 1))
+call assert_equal(123, str2nr("123'", 10, 1))
+
 " ── demo ──
 echo 'upper    :' toupper(s)
 echo 'words    :' split(s)

@@ -16,6 +16,8 @@ pub const STR2NR_OCT: i32 = 0x02;
 pub const STR2NR_HEX: i32 = 0x04;
 /// `STR2NR_OOCT` — recognize a `0o`/`0O` octal prefix.
 pub const STR2NR_OOCT: i32 = 0x08;
+/// `STR2NR_QUOTE` — skip embedded `'` digit separators (`1'000` → 1000).
+pub const STR2NR_QUOTE: i32 = 0x10;
 /// `STR2NR_ALL` — recognize all of the above prefixes.
 pub const STR2NR_ALL: i32 = STR2NR_BIN | STR2NR_OCT | STR2NR_HEX | STR2NR_OOCT;
 /// `STR2NR_FORCE` — force the base selected by the radix bits in `what`
@@ -112,16 +114,30 @@ pub fn vim_str2nr(
     // c: accumulate digits valid in `base`
     let mut un: u64 = 0; // c: uvarnumber_T un = 0;
     let mut saw_digit = false;
-    while ptr < cap {
-        let d = match bytes[ptr] {
-            c @ b'0'..=b'9' => (c - b'0') as u64,
-            c @ b'a'..=b'f' if base == 16 => (c - b'a' + 10) as u64,
-            c @ b'A'..=b'F' if base == 16 => (c - b'A' + 10) as u64,
-            _ => break,
-        };
-        if d >= base {
-            break;
+    let digit_val = |c: u8| -> Option<u64> {
+        match c {
+            b'0'..=b'9' => Some((c - b'0') as u64),
+            b'a'..=b'f' if base == 16 => Some((c - b'a' + 10) as u64),
+            b'A'..=b'F' if base == 16 => Some((c - b'A' + 10) as u64),
+            _ => None,
         }
+        .filter(|&d| d < base)
+    };
+    while ptr < cap {
+        // c: with STR2NR_QUOTE, a `'` between two digits is a separator: skip it
+        // only when the next char is itself a valid digit (a trailing `'` ends
+        // the number).
+        if (what & STR2NR_QUOTE) != 0
+            && bytes[ptr] == b'\''
+            && ptr + 1 < cap
+            && digit_val(bytes[ptr + 1]).is_some()
+        {
+            ptr += 1;
+            continue;
+        }
+        let Some(d) = digit_val(bytes[ptr]) else {
+            break;
+        };
         un = un.saturating_mul(base).saturating_add(d);
         saw_digit = true;
         ptr += 1;

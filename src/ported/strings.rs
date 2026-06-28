@@ -8,7 +8,7 @@
 #![allow(non_snake_case)]
 
 use crate::ported::charset::{
-    vim_str2nr, STR2NR_BIN, STR2NR_FORCE, STR2NR_HEX, STR2NR_OCT, STR2NR_OOCT,
+    vim_str2nr, STR2NR_BIN, STR2NR_FORCE, STR2NR_HEX, STR2NR_OCT, STR2NR_OOCT, STR2NR_QUOTE,
 };
 use crate::ported::eval::encode::encode_tv2string;
 use crate::ported::eval::typval::{
@@ -40,12 +40,19 @@ pub fn f_str2nr(argvars: &[typval_T], rettv: &mut typval_T) {
     }
     // c: switch(base) { case 2: STR2NR_BIN|FORCE; case 8: STR2NR_OCT|OOCT|FORCE;
     //     case 16: STR2NR_HEX|FORCE; } (base 10 stays plain decimal, what == 0)
-    let what = match base {
+    let mut what = match base {
         2 => STR2NR_BIN | STR2NR_FORCE,
         8 => STR2NR_OCT | STR2NR_OOCT | STR2NR_FORCE,
         16 => STR2NR_HEX | STR2NR_FORCE,
         _ => 0,
     };
+    // c: a truthy {quote} (argvars[2]) lets `'` separate digits (1'000 → 1000).
+    if argvars
+        .get(2)
+        .is_some_and(|t| tv_get_number_chk(t, None) != 0)
+    {
+        what |= STR2NR_QUOTE;
+    }
     // c: p = skipwhite(...); handle the leading sign before vim_str2nr.
     let s = tv_get_string(&argvars[0]);
     let p = s.trim_start();
