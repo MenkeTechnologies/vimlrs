@@ -95,14 +95,6 @@ pub fn f_call(
     unimplemented!("STUB f_call — csrc/eval/funcs.c:547")
 }
 
-/// Port of `f_changenr()` — `csrc/eval/funcs.c:604`. STUB: not yet ported.
-pub fn f_changenr(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_changenr — csrc/eval/funcs.c:604")
-}
-
 /// Port of `f_chanclose()` — `csrc/eval/funcs.c:610`. STUB: not yet ported.
 pub fn f_chanclose(
     _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
@@ -177,14 +169,6 @@ pub fn set_cursorpos() {
     unimplemented!("STUB set_cursorpos — csrc/eval/funcs.c:965")
 }
 
-/// Port of `f_cursor()` — `csrc/eval/funcs.c:1035`. STUB: not yet ported.
-pub fn f_cursor(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_cursor — csrc/eval/funcs.c:1035")
-}
-
 /// Port of `f_debugbreak()` — `csrc/eval/funcs.c:1041`. STUB: not yet ported.
 pub fn f_debugbreak(
     _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
@@ -229,14 +213,6 @@ pub fn f_expand(
     unimplemented!("STUB f_expand — csrc/eval/funcs.c:1403")
 }
 
-/// Port of `f_menu_get()` — `csrc/eval/funcs.c:1478`. STUB: not yet ported.
-pub fn f_menu_get(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_menu_get — csrc/eval/funcs.c:1478")
-}
-
 /// Port of `f_expandcmd()` — `csrc/eval/funcs.c:1491`. STUB: not yet ported.
 pub fn f_expandcmd(
     _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
@@ -271,26 +247,10 @@ pub fn getregionpos() {
     unimplemented!("STUB getregionpos — csrc/eval/funcs.c:2180")
 }
 
-/// Port of `f_getregion()` — `csrc/eval/funcs.c:2316`. STUB: not yet ported.
-pub fn f_getregion(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_getregion — csrc/eval/funcs.c:2316")
-}
-
 /// Port of `add_regionpos_range()` — `csrc/eval/funcs.c:2355`. STUB: not yet ported.
 /// C: `static void add_regionpos_range(typval_T *rettv, pos_T p1, pos_T p2)`
 pub fn add_regionpos_range() {
     unimplemented!("STUB add_regionpos_range — csrc/eval/funcs.c:2355")
-}
-
-/// Port of `f_getregionpos()` — `csrc/eval/funcs.c:2378`. STUB: not yet ported.
-pub fn f_getregionpos(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_getregionpos — csrc/eval/funcs.c:2378")
 }
 
 /// Port of `dummy_timer_due_cb()` — `csrc/eval/funcs.c:2568`. STUB: not yet ported.
@@ -457,14 +417,6 @@ pub fn get_matches_in_str() {
     unimplemented!("STUB get_matches_in_str — csrc/eval/funcs.c:4272")
 }
 
-/// Port of `f_matchbufline()` — `csrc/eval/funcs.c:4322`. STUB: not yet ported.
-pub fn f_matchbufline(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_matchbufline — csrc/eval/funcs.c:4322")
-}
-
 /// Port of `may_add_state_char()` — `csrc/eval/funcs.c:4589`. STUB: not yet ported.
 /// C: `static void may_add_state_char(garray_T *gap, const char *include, uint8_t c)`
 pub fn may_add_state_char() {
@@ -629,46 +581,6 @@ pub fn set_position() {
     unimplemented!("STUB set_position — csrc/eval/funcs.c:6442")
 }
 
-/// Port of `f_setcharpos()` — `csrc/eval/funcs.c:6481`. STUB: not yet ported.
-pub fn f_setcharpos(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_setcharpos — csrc/eval/funcs.c:6481")
-}
-
-/// Port of `f_setcharsearch()` — `csrc/eval/funcs.c:6486`. STUB: not yet ported.
-pub fn f_setcharsearch(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_setcharsearch — csrc/eval/funcs.c:6486")
-}
-
-/// Port of `f_setcursorcharpos()` — `csrc/eval/funcs.c:6515`. STUB: not yet ported.
-pub fn f_setcursorcharpos(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_setcursorcharpos — csrc/eval/funcs.c:6515")
-}
-
-/// Port of `f_setpos()` — `csrc/eval/funcs.c:6574`. STUB: not yet ported.
-pub fn f_setpos(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_setpos — csrc/eval/funcs.c:6574")
-}
-
-/// Port of `f_settagstack()` — `csrc/eval/funcs.c:6751`. STUB: not yet ported.
-pub fn f_settagstack(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_settagstack — csrc/eval/funcs.c:6751")
-}
-
 /// Port of `f_sockconnect()` — `csrc/eval/funcs.c:6844`. STUB: not yet ported.
 pub fn f_sockconnect(
     _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
@@ -683,22 +595,6 @@ pub fn f_stdioopen(
     _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
 ) {
     unimplemented!("STUB f_stdioopen — csrc/eval/funcs.c:6896")
-}
-
-/// Port of `f_spellbadword()` — `csrc/eval/funcs.c:6951`. STUB: not yet ported.
-pub fn f_spellbadword(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_spellbadword — csrc/eval/funcs.c:6951")
-}
-
-/// Port of `f_spellsuggest()` — `csrc/eval/funcs.c:7014`. STUB: not yet ported.
-pub fn f_spellsuggest(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_spellsuggest — csrc/eval/funcs.c:7014")
 }
 
 /// Port of `get_xdg_var_list()` — `csrc/eval/funcs.c:7140`. STUB: not yet ported.
@@ -723,106 +619,10 @@ pub fn f_submatch(
     unimplemented!("STUB f_submatch — csrc/eval/funcs.c:7297")
 }
 
-/// Port of `f_swapfilelist()` — `csrc/eval/funcs.c:7357`. STUB: not yet ported.
-pub fn f_swapfilelist(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_swapfilelist — csrc/eval/funcs.c:7357")
-}
-
 /// Port of `f_swapinfo()` — `csrc/eval/funcs.c:7364`. STUB: not yet ported.
 pub fn f_swapinfo(
     _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
     _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
 ) {
     unimplemented!("STUB f_swapinfo — csrc/eval/funcs.c:7364")
-}
-
-/// Port of `f_swapname()` — `csrc/eval/funcs.c:7371`. STUB: not yet ported.
-pub fn f_swapname(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_swapname — csrc/eval/funcs.c:7371")
-}
-
-/// Port of `f_synID()` — `csrc/eval/funcs.c:7385`. STUB: not yet ported.
-pub fn f_synID(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_synID — csrc/eval/funcs.c:7385")
-}
-
-/// Port of `f_synIDattr()` — `csrc/eval/funcs.c:7404`. STUB: not yet ported.
-pub fn f_synIDattr(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_synIDattr — csrc/eval/funcs.c:7404")
-}
-
-/// Port of `f_synIDtrans()` — `csrc/eval/funcs.c:7502`. STUB: not yet ported.
-pub fn f_synIDtrans(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_synIDtrans — csrc/eval/funcs.c:7502")
-}
-
-/// Port of `f_synconcealed()` — `csrc/eval/funcs.c:7516`. STUB: not yet ported.
-pub fn f_synconcealed(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_synconcealed — csrc/eval/funcs.c:7516")
-}
-
-/// Port of `f_synstack()` — `csrc/eval/funcs.c:7556`. STUB: not yet ported.
-pub fn f_synstack(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_synstack — csrc/eval/funcs.c:7556")
-}
-
-/// Port of `f_timer_info()` — `csrc/eval/funcs.c:7635`. STUB: not yet ported.
-pub fn f_timer_info(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_timer_info — csrc/eval/funcs.c:7635")
-}
-
-/// Port of `f_timer_pause()` — `csrc/eval/funcs.c:7654`. STUB: not yet ported.
-pub fn f_timer_pause(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_timer_pause — csrc/eval/funcs.c:7654")
-}
-
-/// Port of `f_timer_start()` — `csrc/eval/funcs.c:7675`. STUB: not yet ported.
-pub fn f_timer_start(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_timer_start — csrc/eval/funcs.c:7675")
-}
-
-/// Port of `f_timer_stop()` — `csrc/eval/funcs.c:7706`. STUB: not yet ported.
-pub fn f_timer_stop(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_timer_stop — csrc/eval/funcs.c:7706")
-}
-
-/// Port of `f_timer_stopall()` — `csrc/eval/funcs.c:7720`. STUB: not yet ported.
-pub fn f_timer_stopall(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_timer_stopall — csrc/eval/funcs.c:7720")
 }

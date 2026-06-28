@@ -2330,3 +2330,126 @@ pub fn f_confirm(argvars: &[typval_T], rettv: &mut typval_T) {
         }
     }
 }
+
+// ── Syntax / spell / swap / region / timer / cursor-setter builtins ──
+//
+// A standalone interpreter has no syntax highlighter, spell checker, swap
+// files, screen region, event-loop timers, or current window/buffer to move a
+// cursor in. Each reduces to the value its C body produces with the subsystem
+// inactive: no syntax id (0) / attribute (""), no swap file (""), no bad word
+// (`["", ""]`), an empty result List, a cursor/position set that cannot apply
+// (-1), or a timer that cannot be created without an event loop (-1).
+
+/// Port of `f_synID()` — no syntax highlighter → id 0.
+pub fn f_synID(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_synIDtrans()` — no syntax → translated id 0.
+pub fn f_synIDtrans(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_synIDattr()` — no syntax → "" (the C NULL string).
+pub fn f_synIDattr(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(String::new());
+}
+/// Port of `f_synstack()` — `tv_list_set_ret(rettv, NULL)`, never filled with no
+/// buffer → empty List.
+pub fn f_synstack(_argvars: &[typval_T], rettv: &mut typval_T) {
+    tv_list_alloc_ret(rettv, 0);
+}
+/// Port of `f_synconcealed()` — the unconditional `[concealed, text, matchid]`
+/// triple; nothing is concealed standalone → `[0, '', 0]`.
+pub fn f_synconcealed(_argvars: &[typval_T], rettv: &mut typval_T) {
+    let l = tv_list_alloc_ret(rettv, 3);
+    let mut lb = l.borrow_mut();
+    tv_list_append_number(&mut lb, 0);
+    tv_list_append_string(&mut lb, "");
+    tv_list_append_number(&mut lb, 0);
+}
+/// Port of `f_changenr()` — `curbuf->b_u_seq_cur`; no undo history → 0.
+pub fn f_changenr(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_swapname()` — no swap file → "" (the C NULL string).
+pub fn f_swapname(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(String::new());
+}
+/// Port of `f_swapfilelist()`/`recover_names()` — no swap files → empty List.
+pub fn f_swapfilelist(_argvars: &[typval_T], rettv: &mut typval_T) {
+    tv_list_alloc_ret(rettv, 0);
+}
+/// Port of `f_spellbadword()` — no spell checker → `['', '']` (no bad word).
+pub fn f_spellbadword(_argvars: &[typval_T], rettv: &mut typval_T) {
+    let l = tv_list_alloc_ret(rettv, 2);
+    let mut lb = l.borrow_mut();
+    tv_list_append_string(&mut lb, "");
+    tv_list_append_string(&mut lb, "");
+}
+/// Port of `f_spellsuggest()` — no spell checker → empty List.
+pub fn f_spellsuggest(_argvars: &[typval_T], rettv: &mut typval_T) {
+    tv_list_alloc_ret(rettv, 0);
+}
+/// Port of `f_getregion()` — no buffer/selection → empty List.
+pub fn f_getregion(_argvars: &[typval_T], rettv: &mut typval_T) {
+    tv_list_alloc_ret(rettv, 0);
+}
+/// Port of `f_getregionpos()` — no buffer/selection → empty List.
+pub fn f_getregionpos(_argvars: &[typval_T], rettv: &mut typval_T) {
+    tv_list_alloc_ret(rettv, 0);
+}
+/// Port of `f_matchbufline()` — no buffer → empty List.
+pub fn f_matchbufline(_argvars: &[typval_T], rettv: &mut typval_T) {
+    tv_list_alloc_ret(rettv, 0);
+}
+/// Port of `f_menu_get()` — no menus → empty List.
+pub fn f_menu_get(_argvars: &[typval_T], rettv: &mut typval_T) {
+    tv_list_alloc_ret(rettv, 0);
+}
+/// Port of `f_timer_info()` — no event-loop timers → empty List.
+pub fn f_timer_info(_argvars: &[typval_T], rettv: &mut typval_T) {
+    tv_list_alloc_ret(rettv, 0);
+}
+/// Port of `f_timer_start()` — no event loop to schedule on → -1 (the C error
+/// default; a real timer id is otherwise returned).
+pub fn f_timer_start(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(-1 as varnumber_T);
+}
+/// Port of `f_timer_stop()` — no timers → no-op (rettv stays 0).
+pub fn f_timer_stop(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_timer_pause()` — no timers → no-op (rettv stays 0).
+pub fn f_timer_pause(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_timer_stopall()` — no timers → no-op (rettv stays 0).
+pub fn f_timer_stopall(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_setpos()`/`set_position(…,false)` — no buffer/window to set a
+/// position in → -1 (the C error default).
+pub fn f_setpos(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(-1 as varnumber_T);
+}
+/// Port of `f_setcharpos()`/`set_position(…,true)` — no buffer/window → -1.
+pub fn f_setcharpos(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(-1 as varnumber_T);
+}
+/// Port of `f_cursor()`/`set_cursorpos(…,false)` — no window to move → -1.
+pub fn f_cursor(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(-1 as varnumber_T);
+}
+/// Port of `f_setcursorcharpos()`/`set_cursorpos(…,true)` — no window → -1.
+pub fn f_setcursorcharpos(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(-1 as varnumber_T);
+}
+/// Port of `f_setcharsearch()` — sets the `f`/`t` search state we do not track
+/// standalone → no-op (rettv stays 0, as the C sets no return value).
+pub fn f_setcharsearch(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_settagstack()` — no window tag stack to mutate → accepted no-op
+/// (0, the C success return).
+pub fn f_settagstack(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}

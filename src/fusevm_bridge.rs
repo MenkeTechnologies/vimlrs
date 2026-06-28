@@ -26,24 +26,28 @@ use crate::ported::eval::fs::{
     f_readfile, f_rename, f_resolve, f_setfperm, f_simplify, f_tempname, f_writefile,
 };
 use crate::ported::eval::funcs::{
-    f_abs, f_add, f_and, f_atan2, f_byte2line, f_char2nr, f_charcol, f_col, f_confirm, f_copy,
-    f_deepcopy, f_dictwatcheradd, f_dictwatcherdel, f_did_filetype, f_empty, f_escape,
-    f_eventhandler, f_exists, f_flatten, f_flattennew, f_float2nr, f_fmod, f_fnameescape,
+    f_abs, f_add, f_and, f_atan2, f_byte2line, f_changenr, f_char2nr, f_charcol, f_col, f_confirm,
+    f_copy, f_cursor, f_deepcopy, f_dictwatcheradd, f_dictwatcherdel, f_did_filetype, f_empty,
+    f_escape, f_eventhandler, f_exists, f_flatten, f_flattennew, f_float2nr, f_fmod, f_fnameescape,
     f_foreground, f_funcref, f_function, f_garbagecollect, f_get, f_getchangelist, f_getcharpos,
     f_getcharsearch, f_getcurpos, f_getcursorcharpos, f_getenv, f_getfontname, f_getjumplist,
-    f_getmarklist, f_getpid, f_getpos, f_getreg, f_getreginfo, f_getregtype, f_gettagstack,
-    f_gettext, f_has, f_has_key, f_hlexists, f_id, f_index, f_indexof, f_input, f_inputdialog,
-    f_inputlist, f_inputrestore, f_inputsave, f_inputsecret, f_insert, f_invert, f_isinf, f_isnan,
-    f_items, f_json_decode, f_json_encode, f_keys, f_len, f_line, f_line2byte, f_list2str,
-    f_localtime, f_match, f_matchend, f_matchlist, f_matchstr, f_matchstrlist, f_matchstrpos,
-    f_max, f_min, f_mode, f_nextnonblank, f_nr2char, f_or, f_pow, f_prevnonblank, f_printf,
-    f_prompt_getprompt, f_pum_getpos, f_pumvisible, f_rand, f_range, f_reduce, f_reg_executing,
-    f_reg_recorded, f_reg_recording, f_reltime, f_reltimefloat, f_reltimestr, f_repeat, f_reverse,
-    f_screenattr, f_screenchar, f_screenchars, f_screencol, f_screenrow, f_screenstring, f_search,
-    f_searchdecl, f_searchpair, f_searchpairpos, f_searchpos, f_serverlist, f_setenv, f_setreg,
-    f_sha256, f_shellescape, f_shiftwidth, f_soundfold, f_split, f_srand, f_state, f_str2float,
-    f_strftime, f_strptime, f_substitute, f_tabpagebuflist, f_tagfiles, f_taglist, f_type,
-    f_values, f_virtcol, f_visualmode, f_wildmenumode, f_windowsversion, f_wordcount, f_xor,
+    f_getmarklist, f_getpid, f_getpos, f_getreg, f_getreginfo, f_getregion, f_getregionpos,
+    f_getregtype, f_gettagstack, f_gettext, f_has, f_has_key, f_hlexists, f_id, f_index, f_indexof,
+    f_input, f_inputdialog, f_inputlist, f_inputrestore, f_inputsave, f_inputsecret, f_insert,
+    f_invert, f_isinf, f_isnan, f_items, f_json_decode, f_json_encode, f_keys, f_len, f_line,
+    f_line2byte, f_list2str, f_localtime, f_match, f_matchbufline, f_matchend, f_matchlist,
+    f_matchstr, f_matchstrlist, f_matchstrpos, f_max, f_menu_get, f_min, f_mode, f_nextnonblank,
+    f_nr2char, f_or, f_pow, f_prevnonblank, f_printf, f_prompt_getprompt, f_pum_getpos,
+    f_pumvisible, f_rand, f_range, f_reduce, f_reg_executing, f_reg_recorded, f_reg_recording,
+    f_reltime, f_reltimefloat, f_reltimestr, f_repeat, f_reverse, f_screenattr, f_screenchar,
+    f_screenchars, f_screencol, f_screenrow, f_screenstring, f_search, f_searchdecl, f_searchpair,
+    f_searchpairpos, f_searchpos, f_serverlist, f_setcharpos, f_setcharsearch, f_setcursorcharpos,
+    f_setenv, f_setpos, f_setreg, f_settagstack, f_sha256, f_shellescape, f_shiftwidth,
+    f_soundfold, f_spellbadword, f_spellsuggest, f_split, f_srand, f_state, f_str2float,
+    f_strftime, f_strptime, f_substitute, f_swapfilelist, f_swapname, f_synID, f_synIDattr,
+    f_synIDtrans, f_synconcealed, f_synstack, f_tabpagebuflist, f_tagfiles, f_taglist,
+    f_timer_info, f_timer_pause, f_timer_start, f_timer_stop, f_timer_stopall, f_type, f_values,
+    f_virtcol, f_visualmode, f_wildmenumode, f_windowsversion, f_wordcount, f_xor,
     float_op_wrapper,
 };
 use crate::ported::eval::list::{
@@ -578,6 +582,56 @@ pub const VIML_FN_INPUTSAVE: u16 = 3311;
 pub const VIML_FN_INPUTRESTORE: u16 = 3312;
 /// `confirm()`
 pub const VIML_FN_CONFIRM: u16 = 3313;
+/// `synID()`
+pub const VIML_FN_SYNID: u16 = 3314;
+/// `synIDtrans()`
+pub const VIML_FN_SYNIDTRANS: u16 = 3315;
+/// `synIDattr()`
+pub const VIML_FN_SYNIDATTR: u16 = 3316;
+/// `synstack()`
+pub const VIML_FN_SYNSTACK: u16 = 3317;
+/// `synconcealed()`
+pub const VIML_FN_SYNCONCEALED: u16 = 3318;
+/// `changenr()`
+pub const VIML_FN_CHANGENR: u16 = 3319;
+/// `swapname()`
+pub const VIML_FN_SWAPNAME: u16 = 3320;
+/// `swapfilelist()`
+pub const VIML_FN_SWAPFILELIST: u16 = 3321;
+/// `spellbadword()`
+pub const VIML_FN_SPELLBADWORD: u16 = 3322;
+/// `spellsuggest()`
+pub const VIML_FN_SPELLSUGGEST: u16 = 3323;
+/// `getregion()`
+pub const VIML_FN_GETREGION: u16 = 3324;
+/// `getregionpos()`
+pub const VIML_FN_GETREGIONPOS: u16 = 3325;
+/// `matchbufline()`
+pub const VIML_FN_MATCHBUFLINE: u16 = 3326;
+/// `menu_get()`
+pub const VIML_FN_MENU_GET: u16 = 3327;
+/// `timer_info()`
+pub const VIML_FN_TIMER_INFO: u16 = 3328;
+/// `timer_start()`
+pub const VIML_FN_TIMER_START: u16 = 3329;
+/// `timer_stop()`
+pub const VIML_FN_TIMER_STOP: u16 = 3330;
+/// `timer_pause()`
+pub const VIML_FN_TIMER_PAUSE: u16 = 3331;
+/// `timer_stopall()`
+pub const VIML_FN_TIMER_STOPALL: u16 = 3332;
+/// `setpos()`
+pub const VIML_FN_SETPOS: u16 = 3333;
+/// `setcharpos()`
+pub const VIML_FN_SETCHARPOS: u16 = 3334;
+/// `cursor()`
+pub const VIML_FN_CURSOR: u16 = 3335;
+/// `setcursorcharpos()`
+pub const VIML_FN_SETCURSORCHARPOS: u16 = 3336;
+/// `setcharsearch()`
+pub const VIML_FN_SETCHARSEARCH: u16 = 3337;
+/// `settagstack()`
+pub const VIML_FN_SETTAGSTACK: u16 = 3338;
 /// `flattennew()`
 pub const VIML_FN_FLATTENNEW: u16 = 3211;
 /// `sha256()`
@@ -2057,6 +2111,49 @@ pub fn install(vm: &mut VM) {
         call_func(vm, n, f_inputrestore)
     });
     vm.register_builtin(VIML_FN_CONFIRM, |vm, n| call_func(vm, n, f_confirm));
+    vm.register_builtin(VIML_FN_SYNID, |vm, n| call_func(vm, n, f_synID));
+    vm.register_builtin(VIML_FN_SYNIDTRANS, |vm, n| call_func(vm, n, f_synIDtrans));
+    vm.register_builtin(VIML_FN_SYNIDATTR, |vm, n| call_func(vm, n, f_synIDattr));
+    vm.register_builtin(VIML_FN_SYNSTACK, |vm, n| call_func(vm, n, f_synstack));
+    vm.register_builtin(VIML_FN_SYNCONCEALED, |vm, n| {
+        call_func(vm, n, f_synconcealed)
+    });
+    vm.register_builtin(VIML_FN_CHANGENR, |vm, n| call_func(vm, n, f_changenr));
+    vm.register_builtin(VIML_FN_SWAPNAME, |vm, n| call_func(vm, n, f_swapname));
+    vm.register_builtin(VIML_FN_SWAPFILELIST, |vm, n| {
+        call_func(vm, n, f_swapfilelist)
+    });
+    vm.register_builtin(VIML_FN_SPELLBADWORD, |vm, n| {
+        call_func(vm, n, f_spellbadword)
+    });
+    vm.register_builtin(VIML_FN_SPELLSUGGEST, |vm, n| {
+        call_func(vm, n, f_spellsuggest)
+    });
+    vm.register_builtin(VIML_FN_GETREGION, |vm, n| call_func(vm, n, f_getregion));
+    vm.register_builtin(VIML_FN_GETREGIONPOS, |vm, n| {
+        call_func(vm, n, f_getregionpos)
+    });
+    vm.register_builtin(VIML_FN_MATCHBUFLINE, |vm, n| {
+        call_func(vm, n, f_matchbufline)
+    });
+    vm.register_builtin(VIML_FN_MENU_GET, |vm, n| call_func(vm, n, f_menu_get));
+    vm.register_builtin(VIML_FN_TIMER_INFO, |vm, n| call_func(vm, n, f_timer_info));
+    vm.register_builtin(VIML_FN_TIMER_START, |vm, n| call_func(vm, n, f_timer_start));
+    vm.register_builtin(VIML_FN_TIMER_STOP, |vm, n| call_func(vm, n, f_timer_stop));
+    vm.register_builtin(VIML_FN_TIMER_PAUSE, |vm, n| call_func(vm, n, f_timer_pause));
+    vm.register_builtin(VIML_FN_TIMER_STOPALL, |vm, n| {
+        call_func(vm, n, f_timer_stopall)
+    });
+    vm.register_builtin(VIML_FN_SETPOS, |vm, n| call_func(vm, n, f_setpos));
+    vm.register_builtin(VIML_FN_SETCHARPOS, |vm, n| call_func(vm, n, f_setcharpos));
+    vm.register_builtin(VIML_FN_CURSOR, |vm, n| call_func(vm, n, f_cursor));
+    vm.register_builtin(VIML_FN_SETCURSORCHARPOS, |vm, n| {
+        call_func(vm, n, f_setcursorcharpos)
+    });
+    vm.register_builtin(VIML_FN_SETCHARSEARCH, |vm, n| {
+        call_func(vm, n, f_setcharsearch)
+    });
+    vm.register_builtin(VIML_FN_SETTAGSTACK, |vm, n| call_func(vm, n, f_settagstack));
     vm.register_builtin(VIML_FN_FLATTENNEW, |vm, n| call_func(vm, n, f_flattennew));
     vm.register_builtin(VIML_FN_SHA256, |vm, n| call_func(vm, n, f_sha256));
     vm.register_builtin(VIML_FN_BLOB2LIST, |vm, n| call_func(vm, n, f_blob2list));
