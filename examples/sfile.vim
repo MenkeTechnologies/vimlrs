@@ -17,6 +17,11 @@ call assert_equal(0, expand('<sfile>:p:h') =~ 'sfile\.vim')
 call assert_equal(expand('<sfile>'), expand('<script>'))
 call assert_equal(expand('<sfile>:t'), expand('<script>:t'))
 
+" --- inside a :source'd file, <sfile> is THAT file; afterwards ours is restored
+execute 'source ' . expand('<sfile>:p:h') . '/lib/sfile_helper.vim'
+call assert_equal('sfile_helper.vim', g:sfile_helper_seen)
+call assert_equal('sfile.vim', expand('<sfile>:t'))
+
 " --- expand() of a $VAR / wildcard path still works (no special token)
 call assert_equal($HOME, expand('$HOME'))
 

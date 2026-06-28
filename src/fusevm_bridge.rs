@@ -1788,7 +1788,14 @@ fn b_source(vm: &mut VM, _: u8) -> Value {
     };
     match std::fs::read_to_string(&expanded) {
         Ok(src) => {
+            // `<sfile>`/`<script>` inside the sourced file resolve to ITS path,
+            // not the parent's (a nested sourcing-name push, popped after).
+            let sname = std::fs::canonicalize(&expanded)
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| expanded.clone());
+            crate::ported::eval::fs::push_sourcing_name(sname);
             let _ = run_source_nested(&src);
+            crate::ported::eval::fs::pop_sourcing_name();
         }
         Err(_) => message::semsg(&format!("E484: Can't open file {path}")),
     }
