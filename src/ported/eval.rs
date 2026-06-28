@@ -87,6 +87,66 @@ pub fn string2float(text: &str) -> (f64, usize) {
     if starts("nan") {
         return (f64::NAN, 3);
     }
+    // c: strtod() also parses hex floats — "0x1f" → 31.0, "0x1.8p1" → 3.0.
+    {
+        let b = text.as_bytes();
+        let mut k = 0;
+        let neg = b.first() == Some(&b'-');
+        if matches!(b.first(), Some(b'+' | b'-')) {
+            k = 1;
+        }
+        if b.len() >= k + 2 && b[k] == b'0' && (b[k + 1] | 0x20) == b'x' {
+            let hexval = |c: u8| (c as char).to_digit(16).unwrap() as f64;
+            let mut j = k + 2;
+            let mut mant = 0.0f64;
+            let mut any = false;
+            while j < b.len() && b[j].is_ascii_hexdigit() {
+                mant = mant * 16.0 + hexval(b[j]);
+                j += 1;
+                any = true;
+            }
+            if j < b.len() && b[j] == b'.' {
+                j += 1;
+                let mut scale = 1.0 / 16.0;
+                while j < b.len() && b[j].is_ascii_hexdigit() {
+                    mant += hexval(b[j]) * scale;
+                    scale /= 16.0;
+                    j += 1;
+                    any = true;
+                }
+            }
+            if any {
+                // Optional binary exponent `p[+/-]ddd`.
+                let mut exp = 0i32;
+                if j < b.len() && (b[j] | 0x20) == b'p' {
+                    let mut e = j + 1;
+                    let mut es = 1i32;
+                    if e < b.len() && matches!(b[e], b'+' | b'-') {
+                        if b[e] == b'-' {
+                            es = -1;
+                        }
+                        e += 1;
+                    }
+                    let mut ev = 0i32;
+                    let mut ed = false;
+                    while e < b.len() && b[e].is_ascii_digit() {
+                        ev = ev * 10 + (b[e] - b'0') as i32;
+                        e += 1;
+                        ed = true;
+                    }
+                    if ed {
+                        exp = es * ev;
+                        j = e;
+                    }
+                }
+                let mut val = mant * 2f64.powi(exp);
+                if neg {
+                    val = -val;
+                }
+                return (val, j);
+            }
+        }
+    }
     // c: *ret_value = strtod(text, &s); return s - text;
     // Scan the longest prefix that is a valid C float literal.
     let b = text.as_bytes();

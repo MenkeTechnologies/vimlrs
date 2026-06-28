@@ -39,7 +39,11 @@ Covered by `examples/compare.vim`.
 - The `\=` expression evaluates to empty specifically when it uses the `.`
   concatenation operator. `\=toupper(submatch(0))` and `\=submatch(0)*2` both work.
 
-### 3. `split()` with zero-width pattern `\zs` doesn't split
+### 3. `split()` with zero-width pattern `\zs` doesn't split — ✅ FIXED
+`regex_split` rewritten to the faithful f_split `col` algorithm (any empty-capable
+separator advances one char), and `\zs`/`\ze` implemented in the regex engine
+(reserved match-bound slots), which also fixes `matchstr`/`substitute`. Covered by
+`examples/regex_zs.vim`.
 - `split('hello','\zs')` → Vim `['h', 'e', 'l', 'l', 'o']`, vimlrs `['hello']`
 - Zero-width-match splitting (the standard "split into chars" idiom) isn't handled.
   `src/ported/strings.rs` split impl.
@@ -136,7 +140,9 @@ Found in a second, deeper pass; all reproduced against the current binary. (Thes
 supersede the earlier "`%g` … verified at parity" note in the coverage list —
 `%g`/`%G` are **not** at parity; see #R2-5.)
 
-### R2-1. `charidx()` PANICS (crashes the interpreter) on multibyte input
+### R2-1. `charidx()` PANICS (crashes the interpreter) on multibyte input — ✅ FIXED
+Now walks char boundaries (maps a byte to the char that contains it); never
+slices mid-character. Covered by `examples/numeric_edge.vim`.
 - `charidx("héllo",2)` → Vim `1`, vimlrs **panics** (`thread 'main' panicked at
   src/ported/strings.rs:255: end byte index 2 is not a char boundary; it is inside 'é'`,
   process aborts with exit 101)
@@ -173,13 +179,17 @@ supersede the earlier "`%g` … verified at parity" note in the coverage list �
 - `function("toupper")("hi")` → Vim `HI`, vimlrs `E15: Invalid expression: trailing tokens`
 - `call()` works; direct call syntax on a funcref expression does not.
 
-### R2-8. `%` on Floats should error (E804) but returns a value
+### R2-8. `%` on Floats should error (E804) but returns a value — ✅ FIXED
+`b_mod` now raises E804 for a Float operand (`%` is integer-only). Covered by
+`examples/numeric_edge.vim`.
 - `1.0 % 2.0` → Vim `E804: Cannot use '%' with Float`, vimlrs `1.0`
 
 ### R2-9. `execute()` puts the newline at the wrong end
 - `string(execute("echo 5"))` → Vim `'\n5'` (leading), vimlrs `'5\n'` (trailing)
 
-### R2-10. `str2float()` doesn't parse hex
+### R2-10. `str2float()` doesn't parse hex — ✅ FIXED
+`string2float` now parses hex floats (`0x1f`→31.0, `0x1.8p1`→3.0), matching strtod.
+Covered by `examples/numeric_edge.vim`.
 - `str2float("0x1f")` → Vim `31.0`, vimlrs `0.0`
 
 ### R2-11. `exists("*funcname")` returns 0 for existing builtins
