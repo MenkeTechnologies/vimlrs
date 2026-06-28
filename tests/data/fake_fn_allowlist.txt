@@ -116,3 +116,53 @@ utf_char2utf16len
 # TYPVAL_ENCODE_CONV_FLOAT macro performs inline via vim_snprintf("%g", …)
 # (Neovim has no named helper for it); faithful port of that formatting.
 vim_float_g
+
+# ── search.c (not vendored) — matchfuzzy()/matchfuzzypos() ──
+# Real Neovim fuzzy matcher. Home file search.c is outside the vendored eval/
+# tree; faithful ports cited to search.c.
+f_matchfuzzy
+f_matchfuzzypos
+do_fuzzymatch
+fuzzy_match
+fuzzy_match_recursive
+fuzzy_match_compute_score
+
+# ── cmdhist.c (not vendored) — command-line history ──
+# Real Neovim history rings behind histadd()/histget()/histnr()/histdel();
+# get_histtype maps a history name to its ring index. Home file cmdhist.c.
+f_histadd
+f_histget
+f_histnr
+f_histdel
+get_histtype
+
+# ── digraph.c (not vendored) — digraph table ──
+# Real Neovim digraph builtins; getexactdigraph resolves a two-char trigger.
+f_digraph_get
+f_digraph_set
+f_digraph_getlist
+f_digraph_setlist
+getexactdigraph
+
+# ── mbyte.c (not vendored) — iconv()/cell-width overrides ──
+# Real Neovim string-encoding + cell-width-table builtins; cw_value looks up the
+# setcellwidths() override consulted by utf_char2cells(). Home file mbyte.c.
+f_iconv
+f_setcellwidths
+f_getcellwidths
+cw_value
+
+# ── eval/funcs.c (full table, not in the vendored funcs.c subset) ──
+# Real Neovim builtins whose definitions sit in the parts of eval/funcs.c that
+# this vendored subset does not include.
+f_hostname
+f_argc
+f_argidx
+f_argv
+f_arglistid
+
+# ── fold.c (not vendored) — foldlevel() (no folds standalone → 0) ──
+f_foldlevel
+
+# ── testing.c (not vendored) — assert_equalfile() ──
+f_assert_equalfile

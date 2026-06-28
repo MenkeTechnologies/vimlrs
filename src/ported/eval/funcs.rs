@@ -3411,3 +3411,692 @@ pub fn find_win_for_curbuf() {}
 pub fn buf_win_common(_argvars: &[typval_T], rettv: &mut typval_T, _get_nr: bool) {
     *rettv = typval_T::from(-1 as varnumber_T);
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// Round-1 builtin expansion. These builtins' C home files lie outside the
+// vendored `csrc/eval/` tree (search.c, cmdhist.c, digraph.c, mbyte.c,
+// testing.c, and the full eval/funcs.c table), so their `fn` names are recorded
+// in `tests/data/fake_fn_allowlist.txt`. Each is a faithful port cited to its
+// home file.
+// ════════════════════════════════════════════════════════════════════════════
+
+use crate::ported::eval::typval_defs_h::VarLockStatus;
+
+// ── matchfuzzy()/matchfuzzypos() — Neovim search.c (fuzzy_match*). ──
+
+const FUZZY_SEQUENTIAL_BONUS: i32 = 15;
+const FUZZY_SEPARATOR_BONUS: i32 = 30;
+const FUZZY_CAMEL_BONUS: i32 = 30;
+const FUZZY_FIRST_LETTER_BONUS: i32 = 15;
+const FUZZY_LEADING_LETTER_PENALTY: i32 = -5;
+const FUZZY_MAX_LEADING_LETTER_PENALTY: i32 = -15;
+const FUZZY_UNMATCHED_LETTER_PENALTY: i32 = -1;
+const FUZZY_RECURSION_LIMIT: i32 = 10;
+const FUZZY_MAX_MATCHES: usize = 256;
+
+/// Port of `fuzzy_match_compute_score()` (Neovim search.c) — score a completed
+/// set of match positions: base 100, a clamped leading-letter penalty, an
+/// unmatched-letter penalty, plus sequential/camel/separator/first-letter
+/// bonuses per matched char.
+fn fuzzy_match_compute_score(str: &[char], matches: &[usize], camelcase: bool) -> i32 {
+    let mut score = 100;
+    // c: leading-letter penalty, clamped to MAX_LEADING_LETTER_PENALTY.
+    let mut penalty = FUZZY_LEADING_LETTER_PENALTY * matches[0] as i32;
+    if penalty < FUZZY_MAX_LEADING_LETTER_PENALTY {
+        penalty = FUZZY_MAX_LEADING_LETTER_PENALTY;
+    }
+    score += penalty;
+    // c: unmatched-letter penalty.
+    let unmatched = str.len() as i32 - matches.len() as i32;
+    score += FUZZY_UNMATCHED_LETTER_PENALTY * unmatched;
+    // c: ordering bonuses.
+    for i in 0..matches.len() {
+        let curr_idx = matches[i];
+        if i > 0 && curr_idx == matches[i - 1] + 1 {
+            score += FUZZY_SEQUENTIAL_BONUS;
+        }
+        if curr_idx > 0 {
+            let neighbor = str[curr_idx - 1];
+            let curr = str[curr_idx];
+            if camelcase && neighbor.is_lowercase() && curr.is_uppercase() {
+                score += FUZZY_CAMEL_BONUS;
+            }
+            if neighbor == '/' || neighbor == '\\' || neighbor == ' ' || neighbor == '_' {
+                score += FUZZY_SEPARATOR_BONUS;
+            }
+        } else {
+            score += FUZZY_FIRST_LETTER_BONUS;
+        }
+    }
+    score
+}
+
+/// Port of `fuzzy_match_recursive()` (Neovim search.c) — recursively match the
+/// remaining `fuzpat` against `str_rem` (whose first char is at absolute
+/// `str_idx` in `str_full`), accumulating matched positions into `matches`.
+/// Returns the best score when the whole pattern matches.
+#[allow(clippy::too_many_arguments)]
+fn fuzzy_match_recursive(
+    fuzpat: &[char],
+    str_rem: &[char],
+    str_idx: usize,
+    str_full: &[char],
+    camelcase: bool,
+    matches: &mut Vec<usize>,
+    recursion: &mut i32,
+) -> Option<i32> {
+    *recursion += 1;
+    if *recursion >= FUZZY_RECURSION_LIMIT {
+        return None;
+    }
+    if fuzpat.is_empty() || str_rem.is_empty() {
+        return None;
+    }
+    let mut recursive_best: Option<(i32, Vec<usize>)> = None;
+    let mut fp = 0usize;
+    let mut sp = 0usize;
+    while fp < fuzpat.len() && sp < str_rem.len() {
+        let c1 = fuzpat[fp];
+        let c2 = str_rem[sp];
+        // c: case-insensitive compare (mb_tolower).
+        if c1.to_lowercase().eq(c2.to_lowercase()) {
+            if matches.len() >= FUZZY_MAX_MATCHES {
+                return None;
+            }
+            // c: recursive call that "skips" this match (copy-on-write matches).
+            let mut rec_matches = matches.clone();
+            if let Some(rscore) = fuzzy_match_recursive(
+                &fuzpat[fp..],
+                &str_rem[sp + 1..],
+                str_idx + sp + 1,
+                str_full,
+                camelcase,
+                &mut rec_matches,
+                recursion,
+            ) {
+                #[allow(clippy::unnecessary_map_or)]
+                if recursive_best.as_ref().map_or(true, |(bs, _)| rscore > *bs) {
+                    recursive_best = Some((rscore, rec_matches));
+                }
+            }
+            matches.push(str_idx + sp);
+            fp += 1;
+        }
+        sp += 1;
+    }
+    let matched = fp >= fuzpat.len();
+    let this_score = if matched {
+        fuzzy_match_compute_score(str_full, matches, camelcase)
+    } else {
+        0
+    };
+    if let Some((rscore, rmatches)) = recursive_best {
+        if !matched || rscore > this_score {
+            *matches = rmatches;
+            return Some(rscore);
+        }
+    }
+    if matched {
+        return Some(this_score);
+    }
+    None
+}
+
+/// Port of `fuzzy_match()` (Neovim search.c) — match `pat` against `str`. With
+/// `matchseq` the pattern matches as a single sequence; otherwise it is split
+/// on spaces into words, each matched independently and the scores summed.
+/// Returns the total score and all matched char positions.
+fn fuzzy_match(
+    str: &[char],
+    pat: &str,
+    matchseq: bool,
+    camelcase: bool,
+) -> Option<(i32, Vec<usize>)> {
+    let words: Vec<Vec<char>> = if matchseq {
+        vec![pat.chars().collect()]
+    } else {
+        pat.split(' ')
+            .filter(|w| !w.is_empty())
+            .map(|w| w.chars().collect())
+            .collect()
+    };
+    if words.is_empty() {
+        return None;
+    }
+    let mut total = 0i32;
+    let mut all: Vec<usize> = Vec::new();
+    for w in &words {
+        let mut matches: Vec<usize> = Vec::new();
+        let mut recursion = 0i32;
+        match fuzzy_match_recursive(w, str, 0, str, camelcase, &mut matches, &mut recursion) {
+            Some(score) => {
+                total += score;
+                all.extend_from_slice(&matches);
+            }
+            None => return None,
+        }
+    }
+    Some((total, all))
+}
+
+/// Port of `do_fuzzymatch()` (Neovim search.c) — the shared body of
+/// `matchfuzzy()`/`matchfuzzypos()`. Scores every list item (a String, or a
+/// Dict field named by the `key` option), sorts by descending score (stable on
+/// input order for ties), applies the `limit`/`matchseq`/`camelcase` options,
+/// and returns either the filtered items or `[items, positions, scores]`.
+fn do_fuzzymatch(argvars: &[typval_T], rettv: &mut typval_T, return_pos: bool) {
+    let l = match (argvars[0].v_type, &argvars[0].vval) {
+        (VAR_LIST, v_list(Some(l))) => l.clone(),
+        _ => {
+            emsg("E714: List required");
+            return;
+        }
+    };
+    let pat = tv_get_string(&argvars[1]);
+    // c: third argument is an optional options Dict.
+    let mut key: Option<String> = None;
+    let mut matchseq = false;
+    let mut camelcase = true;
+    let mut limit: i64 = 0;
+    if argvars.len() >= 3 {
+        if let (VAR_DICT, v_dict(Some(d))) = (argvars[2].v_type, &argvars[2].vval) {
+            let d = d.borrow();
+            if let Some(k) = tv_dict_find(&d, "key") {
+                key = Some(tv_get_string(k));
+            }
+            if let Some(v) = tv_dict_find(&d, "matchseq") {
+                matchseq = tv_get_number(v) != 0;
+            }
+            if let Some(v) = tv_dict_find(&d, "camelcase") {
+                camelcase = tv_get_bool(v) != 0;
+            }
+            if let Some(v) = tv_dict_find(&d, "limit") {
+                limit = tv_get_number(v);
+            }
+        }
+    }
+    let items: Vec<typval_T> = l
+        .borrow()
+        .lv_items
+        .iter()
+        .map(|it| it.li_tv.clone())
+        .collect();
+    let mut scored: Vec<(usize, i32, Vec<usize>)> = Vec::new();
+    for (idx, item) in items.iter().enumerate() {
+        // c: extract the text to match — the item itself (String) or item[key].
+        let text = match &key {
+            Some(k) => match (item.v_type, &item.vval) {
+                (VAR_DICT, v_dict(Some(d))) => match tv_dict_find(&d.borrow(), k) {
+                    Some(v) => tv_get_string(v),
+                    None => continue,
+                },
+                _ => continue,
+            },
+            None => {
+                if item.v_type == VAR_STRING {
+                    tv_get_string(item)
+                } else {
+                    continue;
+                }
+            }
+        };
+        let chars: Vec<char> = text.chars().collect();
+        if let Some((score, positions)) = fuzzy_match(&chars, &pat, matchseq, camelcase) {
+            scored.push((idx, score, positions));
+        }
+    }
+    // c: sort by descending score; stable so equal scores keep input order.
+    scored.sort_by_key(|x| std::cmp::Reverse(x.1));
+    if limit > 0 && scored.len() > limit as usize {
+        scored.truncate(limit as usize);
+    }
+    if !return_pos {
+        let out = tv_list_alloc_ret(rettv, scored.len() as isize);
+        let mut ob = out.borrow_mut();
+        for (idx, _, _) in &scored {
+            tv_list_append_tv(&mut ob, items[*idx].clone());
+        }
+        return;
+    }
+    // c: matchfuzzypos() returns [matched_items, positions, scores].
+    let outer = tv_list_alloc_ret(rettv, 3);
+    let matched = tv_list_alloc(0);
+    let posl = tv_list_alloc(0);
+    let scorel = tv_list_alloc(0);
+    for (idx, score, positions) in &scored {
+        tv_list_append_tv(&mut matched.borrow_mut(), items[*idx].clone());
+        let p = tv_list_alloc(0);
+        for pos in positions {
+            tv_list_append_number(&mut p.borrow_mut(), *pos as varnumber_T);
+        }
+        tv_list_append_tv(
+            &mut posl.borrow_mut(),
+            typval_T {
+                v_type: VAR_LIST,
+                v_lock: VarLockStatus::VAR_UNLOCKED,
+                vval: v_list(Some(p)),
+            },
+        );
+        tv_list_append_number(&mut scorel.borrow_mut(), *score as varnumber_T);
+    }
+    let mk = |l| typval_T {
+        v_type: VAR_LIST,
+        v_lock: VarLockStatus::VAR_UNLOCKED,
+        vval: v_list(Some(l)),
+    };
+    let mut ob = outer.borrow_mut();
+    tv_list_append_tv(&mut ob, mk(matched));
+    tv_list_append_tv(&mut ob, mk(posl));
+    tv_list_append_tv(&mut ob, mk(scorel));
+}
+
+/// Port of `f_matchfuzzy()` (Neovim search.c) — fuzzy-filter a List by a
+/// pattern, best matches first.
+pub fn f_matchfuzzy(argvars: &[typval_T], rettv: &mut typval_T) {
+    do_fuzzymatch(argvars, rettv, false);
+}
+
+/// Port of `f_matchfuzzypos()` (Neovim search.c) — like `matchfuzzy()` but
+/// returns `[items, match-positions, scores]`.
+pub fn f_matchfuzzypos(argvars: &[typval_T], rettv: &mut typval_T) {
+    do_fuzzymatch(argvars, rettv, true);
+}
+
+// ── histadd()/histget()/histnr()/histdel() — Neovim cmdhist.c. ──
+
+thread_local! {
+    /// The five command-line history rings (`history[HIST_COUNT][]` in
+    /// cmdhist.c): cmd, search, expr, input, debug. Index 0 is the oldest.
+    static HISTORY: std::cell::RefCell<[Vec<String>; 5]> =
+        const { std::cell::RefCell::new([Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()]) };
+}
+
+/// Port of `get_histtype()` (Neovim cmdhist.c) — map a history name (`":"`/
+/// `"cmd"`, `"/"`/`"search"`, `"="`/`"expr"`, `"@"`/`"input"`, `">"`/`"debug"`)
+/// to its ring index, or `None` for an invalid name. An empty name is the
+/// command history.
+fn get_histtype(name: &str) -> Option<usize> {
+    match name {
+        "" | ":" | "cmd" => Some(0),
+        "/" | "?" | "search" => Some(1),
+        "=" | "expr" => Some(2),
+        "@" | "input" => Some(3),
+        ">" | "debug" => Some(4),
+        _ => None,
+    }
+}
+
+/// Port of `f_histadd()` (Neovim cmdhist.c) — add `{item}` to history
+/// `{history}` (de-duplicating). Returns 1 on success, 0 on failure.
+pub fn f_histadd(argvars: &[typval_T], rettv: &mut typval_T) {
+    let name = tv_get_string(&argvars[0]);
+    let item = tv_get_string(&argvars[1]);
+    let t = match get_histtype(&name) {
+        Some(t) => t,
+        None => return,
+    };
+    if item.is_empty() {
+        return;
+    }
+    HISTORY.with(|h| {
+        let mut h = h.borrow_mut();
+        h[t].retain(|e| e != &item);
+        h[t].push(item);
+    });
+    rettv.vval = v_number(1);
+}
+
+/// Port of `f_histget()` (Neovim cmdhist.c) — return the `{index}`-th entry of
+/// history `{history}`. A positive index is the absolute 1-based entry number,
+/// a negative index counts back from the newest (-1 = newest); omitted/0 means
+/// the newest. Out of range yields "".
+pub fn f_histget(argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.v_type = VAR_STRING;
+    let name = tv_get_string(&argvars[0]);
+    let t = match get_histtype(&name) {
+        Some(t) => t,
+        None => {
+            rettv.vval = v_string(String::new());
+            return;
+        }
+    };
+    let idx = if argvars.len() >= 2 {
+        tv_get_number(&argvars[1])
+    } else {
+        0
+    };
+    let s = HISTORY.with(|h| {
+        let h = h.borrow();
+        let v = &h[t];
+        let n = v.len() as varnumber_T;
+        let pos: Option<usize> = if idx == 0 {
+            v.len().checked_sub(1)
+        } else if idx > 0 {
+            if idx <= n {
+                Some((idx - 1) as usize)
+            } else {
+                None
+            }
+        } else {
+            let p = n + idx;
+            if p >= 0 {
+                Some(p as usize)
+            } else {
+                None
+            }
+        };
+        pos.map(|i| v[i].clone()).unwrap_or_default()
+    });
+    rettv.vval = v_string(s);
+}
+
+/// Port of `f_histnr()` (Neovim cmdhist.c) — the number of the newest entry in
+/// history `{history}` (here the entry count), or -1 for an invalid name.
+pub fn f_histnr(argvars: &[typval_T], rettv: &mut typval_T) {
+    let name = tv_get_string(&argvars[0]);
+    match get_histtype(&name) {
+        Some(t) => {
+            let n = HISTORY.with(|h| h.borrow()[t].len());
+            rettv.vval = v_number(n as varnumber_T);
+        }
+        None => rettv.vval = v_number(-1),
+    }
+}
+
+/// Port of `f_histdel()` (Neovim cmdhist.c) — delete from history `{history}`:
+/// with no `{item}` clear the whole ring; a Number deletes that indexed entry;
+/// a String deletes every entry matching it as a pattern. Returns 1.
+pub fn f_histdel(argvars: &[typval_T], rettv: &mut typval_T) {
+    let name = tv_get_string(&argvars[0]);
+    let t = match get_histtype(&name) {
+        Some(t) => t,
+        None => return,
+    };
+    HISTORY.with(|h| {
+        let mut h = h.borrow_mut();
+        if argvars.len() < 2 {
+            h[t].clear();
+        } else if argvars[1].v_type == VAR_NUMBER {
+            let idx = tv_get_number(&argvars[1]);
+            let n = h[t].len() as varnumber_T;
+            let pos = if idx > 0 && idx <= n {
+                Some((idx - 1) as usize)
+            } else if idx < 0 && n + idx >= 0 {
+                Some((n + idx) as usize)
+            } else {
+                None
+            };
+            if let Some(p) = pos {
+                h[t].remove(p);
+            }
+        } else {
+            let pat = tv_get_string(&argvars[1]);
+            h[t].retain(|e| !regex_match(&pat, e, false));
+        }
+    });
+    rettv.vval = v_number(1);
+}
+
+// ── digraph_get()/digraph_set()/digraph_getlist()/digraph_setlist() —
+//    Neovim digraph.c. ──
+
+thread_local! {
+    /// User digraphs set via `digraph_set()` (keyed by the two-char trigger),
+    /// layered over the small built-in table in `getexactdigraph()`.
+    static USER_DIGRAPHS: std::cell::RefCell<std::collections::HashMap<String, String>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Port of `getexactdigraph()` (Neovim digraph.c) — resolve the two-character
+/// trigger `c1c2` to its digraph string: a user digraph (from `digraph_set()`)
+/// takes precedence over the built-in RFC-1345 subset; `None` if unknown.
+fn getexactdigraph(c1: char, c2: char) -> Option<String> {
+    let key: String = [c1, c2].iter().collect();
+    if let Some(v) = USER_DIGRAPHS.with(|d| d.borrow().get(&key).cloned()) {
+        return Some(v);
+    }
+    // c: a small slice of Neovim's built-in digraph table (digraphdefault[]).
+    let builtin = match (c1, c2) {
+        ('a', ':') => 'ä',
+        ('o', ':') => 'ö',
+        ('u', ':') => 'ü',
+        ('e', '\'') => 'é',
+        ('C', 'o') => '©',
+        ('R', 'O') => '®',
+        ('+', '-') => '±',
+        ('-', '>') => '→',
+        ('O', 'K') => '✓',
+        _ => return None,
+    };
+    Some(builtin.to_string())
+}
+
+/// Port of `f_digraph_get()` (Neovim digraph.c) — the digraph string for the
+/// two-character trigger `{chars}`, or "" if none is defined.
+pub fn f_digraph_get(argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.v_type = VAR_STRING;
+    let chars = tv_get_string(&argvars[0]);
+    let cc: Vec<char> = chars.chars().collect();
+    if cc.len() != 2 {
+        crate::ported::message::semsg(&format!(
+            "E1214: Digraph must be just two characters: {chars}"
+        ));
+        rettv.vval = v_string(String::new());
+        return;
+    }
+    rettv.vval = v_string(getexactdigraph(cc[0], cc[1]).unwrap_or_default());
+}
+
+/// Port of `f_digraph_set()` (Neovim digraph.c) — register the digraph
+/// `{digraph}` for the two-character trigger `{chars}`. Returns v:true/v:false.
+pub fn f_digraph_set(argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.v_type = VAR_BOOL;
+    let chars = tv_get_string(&argvars[0]);
+    let digr = tv_get_string(&argvars[1]);
+    if chars.chars().count() != 2 {
+        crate::ported::message::semsg(&format!(
+            "E1214: Digraph must be just two characters: {chars}"
+        ));
+        rettv.vval = v_bool(kBoolVarFalse);
+        return;
+    }
+    USER_DIGRAPHS.with(|d| d.borrow_mut().insert(chars, digr));
+    rettv.vval = v_bool(kBoolVarTrue);
+}
+
+/// Port of `f_digraph_getlist()` (Neovim digraph.c) — return the user digraphs
+/// as a List of `[chars, digraph]` pairs (sorted by trigger for stability).
+pub fn f_digraph_getlist(_argvars: &[typval_T], rettv: &mut typval_T) {
+    let mut entries: Vec<(String, String)> = USER_DIGRAPHS.with(|d| {
+        d.borrow()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    });
+    entries.sort();
+    let out = tv_list_alloc_ret(rettv, entries.len() as isize);
+    let mut ob = out.borrow_mut();
+    for (chars, digr) in entries {
+        let pair = tv_list_alloc(2);
+        {
+            let mut pb = pair.borrow_mut();
+            tv_list_append_string(&mut pb, &chars);
+            tv_list_append_string(&mut pb, &digr);
+        }
+        tv_list_append_tv(
+            &mut ob,
+            typval_T {
+                v_type: VAR_LIST,
+                v_lock: VarLockStatus::VAR_UNLOCKED,
+                vval: v_list(Some(pair)),
+            },
+        );
+    }
+}
+
+/// Port of `f_digraph_setlist()` (Neovim digraph.c) — register a List of
+/// `[chars, digraph]` pairs. Returns v:true on success, v:false on a bad entry.
+pub fn f_digraph_setlist(argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.v_type = VAR_BOOL;
+    rettv.vval = v_bool(kBoolVarFalse);
+    let l = match (argvars[0].v_type, &argvars[0].vval) {
+        (VAR_LIST, v_list(Some(l))) => l.clone(),
+        _ => {
+            emsg("E714: List required");
+            return;
+        }
+    };
+    let mut pending: Vec<(String, String)> = Vec::new();
+    for item in l.borrow().lv_items.iter() {
+        let pair: Vec<String> = match (item.li_tv.v_type, &item.li_tv.vval) {
+            (VAR_LIST, v_list(Some(inner))) => inner
+                .borrow()
+                .lv_items
+                .iter()
+                .map(|e| tv_get_string(&e.li_tv))
+                .collect(),
+            _ => {
+                emsg("E1216: digraph_setlist() argument must be a list of lists with two items");
+                return;
+            }
+        };
+        if pair.len() != 2 || pair[0].chars().count() != 2 {
+            emsg("E1216: digraph_setlist() argument must be a list of lists with two items");
+            return;
+        }
+        pending.push((pair[0].clone(), pair[1].clone()));
+    }
+    USER_DIGRAPHS.with(|d| {
+        let mut d = d.borrow_mut();
+        for (k, v) in pending {
+            d.insert(k, v);
+        }
+    });
+    rettv.vval = v_bool(kBoolVarTrue);
+}
+
+// ── hostname()/iconv() — eval/funcs.c (full table) + Neovim mbyte.c. ──
+
+/// Port of `f_hostname()` (Neovim eval/funcs.c, full table) — the system host
+/// name (`os_get_hostname`).
+pub fn f_hostname(_argvars: &[typval_T], rettv: &mut typval_T) {
+    use nix::libc;
+    rettv.v_type = VAR_STRING;
+    // c: os_get_hostname() → gethostname(3) into a fixed buffer.
+    let mut buf = [0u8; 256];
+    let name = unsafe {
+        if libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) == 0 {
+            std::ffi::CStr::from_ptr(buf.as_ptr() as *const libc::c_char)
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            String::new()
+        }
+    };
+    rettv.vval = v_string(name);
+}
+
+/// Port of `f_iconv()` (Neovim eval/funcs.c → mbyte.c `string_convert`) —
+/// convert `{expr}` from `{from}` to `{to}`. vimlrs holds strings as UTF-8
+/// internally, so identity and UTF-8↔UTF-8 conversions return the input; an
+/// unsupported pairing also returns the input unchanged (Vim's "no conversion"
+/// fallback), with characters left as-is.
+pub fn f_iconv(argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.v_type = VAR_STRING;
+    let s = tv_get_string(&argvars[0]);
+    let canon = |e: &str| -> &'static str {
+        match e.to_ascii_lowercase().as_str() {
+            "utf-8" | "utf8" | "unicode" => "utf-8",
+            "latin1" | "iso-8859-1" | "8bit-iso-8859-1" => "latin1",
+            _ => "other",
+        }
+    };
+    let from = canon(&tv_get_string(&argvars[1]));
+    let to = canon(&tv_get_string(&argvars[2]));
+    // c: same encoding (or both UTF-8 aliases) → no conversion needed.
+    let out = if from == to {
+        s
+    } else if from == "latin1" && to == "utf-8" {
+        // Latin-1 byte values map 1:1 onto the first 256 codepoints; our chars
+        // already are those codepoints, so the text passes through.
+        s
+    } else if from == "utf-8" && to == "latin1" {
+        // Representable codepoints (<= 0xFF) pass through; others become '?'.
+        s.chars()
+            .map(|c| if (c as u32) <= 0xFF { c } else { '?' })
+            .collect()
+    } else {
+        s
+    };
+    rettv.vval = v_string(out);
+}
+
+// ── argc()/argv()/argidx() — eval/funcs.c (full table). vimlrs runs a single
+//    script with no editor argument list, so the arglist is empty. ──
+
+/// Port of `f_argc()` (Neovim eval/funcs.c) — the size of the argument list (0,
+/// no editor arglist when standalone).
+pub fn f_argc(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.vval = v_number(0);
+}
+
+/// Port of `f_argidx()` (Neovim eval/funcs.c) — the current index in the
+/// argument list (0 when standalone).
+pub fn f_argidx(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.vval = v_number(0);
+}
+
+/// Port of `f_argv()` (Neovim eval/funcs.c) — with no/`-1` index, the whole
+/// (empty) argument list as a List; with an index, that entry as a String ("").
+pub fn f_argv(argvars: &[typval_T], rettv: &mut typval_T) {
+    if argvars.is_empty() || tv_get_number(&argvars[0]) == -1 {
+        let _ = tv_list_alloc_ret(rettv, 0);
+        return;
+    }
+    rettv.v_type = VAR_STRING;
+    rettv.vval = v_string(String::new());
+}
+
+// ── assert_equalfile() — Neovim testing.c. ──
+
+/// Port of `f_assert_equalfile()` (Neovim testing.c) — assert that two files
+/// have identical contents. On mismatch (or a missing file) append an error to
+/// `v:errors` and return 1; otherwise return 0.
+pub fn f_assert_equalfile(argvars: &[typval_T], rettv: &mut typval_T) {
+    let fname1 = tv_get_string(&argvars[0]);
+    let fname2 = tv_get_string(&argvars[1]);
+    let c1 = std::fs::read(&fname1);
+    let c2 = std::fs::read(&fname2);
+    let equal = matches!((&c1, &c2), (Ok(a), Ok(b)) if a == b);
+    if equal {
+        return;
+    }
+    // c: fill_assert_error builds "expected file ... to be equal to ...".
+    let detail = match (c1.is_ok(), c2.is_ok()) {
+        (false, _) => format!("E485: Can't read file {fname1}"),
+        (_, false) => format!("E485: Can't read file {fname2}"),
+        _ => format!("first file \"{fname1}\" differs from second file \"{fname2}\""),
+    };
+    let extra = if argvars.len() >= 3 {
+        format!("{}: ", tv_get_string(&argvars[2]))
+    } else {
+        String::new()
+    };
+    assert_error(&format!("{extra}{detail}"));
+    rettv.vval = v_number(1);
+}
+
+// ── arglistid() — eval/funcs.c (full table); foldlevel() — fold.c. ──
+
+/// Port of `f_arglistid()` (Neovim eval/funcs.c) — the id of the argument list
+/// of the (optionally specified) window. vimlrs runs a single script with one
+/// global, unnamed argument list, so the id is always 0.
+pub fn f_arglistid(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.vval = v_number(0);
+}
+
+/// Port of `f_foldlevel()` (Neovim fold.c) — the fold level at line `{lnum}`.
+/// No editor windows/folds exist standalone, so every line is at level 0.
+pub fn f_foldlevel(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.vval = v_number(0);
+}

@@ -363,6 +363,11 @@ fn utf_char2cells(c: char) -> usize {
         return 0;
     }
     let u = c as u32;
+    // c: a `setcellwidths()` override (cw_value()) takes precedence over the
+    // built-in width tables (Neovim mbyte.c).
+    if let Some(w) = cw_value(u) {
+        return w;
+    }
     let wide = matches!(u,
         0x1100..=0x115F | 0x2329 | 0x232A | 0x2E80..=0x303E | 0x3041..=0x33FF
         | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xA000..=0xA4CF | 0xAC00..=0xD7A3
@@ -372,6 +377,97 @@ fn utf_char2cells(c: char) -> usize {
         2
     } else {
         1
+    }
+}
+
+// ── setcellwidths()/getcellwidths() — Neovim mbyte.c (home file not vendored).
+// The user-defined cell-width override table installed by `setcellwidths()`.
+// Each tuple is `(low, high, width)`: codepoints in `low..=high` display in
+// `width` (1 or 2) cells. Consulted by `cw_value()` from `utf_char2cells()`.
+thread_local! {
+    static CW_TABLE: std::cell::RefCell<Vec<(u32, u32, u8)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Port of `cw_value()` (Neovim mbyte.c) — the display width override for
+/// codepoint `c` from the `setcellwidths()` table, or `None` when no range
+/// covers it (so the built-in width tables apply).
+fn cw_value(c: u32) -> Option<usize> {
+    CW_TABLE.with(|t| {
+        t.borrow()
+            .iter()
+            .find(|(lo, hi, _)| c >= *lo && c <= *hi)
+            .map(|(_, _, w)| *w as usize)
+    })
+}
+
+/// Port of `f_setcellwidths()` (Neovim mbyte.c) — install a list of
+/// `[low, high, width]` triples as the character cell-width override table.
+/// Each entry must be a 3-Number List with `width` 1 or 2 and `low <= high`.
+pub fn f_setcellwidths(argvars: &[typval_T], _rettv: &mut typval_T) {
+    let l = match (argvars[0].v_type, &argvars[0].vval) {
+        (VAR_LIST, v_list(Some(l))) => l.clone(),
+        // c: emsg(_(e_listreq)) — the argument must be a List.
+        _ => {
+            crate::ported::message::emsg("E1109: List required");
+            return;
+        }
+    };
+    let mut table: Vec<(u32, u32, u8)> = Vec::new();
+    for item in l.borrow().lv_items.iter() {
+        // c: each entry is itself a List of exactly three Numbers.
+        let triple: Vec<varnumber_T> = match (item.li_tv.v_type, &item.li_tv.vval) {
+            (VAR_LIST, v_list(Some(inner))) => inner
+                .borrow()
+                .lv_items
+                .iter()
+                .map(|e| crate::ported::eval::typval::tv_get_number(&e.li_tv))
+                .collect(),
+            _ => {
+                crate::ported::message::emsg("E1110: List item is not a List");
+                return;
+            }
+        };
+        if triple.len() != 3 {
+            crate::ported::message::emsg("E1111: List with three Numbers required");
+            return;
+        }
+        let (lo, hi, w) = (triple[0], triple[1], triple[2]);
+        if w != 1 && w != 2 {
+            crate::ported::message::emsg("E1112: List item width must be 1 or 2");
+            return;
+        }
+        if lo < 0 || hi < lo {
+            crate::ported::message::emsg("E1113: Overlapping ranges for 0x...");
+            return;
+        }
+        table.push((lo as u32, hi as u32, w as u8));
+    }
+    CW_TABLE.with(|t| *t.borrow_mut() = table);
+}
+
+/// Port of `f_getcellwidths()` (Neovim mbyte.c) — return the cell-width
+/// override table as a List of `[low, high, width]` triples (insertion order).
+pub fn f_getcellwidths(_argvars: &[typval_T], rettv: &mut typval_T) {
+    let table = CW_TABLE.with(|t| t.borrow().clone());
+    let out = tv_list_alloc_ret(rettv, table.len() as isize);
+    let mut ob = out.borrow_mut();
+    for (lo, hi, w) in table {
+        let inner = crate::ported::eval::typval::tv_list_alloc(3);
+        {
+            let mut ib = inner.borrow_mut();
+            tv_list_append_number(&mut ib, lo as varnumber_T);
+            tv_list_append_number(&mut ib, hi as varnumber_T);
+            tv_list_append_number(&mut ib, w as varnumber_T);
+        }
+        tv_list_append_tv(
+            &mut ob,
+            typval_T {
+                v_type: VAR_LIST,
+                v_lock: crate::ported::eval::typval_defs_h::VarLockStatus::VAR_UNLOCKED,
+                vval: v_list(Some(inner)),
+            },
+        );
     }
 }
 

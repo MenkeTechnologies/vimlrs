@@ -67,6 +67,11 @@ use crate::ported::eval::funcs::{
     f_winbufnr, f_wincol, f_windowsversion, f_winheight, f_winlayout, f_winline, f_winnr,
     f_winrestcmd, f_winrestview, f_winsaveview, f_winwidth, f_wordcount, f_xor, float_op_wrapper,
 };
+use crate::ported::eval::funcs::{
+    f_argc, f_argidx, f_arglistid, f_argv, f_assert_equalfile, f_digraph_get, f_digraph_getlist,
+    f_digraph_set, f_digraph_setlist, f_foldlevel, f_histadd, f_histdel, f_histget, f_histnr,
+    f_hostname, f_iconv, f_matchfuzzy, f_matchfuzzypos,
+};
 use crate::ported::eval::list::{
     f_count, f_extend, f_extendnew, f_filter, f_foreach, f_map, f_mapnew, f_remove,
     FILTER_MAP_CMD_HOOK, FILTER_MAP_EVAL_HOOK,
@@ -86,10 +91,10 @@ use crate::ported::eval::vars::{eval_variable, set_var, set_vim_var_string, vv::
 use crate::ported::eval_h::exprtype_T::{self, *};
 use crate::ported::message;
 use crate::ported::strings::{
-    f_byteidx, f_byteidxcomp, f_charclass, f_charidx, f_slice, f_str2list, f_str2nr, f_strcharlen,
-    f_strcharpart, f_strchars, f_strdisplaywidth, f_strgetchar, f_stridx, f_string, f_strlen,
-    f_strpart, f_strridx, f_strtrans, f_strutf16len, f_strwidth, f_tolower, f_toupper, f_tr,
-    f_trim, f_utf16idx,
+    f_byteidx, f_byteidxcomp, f_charclass, f_charidx, f_getcellwidths, f_setcellwidths, f_slice,
+    f_str2list, f_str2nr, f_strcharlen, f_strcharpart, f_strchars, f_strdisplaywidth, f_strgetchar,
+    f_stridx, f_string, f_strlen, f_strpart, f_strridx, f_strtrans, f_strutf16len, f_strwidth,
+    f_tolower, f_toupper, f_tr, f_trim, f_utf16idx,
 };
 use crate::viml_ast::Stmt;
 use crate::viml_lexer::{CaseFlag, CmpOp, VimlError};
@@ -915,6 +920,46 @@ pub const VIML_FN_BROWSEDIR: u16 = 3465;
 pub const VIML_FN_FINDDIR: u16 = 3466;
 /// `findfile()`
 pub const VIML_FN_FINDFILE: u16 = 3467;
+/// `matchfuzzy()`
+pub const VIML_FN_MATCHFUZZY: u16 = 3468;
+/// `matchfuzzypos()`
+pub const VIML_FN_MATCHFUZZYPOS: u16 = 3469;
+/// `histadd()`
+pub const VIML_FN_HISTADD: u16 = 3470;
+/// `histget()`
+pub const VIML_FN_HISTGET: u16 = 3471;
+/// `histnr()`
+pub const VIML_FN_HISTNR: u16 = 3472;
+/// `histdel()`
+pub const VIML_FN_HISTDEL: u16 = 3473;
+/// `digraph_get()`
+pub const VIML_FN_DIGRAPH_GET: u16 = 3474;
+/// `digraph_set()`
+pub const VIML_FN_DIGRAPH_SET: u16 = 3475;
+/// `digraph_getlist()`
+pub const VIML_FN_DIGRAPH_GETLIST: u16 = 3476;
+/// `digraph_setlist()`
+pub const VIML_FN_DIGRAPH_SETLIST: u16 = 3477;
+/// `setcellwidths()`
+pub const VIML_FN_SETCELLWIDTHS: u16 = 3478;
+/// `getcellwidths()`
+pub const VIML_FN_GETCELLWIDTHS: u16 = 3479;
+/// `hostname()`
+pub const VIML_FN_HOSTNAME: u16 = 3480;
+/// `iconv()`
+pub const VIML_FN_ICONV: u16 = 3481;
+/// `argc()`
+pub const VIML_FN_ARGC: u16 = 3482;
+/// `argidx()`
+pub const VIML_FN_ARGIDX: u16 = 3483;
+/// `argv()`
+pub const VIML_FN_ARGV: u16 = 3484;
+/// `assert_equalfile()`
+pub const VIML_FN_ASSERT_EQUALFILE: u16 = 3485;
+/// `arglistid()`
+pub const VIML_FN_ARGLISTID: u16 = 3486;
+/// `foldlevel()`
+pub const VIML_FN_FOLDLEVEL: u16 = 3487;
 /// `flattennew()`
 pub const VIML_FN_FLATTENNEW: u16 = 3211;
 /// `sha256()`
@@ -2851,6 +2896,38 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FN_SHA256, |vm, n| call_func(vm, n, f_sha256));
     vm.register_builtin(VIML_FN_BLOB2LIST, |vm, n| call_func(vm, n, f_blob2list));
     vm.register_builtin(VIML_FN_LIST2BLOB, |vm, n| call_func(vm, n, f_list2blob));
+    vm.register_builtin(VIML_FN_MATCHFUZZY, |vm, n| call_func(vm, n, f_matchfuzzy));
+    vm.register_builtin(VIML_FN_MATCHFUZZYPOS, |vm, n| {
+        call_func(vm, n, f_matchfuzzypos)
+    });
+    vm.register_builtin(VIML_FN_HISTADD, |vm, n| call_func(vm, n, f_histadd));
+    vm.register_builtin(VIML_FN_HISTGET, |vm, n| call_func(vm, n, f_histget));
+    vm.register_builtin(VIML_FN_HISTNR, |vm, n| call_func(vm, n, f_histnr));
+    vm.register_builtin(VIML_FN_HISTDEL, |vm, n| call_func(vm, n, f_histdel));
+    vm.register_builtin(VIML_FN_DIGRAPH_GET, |vm, n| call_func(vm, n, f_digraph_get));
+    vm.register_builtin(VIML_FN_DIGRAPH_SET, |vm, n| call_func(vm, n, f_digraph_set));
+    vm.register_builtin(VIML_FN_DIGRAPH_GETLIST, |vm, n| {
+        call_func(vm, n, f_digraph_getlist)
+    });
+    vm.register_builtin(VIML_FN_DIGRAPH_SETLIST, |vm, n| {
+        call_func(vm, n, f_digraph_setlist)
+    });
+    vm.register_builtin(VIML_FN_SETCELLWIDTHS, |vm, n| {
+        call_func(vm, n, f_setcellwidths)
+    });
+    vm.register_builtin(VIML_FN_GETCELLWIDTHS, |vm, n| {
+        call_func(vm, n, f_getcellwidths)
+    });
+    vm.register_builtin(VIML_FN_HOSTNAME, |vm, n| call_func(vm, n, f_hostname));
+    vm.register_builtin(VIML_FN_ICONV, |vm, n| call_func(vm, n, f_iconv));
+    vm.register_builtin(VIML_FN_ARGC, |vm, n| call_func(vm, n, f_argc));
+    vm.register_builtin(VIML_FN_ARGIDX, |vm, n| call_func(vm, n, f_argidx));
+    vm.register_builtin(VIML_FN_ARGV, |vm, n| call_func(vm, n, f_argv));
+    vm.register_builtin(VIML_FN_ASSERT_EQUALFILE, |vm, n| {
+        call_func(vm, n, f_assert_equalfile)
+    });
+    vm.register_builtin(VIML_FN_ARGLISTID, |vm, n| call_func(vm, n, f_arglistid));
+    vm.register_builtin(VIML_FN_FOLDLEVEL, |vm, n| call_func(vm, n, f_foldlevel));
     vm.register_builtin(VIML_SET_LINENO, b_set_lineno);
     vm.register_builtin(VIML_CALL_USER, b_call_user);
     vm.register_builtin(VIML_SET_RETURN, b_set_return);
