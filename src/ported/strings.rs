@@ -187,16 +187,26 @@ pub fn f_strridx(argvars: &[typval_T], rettv: &mut typval_T) {
 /// that appear in `{fromstr}` to the matching character of `{tostr}`.
 pub fn f_tr(argvars: &[typval_T], rettv: &mut typval_T) {
     let src = tv_get_string(&argvars[0]);
-    let from: Vec<char> = tv_get_string(&argvars[1]).chars().collect();
+    let fromstr = tv_get_string(&argvars[1]);
+    let from: Vec<char> = fromstr.chars().collect();
     let to: Vec<char> = tv_get_string(&argvars[2]).chars().collect();
-    let out: String = src
-        .chars()
-        .map(|c| match from.iter().position(|&f| f == c) {
-            Some(i) => to.get(i).copied().unwrap_or(c),
-            None => c,
-        })
-        .collect();
     rettv.v_type = VAR_STRING;
+    // c: a {src} char found in {fromstr} at index i maps to {tostr}[i]; if {tostr}
+    // has no such character the sets do not correspond — E475, returning "".
+    let mut out = String::new();
+    for c in src.chars() {
+        match from.iter().position(|&f| f == c) {
+            Some(i) => match to.get(i) {
+                Some(&t) => out.push(t),
+                None => {
+                    crate::ported::message::semsg(&format!("E475: Invalid argument: {fromstr}"));
+                    rettv.vval = v_string(String::new());
+                    return;
+                }
+            },
+            None => out.push(c),
+        }
+    }
     rettv.vval = v_string(out);
 }
 

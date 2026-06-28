@@ -97,6 +97,13 @@ call assert_equal('  x', trim('  x  ', ' ', 2))
 call assert_equal('hixx', trim('xxhixx', 'x', 1))
 call assert_equal('abc', trim('abc', ''))
 
+" ── tr() maps {fromstr} chars to {tostr}; unmapped chars pass through. A
+"    {src} char whose {fromstr} index has no {tostr} char is an error (E475 → '') ──
+call assert_equal('Hello THere', tr('hello there', 'ht', 'HT'))
+call assert_equal('{blob}', tr('<blob>', '<>', '{}'))
+call assert_equal('AbCd', tr('abcd', 'ac', 'AC'))
+call assert_fails("call tr('abc', 'ab', 'x')", 'E475')
+
 " ── printf %g: 6 significant digits, %e/%f chosen by exponent ──
 call assert_equal('0.1 1e+06 0.0001', printf('%g %g %g', 0.1, 1000000.0, 0.0001))
 call assert_equal('3.14', printf('%.3g', 3.14159))
