@@ -1233,6 +1233,10 @@ thread_local! {
     /// `did_emsg` snapshot taken by `VIML_ERR_MARK` at a statement's start, so
     /// `:echo`/`:echon` can skip output when evaluating its args raised an error.
     static ERR_MARK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Nesting depth of `execute()` calls. While > 0, `:echo` output uses Vim's
+    /// execute()-capture convention (a newline *before* each `:echo`) instead of
+    /// the trailing newline used for stdout / general captures.
+    static EXECUTE_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     /// Registry of user-defined functions, by name (populated from a compiled
     /// program before its `main` chunk runs).
     static FUNCTIONS: RefCell<std::collections::HashMap<String, crate::compile_viml::UserFuncDef>> =
@@ -1735,10 +1739,18 @@ fn echo_impl(vm: &mut VM, argc: u8, newline: bool) {
     }
     let sep = if newline { " " } else { "" };
     let rendered: Vec<String> = parts.iter().map(encode_tv2echo).collect();
-    let mut line = rendered.join(sep);
-    if newline {
-        line.push('\n');
-    }
+    let body = rendered.join(sep);
+    // To stdout, `:echo` ends with a newline (one message per line). Inside
+    // execute(), Vim instead *prefixes* each `:echo` with a newline (so
+    // string(execute("echo 5")) == "\n5"); `:echon` adds none.
+    let exec_capture = EXECUTE_DEPTH.with(|d| d.get()) > 0;
+    let line = if !newline {
+        body
+    } else if exec_capture {
+        format!("\n{body}")
+    } else {
+        format!("{body}\n")
+    };
     echo_write(&line);
 }
 
@@ -2028,10 +2040,13 @@ fn b_execute(vm: &mut VM, argc: u8) -> Value {
         _ => vec![tv_get_string(&args[0])],
     };
     // Redirect output into a fresh capture buffer, run, then restore the sink.
+    // EXECUTE_DEPTH switches `:echo` to the leading-newline capture convention.
     let saved = ECHO_SINK.with(|s| s.borrow_mut().replace(String::new()));
+    EXECUTE_DEPTH.with(|d| d.set(d.get() + 1));
     for cmd in cmds {
         let _ = run_source_nested(&cmd);
     }
+    EXECUTE_DEPTH.with(|d| d.set(d.get() - 1));
     let out = ECHO_SINK.with(|s| s.borrow_mut().take().unwrap_or_default());
     ECHO_SINK.with(|s| *s.borrow_mut() = saved);
     tv_to_value(tv_str(out))
@@ -5213,7 +5228,9 @@ mod tests {
             run("echo filter({'a': 1, 'b': 2, 'c': 3}, 'v:val > 1')"),
             "{'b': 2, 'c': 3}\n"
         );
-        assert_eq!(run("echo execute('echo 41 + 1')"), "42\n\n"); // captured "42\n" + echo's \n
+        // execute() captures with a leading newline ("\n42"); the outer echo
+        // then appends its own trailing newline.
+        assert_eq!(run("echo execute('echo 41 + 1')"), "\n42\n");
         assert_eq!(run("echo deepcopy([[1], [2]])"), "[[1], [2]]\n");
         assert_eq!(run("echo fmod(10.0, 3.0)"), "1.0\n");
     }

@@ -211,7 +211,11 @@ lambda literals `{x->x}(a)`, and indexed funcrefs `fns[0](a)`. Covered by
 `examples/numeric_edge.vim`.
 - `1.0 % 2.0` → Vim `E804: Cannot use '%' with Float`, vimlrs `1.0`
 
-### R2-9. `execute()` puts the newline at the wrong end
+### R2-9. `execute()` puts the newline at the wrong end — ✅ FIXED
+Inside execute() (tracked by an EXECUTE_DEPTH counter) `:echo` now prefixes its
+output with a newline instead of appending one, so `string(execute("echo 5"))`
+== `"\n5"`. Stdout / general captures keep the trailing newline. Covered by
+`examples/execute_capture.vim`.
 - `string(execute("echo 5"))` → Vim `'\n5'` (leading), vimlrs `'5\n'` (trailing)
 
 ### R2-10. `str2float()` doesn't parse hex — ✅ FIXED
