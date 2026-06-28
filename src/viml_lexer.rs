@@ -253,14 +253,17 @@ impl<'a> Lexer<'a> {
                 self.pos += 1;
             }
         }
-        if matches!(self.peek(), b'e' | b'E') {
+        // An exponent is only part of the literal after a `.{digits}` fraction:
+        // Vim/Neovim's float grammar is `[0-9]+\.[0-9]+([eE][+-]?[0-9]+)?`, so a
+        // dotless `1e100` is the Number `1` followed by the name `e100` (an error
+        // at parse time), never a float.
+        if is_float && matches!(self.peek(), b'e' | b'E') {
             let save = self.pos;
             self.pos += 1;
             if matches!(self.peek(), b'+' | b'-') {
                 self.pos += 1;
             }
             if self.peek().is_ascii_digit() {
-                is_float = true;
                 while self.peek().is_ascii_digit() {
                     self.pos += 1;
                 }

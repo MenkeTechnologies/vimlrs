@@ -76,7 +76,14 @@ Covered by `examples/index_get.vim`.
 
 ## Float formatting — systemic `string()` divergence
 
-### 7. `string()` of a Float diverges in exponent format, precision, and exp threshold
+### 7. `string()` of a Float diverges in exponent format, precision, and exp threshold — ⊘ WONTFIX (matches Neovim)
+vimlrs targets **Neovim** (the vendored `csrc/` is the spec), and Neovim renders
+a Float with plain C `printf("%g")` (`encode.c:369`, `typval.c:4591`) — 6
+significant digits, C-style `e+NN` exponent, `.0` appended when integral.
+vimlrs's `vim_float_g` already reproduces that exactly, so its output **matches
+Neovim** (`string(1.0e10)` → `1e+10`, `string(123456789.0)` → `1.23457e+08`).
+The values quoted here are Vim 9.x's distinct float printer; not a vimlrs/Neovim
+bug. (Same applies to R2-5.)
 - `string(1.0e10)` → Vim `1.0e10`, vimlrs `1e+10`
 - `string(123456789.0)` → Vim `1.234568e8`, vimlrs `1.23457e+08`
 - `string(0.0001)` → Vim `1.0e-4`, vimlrs `0.0001`
@@ -112,7 +119,11 @@ E684 and `echo printf('%d',3.7)` only E805 — no trailing fallback. Covered by
 - On error vimlrs still emits a fallback result value, so erroring expressions produce
   extra output Vim never produces.
 
-### 10. Float literals without a dot are accepted (lexer too lenient) — minor
+### 10. Float literals without a dot are accepted (lexer too lenient) — ✅ FIXED
+The lexer now only consumes an `[eE]` exponent after a `.{digits}` fraction
+(Neovim's grammar `[0-9]+\.[0-9]+([eE]...)?`), so `1e100` is the Number `1`
+followed by a name (a parse error), while `1.0e100` stays a Float. Covered by
+`examples/float_literals.vim`.
 - `string(1e100)` → Vim errors `E15: Invalid expression` (Vim requires `1.0e100`); vimlrs returns `1e+100`
 - Vim's float-literal grammar requires `{digits}.{digits}[e…]`.
 
@@ -184,7 +195,10 @@ Added `Node::OptSeq`: `\%[atoms]` matches a greedy in-order prefix of its atoms
 `examples/regex_optseq.vim`.
 - `matchstr("function","f\%[unc]")` → Vim `func`, vimlrs `` (empty)
 
-### R2-5. `printf("%g"/"%G", …)` formatting diverges
+### R2-5. `printf("%g"/"%G", …)` formatting diverges — ⊘ WONTFIX (matches Neovim)
+Like #7: vimlrs's `%g` follows C/Neovim, not Vim 9.x's float printer. `printf`
+on Neovim routes floats through the platform `%g`, which is what vimlrs emits.
+Not a vimlrs/Neovim bug.
 - `printf("%g",1.0)` → Vim `1.0`, vimlrs `1`
 - `printf("%g",1000000.0)` → Vim `1000000.0`, vimlrs `1e+06`
 - `printf("%g",0.0001)` → Vim `1.0e-4`, vimlrs `0.0001`
