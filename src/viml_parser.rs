@@ -218,10 +218,65 @@ impl Lines {
     /// top-level `|` bars — into separate logical lines so the block parser
     /// handles it normally. Both keep the original 1-based source line number.
     fn new(src: &str) -> Self {
+        // Pass 0: collapse heredoc assignments (`let x =<< [trim] [eval] END`)
+        // into a single synthesized `let x = [...]` list-literal line. Body lines
+        // are taken VERBATIM from the raw source — before continuation-folding or
+        // bar-splitting — exactly as Vim's `ea_getline` feeds `heredoc_get()`
+        // (csrc/eval/vars.c). Each body line becomes a single-quoted list item.
+        let raw: Vec<&str> = src.lines().collect();
+        let mut collapsed: Vec<(u32, String)> = Vec::new();
+        let mut k = 0;
+        while k < raw.len() {
+            let lineno = (k + 1) as u32;
+            if let Some((prefix, trim, _eval, marker)) = heredoc_opener(raw[k]) {
+                // With `trim`, the end marker may be indented to match the `:let`
+                // command line; record that indent so it can be skipped.
+                let cmd_indent: String = raw[k].chars().take_while(|c| c.is_whitespace()).collect();
+                let mut body: Vec<String> = Vec::new();
+                let mut j = k + 1;
+                while j < raw.len() {
+                    let bl = raw[j];
+                    let probe = if trim {
+                        bl.strip_prefix(cmd_indent.as_str()).unwrap_or(bl)
+                    } else {
+                        bl
+                    };
+                    j += 1;
+                    if probe == marker {
+                        break;
+                    }
+                    body.push(bl.to_string());
+                }
+                // With `trim`, strip from every line the indent of the first
+                // (non-blank) body line, matching char-for-char.
+                if trim {
+                    if let Some(first) = body.iter().find(|l| !l.trim().is_empty()) {
+                        let ti: String = first.chars().take_while(|c| c.is_whitespace()).collect();
+                        for l in body.iter_mut() {
+                            let n: usize = l
+                                .chars()
+                                .zip(ti.chars())
+                                .take_while(|(a, b)| a == b)
+                                .map(|(a, _)| a.len_utf8())
+                                .sum();
+                            *l = l[n..].to_string();
+                        }
+                    }
+                }
+                let items: Vec<String> = body
+                    .iter()
+                    .map(|l| format!("'{}'", l.replace('\'', "''")))
+                    .collect();
+                collapsed.push((lineno, format!("{prefix}= [{}]", items.join(", "))));
+                k = j;
+                continue;
+            }
+            collapsed.push((lineno, raw[k].to_string()));
+            k += 1;
+        }
         // Pass 1: continuation join.
         let mut joined: Vec<(u32, String)> = Vec::new();
-        for (idx, raw) in src.lines().enumerate() {
-            let lineno = (idx + 1) as u32;
+        for (lineno, raw) in collapsed {
             if let Some(rest) = raw.trim_start().strip_prefix('\\') {
                 if let Some(last) = joined.last_mut() {
                     last.1.push_str(rest);
@@ -705,6 +760,41 @@ fn split_unlet_args(s: &str) -> Vec<&str> {
         out.push(&s[st..]);
     }
     out
+}
+
+/// If `line` is a heredoc assignment opener (`let X =<< [trim] [eval] MARKER`),
+/// return `(prefix, trim, eval, marker)` where `prefix` is the `:let` target
+/// text before `=<<` (the caller appends `= [...]`). Mirrors the keyword scan
+/// at the top of `heredoc_get()` (csrc/eval/vars.c).
+fn heredoc_opener(line: &str) -> Option<(String, bool, bool, String)> {
+    let (cmd, _) = cmd_word(line.trim_start());
+    if !matches!(cmd, "let" | "const" | "cons") {
+        return None;
+    }
+    let op = line.find("=<<")?;
+    let prefix = line[..op].to_string();
+    let mut rest = line[op + 3..].trim_start();
+    let (mut trim, mut eval) = (false, false);
+    loop {
+        let kw = |r: &str, w: &str| -> bool {
+            r.strip_prefix(w)
+                .is_some_and(|t| t.is_empty() || t.starts_with(char::is_whitespace))
+        };
+        if kw(rest, "trim") {
+            trim = true;
+            rest = rest[4..].trim_start();
+        } else if kw(rest, "eval") {
+            eval = true;
+            rest = rest[4..].trim_start();
+        } else {
+            break;
+        }
+    }
+    let marker = rest.split_whitespace().next()?;
+    if marker.is_empty() {
+        return None;
+    }
+    Some((prefix, trim, eval, marker.to_string()))
 }
 
 /// Parse one `:unlet` argument into a bare name or a List/Dict element target.
