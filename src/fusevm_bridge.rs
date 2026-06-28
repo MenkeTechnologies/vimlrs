@@ -68,11 +68,15 @@ use crate::ported::eval::funcs::{
     f_winrestcmd, f_winrestview, f_winsaveview, f_winwidth, f_wordcount, f_xor, float_op_wrapper,
 };
 use crate::ported::eval::funcs::{
-    f_argc, f_argidx, f_arglistid, f_argv, f_assert_equalfile, f_clearmatches, f_digraph_get,
-    f_digraph_getlist, f_digraph_set, f_digraph_setlist, f_foldclosed, f_foldclosedend,
-    f_foldlevel, f_getmatches, f_hasmapto, f_histadd, f_histdel, f_histget, f_histnr, f_hostname,
-    f_iconv, f_maparg, f_mapcheck, f_maplist, f_matchadd, f_matchaddpos, f_matcharg, f_matchdelete,
-    f_matchfuzzy, f_matchfuzzypos, f_setmatches, f_sign_define, f_sign_getdefined, f_sign_undefine,
+    f_argc, f_argidx, f_arglistid, f_argv, f_assert_equalfile, f_clearmatches, f_complete_info,
+    f_diff_filler, f_digraph_get, f_digraph_getlist, f_digraph_set, f_digraph_setlist,
+    f_foldclosed, f_foldclosedend, f_foldlevel, f_foldtext, f_foldtextresult, f_getcmdline,
+    f_getcmdpos, f_getcmdtype, f_getmatches, f_hasmapto, f_highlight_exists, f_histadd, f_histdel,
+    f_histget, f_histnr, f_hostname, f_iconv, f_indent, f_maparg, f_mapcheck, f_maplist,
+    f_matchadd, f_matchaddpos, f_matcharg, f_matchdelete, f_matchfuzzy, f_matchfuzzypos,
+    f_searchcount, f_setcmdline, f_setcmdpos, f_setmatches, f_sign_define, f_sign_getdefined,
+    f_sign_getplaced, f_sign_jump, f_sign_place, f_sign_placelist, f_sign_undefine, f_sign_unplace,
+    f_sign_unplacelist, f_virtcol2col, f_wildtrigger,
 };
 use crate::ported::eval::list::{
     f_count, f_extend, f_extendnew, f_filter, f_foreach, f_map, f_mapnew, f_remove,
@@ -994,6 +998,46 @@ pub const VIML_FN_MAPARG: u16 = 3504;
 pub const VIML_FN_MAPCHECK: u16 = 3505;
 /// `maplist()`
 pub const VIML_FN_MAPLIST: u16 = 3506;
+/// `setcmdline()`
+pub const VIML_FN_SETCMDLINE: u16 = 3507;
+/// `getcmdline()`
+pub const VIML_FN_GETCMDLINE: u16 = 3508;
+/// `setcmdpos()`
+pub const VIML_FN_SETCMDPOS: u16 = 3509;
+/// `getcmdpos()`
+pub const VIML_FN_GETCMDPOS: u16 = 3510;
+/// `getcmdtype()`
+pub const VIML_FN_GETCMDTYPE: u16 = 3511;
+/// `sign_place()`
+pub const VIML_FN_SIGN_PLACE: u16 = 3512;
+/// `sign_getplaced()`
+pub const VIML_FN_SIGN_GETPLACED: u16 = 3513;
+/// `sign_unplace()`
+pub const VIML_FN_SIGN_UNPLACE: u16 = 3514;
+/// `sign_placelist()`
+pub const VIML_FN_SIGN_PLACELIST: u16 = 3515;
+/// `sign_unplacelist()`
+pub const VIML_FN_SIGN_UNPLACELIST: u16 = 3516;
+/// `sign_jump()`
+pub const VIML_FN_SIGN_JUMP: u16 = 3517;
+/// `indent()`
+pub const VIML_FN_INDENT: u16 = 3518;
+/// `foldtext()`
+pub const VIML_FN_FOLDTEXT: u16 = 3519;
+/// `foldtextresult()`
+pub const VIML_FN_FOLDTEXTRESULT: u16 = 3520;
+/// `highlight_exists()`
+pub const VIML_FN_HIGHLIGHT_EXISTS: u16 = 3521;
+/// `diff_filler()`
+pub const VIML_FN_DIFF_FILLER: u16 = 3522;
+/// `virtcol2col()`
+pub const VIML_FN_VIRTCOL2COL: u16 = 3523;
+/// `wildtrigger()`
+pub const VIML_FN_WILDTRIGGER: u16 = 3524;
+/// `searchcount()`
+pub const VIML_FN_SEARCHCOUNT: u16 = 3525;
+/// `complete_info()`
+pub const VIML_FN_COMPLETE_INFO: u16 = 3526;
 /// `flattennew()`
 pub const VIML_FN_FLATTENNEW: u16 = 3211;
 /// `sha256()`
@@ -2986,6 +3030,40 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FN_MAPARG, |vm, n| call_func(vm, n, f_maparg));
     vm.register_builtin(VIML_FN_MAPCHECK, |vm, n| call_func(vm, n, f_mapcheck));
     vm.register_builtin(VIML_FN_MAPLIST, |vm, n| call_func(vm, n, f_maplist));
+    vm.register_builtin(VIML_FN_SETCMDLINE, |vm, n| call_func(vm, n, f_setcmdline));
+    vm.register_builtin(VIML_FN_GETCMDLINE, |vm, n| call_func(vm, n, f_getcmdline));
+    vm.register_builtin(VIML_FN_SETCMDPOS, |vm, n| call_func(vm, n, f_setcmdpos));
+    vm.register_builtin(VIML_FN_GETCMDPOS, |vm, n| call_func(vm, n, f_getcmdpos));
+    vm.register_builtin(VIML_FN_GETCMDTYPE, |vm, n| call_func(vm, n, f_getcmdtype));
+    vm.register_builtin(VIML_FN_SIGN_PLACE, |vm, n| call_func(vm, n, f_sign_place));
+    vm.register_builtin(VIML_FN_SIGN_GETPLACED, |vm, n| {
+        call_func(vm, n, f_sign_getplaced)
+    });
+    vm.register_builtin(VIML_FN_SIGN_UNPLACE, |vm, n| {
+        call_func(vm, n, f_sign_unplace)
+    });
+    vm.register_builtin(VIML_FN_SIGN_PLACELIST, |vm, n| {
+        call_func(vm, n, f_sign_placelist)
+    });
+    vm.register_builtin(VIML_FN_SIGN_UNPLACELIST, |vm, n| {
+        call_func(vm, n, f_sign_unplacelist)
+    });
+    vm.register_builtin(VIML_FN_SIGN_JUMP, |vm, n| call_func(vm, n, f_sign_jump));
+    vm.register_builtin(VIML_FN_INDENT, |vm, n| call_func(vm, n, f_indent));
+    vm.register_builtin(VIML_FN_FOLDTEXT, |vm, n| call_func(vm, n, f_foldtext));
+    vm.register_builtin(VIML_FN_FOLDTEXTRESULT, |vm, n| {
+        call_func(vm, n, f_foldtextresult)
+    });
+    vm.register_builtin(VIML_FN_HIGHLIGHT_EXISTS, |vm, n| {
+        call_func(vm, n, f_highlight_exists)
+    });
+    vm.register_builtin(VIML_FN_DIFF_FILLER, |vm, n| call_func(vm, n, f_diff_filler));
+    vm.register_builtin(VIML_FN_VIRTCOL2COL, |vm, n| call_func(vm, n, f_virtcol2col));
+    vm.register_builtin(VIML_FN_WILDTRIGGER, |vm, n| call_func(vm, n, f_wildtrigger));
+    vm.register_builtin(VIML_FN_SEARCHCOUNT, |vm, n| call_func(vm, n, f_searchcount));
+    vm.register_builtin(VIML_FN_COMPLETE_INFO, |vm, n| {
+        call_func(vm, n, f_complete_info)
+    });
     vm.register_builtin(VIML_SET_LINENO, b_set_lineno);
     vm.register_builtin(VIML_CALL_USER, b_call_user);
     vm.register_builtin(VIML_SET_RETURN, b_set_return);

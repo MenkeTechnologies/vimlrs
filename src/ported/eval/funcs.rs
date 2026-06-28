@@ -4426,3 +4426,387 @@ pub fn f_mapcheck(_argvars: &[typval_T], rettv: &mut typval_T) {
 pub fn f_maplist(_argvars: &[typval_T], rettv: &mut typval_T) {
     let _ = tv_list_alloc_ret(rettv, 0);
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// Round-3 builtin expansion. Command-line state (ex_getln.c), sign placement
+// (sign.c), and a set of editor-feature queries whose answer is well-defined
+// when no editor is attached (indent.c / fold.c / highlight.c / diff.c /
+// search.c / popupmenu / cmdexpand). All outside the vendored csrc/eval/ tree,
+// so recorded in the drift-gate allowlist.
+// ════════════════════════════════════════════════════════════════════════════
+
+// ── setcmdline()/getcmdline()/setcmdpos()/getcmdpos()/getcmdtype() —
+//    Neovim ex_getln.c. Standalone we model a settable command-line buffer. ──
+
+thread_local! {
+    /// The command-line buffer state (`ccline` in ex_getln.c): `(line, pos,
+    /// type)`. `pos` is the 1-based byte position of the cursor.
+    static CMDLINE: std::cell::RefCell<(String, varnumber_T, String)> =
+        const { std::cell::RefCell::new((String::new(), 0, String::new())) };
+}
+
+/// Port of `f_setcmdline()` (Neovim ex_getln.c) — replace the command-line
+/// contents with `{str}` and, optionally, move the cursor to byte `{pos}`.
+/// Returns 0 on success.
+pub fn f_setcmdline(argvars: &[typval_T], rettv: &mut typval_T) {
+    let line = tv_get_string(&argvars[0]);
+    let pos = if argvars.len() >= 2 {
+        tv_get_number(&argvars[1])
+    } else {
+        line.len() as varnumber_T + 1
+    };
+    CMDLINE.with(|c| {
+        let mut c = c.borrow_mut();
+        c.0 = line;
+        c.1 = pos;
+    });
+    rettv.vval = v_number(0);
+}
+
+/// Port of `f_getcmdline()` (Neovim ex_getln.c) — the current command-line
+/// contents ("" when no command line is active).
+pub fn f_getcmdline(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.v_type = VAR_STRING;
+    rettv.vval = v_string(CMDLINE.with(|c| c.borrow().0.clone()));
+}
+
+/// Port of `f_setcmdpos()` (Neovim ex_getln.c) — set the cursor to byte
+/// position `{pos}` (1-based) on the command line. Returns 0 on success.
+pub fn f_setcmdpos(argvars: &[typval_T], rettv: &mut typval_T) {
+    let pos = tv_get_number(&argvars[0]);
+    CMDLINE.with(|c| c.borrow_mut().1 = pos);
+    rettv.vval = v_number(0);
+}
+
+/// Port of `f_getcmdpos()` (Neovim ex_getln.c) — the 1-based byte position of
+/// the cursor on the command line (0 when no command line is active).
+pub fn f_getcmdpos(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.vval = v_number(CMDLINE.with(|c| c.borrow().1));
+}
+
+/// Port of `f_getcmdtype()` (Neovim ex_getln.c) — the command-line type char
+/// (`:`/`/`/`?`/…), "" when no command line is active.
+pub fn f_getcmdtype(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.v_type = VAR_STRING;
+    rettv.vval = v_string(CMDLINE.with(|c| c.borrow().2.clone()));
+}
+
+// ── sign_place()/sign_getplaced()/sign_unplace()/sign_placelist()/
+//    sign_unplacelist()/sign_jump() — Neovim sign.c (placed-sign list). ──
+
+thread_local! {
+    /// Placed signs (`buf_T.b_signlist` per buffer in sign.c): each a Dict
+    /// `{id, group, name, bufnr, lnum, priority}`.
+    static SIGNS_PLACED: std::cell::RefCell<Vec<typval_T>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Counter for auto-assigned placed-sign ids (`id == 0`).
+    static SIGN_LAST_ID: std::cell::Cell<varnumber_T> = const { std::cell::Cell::new(0) };
+}
+
+/// Place one sign and return its id. Shared by `sign_place()`/`sign_placelist()`.
+fn sign_place_one(
+    id: varnumber_T,
+    group: &str,
+    name: &str,
+    bufnr: varnumber_T,
+    lnum: varnumber_T,
+    priority: varnumber_T,
+) -> varnumber_T {
+    let id = if id == 0 {
+        SIGN_LAST_ID.with(|c| {
+            let v = c.get() + 1;
+            c.set(v);
+            v
+        })
+    } else {
+        id
+    };
+    let d = tv_dict_alloc();
+    {
+        let mut db = d.borrow_mut();
+        tv_dict_add_nr(&mut db, "id", id);
+        tv_dict_add_str(&mut db, "group", group);
+        tv_dict_add_str(&mut db, "name", name);
+        tv_dict_add_nr(&mut db, "bufnr", bufnr);
+        tv_dict_add_nr(&mut db, "lnum", lnum);
+        tv_dict_add_nr(&mut db, "priority", priority);
+    }
+    SIGNS_PLACED.with(|s| s.borrow_mut().push(match_dict_val(d)));
+    id
+}
+
+/// Read a Number field from a Dict typval, with a default.
+fn sign_dict_nr(d: &typval_T, key: &str, def: varnumber_T) -> varnumber_T {
+    match (d.v_type, &d.vval) {
+        (VAR_DICT, v_dict(Some(dd))) => tv_dict_find(&dd.borrow(), key)
+            .map(tv_get_number)
+            .unwrap_or(def),
+        _ => def,
+    }
+}
+
+/// Read a String field from a Dict typval, with a default.
+fn sign_dict_str(d: &typval_T, key: &str, def: &str) -> String {
+    match (d.v_type, &d.vval) {
+        (VAR_DICT, v_dict(Some(dd))) => tv_dict_find(&dd.borrow(), key)
+            .map(tv_get_string)
+            .unwrap_or_else(|| def.to_string()),
+        _ => def.to_string(),
+    }
+}
+
+/// Port of `f_sign_place()` (Neovim sign.c) — place sign `{name}` (group
+/// `{group}`) in buffer `{buf}` at the line given by `{dict}.lnum`. `{id}` 0
+/// auto-assigns. Returns the sign id, or -1 on error.
+pub fn f_sign_place(argvars: &[typval_T], rettv: &mut typval_T) {
+    let id = tv_get_number(&argvars[0]);
+    let group = tv_get_string(&argvars[1]);
+    let name = tv_get_string(&argvars[2]);
+    let bufnr = if argvars[3].v_type == VAR_NUMBER {
+        tv_get_number(&argvars[3])
+    } else {
+        1
+    };
+    let dict = argvars.get(4);
+    let lnum = dict.map_or(1, |d| sign_dict_nr(d, "lnum", 1));
+    let priority = dict.map_or(10, |d| sign_dict_nr(d, "priority", 10));
+    rettv.vval = v_number(sign_place_one(id, &group, &name, bufnr, lnum, priority));
+}
+
+/// Port of `f_sign_placelist()` (Neovim sign.c) — place every sign in `{list}`
+/// (each a Dict). Returns the List of assigned ids (-1 for a bad entry).
+pub fn f_sign_placelist(argvars: &[typval_T], rettv: &mut typval_T) {
+    let l = match (argvars[0].v_type, &argvars[0].vval) {
+        (VAR_LIST, v_list(Some(l))) => l.clone(),
+        _ => {
+            emsg("E714: List required");
+            return;
+        }
+    };
+    let items: Vec<typval_T> = l
+        .borrow()
+        .lv_items
+        .iter()
+        .map(|it| it.li_tv.clone())
+        .collect();
+    let out = tv_list_alloc_ret(rettv, items.len() as isize);
+    let mut ob = out.borrow_mut();
+    for it in items {
+        if it.v_type != VAR_DICT {
+            tv_list_append_number(&mut ob, -1);
+            continue;
+        }
+        let id = sign_dict_nr(&it, "id", 0);
+        let group = sign_dict_str(&it, "group", "");
+        let name = sign_dict_str(&it, "name", "");
+        let bufnr = sign_dict_nr(&it, "buffer", 1);
+        let lnum = sign_dict_nr(&it, "lnum", 1);
+        let priority = sign_dict_nr(&it, "priority", 10);
+        tv_list_append_number(
+            &mut ob,
+            sign_place_one(id, &group, &name, bufnr, lnum, priority),
+        );
+    }
+}
+
+/// Port of `f_sign_getplaced()` (Neovim sign.c) — the placed signs as
+/// `[{bufnr, signs: [...]}]`, grouped by buffer. An optional `{buf}` and a
+/// `{dict}` with `group`/`id`/`lnum` narrow the result.
+pub fn f_sign_getplaced(argvars: &[typval_T], rettv: &mut typval_T) {
+    let want_buf = argvars
+        .first()
+        .filter(|t| t.v_type == VAR_NUMBER)
+        .map(tv_get_number);
+    let dict = argvars.get(1);
+    let want_group = dict.and_then(|d| match (d.v_type, &d.vval) {
+        (VAR_DICT, v_dict(Some(dd))) => tv_dict_find(&dd.borrow(), "group").map(tv_get_string),
+        _ => None,
+    });
+    let placed: Vec<typval_T> = SIGNS_PLACED.with(|s| s.borrow().clone());
+    // Group surviving signs by bufnr, preserving insertion order.
+    let mut buffers: Vec<varnumber_T> = Vec::new();
+    let mut grouped: std::collections::BTreeMap<varnumber_T, Vec<typval_T>> =
+        std::collections::BTreeMap::new();
+    for sg in placed {
+        let bufnr = sign_dict_nr(&sg, "bufnr", 0);
+        if let Some(wb) = want_buf {
+            if wb != bufnr {
+                continue;
+            }
+        }
+        if let Some(wg) = &want_group {
+            if *wg != sign_dict_str(&sg, "group", "") {
+                continue;
+            }
+        }
+        if !buffers.contains(&bufnr) {
+            buffers.push(bufnr);
+        }
+        grouped.entry(bufnr).or_default().push(sg);
+    }
+    let out = tv_list_alloc_ret(rettv, buffers.len() as isize);
+    let mut ob = out.borrow_mut();
+    for bufnr in buffers {
+        let signs = grouped.remove(&bufnr).unwrap_or_default();
+        let entry = tv_dict_alloc();
+        {
+            let mut eb = entry.borrow_mut();
+            tv_dict_add_nr(&mut eb, "bufnr", bufnr);
+            let sl = tv_list_alloc(signs.len() as isize);
+            {
+                let mut slb = sl.borrow_mut();
+                for sg in signs {
+                    tv_list_append_tv(&mut slb, sg);
+                }
+            }
+            tv_dict_add_tv(
+                &mut eb,
+                "signs",
+                typval_T {
+                    v_type: VAR_LIST,
+                    v_lock: VarLockStatus::VAR_UNLOCKED,
+                    vval: v_list(Some(sl)),
+                },
+            );
+        }
+        tv_list_append_tv(&mut ob, match_dict_val(entry));
+    }
+}
+
+/// Port of `f_sign_unplace()` (Neovim sign.c) — remove placed signs in
+/// `{group}` (""/"*" = all groups), optionally narrowed by `{dict}.id`/
+/// `{dict}.buffer`. Returns 0 on success.
+pub fn f_sign_unplace(argvars: &[typval_T], rettv: &mut typval_T) {
+    let group = tv_get_string(&argvars[0]);
+    let dict = argvars.get(1);
+    let want_id = dict.map(|d| sign_dict_nr(d, "id", 0)).filter(|v| *v != 0);
+    let want_buf = dict
+        .map(|d| sign_dict_nr(d, "buffer", -1))
+        .filter(|v| *v != -1);
+    SIGNS_PLACED.with(|s| {
+        s.borrow_mut().retain(|sg| {
+            let g_ok = group.is_empty() || group == "*" || group == sign_dict_str(sg, "group", "");
+            #[allow(clippy::unnecessary_map_or)]
+            let id_ok = want_id.map_or(true, |w| w == sign_dict_nr(sg, "id", 0));
+            #[allow(clippy::unnecessary_map_or)]
+            let buf_ok = want_buf.map_or(true, |w| w == sign_dict_nr(sg, "bufnr", 0));
+            // Keep the sign unless every selector matches.
+            !(g_ok && id_ok && buf_ok)
+        });
+    });
+    rettv.vval = v_number(0);
+}
+
+/// Port of `f_sign_unplacelist()` (Neovim sign.c) — unplace each sign described
+/// in `{list}`. Returns a List of per-item results (0 on success).
+pub fn f_sign_unplacelist(argvars: &[typval_T], rettv: &mut typval_T) {
+    let l = match (argvars[0].v_type, &argvars[0].vval) {
+        (VAR_LIST, v_list(Some(l))) => l.clone(),
+        _ => {
+            emsg("E714: List required");
+            return;
+        }
+    };
+    let items: Vec<typval_T> = l
+        .borrow()
+        .lv_items
+        .iter()
+        .map(|it| it.li_tv.clone())
+        .collect();
+    let out = tv_list_alloc_ret(rettv, items.len() as isize);
+    let mut ob = out.borrow_mut();
+    for it in items {
+        let group = sign_dict_str(&it, "group", "");
+        let id = sign_dict_nr(&it, "id", 0);
+        SIGNS_PLACED.with(|s| {
+            s.borrow_mut().retain(|sg| {
+                let g_ok = group.is_empty() || group == sign_dict_str(sg, "group", "");
+                let id_ok = id == 0 || id == sign_dict_nr(sg, "id", 0);
+                !(g_ok && id_ok)
+            });
+        });
+        tv_list_append_number(&mut ob, 0);
+    }
+}
+
+/// Port of `f_sign_jump()` (Neovim sign.c) — jump the cursor to sign `{id}`.
+/// No editor cursor standalone, so it reports failure (-1).
+pub fn f_sign_jump(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.vval = v_number(-1);
+}
+
+// ── editor-feature queries with a well-defined "no editor" answer. ──
+
+/// Port of `f_indent()` (Neovim indent.c) — the indent of line `{lnum}`. No
+/// buffer standalone, so -1 (the invalid-line result).
+pub fn f_indent(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.vval = v_number(-1);
+}
+
+/// Port of `f_foldtext()` (Neovim fold.c) — the text shown for the closed fold
+/// on the current line. No folds standalone → "".
+pub fn f_foldtext(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.v_type = VAR_STRING;
+    rettv.vval = v_string(String::new());
+}
+
+/// Port of `f_foldtextresult()` (Neovim fold.c) — the `'foldtext'` text for the
+/// fold at `{lnum}`. No folds standalone → "".
+pub fn f_foldtextresult(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.v_type = VAR_STRING;
+    rettv.vval = v_string(String::new());
+}
+
+/// Port of `f_highlight_exists()` (Neovim highlight_group.c) — whether highlight
+/// group `{name}` is defined. No highlight groups standalone → 0.
+pub fn f_highlight_exists(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.vval = v_number(0);
+}
+
+/// Port of `f_diff_filler()` (Neovim diff.c) — the number of filler lines above
+/// line `{lnum}`. No diff mode standalone → 0.
+pub fn f_diff_filler(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.vval = v_number(0);
+}
+
+/// Port of `f_virtcol2col()` (Neovim plines.c) — the byte index of the
+/// character at virtual column `{virtcol}`. No buffer standalone → -1.
+pub fn f_virtcol2col(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.vval = v_number(-1);
+}
+
+/// Port of `f_wildtrigger()` (Neovim cmdexpand.c) — trigger wildcard completion
+/// on the command line. No interactive command line standalone → no-op.
+pub fn f_wildtrigger(_argvars: &[typval_T], _rettv: &mut typval_T) {}
+
+/// Port of `f_searchcount()` (Neovim search.c) — the search-count dict
+/// `{current, total, exact_match, incomplete, maxcount}`. No active search
+/// standalone → all-zero counts (maxcount defaults to 99).
+pub fn f_searchcount(_argvars: &[typval_T], rettv: &mut typval_T) {
+    let d = tv_dict_alloc_ret(rettv);
+    let mut db = d.borrow_mut();
+    tv_dict_add_nr(&mut db, "current", 0);
+    tv_dict_add_nr(&mut db, "total", 0);
+    tv_dict_add_nr(&mut db, "exact_match", 0);
+    tv_dict_add_nr(&mut db, "incomplete", 0);
+    tv_dict_add_nr(&mut db, "maxcount", 99);
+}
+
+/// Port of `f_complete_info()` (Neovim insexpand.c) — the insert-completion
+/// state dict. No insert-mode completion standalone → an inactive snapshot.
+pub fn f_complete_info(_argvars: &[typval_T], rettv: &mut typval_T) {
+    let d = tv_dict_alloc_ret(rettv);
+    let mut db = d.borrow_mut();
+    tv_dict_add_str(&mut db, "mode", "");
+    tv_dict_add_nr(&mut db, "pum_visible", 0);
+    let items = tv_list_alloc(0);
+    tv_dict_add_tv(
+        &mut db,
+        "items",
+        typval_T {
+            v_type: VAR_LIST,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_list(Some(items)),
+        },
+    );
+    tv_dict_add_nr(&mut db, "selected", -1);
+}

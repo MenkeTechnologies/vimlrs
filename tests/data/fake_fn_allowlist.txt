@@ -192,3 +192,37 @@ f_hasmapto
 f_maparg
 f_mapcheck
 f_maplist
+
+# ── ex_getln.c (not vendored) — command-line state ──
+f_setcmdline
+f_getcmdline
+f_setcmdpos
+f_getcmdpos
+f_getcmdtype
+
+# ── sign.c (not vendored) — placed-sign list ──
+# sign_place_one is the shared placement core; sign_dict_nr/sign_dict_str read a
+# Number/String field from a Dict argument (Neovim uses tv_dict_get_number/
+# tv_dict_get_string for the same).
+f_sign_place
+f_sign_getplaced
+f_sign_unplace
+f_sign_placelist
+f_sign_unplacelist
+f_sign_jump
+sign_place_one
+sign_dict_nr
+sign_dict_str
+
+# ── editor-feature queries with a defined "no editor" answer ──
+# indent.c / fold.c / highlight_group.c / diff.c / plines.c / cmdexpand.c /
+# search.c / insexpand.c — each returns its documented absent-feature value.
+f_indent
+f_foldtext
+f_foldtextresult
+f_highlight_exists
+f_diff_filler
+f_virtcol2col
+f_wildtrigger
+f_searchcount
+f_complete_info
