@@ -1,8 +1,9 @@
-" wordfreq.vim — a small text-processing pipeline over a file.
+" wordfreq.vim — a text-processing pipeline over a file, with embedded tests.
 "
-" Demonstrates the ported file-I/O and string builtins working together:
-" writefile()/readfile() round-trip, split() tokenizing, a dict frequency
-" table, sort() with a Funcref comparator, and printf() formatting.
+" Demonstrates the ported file-I/O and string builtins together: writefile()/
+" readfile() round-trip, split() tokenizing, a dict frequency table, sort()
+" with a Funcref comparator, printf() formatting, and assertions over the
+" results. Exits non-zero on failure.
 "
 "   vimlrs examples/wordfreq.vim
 
@@ -17,8 +18,6 @@ let words = []
 for line in lines
   call extend(words, split(line))
 endfor
-echo 'total words :' len(words)
-echo 'unique words:' len(uniq(sort(copy(words))))
 
 " Build a frequency table.
 let freq = {}
@@ -37,7 +36,26 @@ for w in keys(freq)
 endfor
 call sort(pairs, function('ByCountDesc'))
 
-echo 'frequencies (most common first):'
-for p in pairs
-  echo printf('  %-7s %d', p[0], p[1])
-endfor
+" ── unit tests ──
+call assert_equal(10, len(words))
+call assert_equal(7, len(uniq(sort(copy(words)))))
+call assert_equal(3, freq['the'])
+call assert_equal(2, freq['fox'])
+call assert_equal(1, freq['dog'])
+call assert_false(has_key(freq, 'cat'))
+call assert_equal(['the', 3], pairs[0])
+call assert_equal(7, len(pairs))
+
+" ── demo ──
+echo 'total words :' len(words)
+echo 'unique words:' len(uniq(sort(copy(words))))
+echo 'most common :' pairs[0][0] '('.pairs[0][1].')'
+
+" ── self-test epilogue ──
+if !empty(v:errors)
+  for e in v:errors
+    echo 'FAIL:' e
+  endfor
+  throw len(v:errors) . ' assertion(s) failed'
+endif
+echo 'OK: wordfreq assertions passed'

@@ -11,6 +11,7 @@ use std::rc::Rc;
 
 use crate::ported::eval::typval::{
     tv_dict_add_tv, tv_dict_alloc, tv_dict_find, tv_get_string, tv_list_alloc,
+    tv_list_append_string,
 };
 use crate::ported::eval::typval_defs_h::{
     dict_T, list_T, partial_T, typval_T, typval_vval_union::*, varnumber_T, BoolVarValue,
@@ -667,6 +668,22 @@ pub fn get_vim_var_list(idx: VimVarIndex) -> Option<Rc<RefCell<list_T>>> {
         v_list(l) => l,
         _ => None,
     }
+}
+
+/// Port of `assert_error()` from `Src/eval/vars.c:3360` — append an assertion
+/// failure message to `v:errors`, first making `v:errors` a List if it is not
+/// one yet. (The C `garray_T *gap` accumulates the message bytes; the port
+/// receives the already-built message.)
+pub fn assert_error(msg: &str) {
+    let list = match get_vim_var_list(vv::VV_ERRORS) {
+        Some(l) => l,
+        None => {
+            let l = tv_list_alloc(1);
+            set_vim_var_list(vv::VV_ERRORS, Some(Rc::clone(&l)));
+            l
+        }
+    };
+    tv_list_append_string(&mut list.borrow_mut(), msg);
 }
 
 /// Port of `get_vim_var_dict()` from `Src/eval/vars.c:1914`.

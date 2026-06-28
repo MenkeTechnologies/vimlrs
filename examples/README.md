@@ -21,6 +21,28 @@ cargo build
 Run any script with `VIMLRS_JIT_STATS=1` to see JIT activity, or `VIMLRS_NO_JIT=1`
 to force the interpreter baseline.
 
+### Self-testing — these examples are the regression suite
+
+Every script is also a **unit test**: it asserts its expected results with Vim's
+built-in test framework (`assert_equal`, `assert_true`, `assert_match`,
+`assert_inrange`, …), which records failures in `v:errors`. Each ends with an
+epilogue that `throw`s — making the process exit non-zero — when `v:errors` is
+non-empty:
+
+```vim
+call assert_equal('Fizz', FizzBuzz(3))
+" ...
+if !empty(v:errors)
+  for e in v:errors | echo 'FAIL:' e | endfor
+  throw len(v:errors) . ' assertion(s) failed'
+endif
+```
+
+CI runs them all via `cargo test` — `tests/examples.rs` executes each script
+through the built binary and fails if any exits non-zero. So a behaviour
+regression in a ported builtin turns a green assert red. The interactive example
+is fed canned answers from `tests/fixtures/interactive.in`.
+
 ### Notes on the current language surface
 
 These scripts stick to what the parser supports today. Two idioms common in

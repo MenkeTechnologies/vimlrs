@@ -42,9 +42,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       # No-op on macOS via runner.os guard inside the composite action.
       - uses: Swatinem/rust-cache@v2
-      # Includes the drift gate (tests/ported_fn_names_match_c.rs), which
-      # derives the legal-name set straight from the vendored csrc/ tree — it
-      # needs no generated artifact, so a fresh checkout passes.
+      # Runs the lib unit tests, the drift gate (tests/ported_fn_names_match_c.rs,
+      # which derives the legal-name set straight from the vendored csrc/ tree so
+      # a fresh checkout passes), and the example self-tests (tests/examples.rs
+      # runs every examples/*.vim, each of which asserts its own results with the
+      # built-in assert_* framework and exits non-zero on a regression).
       - run: cargo test --locked --no-fail-fast
 
   # Formatting is handled by the local pre-commit hook (auto-runs `cargo fmt`

@@ -463,12 +463,6 @@ pub fn reset_v_option_vars() {
     unimplemented!("STUB reset_v_option_vars — csrc/eval/vars.c:3349")
 }
 
-/// Port of `assert_error()` — `csrc/eval/vars.c:3360`. STUB: not yet ported.
-/// C: `void assert_error(garray_T *gap)`
-pub fn assert_error() {
-    unimplemented!("STUB assert_error — csrc/eval/vars.c:3360")
-}
-
 /// Port of `var_exists()` — `csrc/eval/vars.c:3371`. STUB: not yet ported.
 /// C: `bool var_exists(const char *var)`
 pub fn var_exists() {

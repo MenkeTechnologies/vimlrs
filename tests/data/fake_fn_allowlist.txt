@@ -55,3 +55,24 @@ sha256_finish
 # eval tree so the generator already recognizes them; vim_ispathsep_nocolon is
 # only called from within path.c, so it is listed here.
 vim_ispathsep_nocolon
+
+# ── testing.c (not vendored) ──
+# The Vim assert framework backing assert_equal()/assert_true()/… . Their
+# implementations live in Neovim's testing.c, which is not part of the vendored
+# eval tree; the spec is in csrc/eval.lua and v:errors is appended via the
+# vendored assert_error() (csrc/eval/vars.c). These are faithful ports, cited to
+# testing.c. The shared helpers (fill_assert_error, assert_equal_common,
+# assert_match_common, assert_bool) are real Neovim functions from the same file.
+f_assert_equal
+f_assert_notequal
+f_assert_true
+f_assert_false
+f_assert_match
+f_assert_notmatch
+f_assert_report
+f_assert_inrange
+f_assert_exception
+fill_assert_error
+assert_equal_common
+assert_match_common
+assert_bool

@@ -1,14 +1,15 @@
-" interactive.vim — read input from the terminal in a standalone script.
+" interactive.vim — read input from the terminal, with embedded unit tests.
 "
-" Demonstrates the input family: input() (line read with a prompt), inputlist()
-" (numbered menu), and confirm() (button choice). In the editor these prompt
-" through the command-line UI; standalone they write the prompt to stdout and
-" read one line from stdin — the role `read` plays in a shell script.
+" Demonstrates the input family: input() (line read), inputlist() (numbered
+" menu), confirm() (button choice). In the editor these prompt through the
+" command-line UI; standalone they write the prompt to stdout and read one line
+" from stdin — the role `read` plays in a shell script.
 "
-" Pipe answers in for a non-interactive run:
-"   printf 'Ada\n2\ny\n' | vimlrs examples/interactive.vim
-" or just run it and type:
-"   vimlrs examples/interactive.vim
+" The CI run feeds canned answers via tests/golden/interactive.in, so the
+" embedded asserts check the parsed values; exits non-zero on failure.
+"
+" Interactive:   vimlrs examples/interactive.vim
+" Scripted:      printf 'Ada\n2\ny\n' | vimlrs examples/interactive.vim
 
 let name = input('What is your name? ')
 echo 'Hello,' name . '!'
@@ -22,8 +23,20 @@ else
 endif
 
 let ok = confirm('Save your answers?', "&Yes\n&No")
-if ok == 1
-  echo 'Saved.'
-else
-  echo 'Discarded.'
+echo ok == 1 ? 'Saved.' : 'Discarded.'
+
+" ── unit tests (valid only under the scripted stdin fixture: Ada / 2 / 1) ──
+if !empty(name)
+  call assert_equal('Ada', name)
+  call assert_equal(2, choice)
+  call assert_equal('Rust', langs[choice])
+  call assert_equal(1, ok)
+
+  if !empty(v:errors)
+    for e in v:errors
+      echo 'FAIL:' e
+    endfor
+    throw len(v:errors) . ' assertion(s) failed'
+  endif
+  echo 'OK: interactive assertions passed'
 endif

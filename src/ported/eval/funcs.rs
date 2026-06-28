@@ -8,7 +8,9 @@
 //! functions returning another type set `v_type`. Phase 3 ports a subset.
 #![allow(non_snake_case)]
 
+use crate::ported::eval::encode::{encode_tv2echo, encode_tv2string};
 use crate::ported::eval::list::FILTER_MAP_EVAL_HOOK;
+use crate::ported::eval::typval::tv_equal;
 use crate::ported::eval::typval::{
     callback_from_typval, tv_blob_get, tv_check_for_number_arg, tv_check_for_string_arg,
     tv_dict_watcher_add, tv_dict_watcher_remove, tv_get_number, tv_get_string_buf,
@@ -29,7 +31,10 @@ use crate::ported::eval::typval_defs_h::{
     VAR_TYPE_BLOB, VAR_TYPE_BOOL, VAR_TYPE_DICT, VAR_TYPE_FLOAT, VAR_TYPE_FUNC, VAR_TYPE_LIST,
     VAR_TYPE_NUMBER, VAR_TYPE_SPECIAL, VAR_TYPE_STRING,
 };
-use crate::ported::eval::vars::{get_vim_var_str, vv::VV_REG};
+use crate::ported::eval::vars::{
+    assert_error, get_vim_var_str,
+    vv::{VV_EXCEPTION, VV_REG},
+};
 use crate::ported::eval_h::{FAIL, OK};
 use crate::ported::message::emsg;
 use crate::ported::ops::{
@@ -43,6 +48,7 @@ use crate::ported::profile::{
     profile_end, profile_msg, profile_signed, profile_start, profile_sub, proftime_T,
 };
 use crate::ported::sha256::sha256_bytes;
+use crate::viml_regex::regex_match;
 use crate::viml_regex::{regex_matchlist, regex_matchstrpos};
 
 /// Port of `f_len()` from `Src/eval/funcs.c`.
@@ -2452,4 +2458,216 @@ pub fn f_setcharsearch(_argvars: &[typval_T], rettv: &mut typval_T) {
 /// (0, the C success return).
 pub fn f_settagstack(_argvars: &[typval_T], rettv: &mut typval_T) {
     *rettv = typval_T::from(0 as varnumber_T);
+}
+
+// ── assert_*() — the Vim unit-testing framework (testing.c, not vendored) ──
+//
+// Each assert appends a failure message to `v:errors` (via the vendored
+// `assert_error`, csrc/eval/vars.c:3360) and returns 1 on failure, 0 on
+// success — so a script can run a batch of asserts and then inspect
+// `v:errors`. Behaviour and message wording follow the spec documented in
+// `csrc/eval.lua` (the implementations live in Neovim's `testing.c`, which is
+// not part of the vendored eval tree). Values render with `string()`
+// (`encode_tv2string`); a user `{msg}` renders with `:echo` rules
+// (`encode_tv2echo`), matching the C `fill_assert_error`.
+
+/// The assertion flavour selecting `fill_assert_error`'s wording.
+#[derive(Clone, Copy, PartialEq)]
+enum AssertType {
+    Equal,
+    NotEqual,
+    Match,
+    NotMatch,
+    Other,
+}
+
+/// Port of `fill_assert_error()` (Neovim `testing.c`, not vendored) — build the
+/// `v:errors` line: an optional `{msg}: ` prefix, then `Expected …`/`Pattern …`
+/// per `atype`, the expected value (or `exp_str` literal), and for the
+/// non-`NotEqual` forms the actual value.
+fn fill_assert_error(
+    opt_msg: Option<&typval_T>,
+    exp_str: Option<&str>,
+    exp_tv: &typval_T,
+    got_tv: &typval_T,
+    atype: AssertType,
+) -> String {
+    let mut s = String::new();
+    if let Some(m) = opt_msg {
+        if m.v_type != VAR_UNKNOWN {
+            s.push_str(&encode_tv2echo(m));
+            s.push_str(": ");
+        }
+    }
+    s.push_str(match atype {
+        AssertType::Match | AssertType::NotMatch => "Pattern ",
+        AssertType::NotEqual => "Expected not equal to ",
+        _ => "Expected ",
+    });
+    match exp_str {
+        Some(e) => s.push_str(e),
+        None => s.push_str(&encode_tv2string(exp_tv)),
+    }
+    match atype {
+        AssertType::NotEqual => {}
+        AssertType::Match => {
+            s.push_str(" does not match ");
+            s.push_str(&encode_tv2string(got_tv));
+        }
+        AssertType::NotMatch => {
+            s.push_str(" does match ");
+            s.push_str(&encode_tv2string(got_tv));
+        }
+        _ => {
+            s.push_str(" but got ");
+            s.push_str(&encode_tv2string(got_tv));
+        }
+    }
+    s
+}
+
+/// Shared body of `assert_equal`/`assert_notequal` (`assert_equal_common`):
+/// compare with `tv_equal` (case always matters, no coercion) and record a
+/// failure when the result is not the asserted relation.
+fn assert_equal_common(argvars: &[typval_T], rettv: &mut typval_T, want_equal: bool) {
+    let equal = tv_equal(&argvars[0], &argvars[1], false);
+    if equal != want_equal {
+        let atype = if want_equal {
+            AssertType::Equal
+        } else {
+            AssertType::NotEqual
+        };
+        let msg = fill_assert_error(argvars.get(2), None, &argvars[0], &argvars[1], atype);
+        assert_error(&msg);
+        *rettv = typval_T::from(1 as varnumber_T);
+    } else {
+        *rettv = typval_T::from(0 as varnumber_T);
+    }
+}
+
+/// Port of `f_assert_equal()` — fail when `{expected}` and `{actual}` differ.
+pub fn f_assert_equal(argvars: &[typval_T], rettv: &mut typval_T) {
+    assert_equal_common(argvars, rettv, true);
+}
+/// Port of `f_assert_notequal()` — fail when `{expected}` and `{actual}` equal.
+pub fn f_assert_notequal(argvars: &[typval_T], rettv: &mut typval_T) {
+    assert_equal_common(argvars, rettv, false);
+}
+
+/// Shared body of `assert_true`/`assert_false` (`assert_bool`): pass when
+/// `{actual}` is a non-zero Number / `v:true` (resp. zero / `v:false`); any
+/// other type fails. Message uses the `"True"`/`"False"` literal.
+fn assert_bool(argvars: &[typval_T], rettv: &mut typval_T, is_true: bool) {
+    let v = &argvars[0];
+    let ok = match v.v_type {
+        VAR_NUMBER => (tv_get_number(v) != 0) == is_true,
+        VAR_BOOL => (tv_get_bool(v) != 0) == is_true,
+        _ => false,
+    };
+    if !ok {
+        let lit = if is_true { "True" } else { "False" };
+        let msg = fill_assert_error(argvars.get(1), Some(lit), v, v, AssertType::Other);
+        assert_error(&msg);
+        *rettv = typval_T::from(1 as varnumber_T);
+    } else {
+        *rettv = typval_T::from(0 as varnumber_T);
+    }
+}
+
+/// Port of `f_assert_true()` — fail unless `{actual}` is TRUE.
+pub fn f_assert_true(argvars: &[typval_T], rettv: &mut typval_T) {
+    assert_bool(argvars, rettv, true);
+}
+/// Port of `f_assert_false()` — fail unless `{actual}` is FALSE.
+pub fn f_assert_false(argvars: &[typval_T], rettv: &mut typval_T) {
+    assert_bool(argvars, rettv, false);
+}
+
+/// Shared body of `assert_match`/`assert_notmatch` (`assert_match_common`):
+/// match `{pattern}` against `{actual}` as a string with Vim 'magic' regex,
+/// case-sensitive (`assert` ignores 'ignorecase').
+fn assert_match_common(argvars: &[typval_T], rettv: &mut typval_T, want_match: bool) {
+    let pat = tv_get_string(&argvars[0]);
+    let actual = tv_get_string(&argvars[1]);
+    let matched = regex_match(&pat, &actual, false);
+    if matched != want_match {
+        let atype = if want_match {
+            AssertType::Match
+        } else {
+            AssertType::NotMatch
+        };
+        let msg = fill_assert_error(argvars.get(2), None, &argvars[0], &argvars[1], atype);
+        assert_error(&msg);
+        *rettv = typval_T::from(1 as varnumber_T);
+    } else {
+        *rettv = typval_T::from(0 as varnumber_T);
+    }
+}
+
+/// Port of `f_assert_match()` — fail when `{pattern}` does not match `{actual}`.
+pub fn f_assert_match(argvars: &[typval_T], rettv: &mut typval_T) {
+    assert_match_common(argvars, rettv, true);
+}
+/// Port of `f_assert_notmatch()` — fail when `{pattern}` matches `{actual}`.
+pub fn f_assert_notmatch(argvars: &[typval_T], rettv: &mut typval_T) {
+    assert_match_common(argvars, rettv, false);
+}
+
+/// Port of `f_assert_report()` — append `{msg}` to `v:errors` unconditionally.
+pub fn f_assert_report(argvars: &[typval_T], rettv: &mut typval_T) {
+    assert_error(&tv_get_string(&argvars[0]));
+    *rettv = typval_T::from(1 as varnumber_T);
+}
+
+/// Port of `f_assert_inrange()` — fail when `{actual}` is outside the inclusive
+/// `[{lower}, {upper}]` range. Numbers and Floats compare by value.
+pub fn f_assert_inrange(argvars: &[typval_T], rettv: &mut typval_T) {
+    let as_f64 = |tv: &typval_T| -> f64 {
+        if tv.v_type == VAR_FLOAT {
+            tv_get_float(tv)
+        } else {
+            tv_get_number(tv) as f64
+        }
+    };
+    let lower = as_f64(&argvars[0]);
+    let upper = as_f64(&argvars[1]);
+    let actual = as_f64(&argvars[2]);
+    if actual < lower || actual > upper {
+        let mut msg = String::new();
+        if let Some(m) = argvars.get(3) {
+            if m.v_type != VAR_UNKNOWN {
+                msg.push_str(&encode_tv2echo(m));
+                msg.push_str(": ");
+            }
+        }
+        msg.push_str(&format!(
+            "Expected range {} - {}, but got {}",
+            encode_tv2string(&argvars[0]),
+            encode_tv2string(&argvars[1]),
+            encode_tv2string(&argvars[2]),
+        ));
+        assert_error(&msg);
+        *rettv = typval_T::from(1 as varnumber_T);
+    } else {
+        *rettv = typval_T::from(0 as varnumber_T);
+    }
+}
+
+/// Port of `f_assert_exception()` — fail when `v:exception` does not contain the
+/// `{error}` string. Used inside a `:catch` to assert the thrown exception.
+pub fn f_assert_exception(argvars: &[typval_T], rettv: &mut typval_T) {
+    let error = tv_get_string(&argvars[0]);
+    let exc = get_vim_var_str(VV_EXCEPTION);
+    if exc.is_empty() {
+        // c: "v:exception is not set" when nothing was caught.
+        assert_error("v:exception is not set");
+        *rettv = typval_T::from(1 as varnumber_T);
+    } else if !exc.contains(&error) {
+        let got = typval_T::from(exc);
+        let msg = fill_assert_error(argvars.get(1), None, &argvars[0], &got, AssertType::Other);
+        assert_error(&msg);
+        *rettv = typval_T::from(1 as varnumber_T);
+    } else {
+        *rettv = typval_T::from(0 as varnumber_T);
+    }
 }
