@@ -19,12 +19,6 @@ pub fn change_other_buffer_restore() {
     unimplemented!("STUB change_other_buffer_restore — csrc/eval/buffer.c:113")
 }
 
-/// Port of `set_buffer_lines()` — `csrc/eval/buffer.c:126`. STUB: not yet ported.
-/// C: `static void set_buffer_lines(buf_T *buf, linenr_T lnum_arg, bool append, typval_T *lines,`
-pub fn set_buffer_lines() {
-    unimplemented!("STUB set_buffer_lines — csrc/eval/buffer.c:126")
-}
-
 /// Port of `buf_set_append_line()` — `csrc/eval/buffer.c:257`. STUB: not yet ported.
 /// C: `static void buf_set_append_line(typval_T *argvars, typval_T *rettv, bool append)`
 pub fn buf_set_append_line() {
@@ -35,12 +29,6 @@ pub fn buf_set_append_line() {
 /// C: `static dict_T *get_buffer_info(buf_T *buf)`
 pub fn get_buffer_info() {
     unimplemented!("STUB get_buffer_info — csrc/eval/buffer.c:573")
-}
-
-/// Port of `get_buffer_lines()` — `csrc/eval/buffer.c:678`. STUB: not yet ported.
-/// C: `static void get_buffer_lines(buf_T *buf, linenr_T start, linenr_T end, bool retlist,`
-pub fn get_buffer_lines() {
-    unimplemented!("STUB get_buffer_lines — csrc/eval/buffer.c:678")
 }
 
 /// Port of `getbufline()` — `csrc/eval/buffer.c:715`. STUB: not yet ported.

@@ -7030,6 +7030,22 @@ pub fn f_diff_filler(_argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.vval = v_number(0);
 }
 
+/// Port of `f_hlID()` — `csrc/eval/funcs.c:2894`. The numeric ID of the highlight
+/// group named `{name}`, or 0 when it does not exist. Standalone there are no
+/// highlight groups, so `syn_name2id()` finds nothing → 0. `highlightID()` is the
+/// deprecated alias and shares this implementation.
+pub fn f_hlID(_argvars: &[typval_T], rettv: &mut typval_T) {
+    // c: rettv->vval.v_number = syn_name2id(tv_get_string(&argvars[0]));
+    rettv.vval = v_number(0);
+}
+
+/// Port of `f_diff_hlID()` (Neovim diff.c) — the highlight ID for diff mode at
+/// line `{lnum}` column `{col}`. With no diff change (no diff mode standalone)
+/// the C returns 0.
+pub fn f_diff_hlID(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.vval = v_number(0);
+}
+
 /// Port of `f_virtcol2col()` (Neovim plines.c) — the byte index of the
 /// character at virtual column `{virtcol}`. No buffer standalone → -1.
 pub fn f_virtcol2col(_argvars: &[typval_T], rettv: &mut typval_T) {

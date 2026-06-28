@@ -2235,6 +2235,7 @@ pub(crate) fn builtin_fn_id(name: &str) -> Option<u16> {
         "mapcheck" => h::VIML_FN_MAPCHECK,
         "maplist" => h::VIML_FN_MAPLIST,
         // c: deprecated.c aliases — the same EvalFuncDef as their modern name.
+        "highlightID" => h::VIML_FN_HLID,
         "buffer_exists" => h::VIML_FN_BUFEXISTS,
         "buffer_name" => h::VIML_FN_BUFNAME,
         "buffer_number" => h::VIML_FN_BUFNR,
@@ -2254,6 +2255,8 @@ pub(crate) fn builtin_fn_id(name: &str) -> Option<u16> {
         "foldtext" => h::VIML_FN_FOLDTEXT,
         "foldtextresult" => h::VIML_FN_FOLDTEXTRESULT,
         "highlight_exists" => h::VIML_FN_HIGHLIGHT_EXISTS,
+        "hlID" => h::VIML_FN_HLID,
+        "diff_hlID" => h::VIML_FN_DIFF_HLID,
         "diff_filler" => h::VIML_FN_DIFF_FILLER,
         "virtcol2col" => h::VIML_FN_VIRTCOL2COL,
         "wildtrigger" => h::VIML_FN_WILDTRIGGER,

@@ -40,37 +40,38 @@ use crate::ported::eval::funcs::{
     f_getcursorcharpos, f_getenv, f_getfontname, f_getjumplist, f_getline, f_getmarklist, f_getpid,
     f_getpos, f_getreg, f_getreginfo, f_getregion, f_getregionpos, f_getregtype, f_gettabinfo,
     f_gettabvar, f_gettabwinvar, f_gettagstack, f_gettext, f_getwininfo, f_getwinpos, f_getwinposx,
-    f_getwinposy, f_getwinvar, f_has, f_has_key, f_hlexists, f_id, f_index, f_indexof, f_input,
-    f_inputdialog, f_inputlist, f_inputrestore, f_inputsave, f_inputsecret, f_insert, f_interrupt,
-    f_invert, f_isinf, f_islocked, f_isnan, f_items, f_jobpid, f_jobresize, f_jobstart, f_jobstop,
-    f_jobwait, f_json_decode, f_json_encode, f_keys, f_keytrans, f_last_buffer_nr, f_len,
-    f_libcall, f_libcallnr, f_line, f_line2byte, f_list2str, f_localtime, f_luaeval, f_match,
-    f_matchbufline, f_matchend, f_matchlist, f_matchstr, f_matchstrlist, f_matchstrpos, f_max,
-    f_menu_get, f_min, f_mode, f_msgpackdump, f_msgpackparse, f_nextnonblank, f_nr2char, f_or,
-    f_perleval, f_pow, f_prevnonblank, f_printf, f_prompt_appendbuf, f_prompt_getinput,
-    f_prompt_getprompt, f_prompt_setcallback, f_prompt_setinterrupt, f_prompt_setprompt,
-    f_pum_getpos, f_pumvisible, f_py3eval, f_rand, f_range, f_reduce, f_reg_executing,
-    f_reg_recorded, f_reg_recording, f_reltime, f_reltimefloat, f_reltimestr, f_repeat, f_reverse,
-    f_rpcnotify, f_rpcrequest, f_rpcstart, f_rpcstop, f_rubyeval, f_screenattr, f_screenchar,
-    f_screenchars, f_screencol, f_screenrow, f_screenstring, f_search, f_searchdecl, f_searchpair,
-    f_searchpairpos, f_searchpos, f_serverlist, f_serverstart, f_serverstop, f_setbufline,
-    f_setbufvar, f_setcharpos, f_setcharsearch, f_setcursorcharpos, f_setenv, f_setline, f_setpos,
-    f_setreg, f_settabvar, f_settabwinvar, f_settagstack, f_setwinvar, f_sha256, f_shellescape,
-    f_shiftwidth, f_sockconnect, f_soundfold, f_spellbadword, f_spellsuggest, f_split, f_srand,
-    f_state, f_stdioopen, f_stdpath, f_str2float, f_strftime, f_strptime, f_submatch, f_substitute,
-    f_swapfilelist, f_swapinfo, f_swapname, f_synID, f_synIDattr, f_synIDtrans, f_synconcealed,
-    f_synstack, f_system, f_systemlist, f_tabpagebuflist, f_tabpagenr, f_tabpagewinnr, f_tagfiles,
-    f_taglist, f_termopen, f_timer_info, f_timer_pause, f_timer_start, f_timer_stop,
-    f_timer_stopall, f_type, f_values, f_virtcol, f_visualmode, f_wait, f_wildmenumode,
-    f_win_execute, f_win_findbuf, f_win_getid, f_win_gettype, f_win_gotoid, f_win_id2tabwin,
-    f_win_id2win, f_win_move_separator, f_win_move_statusline, f_win_screenpos, f_win_splitmove,
-    f_winbufnr, f_wincol, f_windowsversion, f_winheight, f_winlayout, f_winline, f_winnr,
-    f_winrestcmd, f_winrestview, f_winsaveview, f_winwidth, f_wordcount, f_xor, float_op_wrapper,
+    f_getwinposy, f_getwinvar, f_has, f_has_key, f_hlID, f_hlexists, f_id, f_index, f_indexof,
+    f_input, f_inputdialog, f_inputlist, f_inputrestore, f_inputsave, f_inputsecret, f_insert,
+    f_interrupt, f_invert, f_isinf, f_islocked, f_isnan, f_items, f_jobpid, f_jobresize,
+    f_jobstart, f_jobstop, f_jobwait, f_json_decode, f_json_encode, f_keys, f_keytrans,
+    f_last_buffer_nr, f_len, f_libcall, f_libcallnr, f_line, f_line2byte, f_list2str, f_localtime,
+    f_luaeval, f_match, f_matchbufline, f_matchend, f_matchlist, f_matchstr, f_matchstrlist,
+    f_matchstrpos, f_max, f_menu_get, f_min, f_mode, f_msgpackdump, f_msgpackparse, f_nextnonblank,
+    f_nr2char, f_or, f_perleval, f_pow, f_prevnonblank, f_printf, f_prompt_appendbuf,
+    f_prompt_getinput, f_prompt_getprompt, f_prompt_setcallback, f_prompt_setinterrupt,
+    f_prompt_setprompt, f_pum_getpos, f_pumvisible, f_py3eval, f_rand, f_range, f_reduce,
+    f_reg_executing, f_reg_recorded, f_reg_recording, f_reltime, f_reltimefloat, f_reltimestr,
+    f_repeat, f_reverse, f_rpcnotify, f_rpcrequest, f_rpcstart, f_rpcstop, f_rubyeval,
+    f_screenattr, f_screenchar, f_screenchars, f_screencol, f_screenrow, f_screenstring, f_search,
+    f_searchdecl, f_searchpair, f_searchpairpos, f_searchpos, f_serverlist, f_serverstart,
+    f_serverstop, f_setbufline, f_setbufvar, f_setcharpos, f_setcharsearch, f_setcursorcharpos,
+    f_setenv, f_setline, f_setpos, f_setreg, f_settabvar, f_settabwinvar, f_settagstack,
+    f_setwinvar, f_sha256, f_shellescape, f_shiftwidth, f_sockconnect, f_soundfold, f_spellbadword,
+    f_spellsuggest, f_split, f_srand, f_state, f_stdioopen, f_stdpath, f_str2float, f_strftime,
+    f_strptime, f_submatch, f_substitute, f_swapfilelist, f_swapinfo, f_swapname, f_synID,
+    f_synIDattr, f_synIDtrans, f_synconcealed, f_synstack, f_system, f_systemlist,
+    f_tabpagebuflist, f_tabpagenr, f_tabpagewinnr, f_tagfiles, f_taglist, f_termopen, f_timer_info,
+    f_timer_pause, f_timer_start, f_timer_stop, f_timer_stopall, f_type, f_values, f_virtcol,
+    f_visualmode, f_wait, f_wildmenumode, f_win_execute, f_win_findbuf, f_win_getid, f_win_gettype,
+    f_win_gotoid, f_win_id2tabwin, f_win_id2win, f_win_move_separator, f_win_move_statusline,
+    f_win_screenpos, f_win_splitmove, f_winbufnr, f_wincol, f_windowsversion, f_winheight,
+    f_winlayout, f_winline, f_winnr, f_winrestcmd, f_winrestview, f_winsaveview, f_winwidth,
+    f_wordcount, f_xor, float_op_wrapper,
 };
 use crate::ported::eval::funcs::{
     f_argc, f_argidx, f_arglistid, f_argv, f_assert_equalfile, f_cindent, f_clearmatches,
     f_cmdcomplete_info, f_complete, f_complete_add, f_complete_check, f_complete_info,
-    f_diff_filler, f_digraph_get, f_digraph_getlist, f_digraph_set, f_digraph_setlist,
+    f_diff_filler, f_diff_hlID, f_digraph_get, f_digraph_getlist, f_digraph_set, f_digraph_setlist,
     f_foldclosed, f_foldclosedend, f_foldlevel, f_foldtext, f_foldtextresult, f_fullcommand,
     f_getchar, f_getcharmod, f_getcharstr, f_getcmdcomplpat, f_getcmdcompltype, f_getcmdline,
     f_getcmdpos, f_getcmdprompt, f_getcmdscreenpos, f_getcmdtype, f_getcompletion,
@@ -1058,6 +1059,10 @@ pub const VIML_FN_HIGHLIGHT_EXISTS: u16 = 3521;
 pub const VIML_FN_DIFF_FILLER: u16 = 3522;
 /// `virtcol2col()`
 pub const VIML_FN_VIRTCOL2COL: u16 = 3523;
+/// `hlID()` (and its deprecated alias `highlightID()`)
+pub const VIML_FN_HLID: u16 = 3572;
+/// `diff_hlID()`
+pub const VIML_FN_DIFF_HLID: u16 = 3573;
 /// `wildtrigger()`
 pub const VIML_FN_WILDTRIGGER: u16 = 3524;
 /// `searchcount()`
@@ -3333,6 +3338,8 @@ pub fn install(vm: &mut VM) {
         call_func(vm, n, f_highlight_exists)
     });
     vm.register_builtin(VIML_FN_DIFF_FILLER, |vm, n| call_func(vm, n, f_diff_filler));
+    vm.register_builtin(VIML_FN_HLID, |vm, n| call_func(vm, n, f_hlID));
+    vm.register_builtin(VIML_FN_DIFF_HLID, |vm, n| call_func(vm, n, f_diff_hlID));
     vm.register_builtin(VIML_FN_VIRTCOL2COL, |vm, n| call_func(vm, n, f_virtcol2col));
     vm.register_builtin(VIML_FN_WILDTRIGGER, |vm, n| call_func(vm, n, f_wildtrigger));
     vm.register_builtin(VIML_FN_SEARCHCOUNT, |vm, n| call_func(vm, n, f_searchcount));

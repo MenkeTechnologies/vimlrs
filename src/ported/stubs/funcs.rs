@@ -99,12 +99,6 @@ pub fn get_optional_window() {
     unimplemented!("STUB get_optional_window — csrc/eval/funcs.c:769")
 }
 
-/// Port of `set_cursorpos()` — `csrc/eval/funcs.c:965`. STUB: not yet ported.
-/// C: `static void set_cursorpos(typval_T *argvars, typval_T *rettv, bool charcol)`
-pub fn set_cursorpos() {
-    unimplemented!("STUB set_cursorpos — csrc/eval/funcs.c:965")
-}
-
 /// Port of `f_eval()` — `csrc/eval/funcs.c:1233`. STUB: not yet ported.
 pub fn f_eval(
     _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
@@ -167,14 +161,6 @@ pub fn dummy_timer_due_cb() {
 /// C: `static void dummy_timer_close_cb(TimeWatcher *tw, void *data)`
 pub fn dummy_timer_close_cb() {
     unimplemented!("STUB dummy_timer_close_cb — csrc/eval/funcs.c:2579")
-}
-
-/// Port of `f_hlID()` — `csrc/eval/funcs.c:2894`. STUB: not yet ported.
-pub fn f_hlID(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_hlID — csrc/eval/funcs.c:2894")
 }
 
 /// Port of `indexof_eval_expr()` — `csrc/eval/funcs.c:2983`. STUB: not yet ported.
