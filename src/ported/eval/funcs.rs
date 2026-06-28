@@ -898,12 +898,14 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
         let mut zero = false;
         let mut plus = false;
         let mut space = false;
+        let mut alt = false; // `#` alternate form
         while i < bytes.len() && matches!(bytes[i], '-' | '0' | '+' | ' ' | '#') {
             match bytes[i] {
                 '-' => left = true,
                 '0' => zero = true,
                 '+' => plus = true,
                 ' ' => space = true,
+                '#' => alt = true,
                 _ => {}
             }
             i += 1;
@@ -1033,6 +1035,19 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
             } else {
                 ("", core)
             }
+        } else if alt {
+            // `#` alternate form for the unsigned radix conversions: a `0x`/`0X`/
+            // `0b`/`0B` prefix on a non-zero x/X/b/B, and a leading `0` on octal.
+            // Carried in the sign slot so zero-padding lands after the prefix.
+            let prefix = match conv {
+                'x' if core != "0" => "0x",
+                'X' if core != "0" => "0X",
+                'b' if core != "0" => "0b",
+                'B' if core != "0" => "0B",
+                'o' if !core.starts_with('0') => "0",
+                _ => "",
+            };
+            (prefix, core)
         } else {
             ("", core)
         };

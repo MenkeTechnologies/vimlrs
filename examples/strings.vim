@@ -44,6 +44,15 @@ call assert_equal('x x', printf('%1$s %1$s', 'x'))
 call assert_equal('00042', printf('%2$05d', 7, 42))
 call assert_equal('1 x', printf('%d %s', 1, 'x'))
 
+" ── printf # (alternate form): 0x/0X/0b prefix on x/X/b, leading 0 on octal;
+"    no prefix for a zero value; zero-padding lands after the prefix ──
+call assert_equal('0xff', printf('%#x', 255))
+call assert_equal('0XFF', printf('%#X', 255))
+call assert_equal('010', printf('%#o', 8))
+call assert_equal('0b1010', printf('%#b', 10))
+call assert_equal('0', printf('%#x', 0))
+call assert_equal('0x0000ff', printf('%#08x', 255))
+
 " ── len() of a String is its BYTE length (multibyte counts each byte) ──
 call assert_equal(6, len('héllo'))
 call assert_equal(5, strchars('héllo'))
