@@ -293,4 +293,8 @@ pub enum Stmt {
     Augroup(String),
     /// `:doautocmd {event} [{pat}]` — fire matching autocommands.
     Doautocmd(String),
+    /// A `:`-prefixed or `%`-prefixed Ex command line with an optional line
+    /// range (`:%s/…`, `:1,3d`, `%g/…/d`): the whole raw line, parsed and run
+    /// against the current buffer at run time.
+    ExCmd(String),
 }

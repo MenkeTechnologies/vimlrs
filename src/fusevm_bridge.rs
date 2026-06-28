@@ -394,6 +394,8 @@ pub const VIML_AUTOCMD: u16 = 3566;
 pub const VIML_AUGROUP: u16 = 3567;
 /// `:doautocmd` statement: pop the args, fire matching autocommands.
 pub const VIML_DOAUTOCMD: u16 = 3568;
+/// `:[range]cmd` statement: pop the raw line, run it against the buffer.
+pub const VIML_EXCMD: u16 = 3569;
 /// `:source {file}`: pop the filename, read and run it in the current scope.
 pub const VIML_SOURCE: u16 = 3500;
 /// `:unlet {name}`: pop the name, delete the variable.
@@ -2329,6 +2331,37 @@ fn b_doautocmd(vm: &mut VM, _: u8) -> Value {
     Value::Undef
 }
 
+/// Run one Ex command against the buffer; an unrecognized command (or a
+/// `:global` sub-command that isn't an Ex command) runs as an ordinary
+/// statement. Used by `b_excmd` and for each `:global`-matched line.
+fn exec_ex_or_stmt(line: &str) {
+    use crate::ported::eval::funcs::{do_excmd, ExCmdResult};
+    match do_excmd(line) {
+        ExCmdResult::Handled => {}
+        ExCmdResult::NotEx => {
+            // Strip a leading ':' so `:echo …` runs as the `echo` statement.
+            let stmt = line.trim().strip_prefix(':').unwrap_or(line.trim());
+            let _ = run_source_nested(stmt);
+        }
+        ExCmdResult::Global(mut lines, cmd) => {
+            // Run `cmd` on each matched line, highest first so deletions above
+            // don't shift the lines still to process.
+            lines.sort_unstable();
+            for lnum in lines.into_iter().rev() {
+                crate::ported::eval::funcs::set_cursorpos(lnum, 1);
+                exec_ex_or_stmt(&cmd);
+            }
+        }
+    }
+}
+
+/// `:[range]cmd` statement: pop the raw line and run it against the buffer.
+fn b_excmd(vm: &mut VM, _: u8) -> Value {
+    let line = tv_get_string(&pop_tv(vm));
+    exec_ex_or_stmt(&line);
+    Value::Undef
+}
+
 /// User-command invocation: pop the raw line (`Name[!] args`), expand the
 /// command's replacement and run it; error E492 if there is no such command.
 fn b_usercmd(vm: &mut VM, _: u8) -> Value {
@@ -2806,6 +2839,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_AUTOCMD, b_autocmd);
     vm.register_builtin(VIML_AUGROUP, b_augroup);
     vm.register_builtin(VIML_DOAUTOCMD, b_doautocmd);
+    vm.register_builtin(VIML_EXCMD, b_excmd);
     vm.register_builtin(VIML_FN_JSON_ENCODE, |vm, n| call_func(vm, n, f_json_encode));
     vm.register_builtin(VIML_FN_JSON_DECODE, |vm, n| call_func(vm, n, f_json_decode));
     vm.register_builtin(VIML_FN_STRGETCHAR, |vm, n| call_func(vm, n, f_strgetchar));

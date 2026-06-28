@@ -93,6 +93,16 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
         _ if is_map_command(cmd) && !line[cmd.len()..].starts_with('(') => {
             Ok(Stmt::Map(line.to_string()))
         }
+        // A `:`-prefixed line, or a `%`-prefixed line (`%s/…`), is an Ex command
+        // with an optional line range. Neither can begin a valid expression
+        // statement, so this is safe; unrecognized Ex commands fall back to
+        // running as an ordinary statement at run time.
+        _ if line.starts_with(':')
+            || (line.starts_with('%')
+                && line[1..].starts_with(|c: char| c.is_ascii_alphabetic())) =>
+        {
+            Ok(Stmt::ExCmd(line.to_string()))
+        }
         // A command word starting with an uppercase letter is a user-command
         // invocation (`:Foo args`), resolved at run time. A name immediately
         // followed by `(` is a funcref call expression, not a command.

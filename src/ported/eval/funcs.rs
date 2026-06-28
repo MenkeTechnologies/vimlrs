@@ -2213,7 +2213,7 @@ fn tv_lines_arg(tv: &typval_T) -> Vec<String> {
 
 /// Port of `set_cursorpos()` (Neovim eval/funcs.c) — move the cursor to `lnum`,
 /// `col`, clamped to the current buffer (line 1..=last, column 1..=len+1).
-fn set_cursorpos(lnum: varnumber_T, col: varnumber_T) {
+pub fn set_cursorpos(lnum: varnumber_T, col: varnumber_T) {
     let len = curbuf_len();
     let l = lnum.clamp(1, len);
     let linelen = get_buffer_lines(l, l)
@@ -5572,6 +5572,276 @@ pub fn au_exists(arg: &str) -> bool {
             .iter()
             .any(|ac| ac.event == event && pat.map_or(true, |p| ac.pat == p))
     })
+}
+
+// ── Ex commands with a line range that operate on the current buffer (Neovim
+//    ex_cmds.c / ex_docmd.c): `:[range]d/s/g/v/m/t/j/y/pu`. Reached from the
+//    parser for `:`-prefixed and `%`-prefixed lines (neither starts a valid
+//    expression). ──
+
+/// The outcome of `do_excmd`: a direct command that mutated the buffer, a
+/// command the Ex layer does not recognize (run it as an ordinary statement),
+/// or a `:global` that must run `cmd` on each of the matched lines.
+pub enum ExCmdResult {
+    Handled,
+    NotEx,
+    Global(Vec<varnumber_T>, String),
+}
+
+/// Parse one address (`.`, `$`, a Number, or empty = the cursor) with optional
+/// `+N`/`-N` offsets. Returns `(lnum, bytes_consumed, had_address)`.
+fn parse_addr(s: &str) -> (varnumber_T, usize, bool) {
+    let b = s.as_bytes();
+    let mut i = 0;
+    let last = curbuf_len();
+    let cur = CURPOS.with(|c| c.borrow().0);
+    let (mut lnum, had) = if i < b.len() && b[i] == b'.' {
+        i += 1;
+        (cur, true)
+    } else if i < b.len() && b[i] == b'$' {
+        i += 1;
+        (last, true)
+    } else if i < b.len() && b[i].is_ascii_digit() {
+        let start = i;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        (s[start..i].parse().unwrap_or(0), true)
+    } else {
+        (cur, false)
+    };
+    // Offsets: +N / -N (a bare +/- is ±1), possibly several.
+    let mut had_off = false;
+    while i < b.len() && (b[i] == b'+' || b[i] == b'-') {
+        let sign = if b[i] == b'+' { 1 } else { -1 };
+        i += 1;
+        let start = i;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        let n: varnumber_T = if i > start {
+            s[start..i].parse().unwrap_or(0)
+        } else {
+            1
+        };
+        lnum += sign * n;
+        had_off = true;
+    }
+    (lnum, i, had || had_off)
+}
+
+/// Parse a leading line range (`%`, `N`, `N,M`, `.`, `$`, `.+1,$`, …). Returns
+/// `(line1, line2, had_range, rest)`; with no range both lines are the cursor
+/// line and `had_range` is false.
+fn parse_line_range(s: &str) -> (varnumber_T, varnumber_T, bool, &str) {
+    let s = s.trim_start();
+    if let Some(rest) = s.strip_prefix('%') {
+        return (1, curbuf_len(), true, rest.trim_start());
+    }
+    let cur = CURPOS.with(|c| c.borrow().0);
+    let (a1, c1, had1) = parse_addr(s);
+    let mut rest = &s[c1..];
+    if let Some(after) = rest.strip_prefix([',', ';']) {
+        let (a2, c2, _) = parse_addr(after);
+        rest = &after[c2..];
+        let l1 = if had1 { a1 } else { cur };
+        return (l1, a2, true, rest.trim_start());
+    }
+    if had1 {
+        (a1, a1, true, rest.trim_start())
+    } else {
+        (cur, cur, false, rest.trim_start())
+    }
+}
+
+/// Split `s` on its first character (the delimiter) into up to three unescaped
+/// fields — used to parse `:s/pat/sub/flags` and `:g/pat/cmd`.
+fn split_delim(s: &str, max: usize) -> Vec<String> {
+    let mut chars = s.chars();
+    let delim = match chars.next() {
+        Some(d) => d,
+        None => return Vec::new(),
+    };
+    let mut fields = vec![String::new()];
+    let mut escaped = false;
+    for c in chars {
+        if escaped {
+            if c != delim {
+                fields.last_mut().unwrap().push('\\');
+            }
+            fields.last_mut().unwrap().push(c);
+            escaped = false;
+        } else if c == '\\' {
+            escaped = true;
+        } else if c == delim && fields.len() < max {
+            fields.push(String::new());
+        } else {
+            fields.last_mut().unwrap().push(c);
+        }
+    }
+    fields
+}
+
+/// Port of `do_excmd()` (Neovim ex_docmd.c, this subset) — run a `:[range]cmd`
+/// line against the current buffer.
+pub fn do_excmd(line: &str) -> ExCmdResult {
+    let line = line.trim().strip_prefix(':').unwrap_or(line.trim());
+    let (l1, l2, had_range, rest) = parse_line_range(line);
+    // Command word: leading letters, then an optional `!`.
+    let cmd_end = rest
+        .find(|c: char| !c.is_ascii_alphabetic())
+        .unwrap_or(rest.len());
+    let cmd = &rest[..cmd_end];
+    let bang = rest[cmd_end..].starts_with('!');
+    let args = rest[cmd_end + if bang { 1 } else { 0 }..].trim();
+    let len = curbuf_len();
+    let (lo, hi) = (l1.clamp(1, len), l2.clamp(1, len));
+    match cmd {
+        "d" | "de" | "del" | "delete" => {
+            CURBUF.with(|b| {
+                let mut b = b.borrow_mut();
+                if b.is_empty() {
+                    b.push(String::new());
+                }
+                let (a, z) = ((lo - 1) as usize, (hi as usize).min(b.len()));
+                if a < z {
+                    b.drain(a..z);
+                }
+                if b.is_empty() {
+                    b.push(String::new());
+                }
+            });
+            set_cursorpos(lo, 1);
+            ExCmdResult::Handled
+        }
+        "s" | "su" | "sub" | "substitute" => {
+            let f = split_delim(args, 3);
+            let (pat, sub, flags) = (
+                f.first().cloned().unwrap_or_default(),
+                f.get(1).cloned().unwrap_or_default(),
+                f.get(2).cloned().unwrap_or_default(),
+            );
+            for lnum in lo..=hi {
+                let cur = get_buffer_lines(lnum, lnum)
+                    .into_iter()
+                    .next()
+                    .unwrap_or_default();
+                let new = crate::viml_regex::regex_substitute(&cur, &pat, &sub, &flags);
+                set_buffer_lines(lnum, vec![new], false);
+            }
+            set_cursorpos(hi, 1);
+            ExCmdResult::Handled
+        }
+        "g" | "gl" | "global" | "v" | "vglobal" => {
+            let invert = cmd.starts_with('v') || bang;
+            let f = split_delim(args, 2);
+            let pat = f.first().cloned().unwrap_or_default();
+            let sub_cmd = f.get(1).cloned().unwrap_or_default();
+            let ic = tv_get_number_chk(&get_option_value("ignorecase"), None) != 0;
+            // :global defaults to the whole file when no range is given.
+            let (gl, gh) = if had_range { (lo, hi) } else { (1, len) };
+            let mut hits = Vec::new();
+            for lnum in gl..=gh {
+                let l = get_buffer_lines(lnum, lnum)
+                    .into_iter()
+                    .next()
+                    .unwrap_or_default();
+                let m = crate::viml_regex::regex_match(&pat, &l, ic);
+                if m != invert {
+                    hits.push(lnum);
+                }
+            }
+            ExCmdResult::Global(hits, sub_cmd)
+        }
+        "m" | "mo" | "move" => {
+            let (dest, _, _) = parse_addr(args.trim());
+            ex_move(lo, hi, dest);
+            ExCmdResult::Handled
+        }
+        "t" | "co" | "cop" | "copy" => {
+            let (dest, _, _) = parse_addr(args.trim());
+            ex_copy(lo, hi, dest);
+            ExCmdResult::Handled
+        }
+        "j" | "jo" | "join" => {
+            ex_join(lo, hi, bang);
+            ExCmdResult::Handled
+        }
+        "y" | "ya" | "yank" => {
+            let reg = args.chars().next().unwrap_or('"');
+            let lines = get_buffer_lines(lo, hi);
+            write_reg_contents_lst(reg, lines, MotionType::LineWise, false);
+            ExCmdResult::Handled
+        }
+        "pu" | "put" => {
+            let reg = args.chars().next().unwrap_or('"');
+            if let Some(lines) = get_reg_contents(reg) {
+                set_buffer_lines(hi, lines, true);
+            }
+            ExCmdResult::Handled
+        }
+        _ => ExCmdResult::NotEx,
+    }
+}
+
+/// Port of `ex_move()` (Neovim ex_cmds.c) — move lines `lo`..`hi` to after
+/// `dest` (0 = before the first line).
+fn ex_move(lo: varnumber_T, hi: varnumber_T, dest: varnumber_T) {
+    let moved = get_buffer_lines(lo, hi);
+    CURBUF.with(|b| {
+        let mut b = b.borrow_mut();
+        let (a, z) = ((lo - 1) as usize, (hi as usize).min(b.len()));
+        b.drain(a..z);
+        // Adjust the destination for the removed block above it.
+        let mut at = dest;
+        if dest >= hi {
+            at -= hi - lo + 1;
+        } else if dest >= lo {
+            at = lo - 1;
+        }
+        let pos = (at.max(0) as usize).min(b.len());
+        for (i, l) in moved.into_iter().enumerate() {
+            b.insert(pos + i, l);
+        }
+    });
+}
+
+/// Port of `ex_copy()` (Neovim ex_cmds.c) — copy lines `lo`..`hi` to after
+/// `dest`.
+fn ex_copy(lo: varnumber_T, hi: varnumber_T, dest: varnumber_T) {
+    let copied = get_buffer_lines(lo, hi);
+    set_buffer_lines(dest, copied, true);
+}
+
+/// Port of `ex_join()` (Neovim ex_cmds.c) — join lines `lo`..`hi` into one. With
+/// `keep` (`:j!`) the lines are concatenated verbatim; otherwise leading
+/// whitespace of joined-on lines is dropped and a single space inserted.
+fn ex_join(lo: varnumber_T, hi: varnumber_T, keep: bool) {
+    let hi = hi.max(lo + 1);
+    let lines = get_buffer_lines(lo, hi);
+    if lines.len() < 2 {
+        return;
+    }
+    let mut joined = lines[0].clone();
+    for l in &lines[1..] {
+        if keep {
+            joined.push_str(l);
+        } else {
+            if !joined.is_empty() && !joined.ends_with(' ') {
+                joined.push(' ');
+            }
+            joined.push_str(l.trim_start());
+        }
+    }
+    CURBUF.with(|b| {
+        let mut b = b.borrow_mut();
+        let (a, z) = ((lo - 1) as usize, (hi as usize).min(b.len()));
+        if a < z {
+            b.drain(a..z);
+            b.insert(a, joined);
+        }
+    });
+    set_cursorpos(lo, 1);
 }
 
 // ════════════════════════════════════════════════════════════════════════════

@@ -329,3 +329,14 @@ line_match_from
 finish_search
 do_searchpair
 skip_cols
+
+# ── round 11: buffer-editing Ex commands (ex_cmds.c / ex_docmd.c) ──
+# :[range]d/s/g/v/m/t/j/y/pu on the in-memory buffer. parse_addr/parse_line_range
+# parse the line range; split_delim splits :s///:g// fields (no single C name).
+do_excmd
+parse_addr
+parse_line_range
+split_delim
+ex_move
+ex_copy
+ex_join
