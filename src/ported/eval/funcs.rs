@@ -2102,34 +2102,209 @@ fn getpos_both(rettv: &mut typval_T, getcurpos: bool) {
     }
 }
 
-/// Port of `f_getpos()`/`getpos_both(…,false,false)` — no cursor → `[0,0,0,0]`.
-pub fn f_getpos(_argvars: &[typval_T], rettv: &mut typval_T) {
-    getpos_both(rettv, false);
+// ── In-memory current buffer (Neovim buffer.c / memline.c). vimlrs runs
+//    standalone, but text functions operate on a single virtual buffer that
+//    scripts populate with setline()/append(). The buffer always has >= 1 line
+//    (an empty buffer is `[""]`), like Vim. ──
+
+thread_local! {
+    /// The current buffer's lines (`curbuf->b_ml` in memline.c), 1-based when
+    /// addressed. Always non-empty.
+    static CURBUF: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    /// The cursor `(lnum, col, curswant)` (`curwin->w_cursor`), 1-based.
+    static CURPOS: std::cell::RefCell<(varnumber_T, varnumber_T, varnumber_T)> =
+        const { std::cell::RefCell::new((1, 1, 1)) };
 }
-/// Port of `f_getcharpos()`/`getpos_both(…,false,true)` — no cursor → `[0,0,0,0]`.
-pub fn f_getcharpos(_argvars: &[typval_T], rettv: &mut typval_T) {
-    getpos_both(rettv, false);
+
+/// Number of lines in the current buffer (minimum 1: an unset buffer reads as a
+/// single empty line, like Vim).
+fn curbuf_len() -> varnumber_T {
+    CURBUF.with(|b| b.borrow().len().max(1) as varnumber_T)
 }
-/// Port of `f_getcurpos()`/`getpos_both(…,true,false)` — no cursor →
-/// `[0,0,0,0,0]` (the 5th element is `curswant`).
+
+/// Port of `tv_get_lnum()` (Neovim eval/typval.c) — resolve a line-number
+/// argument: a Number, or a String like `.` (cursor), `$` (last line), `w0`/
+/// `w$` (window top/bottom = first/last here), or a `'m` mark (0, no marks).
+fn tv_get_lnum(tv: &typval_T) -> varnumber_T {
+    if tv.v_type == VAR_STRING {
+        let s = tv_get_string(tv);
+        match s.as_str() {
+            "." => CURPOS.with(|c| c.borrow().0),
+            "$" | "w$" => curbuf_len(),
+            "w0" => 1,
+            _ if s.starts_with('\'') => 0,
+            _ => s.parse().unwrap_or(0),
+        }
+    } else {
+        tv_get_number(tv)
+    }
+}
+
+/// Port of `get_buffer_lines()` (Neovim buffer.c) — the current buffer's lines
+/// from `start` to `end` (1-based, inclusive, clamped to the buffer).
+fn get_buffer_lines(start: varnumber_T, end: varnumber_T) -> Vec<String> {
+    CURBUF.with(|b| {
+        let b = b.borrow();
+        // An unset buffer reads as a single empty line.
+        if b.is_empty() {
+            return if start <= 1 && end >= 1 {
+                vec![String::new()]
+            } else {
+                Vec::new()
+            };
+        }
+        let len = b.len() as varnumber_T;
+        let (s, e) = (start.max(1), end.min(len));
+        if s > e {
+            return Vec::new();
+        }
+        (s..=e).map(|i| b[(i - 1) as usize].clone()).collect()
+    })
+}
+
+/// Port of `set_buffer_lines()` (Neovim buffer.c) — replace (`append == false`)
+/// the lines from `lnum`, or insert them after line `lnum` (`append == true`,
+/// `lnum == 0` inserts before the first line). Returns 0 on success, 1 on
+/// failure (an out-of-range replace).
+fn set_buffer_lines(lnum: varnumber_T, lines: Vec<String>, append: bool) -> varnumber_T {
+    CURBUF.with(|b| {
+        let mut b = b.borrow_mut();
+        if b.is_empty() {
+            b.push(String::new());
+        }
+        if append {
+            let pos = (lnum.max(0) as usize).min(b.len());
+            for (i, l) in lines.into_iter().enumerate() {
+                b.insert(pos + i, l);
+            }
+            0
+        } else {
+            if lnum < 1 {
+                return 1;
+            }
+            for (i, l) in lines.into_iter().enumerate() {
+                let idx = (lnum - 1) as usize + i;
+                if idx < b.len() {
+                    b[idx] = l;
+                } else if idx == b.len() {
+                    b.push(l);
+                } else {
+                    break;
+                }
+            }
+            0
+        }
+    })
+}
+
+/// Collect a String-or-List `{text}` argument into a vector of lines.
+fn tv_lines_arg(tv: &typval_T) -> Vec<String> {
+    match (tv.v_type, &tv.vval) {
+        (VAR_LIST, v_list(Some(l))) => l
+            .borrow()
+            .lv_items
+            .iter()
+            .map(|it| tv_get_string(&it.li_tv))
+            .collect(),
+        _ => vec![tv_get_string(tv)],
+    }
+}
+
+/// Port of `set_cursorpos()` (Neovim eval/funcs.c) — move the cursor to `lnum`,
+/// `col`, clamped to the current buffer (line 1..=last, column 1..=len+1).
+fn set_cursorpos(lnum: varnumber_T, col: varnumber_T) {
+    let len = curbuf_len();
+    let l = lnum.clamp(1, len);
+    let linelen = get_buffer_lines(l, l)
+        .first()
+        .map_or(0, |s| s.len() as varnumber_T);
+    let c = col.clamp(1, linelen + 1);
+    CURPOS.with(|p| {
+        let mut p = p.borrow_mut();
+        *p = (l, c, c);
+    });
+}
+
+/// Port of `f_getpos()`/`getpos_both(…,false,false)` — the position of `{expr}`
+/// as `[bufnum, lnum, col, off]`; `.` is the cursor, marks are `[0,0,0,0]`.
+pub fn f_getpos(argvars: &[typval_T], rettv: &mut typval_T) {
+    let s = tv_get_string(&argvars[0]);
+    let (lnum, col) = if s == "." {
+        CURPOS.with(|c| {
+            let c = c.borrow();
+            (c.0, c.1)
+        })
+    } else {
+        (tv_get_lnum(&argvars[0]), 0)
+    };
+    let l = tv_list_alloc_ret(rettv, 4);
+    let mut lb = l.borrow_mut();
+    tv_list_append_number(&mut lb, 0);
+    tv_list_append_number(&mut lb, lnum);
+    tv_list_append_number(&mut lb, col);
+    tv_list_append_number(&mut lb, 0);
+}
+
+/// Port of `f_getpos_unused()` — retained stub entry point.
+/// Port of `f_getcharpos()` — like `getpos()` but the column is a character
+/// index. Here the buffer is byte==char for the common ASCII case.
+pub fn f_getcharpos(argvars: &[typval_T], rettv: &mut typval_T) {
+    f_getpos(argvars, rettv);
+}
+/// Port of `f_getcurpos()`/`getpos_both(…,true,false)` — the cursor position as
+/// `[bufnum, lnum, col, off, curswant]`.
 pub fn f_getcurpos(_argvars: &[typval_T], rettv: &mut typval_T) {
-    getpos_both(rettv, true);
+    let (lnum, col, curswant) = CURPOS.with(|c| *c.borrow());
+    let l = tv_list_alloc_ret(rettv, 5);
+    let mut lb = l.borrow_mut();
+    tv_list_append_number(&mut lb, 0);
+    tv_list_append_number(&mut lb, lnum);
+    tv_list_append_number(&mut lb, col);
+    tv_list_append_number(&mut lb, 0);
+    tv_list_append_number(&mut lb, curswant);
 }
 /// Port of `f_getcursorcharpos()`/`getpos_both(…,true,true)` — `[0,0,0,0,0]`.
 pub fn f_getcursorcharpos(_argvars: &[typval_T], rettv: &mut typval_T) {
     getpos_both(rettv, true);
 }
-/// Port of `f_col()`/`get_col(…,false)` — no cursor column → 0.
-pub fn f_col(_argvars: &[typval_T], rettv: &mut typval_T) {
-    *rettv = typval_T::from(0 as varnumber_T);
+/// Port of `f_col()`/`get_col(…,false)` — the byte column of `{expr}`: `.` is
+/// the cursor column, `$` is one past the end of the cursor's line.
+pub fn f_col(argvars: &[typval_T], rettv: &mut typval_T) {
+    let s = tv_get_string(&argvars[0]);
+    let (lnum, ccol) = CURPOS.with(|c| {
+        let c = c.borrow();
+        (c.0, c.1)
+    });
+    let col = match s.as_str() {
+        "." => ccol,
+        "$" => get_buffer_lines(lnum, lnum)
+            .first()
+            .map_or(1, |l| l.len() as varnumber_T + 1),
+        _ if s.starts_with('\'') => 0,
+        _ => 0,
+    };
+    *rettv = typval_T::from(col);
 }
-/// Port of `f_charcol()`/`get_col(…,true)` — no cursor column → 0.
-pub fn f_charcol(_argvars: &[typval_T], rettv: &mut typval_T) {
-    *rettv = typval_T::from(0 as varnumber_T);
+/// Port of `f_charcol()`/`get_col(…,true)` — like `col()` but a character index.
+pub fn f_charcol(argvars: &[typval_T], rettv: &mut typval_T) {
+    let s = tv_get_string(&argvars[0]);
+    let (lnum, ccol) = CURPOS.with(|c| {
+        let c = c.borrow();
+        (c.0, c.1)
+    });
+    let col = match s.as_str() {
+        "." => ccol,
+        "$" => get_buffer_lines(lnum, lnum)
+            .first()
+            .map_or(1, |l| l.chars().count() as varnumber_T + 1),
+        _ => 0,
+    };
+    *rettv = typval_T::from(col);
 }
-/// Port of `f_line()` — no cursor line → 0.
-pub fn f_line(_argvars: &[typval_T], rettv: &mut typval_T) {
-    *rettv = typval_T::from(0 as varnumber_T);
+/// Port of `f_line()` — the line number of `{expr}` (`.` cursor, `$` last line).
+pub fn f_line(argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(tv_get_lnum(&argvars[0]));
 }
 /// Port of `f_virtcol()` — no cursor → 0, or `[0,0]` when the second arg
 /// (`list`) is truthy, matching the C `theend:` branch.
@@ -2167,20 +2342,67 @@ pub fn f_screenchars(_argvars: &[typval_T], rettv: &mut typval_T) {
 pub fn f_screenstring(_argvars: &[typval_T], rettv: &mut typval_T) {
     *rettv = typval_T::from(String::new());
 }
-/// Port of `f_line2byte()` — no buffer → -1.
-pub fn f_line2byte(_argvars: &[typval_T], rettv: &mut typval_T) {
+/// Port of `f_line2byte()` — the byte offset of the first character of line
+/// `{lnum}` (1-based; each line counts its bytes plus one for the newline), or
+/// -1 if out of range. `lnum == last+1` gives the buffer's total byte size + 1.
+pub fn f_line2byte(argvars: &[typval_T], rettv: &mut typval_T) {
+    let lnum = tv_get_lnum(&argvars[0]);
+    let len = curbuf_len();
+    if lnum < 1 || lnum > len + 1 {
+        *rettv = typval_T::from(-1 as varnumber_T);
+        return;
+    }
+    let mut off: varnumber_T = 1;
+    for l in get_buffer_lines(1, lnum - 1) {
+        off += l.len() as varnumber_T + 1;
+    }
+    *rettv = typval_T::from(off);
+}
+/// Port of `f_byte2line()` — the line number containing byte `{byte}` (the
+/// inverse of `line2byte()`), or -1 if out of range.
+pub fn f_byte2line(argvars: &[typval_T], rettv: &mut typval_T) {
+    let target = tv_get_number(&argvars[0]);
+    if target < 1 {
+        *rettv = typval_T::from(-1 as varnumber_T);
+        return;
+    }
+    let mut off: varnumber_T = 1;
+    let mut lnum: varnumber_T = 0;
+    for l in get_buffer_lines(1, curbuf_len()) {
+        lnum += 1;
+        off += l.len() as varnumber_T + 1;
+        if target < off {
+            *rettv = typval_T::from(lnum);
+            return;
+        }
+    }
     *rettv = typval_T::from(-1 as varnumber_T);
 }
-/// Port of `f_byte2line()` — no buffer → -1.
-pub fn f_byte2line(_argvars: &[typval_T], rettv: &mut typval_T) {
-    *rettv = typval_T::from(-1 as varnumber_T);
-}
-/// Port of `f_nextnonblank()` — no buffer lines → 0.
-pub fn f_nextnonblank(_argvars: &[typval_T], rettv: &mut typval_T) {
+/// Port of `f_nextnonblank()` — the first non-blank line at or after `{lnum}`,
+/// or 0 if there is none.
+pub fn f_nextnonblank(argvars: &[typval_T], rettv: &mut typval_T) {
+    let mut lnum = tv_get_lnum(&argvars[0]).max(1);
+    let len = curbuf_len();
+    while lnum <= len {
+        if !get_buffer_lines(lnum, lnum)[0].trim().is_empty() {
+            *rettv = typval_T::from(lnum);
+            return;
+        }
+        lnum += 1;
+    }
     *rettv = typval_T::from(0 as varnumber_T);
 }
-/// Port of `f_prevnonblank()` — no buffer lines → 0.
-pub fn f_prevnonblank(_argvars: &[typval_T], rettv: &mut typval_T) {
+/// Port of `f_prevnonblank()` — the first non-blank line at or before `{lnum}`,
+/// or 0 if there is none.
+pub fn f_prevnonblank(argvars: &[typval_T], rettv: &mut typval_T) {
+    let mut lnum = tv_get_lnum(&argvars[0]).min(curbuf_len());
+    while lnum >= 1 {
+        if !get_buffer_lines(lnum, lnum)[0].trim().is_empty() {
+            *rettv = typval_T::from(lnum);
+            return;
+        }
+        lnum -= 1;
+    }
     *rettv = typval_T::from(0 as varnumber_T);
 }
 /// Port of `f_wordcount()`/`cursor_pos_info()` — empty buffer → every count 0.
@@ -2519,20 +2741,48 @@ pub fn f_timer_stopall(_argvars: &[typval_T], rettv: &mut typval_T) {
 }
 /// Port of `f_setpos()`/`set_position(…,false)` — no buffer/window to set a
 /// position in → -1 (the C error default).
-pub fn f_setpos(_argvars: &[typval_T], rettv: &mut typval_T) {
-    *rettv = typval_T::from(-1 as varnumber_T);
+pub fn f_setpos(argvars: &[typval_T], rettv: &mut typval_T) {
+    let expr = tv_get_string(&argvars[0]);
+    // c: `.` sets the cursor from [bufnum, lnum, col, off]; marks are accepted.
+    if expr == "." {
+        if let (VAR_LIST, v_list(Some(l))) = (argvars[1].v_type, &argvars[1].vval) {
+            let items = &l.borrow().lv_items;
+            let lnum = items.get(1).map_or(0, |it| tv_get_number(&it.li_tv));
+            let col = items.get(2).map_or(1, |it| tv_get_number(&it.li_tv));
+            set_cursorpos(lnum, col);
+        }
+    }
+    *rettv = typval_T::from(0 as varnumber_T);
 }
-/// Port of `f_setcharpos()`/`set_position(…,true)` — no buffer/window → -1.
-pub fn f_setcharpos(_argvars: &[typval_T], rettv: &mut typval_T) {
-    *rettv = typval_T::from(-1 as varnumber_T);
+/// Port of `f_setcharpos()`/`set_position(…,true)` — like `setpos()`.
+pub fn f_setcharpos(argvars: &[typval_T], rettv: &mut typval_T) {
+    f_setpos(argvars, rettv);
 }
-/// Port of `f_cursor()`/`set_cursorpos(…,false)` — no window to move → -1.
-pub fn f_cursor(_argvars: &[typval_T], rettv: &mut typval_T) {
-    *rettv = typval_T::from(-1 as varnumber_T);
+/// Port of `f_cursor()`/`set_cursorpos(…,false)` — move the cursor to `{lnum}`,
+/// `{col}` (or a `[lnum, col, off]` List). Returns 0 on success.
+pub fn f_cursor(argvars: &[typval_T], rettv: &mut typval_T) {
+    let (lnum, col) = if argvars[0].v_type == VAR_LIST {
+        if let (VAR_LIST, v_list(Some(l))) = (argvars[0].v_type, &argvars[0].vval) {
+            let items = &l.borrow().lv_items;
+            (
+                items.first().map_or(1, |it| tv_get_number(&it.li_tv)),
+                items.get(1).map_or(1, |it| tv_get_number(&it.li_tv)),
+            )
+        } else {
+            (1, 1)
+        }
+    } else {
+        (
+            tv_get_number(&argvars[0]),
+            argvars.get(1).map_or(1, tv_get_number),
+        )
+    };
+    set_cursorpos(lnum, col);
+    *rettv = typval_T::from(0 as varnumber_T);
 }
-/// Port of `f_setcursorcharpos()`/`set_cursorpos(…,true)` — no window → -1.
-pub fn f_setcursorcharpos(_argvars: &[typval_T], rettv: &mut typval_T) {
-    *rettv = typval_T::from(-1 as varnumber_T);
+/// Port of `f_setcursorcharpos()`/`set_cursorpos(…,true)` — like `cursor()`.
+pub fn f_setcursorcharpos(argvars: &[typval_T], rettv: &mut typval_T) {
+    f_cursor(argvars, rettv);
 }
 /// Port of `f_setcharsearch()` — sets the `f`/`t` search state we do not track
 /// standalone → no-op (rettv stays 0, as the C sets no return value).
@@ -2930,43 +3180,107 @@ pub fn f_tabpagewinnr(_argvars: &[typval_T], rettv: &mut typval_T) {
 /// Port of `f_getline()` (buffer.c) — no buffer: "" for a single line,
 /// `[]` for the two-arg (range) List form.
 pub fn f_getline(argvars: &[typval_T], rettv: &mut typval_T) {
+    let lnum = tv_get_lnum(&argvars[0]);
     if argvars.len() >= 2 && argvars[1].v_type != VAR_UNKNOWN {
-        tv_list_alloc_ret(rettv, 0);
+        // c: two arguments → a List of lines lnum..=end.
+        let end = tv_get_lnum(&argvars[1]);
+        let lines = get_buffer_lines(lnum, end);
+        let l = tv_list_alloc_ret(rettv, lines.len() as isize);
+        let mut lb = l.borrow_mut();
+        for line in lines {
+            tv_list_append_string(&mut lb, &line);
+        }
     } else {
-        *rettv = typval_T::from(String::new());
+        let s = get_buffer_lines(lnum, lnum)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        *rettv = typval_T::from(s);
     }
 }
-/// Port of `f_getbufline()`/`getbufline()` (buffer.c) — always a List → empty.
-pub fn f_getbufline(_argvars: &[typval_T], rettv: &mut typval_T) {
-    tv_list_alloc_ret(rettv, 0);
+/// Port of `f_getbufline()` (buffer.c) — buffer lines `{lnum}`..`{end}` as a
+/// List. vimlrs has a single virtual buffer, so `{buf}` is ignored.
+pub fn f_getbufline(argvars: &[typval_T], rettv: &mut typval_T) {
+    let lnum = tv_get_lnum(&argvars[1]);
+    let end = if argvars.len() >= 3 && argvars[2].v_type != VAR_UNKNOWN {
+        tv_get_lnum(&argvars[2])
+    } else {
+        lnum
+    };
+    let lines = get_buffer_lines(lnum, end);
+    let l = tv_list_alloc_ret(rettv, lines.len() as isize);
+    let mut lb = l.borrow_mut();
+    for line in lines {
+        tv_list_append_string(&mut lb, &line);
+    }
 }
-/// Port of `f_getbufoneline()` (buffer.c) — no buffer line → "".
-pub fn f_getbufoneline(_argvars: &[typval_T], rettv: &mut typval_T) {
-    *rettv = typval_T::from(String::new());
+/// Port of `f_getbufoneline()` (buffer.c) — the single buffer line `{lnum}`.
+pub fn f_getbufoneline(argvars: &[typval_T], rettv: &mut typval_T) {
+    let lnum = tv_get_lnum(&argvars[1]);
+    let s = get_buffer_lines(lnum, lnum)
+        .into_iter()
+        .next()
+        .unwrap_or_default();
+    *rettv = typval_T::from(s);
 }
 /// Port of `f_getbufinfo()` (buffer.c) — no buffers → empty List.
 pub fn f_getbufinfo(_argvars: &[typval_T], rettv: &mut typval_T) {
     tv_list_alloc_ret(rettv, 0);
 }
-/// Port of `f_setline()`/`set_buffer_lines()` (buffer.c) — no buffer → 1 (FAIL).
-pub fn f_setline(_argvars: &[typval_T], rettv: &mut typval_T) {
-    *rettv = typval_T::from(1 as varnumber_T);
+/// Port of `f_setline()`/`set_buffer_lines()` (buffer.c) — replace line(s) from
+/// `{lnum}` with `{text}` (a String or List). Returns 0 on success, 1 on error.
+pub fn f_setline(argvars: &[typval_T], rettv: &mut typval_T) {
+    let lnum = tv_get_lnum(&argvars[0]);
+    let r = set_buffer_lines(lnum, tv_lines_arg(&argvars[1]), false);
+    *rettv = typval_T::from(r);
 }
-/// Port of `f_setbufline()` (buffer.c) — no buffer → 1 (FAIL).
-pub fn f_setbufline(_argvars: &[typval_T], rettv: &mut typval_T) {
-    *rettv = typval_T::from(1 as varnumber_T);
+/// Port of `f_setbufline()` (buffer.c) — like `setline()` (single buffer).
+pub fn f_setbufline(argvars: &[typval_T], rettv: &mut typval_T) {
+    let lnum = tv_get_lnum(&argvars[1]);
+    let r = set_buffer_lines(lnum, tv_lines_arg(&argvars[2]), false);
+    *rettv = typval_T::from(r);
 }
-/// Port of `f_append()` (buffer.c) — no buffer → 1 (FAIL).
-pub fn f_append(_argvars: &[typval_T], rettv: &mut typval_T) {
-    *rettv = typval_T::from(1 as varnumber_T);
+/// Port of `f_append()` (buffer.c) — insert `{text}` after line `{lnum}` (0 =
+/// before the first line). Returns 0 on success.
+pub fn f_append(argvars: &[typval_T], rettv: &mut typval_T) {
+    let lnum = tv_get_lnum(&argvars[0]);
+    let r = set_buffer_lines(lnum, tv_lines_arg(&argvars[1]), true);
+    *rettv = typval_T::from(r);
 }
-/// Port of `f_appendbufline()` (buffer.c) — no buffer → 1 (FAIL).
-pub fn f_appendbufline(_argvars: &[typval_T], rettv: &mut typval_T) {
-    *rettv = typval_T::from(1 as varnumber_T);
+/// Port of `f_appendbufline()` (buffer.c) — like `append()` (single buffer).
+pub fn f_appendbufline(argvars: &[typval_T], rettv: &mut typval_T) {
+    let lnum = tv_get_lnum(&argvars[1]);
+    let r = set_buffer_lines(lnum, tv_lines_arg(&argvars[2]), true);
+    *rettv = typval_T::from(r);
 }
-/// Port of `f_deletebufline()` (buffer.c) — no buffer → 1 (FAIL default).
-pub fn f_deletebufline(_argvars: &[typval_T], rettv: &mut typval_T) {
-    *rettv = typval_T::from(1 as varnumber_T);
+/// Port of `f_deletebufline()` (buffer.c) — delete lines `{first}`..`{last}`
+/// (single buffer). An emptied buffer keeps one empty line. Returns 0 on
+/// success, 1 if the range is invalid.
+pub fn f_deletebufline(argvars: &[typval_T], rettv: &mut typval_T) {
+    let first = tv_get_lnum(&argvars[1]);
+    let last = if argvars.len() >= 3 && argvars[2].v_type != VAR_UNKNOWN {
+        tv_get_lnum(&argvars[2])
+    } else {
+        first
+    };
+    let len = curbuf_len();
+    if first < 1 || first > len || last < first {
+        *rettv = typval_T::from(1 as varnumber_T);
+        return;
+    }
+    CURBUF.with(|b| {
+        let mut b = b.borrow_mut();
+        if b.is_empty() {
+            b.push(String::new());
+        }
+        let lo = (first - 1) as usize;
+        let hi = (last.min(b.len() as varnumber_T)) as usize;
+        b.drain(lo..hi);
+        if b.is_empty() {
+            b.push(String::new());
+        }
+    });
+    *rettv = typval_T::from(0 as varnumber_T);
 }
 /// Port of `f_getwininfo()` (window.c) — no windows → empty List.
 pub fn f_getwininfo(_argvars: &[typval_T], rettv: &mut typval_T) {
@@ -5326,10 +5640,37 @@ pub fn f_sign_jump(_argvars: &[typval_T], rettv: &mut typval_T) {
 
 // ── editor-feature queries with a well-defined "no editor" answer. ──
 
-/// Port of `f_indent()` (Neovim indent.c) — the indent of line `{lnum}`. No
-/// buffer standalone, so -1 (the invalid-line result).
-pub fn f_indent(_argvars: &[typval_T], rettv: &mut typval_T) {
-    rettv.vval = v_number(-1);
+/// Port of `f_indent()` (Neovim indent.c) — the indent (leading-whitespace
+/// screen width, Tabs expanded to 'tabstop') of line `{lnum}`, -1 if invalid.
+pub fn f_indent(argvars: &[typval_T], rettv: &mut typval_T) {
+    let lnum = tv_get_lnum(&argvars[0]);
+    if lnum < 1 || lnum > curbuf_len() {
+        rettv.vval = v_number(-1);
+        return;
+    }
+    // c: the indent is the screen width of the leading whitespace; a Tab
+    // advances to the next 'tabstop' (default 8) boundary.
+    let line = get_buffer_lines(lnum, lnum)
+        .into_iter()
+        .next()
+        .unwrap_or_default();
+    let ts = {
+        let t = tv_get_number_chk(&get_option_value("tabstop"), None);
+        if t > 0 {
+            t as varnumber_T
+        } else {
+            8
+        }
+    };
+    let mut col: varnumber_T = 0;
+    for c in line.chars() {
+        match c {
+            ' ' => col += 1,
+            '\t' => col += ts - (col % ts),
+            _ => break,
+        }
+    }
+    rettv.vval = v_number(col);
 }
 
 /// Port of `f_foldtext()` (Neovim fold.c) — the text shown for the closed fold

@@ -1,26 +1,25 @@
-" windows.vim — buffer-line and window/tab query builtins, with unit tests.
+" windows.vim — window/tab query builtins, with unit tests.
 "
-" A standalone interpreter has no buffer lines, windows, or GUI, so these return
-" the documented \"absent\" values: reading a line gives \"\" / [], a line-changing
-" command FAILs with 1, window queries give no id (0) / -1 / [] / [0,0], and the
-" GUI position is [-1,-1]. Pinning these contracts lets editor-oriented scripts
-" load and degrade gracefully instead of crashing. Self-checks.
+" A standalone interpreter has no windows, tab pages, or GUI, so these return
+" the documented \"absent\" values: window queries give no id (0) / -1 / [] /
+" [0,0], and the GUI position is [-1,-1]. (The in-memory buffer itself is real —
+" see buffer.vim.) Pinning these contracts lets editor-oriented scripts load and
+" degrade gracefully instead of crashing. Self-checks.
 "
 "   vimlrs examples/windows.vim
 
-" ── reading buffer lines ──
+" ── the virtual buffer is real: a fresh buffer reads as one empty line, and
+"    line-changing commands succeed (return 0) ──
 call assert_equal('', getline(1))
-call assert_equal([], getline(1, 5))
-call assert_equal([], getbufline(1, 1, '$'))
+call assert_equal([''], getline(1, 5))
+call assert_equal([''], getbufline(1, 1, '$'))
 call assert_equal('', getbufoneline(1, 1))
 call assert_equal([], getbufinfo())
-
-" ── line-changing commands FAIL (return 1) with no buffer ──
-call assert_equal(1, setline(1, 'x'))
-call assert_equal(1, append(1, 'x'))
-call assert_equal(1, setbufline(1, 1, 'x'))
-call assert_equal(1, appendbufline(1, 1, 'x'))
-call assert_equal(1, deletebufline(1, 1))
+call assert_equal(0, setline(1, 'x'))
+call assert_equal(0, append(1, 'x'))
+call assert_equal(0, setbufline(1, 1, 'x'))
+call assert_equal(0, appendbufline(1, 1, 'x'))
+call assert_equal(0, deletebufline(1, 1))
 
 " ── window / tab queries ──
 call assert_equal([], getwininfo())

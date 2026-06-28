@@ -9,11 +9,12 @@
 "
 "   vimlrs examples/editor_compat.vim
 
-" ── unit tests: the standalone-absent contracts ──
-call assert_equal([0, 0, 0, 0], getpos('.'))
-call assert_equal([0, 0, 0, 0, 0], getcurpos())
-call assert_equal(0, line('.'))
-call assert_equal(0, col('.'))
+" ── unit tests: position is real (the virtual buffer has a cursor, starting at
+"    line 1, column 1); the screen/syntax/spell subsystems remain absent ──
+call assert_equal([0, 1, 1, 0], getpos('.'))
+call assert_equal([0, 1, 1, 0, 1], getcurpos())
+call assert_equal(1, line('.'))
+call assert_equal(1, col('.'))
 call assert_equal(0, virtcol('.'))
 call assert_equal(0, search('foo'))
 call assert_equal([0, 0], searchpos('foo'))
@@ -21,12 +22,11 @@ call assert_equal(-1, screenchar(1, 1))
 call assert_equal([], synstack(1, 1))
 call assert_equal(0, synID(1, 1, 1))
 call assert_equal(['', ''], spellbadword('teh'))
-call assert_equal({'bytes': 0, 'chars': 0, 'words': 0, 'cursor_bytes': 0, 'cursor_chars': 0, 'cursor_words': 0}, wordcount())
 call assert_equal({'char': '', 'forward': 1, 'until': 0}, getcharsearch())
 
-" Setters report failure (no buffer/window to act on), not a crash.
-call assert_equal(-1, setpos('.', [0, 1, 1, 0]))
-call assert_equal(-1, cursor(1, 1))
+" Cursor setters succeed (return 0) on the in-memory buffer.
+call assert_equal(0, setpos('.', [0, 1, 1, 0]))
+call assert_equal(0, cursor(1, 1))
 
 " ── demo ──
 echo 'getpos(.)   :' getpos('.')

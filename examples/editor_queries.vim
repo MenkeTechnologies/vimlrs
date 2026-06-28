@@ -3,8 +3,10 @@
 " cmdexpand.c / search.c / insexpand.c.
 " Self-test: asserts into v:errors, throws at the end if anything failed.
 
-" --- no buffer / fold / diff: the line/column queries report 'nothing here'
-call assert_equal(-1, indent(1))
+" --- indent() is real (the empty first line of the virtual buffer indents 0;
+"     a line past the end is -1). No fold / diff still report 'nothing here'.
+call assert_equal(0, indent(1))
+call assert_equal(-1, indent(99))
 call assert_equal(0, diff_filler(1))
 call assert_equal(-1, virtcol2col(0, 1, 5))
 

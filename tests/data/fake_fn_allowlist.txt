@@ -309,3 +309,14 @@ apply_autocmds
 do_doautocmd
 au_exists
 match_file_pat
+
+# ── round 9: in-memory current buffer (buffer.c / memline.c / eval-typval) ──
+# A single virtual buffer backs getline()/setline()/append()/cursor()/line()/
+# col()/… standalone. These are the real buffer.c helpers behind them, plus the
+# String/List text-argument adapter (tv_lines_arg has no single C name).
+curbuf_len
+tv_get_lnum
+get_buffer_lines
+set_buffer_lines
+set_cursorpos
+tv_lines_arg
