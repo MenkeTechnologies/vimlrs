@@ -389,3 +389,11 @@ mpack_input_bytes
 # the vendored csrc/eval/ tree). get_xdg_var_list is a real funcs.c name and
 # drops from the stub tree on regeneration.
 get_appname
+
+# ── round 24: <sfile>/<script> in expand() — sourcing-name stack ──
+# Neovim tracks the script being sourced in the global SOURCING_NAME / estack;
+# these accessors are the std-only plumbing that backs expand("<sfile>") /
+# expand("<script>"), with no single Neovim C function name.
+push_sourcing_name
+pop_sourcing_name
+current_sourcing_name

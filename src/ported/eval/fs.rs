@@ -1056,15 +1056,52 @@ pub fn f_globpath(argvars: &[typval_T], rettv: &mut typval_T) {
     }
 }
 
-/// Port of `f_expand()` from `Src/eval/funcs.c` — expand `{string}`: `$VAR`/`~`
-/// references, then file wildcards. Editor specials (`%`/`#`/`<…>`) have no
-/// current file standalone, so they expand to "". With `{list}` (arg 3) truthy
-/// the result is a List of matches.
+thread_local! {
+    /// Stack of paths of the scripts currently being sourced, for `<sfile>` /
+    /// `<script>` in `expand()` (Neovim's `sourcing_name`/`SOURCING_NAME`). The
+    /// bridge pushes/pops this around `eval_file()`.
+    static SOURCING_NAME: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Push the path of a script being sourced (called by the bridge before running).
+pub fn push_sourcing_name(name: String) {
+    SOURCING_NAME.with(|s| s.borrow_mut().push(name));
+}
+
+/// Pop the current sourced-script path (called after the script finishes).
+pub fn pop_sourcing_name() {
+    SOURCING_NAME.with(|s| {
+        s.borrow_mut().pop();
+    });
+}
+
+/// The path of the innermost script currently being sourced, if any.
+fn current_sourcing_name() -> Option<String> {
+    SOURCING_NAME.with(|s| s.borrow().last().cloned())
+}
+
+/// Port of `f_expand()` from `Src/eval/funcs.c` — expand `{string}`: `<sfile>`/
+/// `<script>` to the sourced script's path (with `:` modifiers), `$VAR`/`~`
+/// references, then file wildcards. The other editor specials (`%`/`#`/`<…>`)
+/// have no current file standalone, so they expand to "". With `{list}` (arg 3)
+/// truthy the result is a List of matches.
 pub fn f_expand(argvars: &[typval_T], rettv: &mut typval_T) {
     let s = tv_get_string(&argvars[0]);
     let want_list =
         argvars.len() >= 3 && argvars[2].v_type != VAR_UNKNOWN && tv_get_bool(&argvars[2]) != 0;
-    let results: Vec<String> = if s.starts_with(['%', '#', '<']) {
+    // c: `<sfile>`/`<script>` expand to the sourced script's path, with optional
+    // trailing `:` filename-modifiers (the rest of the token).
+    let sfile = s
+        .strip_prefix("<sfile>")
+        .or_else(|| s.strip_prefix("<script>"));
+    let results: Vec<String> = if let Some(mods) = sfile {
+        match current_sourcing_name() {
+            Some(path) if mods.is_empty() => vec![path],
+            Some(path) => vec![modify_fname(mods, &path)],
+            None => Vec::new(),
+        }
+    } else if s.starts_with(['%', '#', '<']) {
         Vec::new()
     } else {
         let expanded = expand_env(&s);

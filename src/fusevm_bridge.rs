@@ -3608,6 +3608,18 @@ pub fn eval_source(src: &str) -> Result<Option<typval_T>, VimlError> {
 /// Source a `.vim` file through the rkyv bytecode cache: a 2nd+ run with an
 /// unchanged file and binary skips lex/parse/compile and runs the cached chunk.
 pub fn eval_file(path: &std::path::Path) -> Result<(), VimlError> {
+    // Make `<sfile>`/`<script>` (expand()) resolve to this script's path while it
+    // runs. Use the absolute path when it can be resolved, else the given path.
+    let sname = std::fs::canonicalize(path)
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| path.display().to_string());
+    crate::ported::eval::fs::push_sourcing_name(sname);
+    let r = eval_file_inner(path);
+    crate::ported::eval::fs::pop_sourcing_name();
+    r
+}
+
+fn eval_file_inner(path: &std::path::Path) -> Result<(), VimlError> {
     if let Some(prog) = crate::script_cache::try_load(path) {
         run_compiled(prog);
         return Ok(());
