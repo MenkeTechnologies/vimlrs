@@ -2467,27 +2467,276 @@ pub fn f_tabpagebuflist(_argvars: &[typval_T], rettv: &mut typval_T) {
     *rettv = typval_T::from(0 as varnumber_T);
 }
 
-/// Port of `f_search()`/`search_cmn()` — pattern not found (no buffer) → 0.
-pub fn f_search(_argvars: &[typval_T], rettv: &mut typval_T) {
-    *rettv = typval_T::from(0 as varnumber_T);
+thread_local! {
+    /// The last search pattern (`@/` / `spats[0].pat` in search.c), set by
+    /// `search()`/`searchpos()` and read by `searchcount()`.
+    static LAST_SEARCH: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
 }
-/// Port of `f_searchpos()` — not found → `[0, 0]`.
-pub fn f_searchpos(_argvars: &[typval_T], rettv: &mut typval_T) {
+
+/// Find the first byte-column match of `pat` in `line` at or after byte offset
+/// `from`, as `(start, end)` byte offsets (end exclusive).
+fn line_match_from(pat: &str, line: &str, from: usize, ic: bool) -> Option<(usize, usize)> {
+    if from > line.len() {
+        return None;
+    }
+    let (_, s, e) = crate::viml_regex::regex_matchstrpos(pat, &line[from..], ic);
+    if s < 0 {
+        None
+    } else {
+        Some((from + s as usize, from + e as usize))
+    }
+}
+
+/// Port of `searchit()` (Neovim search.c) — search the current buffer for `pat`
+/// from the cursor and (unless the `n` flag is given) move the cursor to the
+/// match. Flags: `b` backward, `n` no-move, `c` accept a match at the cursor,
+/// `e` move to the end of the match, `w`/`W` force/forbid wrap-around (default
+/// wraps). Returns the 1-based `(lnum, col)` of the match, or `None`.
+fn searchit(pat: &str, flags: &str, _stopline: varnumber_T) -> Option<(varnumber_T, varnumber_T)> {
+    LAST_SEARCH.with(|p| *p.borrow_mut() = pat.to_string());
+    let backward = flags.contains('b');
+    let nomove = flags.contains('n');
+    let accept = flags.contains('c');
+    let want_end = flags.contains('e');
+    let wrap = !flags.contains('W');
+    let ic = tv_get_number_chk(&get_option_value("ignorecase"), None) != 0;
+    let (clnum, ccol) = CURPOS.with(|c| {
+        let c = c.borrow();
+        (c.0, c.1)
+    });
+    let lines = get_buffer_lines(1, curbuf_len());
+    let n = lines.len();
+    if n == 0 {
+        return None;
+    }
+    let cur = (clnum - 1).clamp(0, n as varnumber_T - 1) as usize;
+    let cbyte = (ccol - 1).max(0) as usize;
+    // Build the line-visit order with the per-line starting byte offset.
+    let mut order: Vec<(usize, Option<usize>, Option<usize>)> = Vec::new();
+    if !backward {
+        // Current line from the cursor, following lines, then (wrap) earlier.
+        order.push((cur, Some(if accept { cbyte } else { cbyte + 1 }), None));
+        for i in cur + 1..n {
+            order.push((i, Some(0), None));
+        }
+        if wrap {
+            for i in 0..=cur {
+                order.push((i, Some(0), None));
+            }
+        }
+    } else {
+        // Current line up to the cursor, preceding lines, then (wrap) later.
+        order.push((cur, None, Some(if accept { cbyte + 1 } else { cbyte })));
+        for i in (0..cur).rev() {
+            order.push((i, None, Some(usize::MAX)));
+        }
+        if wrap {
+            for i in (cur..n).rev() {
+                order.push((i, None, Some(usize::MAX)));
+            }
+        }
+    }
+    for (li, fwd_from, back_before) in order {
+        let line = &lines[li];
+        if let Some(from) = fwd_from {
+            if let Some((s, e)) = line_match_from(pat, line, from, ic) {
+                let col = if want_end { e } else { s + 1 };
+                return finish_search(li, col, nomove, clnum, ccol);
+            }
+        } else if let Some(before) = back_before {
+            // Backward: the last match that starts before `before`.
+            let mut found: Option<(usize, usize)> = None;
+            let mut scan = 0usize;
+            while let Some((s, e)) = line_match_from(pat, line, scan, ic) {
+                if s >= before {
+                    break;
+                }
+                found = Some((s, e));
+                scan = if e > s { e } else { s + 1 };
+            }
+            if let Some((s, e)) = found {
+                let col = if want_end { e } else { s + 1 };
+                return finish_search(li, col, nomove, clnum, ccol);
+            }
+        }
+    }
+    None
+}
+
+/// Move the cursor to the match (unless `nomove`) and return the 1-based
+/// `(lnum, col)`.
+fn finish_search(
+    li: usize,
+    col: usize,
+    nomove: bool,
+    _clnum: varnumber_T,
+    _ccol: varnumber_T,
+) -> Option<(varnumber_T, varnumber_T)> {
+    let lnum = li as varnumber_T + 1;
+    let col = col as varnumber_T;
+    if !nomove {
+        set_cursorpos(lnum, col);
+    }
+    Some((lnum, col))
+}
+
+/// Port of `f_search()`/`search_cmn()` (search.c) — search the buffer for the
+/// pattern, move the cursor, and return the matching line number (0 if none).
+pub fn f_search(argvars: &[typval_T], rettv: &mut typval_T) {
+    let pat = tv_get_string(&argvars[0]);
+    let flags = argvars.get(1).map(tv_get_string).unwrap_or_default();
+    let stopline = argvars
+        .get(2)
+        .filter(|t| t.v_type != VAR_UNKNOWN)
+        .map(tv_get_number)
+        .unwrap_or(0);
+    let lnum = match searchit(&pat, &flags, stopline) {
+        Some((lnum, _)) => lnum,
+        None => 0,
+    };
+    *rettv = typval_T::from(lnum);
+}
+/// Port of `f_searchpos()` (search.c) — like `search()` but returns
+/// `[lnum, col]` (`[0, 0]` if not found).
+pub fn f_searchpos(argvars: &[typval_T], rettv: &mut typval_T) {
+    let pat = tv_get_string(&argvars[0]);
+    let flags = argvars.get(1).map(tv_get_string).unwrap_or_default();
+    let stopline = argvars
+        .get(2)
+        .filter(|t| t.v_type != VAR_UNKNOWN)
+        .map(tv_get_number)
+        .unwrap_or(0);
+    let (lnum, col) = searchit(&pat, &flags, stopline).unwrap_or((0, 0));
     let l = tv_list_alloc_ret(rettv, 2);
     let mut lb = l.borrow_mut();
-    tv_list_append_number(&mut lb, 0);
-    tv_list_append_number(&mut lb, 0);
+    tv_list_append_number(&mut lb, lnum);
+    tv_list_append_number(&mut lb, col);
 }
-/// Port of `f_searchpair()`/`searchpair_cmn()` — not found → 0.
-pub fn f_searchpair(_argvars: &[typval_T], rettv: &mut typval_T) {
-    *rettv = typval_T::from(0 as varnumber_T);
+/// Port of `searchpair_cmn()` (Neovim search.c) — from the cursor, find the
+/// `end` of a `start`…`end` pair (a `middle` at nesting level 0 also matches),
+/// honoring nesting. Forward by default, backward with the `b` flag; moves the
+/// cursor unless `n`. Returns the 1-based `(lnum, col)` of the match.
+fn do_searchpair(
+    start: &str,
+    middle: &str,
+    end: &str,
+    flags: &str,
+) -> Option<(varnumber_T, varnumber_T)> {
+    let backward = flags.contains('b');
+    let nomove = flags.contains('n');
+    let ic = tv_get_number_chk(&get_option_value("ignorecase"), None) != 0;
+    let lines = get_buffer_lines(1, curbuf_len());
+    let n = lines.len();
+    let (clnum, ccol) = CURPOS.with(|c| {
+        let c = c.borrow();
+        (c.0, c.1)
+    });
+    let cur = (clnum - 1).clamp(0, n as varnumber_T - 1) as usize;
+    let cbyte = (ccol - 1).max(0) as usize;
+    let m_at = |pat: &str, line: &str, col: usize| -> Option<usize> {
+        if pat.is_empty() || col > line.len() {
+            return None;
+        }
+        let (_, s, e) = crate::viml_regex::regex_matchstrpos(pat, &line[col..], ic);
+        if s == 0 {
+            Some((e - s).max(1) as usize)
+        } else {
+            None
+        }
+    };
+    // Build the (line, col) scan positions in order; forward starts just after
+    // the cursor, backward just before it.
+    let mut positions: Vec<(usize, usize)> = Vec::new();
+    #[allow(clippy::needless_range_loop)]
+    if !backward {
+        for li in cur..n {
+            let from = if li == cur { cbyte + 1 } else { 0 };
+            for col in from..=lines[li].len() {
+                positions.push((li, col));
+            }
+        }
+    } else {
+        for li in (0..=cur).rev() {
+            let to = if li == cur {
+                cbyte
+            } else {
+                lines[li].len() + 1
+            };
+            for col in (0..to).rev() {
+                positions.push((li, col));
+            }
+        }
+    }
+    let mut nest = 0i32;
+    let mut idx = 0usize;
+    while idx < positions.len() {
+        let (li, col) = positions[idx];
+        let line = &lines[li];
+        // On the way out (forward), `end` closes; `start` opens. Backward is the
+        // mirror: `start` closes the pair we are inside, `end` opens nesting.
+        let (opener, closer) = if backward { (end, start) } else { (start, end) };
+        if let Some(len) = m_at(closer, line, col) {
+            if nest == 0 {
+                let lnum = li as varnumber_T + 1;
+                let c = col as varnumber_T + 1;
+                if !nomove {
+                    set_cursorpos(lnum, c);
+                }
+                return Some((lnum, c));
+            }
+            nest -= 1;
+            idx += skip_cols(&positions, idx, len);
+            continue;
+        }
+        if let Some(len) = m_at(opener, line, col) {
+            nest += 1;
+            idx += skip_cols(&positions, idx, len);
+            continue;
+        }
+        if nest == 0 && m_at(middle, line, col).is_some() {
+            let lnum = li as varnumber_T + 1;
+            let c = col as varnumber_T + 1;
+            if !nomove {
+                set_cursorpos(lnum, c);
+            }
+            return Some((lnum, c));
+        }
+        idx += 1;
+    }
+    None
 }
-/// Port of `f_searchpairpos()` — not found → `[0, 0]`.
-pub fn f_searchpairpos(_argvars: &[typval_T], rettv: &mut typval_T) {
+
+/// How many scan positions to advance to step past a `len`-byte match (at least
+/// one). Positions on the same line are consecutive.
+fn skip_cols(positions: &[(usize, usize)], idx: usize, len: usize) -> usize {
+    let (li, _) = positions[idx];
+    let mut n = 1;
+    while n < len && idx + n < positions.len() && positions[idx + n].0 == li {
+        n += 1;
+    }
+    n
+}
+
+/// Port of `f_searchpair()` — the line of the matching `end`, 0 if none.
+pub fn f_searchpair(argvars: &[typval_T], rettv: &mut typval_T) {
+    let start = tv_get_string(&argvars[0]);
+    let middle = tv_get_string(&argvars[1]);
+    let end = tv_get_string(&argvars[2]);
+    let flags = argvars.get(3).map(tv_get_string).unwrap_or_default();
+    let lnum = do_searchpair(&start, &middle, &end, &flags).map_or(0, |(l, _)| l);
+    *rettv = typval_T::from(lnum);
+}
+/// Port of `f_searchpairpos()` — the `[lnum, col]` of the matching `end`.
+pub fn f_searchpairpos(argvars: &[typval_T], rettv: &mut typval_T) {
+    let start = tv_get_string(&argvars[0]);
+    let middle = tv_get_string(&argvars[1]);
+    let end = tv_get_string(&argvars[2]);
+    let flags = argvars.get(3).map(tv_get_string).unwrap_or_default();
+    let (lnum, col) = do_searchpair(&start, &middle, &end, &flags).unwrap_or((0, 0));
     let l = tv_list_alloc_ret(rettv, 2);
     let mut lb = l.borrow_mut();
-    tv_list_append_number(&mut lb, 0);
-    tv_list_append_number(&mut lb, 0);
+    tv_list_append_number(&mut lb, lnum);
+    tv_list_append_number(&mut lb, col);
 }
 /// Port of `f_searchdecl()` — declaration not found → 1 (the C `FAIL` default).
 pub fn f_searchdecl(_argvars: &[typval_T], rettv: &mut typval_T) {
@@ -3698,12 +3947,6 @@ pub fn f_rubyeval(_argvars: &[typval_T], rettv: &mut typval_T) {
 /// Port of `f_termopen()` (deprecated.c) — no terminal/event loop → -1.
 pub fn f_termopen(_argvars: &[typval_T], rettv: &mut typval_T) {
     *rettv = typval_T::from(-1 as varnumber_T);
-}
-
-/// Port of `f_do_searchpair()`/`do_searchpair()` helper (funcs.c) — searching
-/// for a matching pair needs a buffer; standalone has none → not found (0).
-pub fn do_searchpair() -> varnumber_T {
-    0
 }
 
 /// Port of `has_wsl()` (funcs.c) — true under Windows Subsystem for Linux,
@@ -5712,14 +5955,50 @@ pub fn f_wildtrigger(_argvars: &[typval_T], _rettv: &mut typval_T) {}
 /// Port of `f_searchcount()` (Neovim search.c) — the search-count dict
 /// `{current, total, exact_match, incomplete, maxcount}`. No active search
 /// standalone → all-zero counts (maxcount defaults to 99).
-pub fn f_searchcount(_argvars: &[typval_T], rettv: &mut typval_T) {
+pub fn f_searchcount(argvars: &[typval_T], rettv: &mut typval_T) {
+    // c: the optional {options} Dict may override the pattern and maxcount.
+    let mut pat = LAST_SEARCH.with(|p| p.borrow().clone());
+    let mut maxcount: varnumber_T = 99;
+    if let Some((VAR_DICT, v_dict(Some(opt)))) = argvars.first().map(|t| (t.v_type, &t.vval)) {
+        let opt = opt.borrow();
+        if let Some(p) = tv_dict_find(&opt, "pattern") {
+            pat = tv_get_string(p);
+        }
+        if let Some(m) = tv_dict_find(&opt, "maxcount") {
+            maxcount = tv_get_number(m);
+        }
+    }
+    let (mut total, mut current, mut exact) = (0i64, 0i64, 0i64);
+    if !pat.is_empty() {
+        let ic = tv_get_number_chk(&get_option_value("ignorecase"), None) != 0;
+        let (clnum, ccol) = CURPOS.with(|c| {
+            let c = c.borrow();
+            (c.0, c.1)
+        });
+        for (i, line) in get_buffer_lines(1, curbuf_len()).iter().enumerate() {
+            let lnum = i as varnumber_T + 1;
+            let mut from = 0usize;
+            while let Some((s, e)) = line_match_from(&pat, line, from, ic) {
+                total += 1;
+                // The cursor is at/after this match → it is the current one.
+                if lnum < clnum || (lnum == clnum && (s as varnumber_T) < ccol) {
+                    current = total;
+                }
+                if lnum == clnum && (s as varnumber_T) == ccol - 1 {
+                    exact = 1;
+                    current = total;
+                }
+                from = if e > s { e } else { s + 1 };
+            }
+        }
+    }
     let d = tv_dict_alloc_ret(rettv);
     let mut db = d.borrow_mut();
-    tv_dict_add_nr(&mut db, "current", 0);
-    tv_dict_add_nr(&mut db, "total", 0);
-    tv_dict_add_nr(&mut db, "exact_match", 0);
+    tv_dict_add_nr(&mut db, "current", current);
+    tv_dict_add_nr(&mut db, "total", total);
+    tv_dict_add_nr(&mut db, "exact_match", exact);
     tv_dict_add_nr(&mut db, "incomplete", 0);
-    tv_dict_add_nr(&mut db, "maxcount", 99);
+    tv_dict_add_nr(&mut db, "maxcount", maxcount);
 }
 
 /// Port of `f_complete_info()` (Neovim insexpand.c) — the insert-completion

@@ -320,3 +320,12 @@ get_buffer_lines
 set_buffer_lines
 set_cursorpos
 tv_lines_arg
+
+# ── round 10: buffer search (search.c) ──
+# searchit is the real Neovim buffer-search core; line_match_from / finish_search
+# are its per-line match + cursor-move helpers (no single C name).
+searchit
+line_match_from
+finish_search
+do_searchpair
+skip_cols
