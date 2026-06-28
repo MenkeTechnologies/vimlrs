@@ -635,6 +635,11 @@ pub fn f_exists(argvars: &[typval_T], rettv: &mut typval_T) {
     // c: a leading '#' queries autocommands — `#{event}` or `#{event}#{pat}`.
     let present = if let Some(au) = name.strip_prefix('#') {
         au_exists(au)
+    } else if let Some(func) = name.strip_prefix('*') {
+        // c: '*' queries a callable — a builtin or user function by name.
+        crate::ported::eval::typval::FUNC_EXISTS_HOOK
+            .with(|h| *h.borrow())
+            .is_some_and(|f| f(func))
     } else {
         crate::ported::eval::vars::eval_variable(&name).is_some()
     };
@@ -693,22 +698,42 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
             }
             i += 1;
         }
-        // Width.
+        // Width. `*` takes the width from the next (sequential) argument; a
+        // negative value means left-justify, as in C.
         let mut width = 0usize;
-        while i < bytes.len() && bytes[i].is_ascii_digit() {
-            width = width * 10 + (bytes[i] as usize - '0' as usize);
+        if i < bytes.len() && bytes[i] == '*' {
             i += 1;
+            let w = argvars.get(arg).map_or(0, |t| tv_get_number_chk(t, None));
+            arg += 1;
+            if w < 0 {
+                left = true;
+                width = (-w) as usize;
+            } else {
+                width = w as usize;
+            }
+        } else {
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                width = width * 10 + (bytes[i] as usize - '0' as usize);
+                i += 1;
+            }
         }
-        // Precision.
+        // Precision. `.*` takes the precision from the next argument.
         let mut prec: Option<usize> = None;
         if i < bytes.len() && bytes[i] == '.' {
             i += 1;
-            let mut p = 0usize;
-            while i < bytes.len() && bytes[i].is_ascii_digit() {
-                p = p * 10 + (bytes[i] as usize - '0' as usize);
+            if i < bytes.len() && bytes[i] == '*' {
                 i += 1;
+                let p = argvars.get(arg).map_or(0, |t| tv_get_number_chk(t, None));
+                arg += 1;
+                prec = Some(p.max(0) as usize);
+            } else {
+                let mut p = 0usize;
+                while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    p = p * 10 + (bytes[i] as usize - '0' as usize);
+                    i += 1;
+                }
+                prec = Some(p);
             }
-            prec = Some(p);
         }
         let Some(conv) = bytes.get(i).copied() else {
             out.push('%');
@@ -722,7 +747,9 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
         let cur = argvars.get(explicit_idx.unwrap_or(arg));
         let core = match conv {
             'd' | 'i' => cur.map_or(0, |t| tv_get_number_chk(t, None)).to_string(),
-            's' => {
+            // c: `%S` is like `%s` but width/precision count screen cells; for the
+            // common case it renders identically.
+            's' | 'S' => {
                 let mut s = cur.map(tv_get_string).unwrap_or_default();
                 if let Some(p) = prec {
                     s.truncate(p);

@@ -106,6 +106,8 @@ enum Node {
     MatchStart,
     /// `\ze` — zero-width; moves the end of the whole match to here.
     MatchEnd,
+    /// `\1`..`\9` — backreference to the text captured by that group.
+    BackRef(usize),
     Class(Class),
     /// Alternation of branches; `Some(idx)` = capturing group index.
     Group(Vec<Branch>, Option<usize>),
@@ -358,6 +360,8 @@ impl Parser {
                 self.forced_ic = Some(false);
                 return self.atom(false);
             }
+            // `\1`..`\9` — backreference to a previously captured group.
+            d @ '1'..='9' => Node::BackRef(d as usize - '0' as usize),
             't' => Node::Lit('\t'),
             'n' => Node::Lit('\n'),
             'r' => Node::Lit('\r'),
@@ -588,6 +592,23 @@ impl Regex {
                     before && !after
                 };
                 ok.then_some(pos)
+            }
+            Node::BackRef(n) => {
+                // Match the exact text previously captured by group `n`. An unset
+                // group (it didn't participate) matches the empty string.
+                match groups.get(*n).copied().flatten() {
+                    Some((s, e)) => {
+                        let len = e - s;
+                        if pos + len <= text.len()
+                            && (0..len).all(|k| char_eq(text[pos + k], text[s + k], ic))
+                        {
+                            Some(pos + len)
+                        } else {
+                            None
+                        }
+                    }
+                    None => Some(pos),
+                }
             }
             Node::Group(branches, capidx) => {
                 let end = self.match_alt(branches, text, pos, groups, ic)?;

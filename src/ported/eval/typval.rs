@@ -2306,6 +2306,10 @@ type SortFuncrefFn = fn(&str, &typval_T, &typval_T) -> Option<varnumber_T>;
 /// Generic "call a Funcref/Partial typval with args → result" hook.
 type CallFuncFn = fn(&typval_T, &[typval_T]) -> Option<typval_T>;
 
+/// `exists("*name")` callable-lookup: true if `name` is a defined builtin or
+/// user function. Installed by the bridge (which owns the function registry).
+type FuncExistsFn = fn(&str) -> bool;
+
 thread_local! {
     /// Bridge-installed funcref comparator for `sort()`/`uniq()` with a `{func}`
     /// argument: `(name, a, b) -> Some(cmp)`, or `None` on a call/type error.
@@ -2319,6 +2323,10 @@ thread_local! {
     /// `reduce()`. The first argument is the callee typval (VAR_FUNC name or
     /// VAR_PARTIAL), so bound partial args are honored. `None` on a call error.
     pub static CALL_FUNC_HOOK: std::cell::RefCell<Option<CallFuncFn>> =
+        const { std::cell::RefCell::new(None) };
+
+    /// `exists("*name")` hook — true if `name` is a defined builtin/user function.
+    pub static FUNC_EXISTS_HOOK: std::cell::RefCell<Option<FuncExistsFn>> =
         const { std::cell::RefCell::new(None) };
 }
 

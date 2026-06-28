@@ -91,7 +91,7 @@ use crate::ported::eval::list::{
 };
 use crate::ported::eval::typval::{
     f_blob2list, f_join, f_list2blob, f_sort, f_uniq, tv_list_slice_or_index, CALL_FUNC_HOOK,
-    SORT_FUNCREF_HOOK,
+    FUNC_EXISTS_HOOK, SORT_FUNCREF_HOOK,
 };
 use crate::ported::eval::typval::{
     tv_get_float, tv_get_number_chk, tv_get_string, tv_list_alloc, tv_list_append_tv,
@@ -2203,6 +2203,15 @@ fn call_funcref(funcref: &typval_T, extra: Vec<typval_T>) -> Option<typval_T> {
     }
 }
 
+/// `exists("*name")` — true if `name` is a defined user function or a ported
+/// builtin. Installed into `FUNC_EXISTS_HOOK` for `f_exists`. A leading `g:`
+/// scope prefix on the function name is ignored, as in Vim.
+fn func_exists_hook(name: &str) -> bool {
+    let name = name.strip_prefix("g:").unwrap_or(name);
+    FUNCTIONS.with(|f| f.borrow().contains_key(name))
+        || crate::compile_viml::builtin_fn_id(name).is_some()
+}
+
 /// Resolve a function name to either a user `:function` or a ported builtin and
 /// call it. Vim's `call()`/funcrefs accept builtin names (`call('printf', […])`,
 /// `function('substitute')`), not just user functions — a user function takes
@@ -2833,6 +2842,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FN_LIST2STR, |vm, n| call_func(vm, n, f_list2str));
     vm.register_builtin(VIML_FN_FLATTEN, |vm, n| call_func(vm, n, f_flatten));
     CALL_FUNC_HOOK.with(|h| *h.borrow_mut() = Some(call_func_hook));
+    FUNC_EXISTS_HOOK.with(|h| *h.borrow_mut() = Some(func_exists_hook));
     vm.register_builtin(VIML_FN_REDUCE, |vm, n| call_func(vm, n, f_reduce));
     vm.register_builtin(VIML_FN_EVAL, b_eval);
     crate::viml_regex::SUBST_EXPR_HOOK.with(|h| *h.borrow_mut() = Some(subst_expr_eval));

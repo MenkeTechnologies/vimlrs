@@ -155,7 +155,10 @@ slices mid-character. Covered by `examples/numeric_edge.vim`.
 - The magic-mode equivalents (`\d\+`, `colou\?r`) work, so the `\v` prefix itself is
   unhandled. Common in real scripts.
 
-### R2-3. Backreferences (`\1`, `\2`…) in patterns don't match
+### R2-3. Backreferences (`\1`, `\2`…) in patterns don't match — ✅ FIXED
+Added `Node::BackRef` to the regex engine: `\1`..`\9` match the text the
+corresponding group captured (unset group → empty). Covered by
+`examples/regex_backref.vim`.
 - `matchstr("hello","\(l\)\1")` → Vim `ll`, vimlrs `` (empty)
 - `substitute("hello","\(l\)\1","X","")` → Vim `heXo`, vimlrs `hello`
 - Capture-group backreferences in the search pattern are not honored.
@@ -171,7 +174,9 @@ slices mid-character. Covered by `examples/numeric_edge.vim`.
 - vimlrs emits raw C `%g` (drops `.0`, C-style `e+06`, different precision/threshold);
   Vim post-processes like its float printer. (`%f`/`%e` are fine.)
 
-### R2-6. `printf` `%S` and `*`-width-from-arg unsupported (passed through literally)
+### R2-6. `printf` `%S` and `*`-width-from-arg unsupported (passed through literally) — ✅ FIXED
+`%S` now renders a string (like `%s`); `%*`/`%.*` take width/precision from the
+next argument (negative width left-justifies). Covered by `examples/printf_exists.vim`.
 - `printf("%S","abc")` → Vim `abc`, vimlrs `%S`
 - `printf("%*d",5,3)` → Vim `    3`, vimlrs `%*d`
 
@@ -192,7 +197,9 @@ slices mid-character. Covered by `examples/numeric_edge.vim`.
 Covered by `examples/numeric_edge.vim`.
 - `str2float("0x1f")` → Vim `31.0`, vimlrs `0.0`
 
-### R2-11. `exists("*funcname")` returns 0 for existing builtins
+### R2-11. `exists("*funcname")` returns 0 for existing builtins — ✅ FIXED
+`exists('*name')` now reports builtins and user functions via a FUNC_EXISTS_HOOK
+the bridge installs. Covered by `examples/printf_exists.vim`.
 - `exists("*substitute")` → Vim `1`, vimlrs `0`. The `*` (callable-exists) form is
   unimplemented; reports every function as absent.
 
