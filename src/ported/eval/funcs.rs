@@ -3024,3 +3024,268 @@ pub fn f_serverstart(_argvars: &[typval_T], rettv: &mut typval_T) {
 pub fn f_serverstop(_argvars: &[typval_T], rettv: &mut typval_T) {
     *rettv = typval_T::from(0 as varnumber_T);
 }
+
+// ── Scoped variables / jobs / channels (no buffers, windows, or event loop) ──
+//
+// Scoped-var getters (vars.c `get_var_from`) return the {def} argument when the
+// variable is absent (always, standalone), else ""; setters are no-ops. Jobs,
+// channels, and sockets need an event loop the standalone interpreter does not
+// run, so they fail (-1) or are no-ops (0); jobwait returns an empty List.
+
+/// `{def}` argument at `idx`, or "" when absent — the `get_var_from` fallback.
+fn get_var_from(argvars: &[typval_T], idx: usize) -> typval_T {
+    match argvars.get(idx) {
+        Some(d) if d.v_type != VAR_UNKNOWN => d.clone(),
+        _ => typval_T::from(String::new()),
+    }
+}
+/// Port of `f_getbufvar()` (vars.c) — no buffer → `{def}` (arg 2) or "".
+pub fn f_getbufvar(argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = get_var_from(argvars, 2);
+}
+/// Port of `f_getwinvar()` (vars.c) — no window → `{def}` (arg 2) or "".
+pub fn f_getwinvar(argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = get_var_from(argvars, 2);
+}
+/// Port of `f_gettabvar()` (vars.c) — no tab page → `{def}` (arg 2) or "".
+pub fn f_gettabvar(argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = get_var_from(argvars, 2);
+}
+/// Port of `f_gettabwinvar()` (vars.c) — no tab/window → `{def}` (arg 3) or "".
+pub fn f_gettabwinvar(argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = get_var_from(argvars, 3);
+}
+/// Port of `f_setbufvar()` (vars.c) — no buffer → no-op (0).
+pub fn f_setbufvar(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_setwinvar()` (vars.c) — no window → no-op (0).
+pub fn f_setwinvar(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_settabvar()` (vars.c) — no tab page → no-op (0).
+pub fn f_settabvar(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_settabwinvar()` (vars.c) — no tab/window → no-op (0).
+pub fn f_settabwinvar(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_jobstart()` (funcs.c) — no event loop to run the job → -1.
+pub fn f_jobstart(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(-1 as varnumber_T);
+}
+/// Port of `f_jobpid()` (funcs.c) — no job → 0.
+pub fn f_jobpid(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_jobstop()` (funcs.c) — no job to stop → 0.
+pub fn f_jobstop(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_jobwait()` (funcs.c) — no jobs → empty List.
+pub fn f_jobwait(_argvars: &[typval_T], rettv: &mut typval_T) {
+    tv_list_alloc_ret(rettv, 0);
+}
+/// Port of `f_jobresize()` (funcs.c) — no job → 0.
+pub fn f_jobresize(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_chanclose()` (funcs.c) — no channel → 0.
+pub fn f_chanclose(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_chansend()` (funcs.c) — no channel → 0 bytes sent.
+pub fn f_chansend(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_feedkeys()` (funcs.c) — no typeahead buffer → no-op (0).
+pub fn f_feedkeys(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_wait()` (funcs.c) — no event loop → -1 (the C error default).
+pub fn f_wait(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(-1 as varnumber_T);
+}
+/// Port of `f_sockconnect()` (funcs.c) — no event loop → 0 (no channel).
+pub fn f_sockconnect(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_win_execute()` (window.c) — no window to run the command in → "".
+pub fn f_win_execute(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(String::new());
+}
+/// Port of `f_bufadd()` (buffer.c) — no buffer list standalone → 0.
+pub fn f_bufadd(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+
+// ── Context stack / providers / RPC / misc (inactive standalone) ──
+
+/// Port of `f_ctxget()` (funcs.c) — empty context stack → empty Dict.
+pub fn f_ctxget(_argvars: &[typval_T], rettv: &mut typval_T) {
+    tv_dict_alloc_ret(rettv);
+}
+/// Port of `f_ctxpop()` (funcs.c) — nothing to pop → no-op (0).
+pub fn f_ctxpop(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_ctxpush()` (funcs.c) — no-op (0).
+pub fn f_ctxpush(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_ctxset()` (funcs.c) — no-op (0).
+pub fn f_ctxset(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_ctxsize()`/`ctx_size()` (funcs.c) — empty stack → 0.
+pub fn f_ctxsize(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_islocked()` (funcs.c) — variable locks are not modeled → 0
+/// (not locked).
+pub fn f_islocked(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_last_buffer_nr()` (buffer.c) — no buffers → 0.
+pub fn f_last_buffer_nr(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_libcall()`/`libcall_common()` (funcs.c) — no dynamic library
+/// loading → "".
+pub fn f_libcall(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(String::new());
+}
+/// Port of `f_libcallnr()` (funcs.c) — no dynamic library loading → 0.
+pub fn f_libcallnr(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_msgpackdump()` (funcs.c) — nothing to encode → empty List.
+pub fn f_msgpackdump(_argvars: &[typval_T], rettv: &mut typval_T) {
+    tv_list_alloc_ret(rettv, 0);
+}
+/// Port of `f_msgpackparse()` (funcs.c) — nothing to parse → empty List.
+pub fn f_msgpackparse(_argvars: &[typval_T], rettv: &mut typval_T) {
+    tv_list_alloc_ret(rettv, 0);
+}
+/// Port of `f_rpcnotify()` (funcs.c) — no RPC channel → 0.
+pub fn f_rpcnotify(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_rpcrequest()` (funcs.c) — no RPC channel → 0.
+pub fn f_rpcrequest(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_rpcstart()` (funcs.c, deprecated) — no RPC → 0.
+pub fn f_rpcstart(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_rpcstop()` (funcs.c) — no RPC → 0.
+pub fn f_rpcstop(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_stdioopen()` (funcs.c) — no event loop → 0 (no channel).
+pub fn f_stdioopen(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_submatch()` (funcs.c) — no active `:substitute` → "" (the List
+/// form, `{list}` truthy, yields an empty List).
+pub fn f_submatch(argvars: &[typval_T], rettv: &mut typval_T) {
+    if argvars.len() >= 2 && argvars[1].v_type != VAR_UNKNOWN && tv_get_bool(&argvars[1]) != 0 {
+        tv_list_alloc_ret(rettv, 0);
+    } else {
+        *rettv = typval_T::from(String::new());
+    }
+}
+/// Port of `f_prompt_appendbuf()` (buffer.c) — no prompt buffer → no-op (0).
+pub fn f_prompt_appendbuf(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_py3eval()` (funcs.c) — no Python provider → v:null.
+pub fn f_py3eval(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.v_type = VAR_SPECIAL;
+    rettv.vval = v_special(kSpecialVarNull);
+}
+/// Port of `f_perleval()` (funcs.c) — no Perl provider → v:null.
+pub fn f_perleval(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.v_type = VAR_SPECIAL;
+    rettv.vval = v_special(kSpecialVarNull);
+}
+
+// ── Final builtins: stdpath (XDG), GUI/provider/terminal absent ──
+
+/// Port of `f_stdpath()` from `Src/eval/funcs.c` — the standard Nvim path of a
+/// given kind, resolved from the XDG base-directory environment variables (with
+/// the usual `~/.config`-style defaults) plus the `nvim` app subdirectory.
+pub fn f_stdpath(argvars: &[typval_T], rettv: &mut typval_T) {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let xdg_home = |env: &str, default_rel: &str| -> String {
+        let base = std::env::var(env)
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| format!("{home}/{default_rel}"));
+        format!("{base}/nvim")
+    };
+    let xdg_dirs = |env: &str, default: &str| -> Vec<String> {
+        let val = std::env::var(env)
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| default.to_string());
+        val.split(':')
+            .filter(|s| !s.is_empty())
+            .map(|d| format!("{d}/nvim"))
+            .collect()
+    };
+    let kind = tv_get_string(&argvars[0]);
+    match kind.as_str() {
+        "config" => *rettv = typval_T::from(xdg_home("XDG_CONFIG_HOME", ".config")),
+        "data" => *rettv = typval_T::from(xdg_home("XDG_DATA_HOME", ".local/share")),
+        "cache" => *rettv = typval_T::from(xdg_home("XDG_CACHE_HOME", ".cache")),
+        "state" => *rettv = typval_T::from(xdg_home("XDG_STATE_HOME", ".local/state")),
+        "log" => {
+            *rettv = typval_T::from(format!(
+                "{}/logs",
+                xdg_home("XDG_STATE_HOME", ".local/state")
+            ))
+        }
+        "run" => {
+            let run = std::env::var("XDG_RUNTIME_DIR").unwrap_or_default();
+            *rettv = typval_T::from(format!("{run}/nvim"));
+        }
+        "config_dirs" | "data_dirs" => {
+            let dirs = if kind == "config_dirs" {
+                xdg_dirs("XDG_CONFIG_DIRS", "/etc/xdg")
+            } else {
+                xdg_dirs("XDG_DATA_DIRS", "/usr/local/share:/usr/share")
+            };
+            let l = tv_list_alloc_ret(rettv, dirs.len() as isize);
+            let mut lb = l.borrow_mut();
+            for d in &dirs {
+                tv_list_append_string(&mut lb, d);
+            }
+        }
+        _ => {
+            emsg(&format!("E6100: \"{kind}\" is not a valid stdpath"));
+            *rettv = typval_T::from(String::new());
+        }
+    }
+}
+/// Port of `f_keytrans()` (funcs.c) — translate key codes to a readable form;
+/// plain text (the standalone case) passes through unchanged.
+pub fn f_keytrans(argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(tv_get_string(&argvars[0]));
+}
+/// Port of `f_luaeval()` (funcs.c) — no Lua provider standalone → v:null.
+pub fn f_luaeval(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.v_type = VAR_SPECIAL;
+    rettv.vval = v_special(kSpecialVarNull);
+}
+/// Port of `f_rubyeval()` (funcs.c) — no Ruby provider standalone → v:null.
+pub fn f_rubyeval(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.v_type = VAR_SPECIAL;
+    rettv.vval = v_special(kSpecialVarNull);
+}
+/// Port of `f_termopen()` (deprecated.c) — no terminal/event loop → -1.
+pub fn f_termopen(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(-1 as varnumber_T);
+}

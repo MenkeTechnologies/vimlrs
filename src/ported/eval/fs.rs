@@ -1131,3 +1131,24 @@ pub fn f_expandcmd(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.v_type = VAR_STRING;
     rettv.vval = v_string(expand_env(&tv_get_string(&argvars[0])));
 }
+
+/// Port of `f_browse()` (fs.c) — no GUI file dialog standalone → "".
+pub fn f_browse(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.v_type = VAR_STRING;
+    rettv.vval = v_string(String::new());
+}
+/// Port of `f_browsedir()` (fs.c) — no GUI directory dialog standalone → "".
+pub fn f_browsedir(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.v_type = VAR_STRING;
+    rettv.vval = v_string(String::new());
+}
+/// Port of `f_finddir()` (fs.c) — no `'path'` to search standalone → "".
+pub fn f_finddir(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.v_type = VAR_STRING;
+    rettv.vval = v_string(String::new());
+}
+/// Port of `f_findfile()` (fs.c) — no `'path'` to search standalone → "".
+pub fn f_findfile(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.v_type = VAR_STRING;
+    rettv.vval = v_string(String::new());
+}

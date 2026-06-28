@@ -37,22 +37,6 @@ pub fn buf_set_append_line() {
     unimplemented!("STUB buf_set_append_line — csrc/eval/buffer.c:257")
 }
 
-/// Port of `f_prompt_appendbuf()` — `csrc/eval/buffer.c:278`. STUB: not yet ported.
-pub fn f_prompt_appendbuf(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_prompt_appendbuf — csrc/eval/buffer.c:278")
-}
-
-/// Port of `f_bufadd()` — `csrc/eval/buffer.c:364`. STUB: not yet ported.
-pub fn f_bufadd(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_bufadd — csrc/eval/buffer.c:364")
-}
-
 /// Port of `buf_win_common()` — `csrc/eval/buffer.c:462`. STUB: not yet ported.
 /// C: `static void buf_win_common(typval_T *argvars, typval_T *rettv, bool get_nr)`
 pub fn buf_win_common() {

@@ -7,22 +7,6 @@ pub fn findfilendir() {
     unimplemented!("STUB findfilendir — csrc/eval/fs.c:536")
 }
 
-/// Port of `f_finddir()` — `csrc/eval/fs.c:602`. STUB: not yet ported.
-pub fn f_finddir(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_finddir — csrc/eval/fs.c:602")
-}
-
-/// Port of `f_findfile()` — `csrc/eval/fs.c:608`. STUB: not yet ported.
-pub fn f_findfile(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_findfile — csrc/eval/fs.c:608")
-}
-
 /// Port of `readdir_checkitem()` — `csrc/eval/fs.c:1166`. STUB: not yet ported.
 /// C: `static varnumber_T readdir_checkitem(void *context, const char *name)`
 pub fn readdir_checkitem() {
@@ -63,20 +47,4 @@ pub fn write_blob() {
 /// C: `static bool write_string(FileDescriptor *const fp, const char *const data)`
 pub fn write_string() {
     unimplemented!("STUB write_string — csrc/eval/fs.c:1780")
-}
-
-/// Port of `f_browse()` — `csrc/eval/fs.c:1892`. STUB: not yet ported.
-pub fn f_browse(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_browse — csrc/eval/fs.c:1892")
-}
-
-/// Port of `f_browsedir()` — `csrc/eval/fs.c:1899`. STUB: not yet ported.
-pub fn f_browsedir(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_browsedir — csrc/eval/fs.c:1899")
 }

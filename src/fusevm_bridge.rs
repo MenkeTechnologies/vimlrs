@@ -20,47 +20,52 @@ use fusevm::{Value, VM};
 use crate::compile_viml::compile_program;
 use crate::ported::eval::encode::{encode_tv2echo, encode_tv2string};
 use crate::ported::eval::fs::{
-    f_chdir, f_delete, f_executable, f_exepath, f_expand, f_expandcmd, f_filecopy, f_filereadable,
-    f_filewritable, f_fnamemodify, f_getcwd, f_getfperm, f_getfsize, f_getftime, f_getftype,
-    f_glob, f_glob2regpat, f_globpath, f_haslocaldir, f_isabsolutepath, f_isdirectory, f_mkdir,
-    f_pathshorten, f_readblob, f_readdir, f_readfile, f_rename, f_resolve, f_setfperm, f_simplify,
-    f_tempname, f_writefile,
+    f_browse, f_browsedir, f_chdir, f_delete, f_executable, f_exepath, f_expand, f_expandcmd,
+    f_filecopy, f_filereadable, f_filewritable, f_finddir, f_findfile, f_fnamemodify, f_getcwd,
+    f_getfperm, f_getfsize, f_getftime, f_getftype, f_glob, f_glob2regpat, f_globpath,
+    f_haslocaldir, f_isabsolutepath, f_isdirectory, f_mkdir, f_pathshorten, f_readblob, f_readdir,
+    f_readfile, f_rename, f_resolve, f_setfperm, f_simplify, f_tempname, f_writefile,
 };
 use crate::ported::eval::funcs::{
     f_abs, f_add, f_and, f_api_info, f_append, f_appendbufline, f_assert_equal, f_assert_exception,
     f_assert_false, f_assert_inrange, f_assert_match, f_assert_notequal, f_assert_notmatch,
-    f_assert_report, f_assert_true, f_atan2, f_bufexists, f_buflisted, f_bufload, f_bufloaded,
-    f_bufname, f_bufnr, f_bufwinid, f_bufwinnr, f_byte2line, f_changenr, f_char2nr, f_charcol,
-    f_col, f_confirm, f_copy, f_cursor, f_debugbreak, f_deepcopy, f_deletebufline,
-    f_dictwatcheradd, f_dictwatcherdel, f_did_filetype, f_empty, f_environ, f_escape,
-    f_eventhandler, f_exists, f_flatten, f_flattennew, f_float2nr, f_fmod, f_fnameescape,
-    f_foreground, f_funcref, f_function, f_garbagecollect, f_get, f_getbufinfo, f_getbufline,
-    f_getbufoneline, f_getchangelist, f_getcharpos, f_getcharsearch, f_getcmdwintype, f_getcurpos,
+    f_assert_report, f_assert_true, f_atan2, f_bufadd, f_bufexists, f_buflisted, f_bufload,
+    f_bufloaded, f_bufname, f_bufnr, f_bufwinid, f_bufwinnr, f_byte2line, f_chanclose, f_changenr,
+    f_chansend, f_char2nr, f_charcol, f_col, f_confirm, f_copy, f_ctxget, f_ctxpop, f_ctxpush,
+    f_ctxset, f_ctxsize, f_cursor, f_debugbreak, f_deepcopy, f_deletebufline, f_dictwatcheradd,
+    f_dictwatcherdel, f_did_filetype, f_empty, f_environ, f_escape, f_eventhandler, f_exists,
+    f_feedkeys, f_flatten, f_flattennew, f_float2nr, f_fmod, f_fnameescape, f_foreground,
+    f_funcref, f_function, f_garbagecollect, f_get, f_getbufinfo, f_getbufline, f_getbufoneline,
+    f_getbufvar, f_getchangelist, f_getcharpos, f_getcharsearch, f_getcmdwintype, f_getcurpos,
     f_getcursorcharpos, f_getenv, f_getfontname, f_getjumplist, f_getline, f_getmarklist, f_getpid,
     f_getpos, f_getreg, f_getreginfo, f_getregion, f_getregionpos, f_getregtype, f_gettabinfo,
-    f_gettagstack, f_gettext, f_getwininfo, f_getwinpos, f_getwinposx, f_getwinposy, f_has,
-    f_has_key, f_hlexists, f_id, f_index, f_indexof, f_input, f_inputdialog, f_inputlist,
-    f_inputrestore, f_inputsave, f_inputsecret, f_insert, f_interrupt, f_invert, f_isinf, f_isnan,
-    f_items, f_json_decode, f_json_encode, f_keys, f_len, f_line, f_line2byte, f_list2str,
-    f_localtime, f_match, f_matchbufline, f_matchend, f_matchlist, f_matchstr, f_matchstrlist,
-    f_matchstrpos, f_max, f_menu_get, f_min, f_mode, f_nextnonblank, f_nr2char, f_or, f_pow,
-    f_prevnonblank, f_printf, f_prompt_getinput, f_prompt_getprompt, f_prompt_setcallback,
-    f_prompt_setinterrupt, f_prompt_setprompt, f_pum_getpos, f_pumvisible, f_rand, f_range,
-    f_reduce, f_reg_executing, f_reg_recorded, f_reg_recording, f_reltime, f_reltimefloat,
-    f_reltimestr, f_repeat, f_reverse, f_screenattr, f_screenchar, f_screenchars, f_screencol,
-    f_screenrow, f_screenstring, f_search, f_searchdecl, f_searchpair, f_searchpairpos,
-    f_searchpos, f_serverlist, f_serverstart, f_serverstop, f_setbufline, f_setcharpos,
-    f_setcharsearch, f_setcursorcharpos, f_setenv, f_setline, f_setpos, f_setreg, f_settagstack,
-    f_sha256, f_shellescape, f_shiftwidth, f_soundfold, f_spellbadword, f_spellsuggest, f_split,
-    f_srand, f_state, f_str2float, f_strftime, f_strptime, f_substitute, f_swapfilelist,
-    f_swapinfo, f_swapname, f_synID, f_synIDattr, f_synIDtrans, f_synconcealed, f_synstack,
-    f_system, f_systemlist, f_tabpagebuflist, f_tabpagenr, f_tabpagewinnr, f_tagfiles, f_taglist,
-    f_timer_info, f_timer_pause, f_timer_start, f_timer_stop, f_timer_stopall, f_type, f_values,
-    f_virtcol, f_visualmode, f_wildmenumode, f_win_findbuf, f_win_getid, f_win_gettype,
-    f_win_gotoid, f_win_id2tabwin, f_win_id2win, f_win_move_separator, f_win_move_statusline,
-    f_win_screenpos, f_win_splitmove, f_winbufnr, f_wincol, f_windowsversion, f_winheight,
-    f_winlayout, f_winline, f_winnr, f_winrestcmd, f_winrestview, f_winsaveview, f_winwidth,
-    f_wordcount, f_xor, float_op_wrapper,
+    f_gettabvar, f_gettabwinvar, f_gettagstack, f_gettext, f_getwininfo, f_getwinpos, f_getwinposx,
+    f_getwinposy, f_getwinvar, f_has, f_has_key, f_hlexists, f_id, f_index, f_indexof, f_input,
+    f_inputdialog, f_inputlist, f_inputrestore, f_inputsave, f_inputsecret, f_insert, f_interrupt,
+    f_invert, f_isinf, f_islocked, f_isnan, f_items, f_jobpid, f_jobresize, f_jobstart, f_jobstop,
+    f_jobwait, f_json_decode, f_json_encode, f_keys, f_keytrans, f_last_buffer_nr, f_len,
+    f_libcall, f_libcallnr, f_line, f_line2byte, f_list2str, f_localtime, f_luaeval, f_match,
+    f_matchbufline, f_matchend, f_matchlist, f_matchstr, f_matchstrlist, f_matchstrpos, f_max,
+    f_menu_get, f_min, f_mode, f_msgpackdump, f_msgpackparse, f_nextnonblank, f_nr2char, f_or,
+    f_perleval, f_pow, f_prevnonblank, f_printf, f_prompt_appendbuf, f_prompt_getinput,
+    f_prompt_getprompt, f_prompt_setcallback, f_prompt_setinterrupt, f_prompt_setprompt,
+    f_pum_getpos, f_pumvisible, f_py3eval, f_rand, f_range, f_reduce, f_reg_executing,
+    f_reg_recorded, f_reg_recording, f_reltime, f_reltimefloat, f_reltimestr, f_repeat, f_reverse,
+    f_rpcnotify, f_rpcrequest, f_rpcstart, f_rpcstop, f_rubyeval, f_screenattr, f_screenchar,
+    f_screenchars, f_screencol, f_screenrow, f_screenstring, f_search, f_searchdecl, f_searchpair,
+    f_searchpairpos, f_searchpos, f_serverlist, f_serverstart, f_serverstop, f_setbufline,
+    f_setbufvar, f_setcharpos, f_setcharsearch, f_setcursorcharpos, f_setenv, f_setline, f_setpos,
+    f_setreg, f_settabvar, f_settabwinvar, f_settagstack, f_setwinvar, f_sha256, f_shellescape,
+    f_shiftwidth, f_sockconnect, f_soundfold, f_spellbadword, f_spellsuggest, f_split, f_srand,
+    f_state, f_stdioopen, f_stdpath, f_str2float, f_strftime, f_strptime, f_submatch, f_substitute,
+    f_swapfilelist, f_swapinfo, f_swapname, f_synID, f_synIDattr, f_synIDtrans, f_synconcealed,
+    f_synstack, f_system, f_systemlist, f_tabpagebuflist, f_tabpagenr, f_tabpagewinnr, f_tagfiles,
+    f_taglist, f_termopen, f_timer_info, f_timer_pause, f_timer_start, f_timer_stop,
+    f_timer_stopall, f_type, f_values, f_virtcol, f_visualmode, f_wait, f_wildmenumode,
+    f_win_execute, f_win_findbuf, f_win_getid, f_win_gettype, f_win_gotoid, f_win_id2tabwin,
+    f_win_id2win, f_win_move_separator, f_win_move_statusline, f_win_screenpos, f_win_splitmove,
+    f_winbufnr, f_wincol, f_windowsversion, f_winheight, f_winlayout, f_winline, f_winnr,
+    f_winrestcmd, f_winrestview, f_winsaveview, f_winwidth, f_wordcount, f_xor, float_op_wrapper,
 };
 use crate::ported::eval::list::{
     f_count, f_extend, f_extendnew, f_filter, f_foreach, f_map, f_mapnew, f_remove,
@@ -805,6 +810,104 @@ pub const VIML_FN_SWAPINFO: u16 = 3416;
 pub const VIML_FN_SERVERSTART: u16 = 3417;
 /// `serverstop()`
 pub const VIML_FN_SERVERSTOP: u16 = 3418;
+/// `getbufvar()`
+pub const VIML_FN_GETBUFVAR: u16 = 3419;
+/// `getwinvar()`
+pub const VIML_FN_GETWINVAR: u16 = 3420;
+/// `gettabvar()`
+pub const VIML_FN_GETTABVAR: u16 = 3421;
+/// `gettabwinvar()`
+pub const VIML_FN_GETTABWINVAR: u16 = 3422;
+/// `setbufvar()`
+pub const VIML_FN_SETBUFVAR: u16 = 3423;
+/// `setwinvar()`
+pub const VIML_FN_SETWINVAR: u16 = 3424;
+/// `settabvar()`
+pub const VIML_FN_SETTABVAR: u16 = 3425;
+/// `settabwinvar()`
+pub const VIML_FN_SETTABWINVAR: u16 = 3426;
+/// `jobstart()`
+pub const VIML_FN_JOBSTART: u16 = 3427;
+/// `jobpid()`
+pub const VIML_FN_JOBPID: u16 = 3428;
+/// `jobstop()`
+pub const VIML_FN_JOBSTOP: u16 = 3429;
+/// `jobwait()`
+pub const VIML_FN_JOBWAIT: u16 = 3430;
+/// `jobresize()`
+pub const VIML_FN_JOBRESIZE: u16 = 3431;
+/// `chanclose()`
+pub const VIML_FN_CHANCLOSE: u16 = 3432;
+/// `chansend()`
+pub const VIML_FN_CHANSEND: u16 = 3433;
+/// `feedkeys()`
+pub const VIML_FN_FEEDKEYS: u16 = 3434;
+/// `wait()`
+pub const VIML_FN_WAIT: u16 = 3435;
+/// `sockconnect()`
+pub const VIML_FN_SOCKCONNECT: u16 = 3436;
+/// `win_execute()`
+pub const VIML_FN_WIN_EXECUTE: u16 = 3437;
+/// `bufadd()`
+pub const VIML_FN_BUFADD: u16 = 3438;
+/// `ctxget()`
+pub const VIML_FN_CTXGET: u16 = 3439;
+/// `ctxpop()`
+pub const VIML_FN_CTXPOP: u16 = 3440;
+/// `ctxpush()`
+pub const VIML_FN_CTXPUSH: u16 = 3441;
+/// `ctxset()`
+pub const VIML_FN_CTXSET: u16 = 3442;
+/// `ctxsize()`
+pub const VIML_FN_CTXSIZE: u16 = 3443;
+/// `islocked()`
+pub const VIML_FN_ISLOCKED: u16 = 3444;
+/// `last_buffer_nr()`
+pub const VIML_FN_LAST_BUFFER_NR: u16 = 3445;
+/// `libcall()`
+pub const VIML_FN_LIBCALL: u16 = 3446;
+/// `libcallnr()`
+pub const VIML_FN_LIBCALLNR: u16 = 3447;
+/// `msgpackdump()`
+pub const VIML_FN_MSGPACKDUMP: u16 = 3448;
+/// `msgpackparse()`
+pub const VIML_FN_MSGPACKPARSE: u16 = 3449;
+/// `rpcnotify()`
+pub const VIML_FN_RPCNOTIFY: u16 = 3450;
+/// `rpcrequest()`
+pub const VIML_FN_RPCREQUEST: u16 = 3451;
+/// `rpcstart()`
+pub const VIML_FN_RPCSTART: u16 = 3452;
+/// `rpcstop()`
+pub const VIML_FN_RPCSTOP: u16 = 3453;
+/// `stdioopen()`
+pub const VIML_FN_STDIOOPEN: u16 = 3454;
+/// `submatch()`
+pub const VIML_FN_SUBMATCH: u16 = 3455;
+/// `prompt_appendbuf()`
+pub const VIML_FN_PROMPT_APPENDBUF: u16 = 3456;
+/// `py3eval()`
+pub const VIML_FN_PY3EVAL: u16 = 3457;
+/// `perleval()`
+pub const VIML_FN_PERLEVAL: u16 = 3458;
+/// `stdpath()`
+pub const VIML_FN_STDPATH: u16 = 3459;
+/// `keytrans()`
+pub const VIML_FN_KEYTRANS: u16 = 3460;
+/// `luaeval()`
+pub const VIML_FN_LUAEVAL: u16 = 3461;
+/// `rubyeval()`
+pub const VIML_FN_RUBYEVAL: u16 = 3462;
+/// `termopen()`
+pub const VIML_FN_TERMOPEN: u16 = 3463;
+/// `browse()`
+pub const VIML_FN_BROWSE: u16 = 3464;
+/// `browsedir()`
+pub const VIML_FN_BROWSEDIR: u16 = 3465;
+/// `finddir()`
+pub const VIML_FN_FINDDIR: u16 = 3466;
+/// `findfile()`
+pub const VIML_FN_FINDFILE: u16 = 3467;
 /// `flattennew()`
 pub const VIML_FN_FLATTENNEW: u16 = 3211;
 /// `sha256()`
@@ -2541,6 +2644,65 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FN_SWAPINFO, |vm, n| call_func(vm, n, f_swapinfo));
     vm.register_builtin(VIML_FN_SERVERSTART, |vm, n| call_func(vm, n, f_serverstart));
     vm.register_builtin(VIML_FN_SERVERSTOP, |vm, n| call_func(vm, n, f_serverstop));
+    vm.register_builtin(VIML_FN_GETBUFVAR, |vm, n| call_func(vm, n, f_getbufvar));
+    vm.register_builtin(VIML_FN_GETWINVAR, |vm, n| call_func(vm, n, f_getwinvar));
+    vm.register_builtin(VIML_FN_GETTABVAR, |vm, n| call_func(vm, n, f_gettabvar));
+    vm.register_builtin(VIML_FN_GETTABWINVAR, |vm, n| {
+        call_func(vm, n, f_gettabwinvar)
+    });
+    vm.register_builtin(VIML_FN_SETBUFVAR, |vm, n| call_func(vm, n, f_setbufvar));
+    vm.register_builtin(VIML_FN_SETWINVAR, |vm, n| call_func(vm, n, f_setwinvar));
+    vm.register_builtin(VIML_FN_SETTABVAR, |vm, n| call_func(vm, n, f_settabvar));
+    vm.register_builtin(VIML_FN_SETTABWINVAR, |vm, n| {
+        call_func(vm, n, f_settabwinvar)
+    });
+    vm.register_builtin(VIML_FN_JOBSTART, |vm, n| call_func(vm, n, f_jobstart));
+    vm.register_builtin(VIML_FN_JOBPID, |vm, n| call_func(vm, n, f_jobpid));
+    vm.register_builtin(VIML_FN_JOBSTOP, |vm, n| call_func(vm, n, f_jobstop));
+    vm.register_builtin(VIML_FN_JOBWAIT, |vm, n| call_func(vm, n, f_jobwait));
+    vm.register_builtin(VIML_FN_JOBRESIZE, |vm, n| call_func(vm, n, f_jobresize));
+    vm.register_builtin(VIML_FN_CHANCLOSE, |vm, n| call_func(vm, n, f_chanclose));
+    vm.register_builtin(VIML_FN_CHANSEND, |vm, n| call_func(vm, n, f_chansend));
+    vm.register_builtin(VIML_FN_FEEDKEYS, |vm, n| call_func(vm, n, f_feedkeys));
+    vm.register_builtin(VIML_FN_WAIT, |vm, n| call_func(vm, n, f_wait));
+    vm.register_builtin(VIML_FN_SOCKCONNECT, |vm, n| call_func(vm, n, f_sockconnect));
+    vm.register_builtin(VIML_FN_WIN_EXECUTE, |vm, n| call_func(vm, n, f_win_execute));
+    vm.register_builtin(VIML_FN_BUFADD, |vm, n| call_func(vm, n, f_bufadd));
+    vm.register_builtin(VIML_FN_CTXGET, |vm, n| call_func(vm, n, f_ctxget));
+    vm.register_builtin(VIML_FN_CTXPOP, |vm, n| call_func(vm, n, f_ctxpop));
+    vm.register_builtin(VIML_FN_CTXPUSH, |vm, n| call_func(vm, n, f_ctxpush));
+    vm.register_builtin(VIML_FN_CTXSET, |vm, n| call_func(vm, n, f_ctxset));
+    vm.register_builtin(VIML_FN_CTXSIZE, |vm, n| call_func(vm, n, f_ctxsize));
+    vm.register_builtin(VIML_FN_ISLOCKED, |vm, n| call_func(vm, n, f_islocked));
+    vm.register_builtin(VIML_FN_LAST_BUFFER_NR, |vm, n| {
+        call_func(vm, n, f_last_buffer_nr)
+    });
+    vm.register_builtin(VIML_FN_LIBCALL, |vm, n| call_func(vm, n, f_libcall));
+    vm.register_builtin(VIML_FN_LIBCALLNR, |vm, n| call_func(vm, n, f_libcallnr));
+    vm.register_builtin(VIML_FN_MSGPACKDUMP, |vm, n| call_func(vm, n, f_msgpackdump));
+    vm.register_builtin(VIML_FN_MSGPACKPARSE, |vm, n| {
+        call_func(vm, n, f_msgpackparse)
+    });
+    vm.register_builtin(VIML_FN_RPCNOTIFY, |vm, n| call_func(vm, n, f_rpcnotify));
+    vm.register_builtin(VIML_FN_RPCREQUEST, |vm, n| call_func(vm, n, f_rpcrequest));
+    vm.register_builtin(VIML_FN_RPCSTART, |vm, n| call_func(vm, n, f_rpcstart));
+    vm.register_builtin(VIML_FN_RPCSTOP, |vm, n| call_func(vm, n, f_rpcstop));
+    vm.register_builtin(VIML_FN_STDIOOPEN, |vm, n| call_func(vm, n, f_stdioopen));
+    vm.register_builtin(VIML_FN_SUBMATCH, |vm, n| call_func(vm, n, f_submatch));
+    vm.register_builtin(VIML_FN_PROMPT_APPENDBUF, |vm, n| {
+        call_func(vm, n, f_prompt_appendbuf)
+    });
+    vm.register_builtin(VIML_FN_PY3EVAL, |vm, n| call_func(vm, n, f_py3eval));
+    vm.register_builtin(VIML_FN_PERLEVAL, |vm, n| call_func(vm, n, f_perleval));
+    vm.register_builtin(VIML_FN_STDPATH, |vm, n| call_func(vm, n, f_stdpath));
+    vm.register_builtin(VIML_FN_KEYTRANS, |vm, n| call_func(vm, n, f_keytrans));
+    vm.register_builtin(VIML_FN_LUAEVAL, |vm, n| call_func(vm, n, f_luaeval));
+    vm.register_builtin(VIML_FN_RUBYEVAL, |vm, n| call_func(vm, n, f_rubyeval));
+    vm.register_builtin(VIML_FN_TERMOPEN, |vm, n| call_func(vm, n, f_termopen));
+    vm.register_builtin(VIML_FN_BROWSE, |vm, n| call_func(vm, n, f_browse));
+    vm.register_builtin(VIML_FN_BROWSEDIR, |vm, n| call_func(vm, n, f_browsedir));
+    vm.register_builtin(VIML_FN_FINDDIR, |vm, n| call_func(vm, n, f_finddir));
+    vm.register_builtin(VIML_FN_FINDFILE, |vm, n| call_func(vm, n, f_findfile));
     vm.register_builtin(VIML_FN_FLATTENNEW, |vm, n| call_func(vm, n, f_flattennew));
     vm.register_builtin(VIML_FN_SHA256, |vm, n| call_func(vm, n, f_sha256));
     vm.register_builtin(VIML_FN_BLOB2LIST, |vm, n| call_func(vm, n, f_blob2list));

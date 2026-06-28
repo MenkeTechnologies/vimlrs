@@ -421,12 +421,6 @@ pub fn valid_varname() {
     unimplemented!("STUB valid_varname — csrc/eval/vars.c:3060")
 }
 
-/// Port of `get_var_from()` — `csrc/eval/vars.c:3081`. STUB: not yet ported.
-/// C: `static void get_var_from(const char *varname, typval_T *rettv, typval_T *deftv, int htname,`
-pub fn get_var_from() {
-    unimplemented!("STUB get_var_from — csrc/eval/vars.c:3081")
-}
-
 /// Port of `getwinvar()` — `csrc/eval/vars.c:3172`. STUB: not yet ported.
 /// C: `static void getwinvar(typval_T *argvars, typval_T *rettv, int off)`
 pub fn getwinvar() {
@@ -485,68 +479,4 @@ pub fn var_redir_str() {
 /// C: `void var_redir_stop(void)`
 pub fn var_redir_stop() {
     unimplemented!("STUB var_redir_stop — csrc/eval/vars.c:3495")
-}
-
-/// Port of `f_gettabvar()` — `csrc/eval/vars.c:3523`. STUB: not yet ported.
-pub fn f_gettabvar(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_gettabvar — csrc/eval/vars.c:3523")
-}
-
-/// Port of `f_gettabwinvar()` — `csrc/eval/vars.c:3537`. STUB: not yet ported.
-pub fn f_gettabwinvar(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_gettabwinvar — csrc/eval/vars.c:3537")
-}
-
-/// Port of `f_getwinvar()` — `csrc/eval/vars.c:3543`. STUB: not yet ported.
-pub fn f_getwinvar(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_getwinvar — csrc/eval/vars.c:3543")
-}
-
-/// Port of `f_getbufvar()` — `csrc/eval/vars.c:3549`. STUB: not yet ported.
-pub fn f_getbufvar(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_getbufvar — csrc/eval/vars.c:3549")
-}
-
-/// Port of `f_settabvar()` — `csrc/eval/vars.c:3558`. STUB: not yet ported.
-pub fn f_settabvar(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_settabvar — csrc/eval/vars.c:3558")
-}
-
-/// Port of `f_settabwinvar()` — `csrc/eval/vars.c:3593`. STUB: not yet ported.
-pub fn f_settabwinvar(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_settabwinvar — csrc/eval/vars.c:3593")
-}
-
-/// Port of `f_setwinvar()` — `csrc/eval/vars.c:3599`. STUB: not yet ported.
-pub fn f_setwinvar(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_setwinvar — csrc/eval/vars.c:3599")
-}
-
-/// Port of `f_setbufvar()` — `csrc/eval/vars.c:3605`. STUB: not yet ported.
-pub fn f_setbufvar(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_setbufvar — csrc/eval/vars.c:3605")
 }

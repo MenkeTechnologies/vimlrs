@@ -97,14 +97,6 @@ pub fn win_execute_after() {
     unimplemented!("STUB win_execute_after — csrc/eval/window.c:548")
 }
 
-/// Port of `f_win_execute()` — `csrc/eval/window.c:578`. STUB: not yet ported.
-pub fn f_win_execute(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_win_execute — csrc/eval/window.c:578")
-}
-
 /// Port of `switch_win()` — `csrc/eval/window.c:972`. STUB: not yet ported.
 /// C: `int switch_win(switchwin_T *switchwin, win_T *win, tabpage_T *tp, bool no_display)`
 pub fn switch_win() {
