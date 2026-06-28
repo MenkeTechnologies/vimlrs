@@ -33,7 +33,12 @@ Covered by `examples/compare.vim`.
 - The whole `?`-suffixed (force-ignorecase) operator family returns the wrong
   boolean or silently produces nothing. Common in real scripts. (`>?` happened to match.)
 
-### 2. `substitute()` with `\=` expression using `.` concat loses the result
+### 2. `substitute()` with `\=` expression using `.` concat loses the result — ✅ FIXED
+Root cause was the parser: `submatch(0).submatch(0)` parsed `.submatch` as a dict
+member read instead of `.` concatenation. `at_member_dot` now treats `.name(` as
+concatenation with a function call (legacy has no direct `dict.key(args)` call —
+that is vim9), so all `f(x).g(y)` chaining concatenates. Covered by
+`examples/concat_dot.vim`.
 - `substitute('abc','.','\=submatch(0).submatch(0)','g')` → Vim `aabbcc`, vimlrs `` (empty)
 - `substitute('abc','.','\=submatch(0).submatch(0)','')` → Vim `aabc`, vimlrs `bc`
 - The `\=` expression evaluates to empty specifically when it uses the `.`

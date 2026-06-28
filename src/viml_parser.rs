@@ -977,9 +977,16 @@ impl Parser {
         }
         let prev = &self.toks[i - 1];
         let next = &self.toks[i + 1];
+        // `.name(` is concatenation with a function call (`a().b(x)` / `s.f(x)`),
+        // not a member call — legacy Vimscript has no direct `dict.key(args)`
+        // call syntax (that is vim9). So only treat `.name` as a member read when
+        // the name is NOT immediately followed by '('.
+        let followed_by_call =
+            matches!(self.toks.get(i + 2), Some(t) if t.kind == Tok::LParen && t.span == next.end);
         matches!(next.kind, Tok::Ident(_))
             && dot.span == prev.end // no space before the dot
             && next.span == dot.end // no space after the dot
+            && !followed_by_call
     }
 
     /// Postfix subscripts: `[index]`, `[from:to]`, `.name` dict member access,
