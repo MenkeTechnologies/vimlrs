@@ -21,6 +21,11 @@ pub struct UserFuncDef {
     pub name: String,
     /// Parameter names (without the `a:` prefix).
     pub params: Vec<String>,
+    /// Compiled default-value expressions for optional parameters, as
+    /// `(param index, chunk)`. Each chunk leaves the default on the VM stack and
+    /// is run at call time (in the partially-bound `a:` scope) when the argument
+    /// is omitted.
+    pub defaults: Vec<(usize, fusevm::Chunk)>,
     /// `function!` — replace an existing definition.
     pub bang: bool,
     /// Compiled function body.
@@ -149,13 +154,19 @@ pub fn compile_program(stmts: &[Stmt]) -> Result<CompiledProgram, VimlError> {
         if let Stmt::Function {
             name,
             args,
+            defaults,
             body,
             bang,
         } = s
         {
+            let defaults = defaults
+                .iter()
+                .map(|(i, e)| Ok((*i, compile_expr_only(e)?)))
+                .collect::<Result<Vec<_>, VimlError>>()?;
             funcs.push(UserFuncDef {
                 name: name.clone(),
                 params: args.clone(),
+                defaults,
                 bang: *bang,
                 chunk: compile_function_body(body, exc)?,
             });
@@ -1555,6 +1566,7 @@ impl Compiler {
                     f.borrow_mut().push(UserFuncDef {
                         name: name.clone(),
                         params: all_params,
+                        defaults: Vec::new(),
                         bang: true,
                         chunk,
                     })

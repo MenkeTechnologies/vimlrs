@@ -1970,34 +1970,50 @@ fn call_user_function(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
     // Bind named parameters into the a: scope; extras into a:0 / a:000. A `...`
     // entry marks the varargs boundary: params before it are named, every arg
     // from that position on goes to a:000 (so `F(...)` collects all args).
-    let mut avars = crate::ported::eval::typval_defs_h::dict_T::default();
+    use crate::ported::eval::typval::tv_dict_add_tv;
     let nfixed = func
         .params
         .iter()
         .position(|p| p == "...")
         .unwrap_or(func.params.len());
+
+    // Push the (empty) a:/l: frame first, then bind params into it one at a time.
+    // Binding incrementally lets an omitted parameter's default expression read
+    // the arguments bound before it, as Vim evaluates defaults left to right.
+    crate::ported::eval::vars::funccal_stack.with(|s| {
+        s.borrow_mut().push(crate::ported::eval::vars::FuncScope {
+            fc_l_vars: crate::ported::eval::typval_defs_h::dict_T::default(),
+            fc_l_avars: crate::ported::eval::typval_defs_h::dict_T::default(),
+        })
+    });
+    let bind_avar = |key: &str, v: typval_T| {
+        crate::ported::eval::vars::funccal_stack.with(|s| {
+            if let Some(top) = s.borrow_mut().last_mut() {
+                tv_dict_add_tv(&mut top.fc_l_avars, key, v);
+            }
+        });
+    };
     for (i, p) in func.params.iter().take(nfixed).enumerate() {
-        let v = args.get(i).cloned().unwrap_or_else(tv_special);
-        crate::ported::eval::typval::tv_dict_add_tv(&mut avars, p, v);
+        let v = if i < args.len() {
+            args[i].clone()
+        } else if let Some((_, chunk)) = func.defaults.iter().find(|(di, _)| *di == i) {
+            // c: an omitted optional argument is its default value (evaluated now,
+            // in the partially-bound a: scope); a missing non-optional one is the
+            // special "v:none"-like value, as before.
+            run_value_chunk(chunk.clone()).unwrap_or_else(tv_special)
+        } else {
+            tv_special()
+        };
+        bind_avar(p, v);
     }
     let extra: Vec<typval_T> = if args.len() > nfixed {
         args[nfixed..].to_vec()
     } else {
         Vec::new()
     };
-    crate::ported::eval::typval::tv_dict_add_tv(
-        &mut avars,
-        "0",
-        tv_num(extra.len() as varnumber_T),
-    );
-    crate::ported::eval::typval::tv_dict_add_tv(&mut avars, "000", new_list(extra));
+    bind_avar("0", tv_num(extra.len() as varnumber_T));
+    bind_avar("000", new_list(extra));
 
-    crate::ported::eval::vars::funccal_stack.with(|s| {
-        s.borrow_mut().push(crate::ported::eval::vars::FuncScope {
-            fc_l_vars: crate::ported::eval::typval_defs_h::dict_T::default(),
-            fc_l_avars: avars,
-        })
-    });
     RETURN_STACK.with(|r| r.borrow_mut().push(None));
 
     run_chunk_nested(func.chunk.clone());
@@ -2019,6 +2035,21 @@ fn run_chunk_nested(chunk: fusevm::Chunk) {
     install(&mut vm);
     let _ = vm.run();
     LAST_RESULT.with(|r| *r.borrow_mut() = saved);
+}
+
+/// Run a chunk compiled with `compile_expr_only` (the value is left on the VM
+/// stack, so it comes back as `VMResult::Ok`) and return it as a typval. Used to
+/// evaluate optional-parameter default expressions at call time. Refpool-safe.
+fn run_value_chunk(chunk: fusevm::Chunk) -> Option<typval_T> {
+    let saved = LAST_RESULT.with(|r| r.borrow_mut().take());
+    let mut vm = VM::new(chunk);
+    install(&mut vm);
+    let r = vm.run();
+    LAST_RESULT.with(|r2| *r2.borrow_mut() = saved);
+    match r {
+        fusevm::VMResult::Ok(v) => Some(value_to_tv(&v)),
+        _ => None,
+    }
 }
 
 /// Run a nested chunk and capture its bare-expression result (the per-element

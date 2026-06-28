@@ -276,6 +276,10 @@ pub enum Stmt {
         name: String,
         /// Parameter names (without the `a:` prefix).
         args: Vec<String>,
+        /// Default values for optional parameters: `(param index, default expr)`,
+        /// e.g. `func F(a, b = 10)` records `(1, Num(10))`. Evaluated at call time
+        /// when the argument is omitted (`:help optional-function-argument`).
+        defaults: Vec<(usize, Expr)>,
         /// Function body.
         body: Vec<Stmt>,
         /// `function!` — replace an existing definition.

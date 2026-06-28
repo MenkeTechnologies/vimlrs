@@ -547,15 +547,63 @@ fn parse_function(cur: &mut Lines, header: &str) -> Result<Stmt, VimlError> {
         .find('(')
         .ok_or_else(|| VimlError::msg("E124: Missing '(' in :function"))?;
     let name = header[..lparen].trim().to_string();
-    let rparen = header[lparen..]
-        .find(')')
-        .map(|r| lparen + r)
-        .ok_or_else(|| VimlError::msg("E125: Missing ')' in :function"))?;
-    let args: Vec<String> = header[lparen + 1..rparen]
-        .split(',')
-        .map(|a| a.trim().to_string())
-        .filter(|a| !a.is_empty())
-        .collect();
+    // Find the `)` that matches the parameter-list `(` — not merely the first
+    // one, since a default value may itself contain parens (`a = abs(-7)`) or
+    // brackets. Track nesting and skip quoted strings.
+    let rparen = {
+        let mut depth = 0i32;
+        let mut quote: Option<u8> = None;
+        let mut found = None;
+        for (i, &b) in header.as_bytes().iter().enumerate().skip(lparen) {
+            match quote {
+                Some(q) => {
+                    if b == q {
+                        quote = None;
+                    }
+                }
+                None => match b {
+                    b'\'' | b'"' => quote = Some(b),
+                    b'(' | b'[' | b'{' => depth += 1,
+                    b')' | b']' | b'}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            found = Some(i);
+                            break;
+                        }
+                    }
+                    _ => {}
+                },
+            }
+        }
+        found.ok_or_else(|| VimlError::msg("E125: Missing ')' in :function"))?
+    };
+    // Split the parameter list, separating optional `name = default` params
+    // (`:help optional-function-argument`) into the name list plus a parallel
+    // list of `(index, default expr)`.
+    let mut args: Vec<String> = Vec::new();
+    let mut defaults: Vec<(usize, Expr)> = Vec::new();
+    for raw in split_top_commas(&header[lparen + 1..rparen]) {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        // `=` introduces a default, but `==`/`=~` etc. inside the default expr
+        // must not be mistaken for it: only an unescaped top-level `=` that is
+        // not part of a comparison operator separates name from default.
+        match raw.find('=').filter(|&p| {
+            raw[..p]
+                .trim_end()
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == ':')
+                && !matches!(raw.as_bytes().get(p + 1), Some(b'=') | Some(b'~'))
+        }) {
+            Some(p) => {
+                defaults.push((args.len(), parse_expr(raw[p + 1..].trim())?));
+                args.push(raw[..p].trim().to_string());
+            }
+            None => args.push(raw.to_string()),
+        }
+    }
     let (body, term) = parse_block(cur, &["endfunction", "endfunc"])?;
     if term.is_none() {
         return Err(VimlError::msg("E126: Missing :endfunction"));
@@ -563,6 +611,7 @@ fn parse_function(cur: &mut Lines, header: &str) -> Result<Stmt, VimlError> {
     Ok(Stmt::Function {
         name,
         args,
+        defaults,
         body,
         bang,
     })
@@ -759,6 +808,38 @@ fn split_unlet_args(s: &str) -> Vec<&str> {
     if let Some(st) = start {
         out.push(&s[st..]);
     }
+    out
+}
+
+/// Split a function parameter list on its top-level commas, keeping commas
+/// inside a default value's `[]`/`()`/`{}` or quoted string intact (so
+/// `func F(l = [1, 2], d = {'a': 1})` splits into two params, not five).
+fn split_top_commas(s: &str) -> Vec<&str> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut quote: Option<u8> = None;
+    let mut start = 0usize;
+    for (i, &c) in bytes.iter().enumerate() {
+        match quote {
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                }
+            }
+            None => match c {
+                b'\'' | b'"' => quote = Some(c),
+                b'[' | b'(' | b'{' => depth += 1,
+                b']' | b')' | b'}' => depth -= 1,
+                b',' if depth == 0 => {
+                    out.push(&s[start..i]);
+                    start = i + 1;
+                }
+                _ => {}
+            },
+        }
+    }
+    out.push(&s[start..]);
     out
 }
 
