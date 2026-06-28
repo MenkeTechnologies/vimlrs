@@ -417,7 +417,17 @@ impl<'a> Lexer<'a> {
         while matches!(self.peek(), b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_') {
             self.pos += 1;
         }
-        if self.peek() == b':' && (self.pos - start) <= 1 {
+        // A leading single-letter scope prefix (`a:`/`b:`/`g:`/`l:`/`s:`/`t:`/
+        // `v:`/`w:`) absorbs its `:` and the name after it. Only the real scope
+        // letters do this — otherwise `z:1` (a no-space ternary `?z:1`) or a
+        // literal-Dict key `#{z:1}` would wrongly merge.
+        if self.peek() == b':'
+            && (self.pos - start) == 1
+            && matches!(
+                self.src[start],
+                b'a' | b'b' | b'g' | b'l' | b's' | b't' | b'v' | b'w'
+            )
+        {
             self.pos += 1;
             while matches!(self.peek(), b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_') {
                 self.pos += 1;

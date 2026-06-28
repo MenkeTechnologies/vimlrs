@@ -37,6 +37,12 @@ call assert_equal('ada', user.name)
 call assert_equal('viml', user.langs[0])
 " #{...} literal-key dict — bare-word keys, no quotes.
 call assert_equal({'id': 1, 'tag': 'x'}, #{id: 1, tag: 'x'})
+" Keys work without a space after ':', including single-char and scope-letter
+" keys (which the lexer would otherwise treat as a scope sigil like a:/s:).
+call assert_equal({'z': 1}, #{z:1})
+call assert_equal({'a': 1, 'b': 2}, #{a:1, b:2})
+call assert_equal({'s': 'x', 'name': 9}, #{s:'x', name:9})
+call assert_equal({'a': 3}, #{a: 1 + 2})
 call assert_equal({'vim': 3, 'rust': 2, 'c': 1}, freq)
 call assert_equal(3, freq['vim'])
 

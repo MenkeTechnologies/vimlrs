@@ -1178,13 +1178,18 @@ impl Parser {
                     )))
                 }
             };
-            let key = if let Some(stripped) = raw.strip_suffix(':') {
-                stripped.to_string()
+            let (key, val) = if let Some(stripped) = raw.strip_suffix(':') {
+                // `a:` — a scope-letter key absorbed its `:`; the value follows.
+                (stripped.to_string(), self.eval1()?)
+            } else if let Some(c) = raw.find(':') {
+                // `a:1` — a scope-letter key merged with a glued simple value
+                // (the lexer can only glue a bareword/number after the `:`); split
+                // and parse that fragment as the value.
+                (raw[..c].to_string(), parse_expr(&raw[c + 1..])?)
             } else {
                 self.eat(&Tok::Colon)?;
-                raw
+                (raw, self.eval1()?)
             };
-            let val = self.eval1()?;
             pairs.push((Expr::Str(key), val));
             match self.advance() {
                 Tok::Comma => {
