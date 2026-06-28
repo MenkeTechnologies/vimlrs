@@ -5780,8 +5780,261 @@ pub fn do_excmd(line: &str) -> ExCmdResult {
             }
             ExCmdResult::Handled
         }
+        "r" | "re" | "read" => {
+            // `:[line]r {file}` inserts a file's lines after the range; `:r !cmd`
+            // inserts a shell command's output. Default position: the last line.
+            let at = if had_range { hi } else { curbuf_len() };
+            let lines = if let Some(shell) = args.strip_prefix('!') {
+                shell_capture(shell.trim())
+            } else {
+                std::fs::read_to_string(args)
+                    .map(|s| s.lines().map(str::to_string).collect())
+                    .unwrap_or_default()
+            };
+            set_buffer_lines(at, lines, true);
+            ExCmdResult::Handled
+        }
+        "w" | "wr" | "write" => {
+            // `:[range]w[!] {file}` writes the buffer (or range) to a file;
+            // `:w >>file` appends; `:w !cmd` pipes to a shell command.
+            let (lo2, hi2) = if had_range { (lo, hi) } else { (1, len) };
+            let body = get_buffer_lines(lo2, hi2).join("\n") + "\n";
+            if let Some(shell) = args.strip_prefix('!') {
+                shell_feed(shell.trim(), &body);
+            } else if let Some(file) = args.strip_prefix(">>") {
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(file.trim())
+                {
+                    use std::io::Write;
+                    let _ = f.write_all(body.as_bytes());
+                }
+            } else if !args.is_empty() {
+                let _ = std::fs::write(args, body);
+            }
+            ExCmdResult::Handled
+        }
+        "e" | "ed" | "edit" => {
+            // `:e {file}` replaces the buffer with the file's contents.
+            if !args.is_empty() {
+                if let Ok(s) = std::fs::read_to_string(args) {
+                    let lines: Vec<String> = s.lines().map(str::to_string).collect();
+                    CURBUF.with(|b| {
+                        *b.borrow_mut() = if lines.is_empty() {
+                            vec![String::new()]
+                        } else {
+                            lines
+                        }
+                    });
+                    set_cursorpos(1, 1);
+                }
+            }
+            ExCmdResult::Handled
+        }
+        "sort" | "sor" => {
+            let (lo2, hi2) = if had_range { (lo, hi) } else { (1, len) };
+            ex_sort(lo2, hi2, bang, args);
+            ExCmdResult::Handled
+        }
+        "p" | "pr" | "print" | "nu" | "number" => {
+            let numbered = cmd.starts_with("nu") || cmd == "number";
+            for lnum in lo..=hi {
+                let l = get_buffer_lines(lnum, lnum)
+                    .into_iter()
+                    .next()
+                    .unwrap_or_default();
+                if numbered {
+                    println!("{lnum:>3} {l}");
+                } else {
+                    println!("{l}");
+                }
+            }
+            ExCmdResult::Handled
+        }
+        // The command word started with a non-letter Ex command (`>`/`<`/`!`)?
+        // parse_addr already consumed any range, so try those directly.
+        "" if rest.starts_with('>') || rest.starts_with('<') || rest.starts_with('!') => {
+            let c = rest.chars().next().unwrap();
+            if c == '!' {
+                if had_range {
+                    let body = get_buffer_lines(lo, hi).join("\n") + "\n";
+                    let out = shell_filter(rest[1..].trim(), &body);
+                    CURBUF.with(|b| {
+                        let mut b = b.borrow_mut();
+                        let (a, z) = ((lo - 1) as usize, (hi as usize).min(b.len()));
+                        b.drain(a..z);
+                        for (i, l) in out.into_iter().enumerate() {
+                            b.insert(a + i, l);
+                        }
+                        if b.is_empty() {
+                            b.push(String::new());
+                        }
+                    });
+                    set_cursorpos(lo, 1);
+                }
+            } else {
+                let count = rest.chars().take_while(|&x| x == c).count();
+                ex_shift(lo, hi, c == '>', count);
+            }
+            ExCmdResult::Handled
+        }
         _ => ExCmdResult::NotEx,
     }
+}
+
+/// Port of `ex_sort()` (Neovim ex_cmds.c) — sort buffer lines `lo`..`hi`. Flags
+/// (in `args` before an optional `/pat/`): `n` numeric, `i` ignore case, `u`
+/// unique, `!` reverse; a `/pat/` sorts by the text matching after `pat`.
+fn ex_sort(lo: varnumber_T, hi: varnumber_T, reverse: bool, args: &str) {
+    let flags: String = args.chars().take_while(|c| *c != '/').collect();
+    let numeric = flags.contains('n');
+    let ignorecase = flags.contains('i');
+    let unique = flags.contains('u');
+    let pat: String = {
+        let f = split_delim(args.trim_start_matches(|c: char| c != '/'), 2);
+        f.first().cloned().unwrap_or_default()
+    };
+    let mut lines = get_buffer_lines(lo, hi);
+    let key = |s: &str| -> String {
+        if pat.is_empty() {
+            s.to_string()
+        } else {
+            let (_, _, e) = crate::viml_regex::regex_matchstrpos(&pat, s, ignorecase);
+            if e < 0 {
+                s.to_string()
+            } else {
+                s[e as usize..].to_string()
+            }
+        }
+    };
+    if numeric {
+        let num = |s: &str| -> i64 {
+            let k = key(s);
+            let t = k.trim_start();
+            let digits: String = t
+                .chars()
+                .skip_while(|c| !c.is_ascii_digit() && *c != '-')
+                .take_while(|c| c.is_ascii_digit() || *c == '-')
+                .collect();
+            digits.parse().unwrap_or(0)
+        };
+        lines.sort_by_key(|s| num(s));
+    } else if ignorecase {
+        lines.sort_by_key(|s| key(s).to_lowercase());
+    } else {
+        lines.sort_by_key(|s| key(s));
+    }
+    if reverse {
+        lines.reverse();
+    }
+    if unique {
+        lines.dedup();
+    }
+    CURBUF.with(|b| {
+        let mut b = b.borrow_mut();
+        let (a, z) = ((lo - 1) as usize, (hi as usize).min(b.len()));
+        if a < z {
+            b.drain(a..z);
+            for (i, l) in lines.into_iter().enumerate() {
+                b.insert(a + i, l);
+            }
+        }
+        if b.is_empty() {
+            b.push(String::new());
+        }
+    });
+}
+
+/// Port of `ex_operators()`/`shift_line()` (Neovim ex_cmds.c / ops.c) —
+/// indent (`>`) or dedent (`<`) lines `lo`..`hi` by `count` × 'shiftwidth'.
+fn ex_shift(lo: varnumber_T, hi: varnumber_T, indent: bool, count: usize) {
+    let sw = {
+        let t = tv_get_number_chk(&get_option_value("shiftwidth"), None);
+        if t > 0 {
+            t as usize
+        } else {
+            8
+        }
+    };
+    let amount = sw * count.max(1);
+    for lnum in lo..=hi {
+        let line = get_buffer_lines(lnum, lnum)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        let new = if indent {
+            if line.trim().is_empty() {
+                line
+            } else {
+                format!("{}{}", " ".repeat(amount), line)
+            }
+        } else {
+            let drop = line.chars().take(amount).take_while(|c| *c == ' ').count();
+            line[drop..].to_string()
+        };
+        set_buffer_lines(lnum, vec![new], false);
+    }
+}
+
+/// Run a shell command and capture its stdout lines (`:r !cmd`).
+fn shell_capture(cmd: &str) -> Vec<String> {
+    std::process::Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .output()
+        .ok()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Pipe text to a shell command's stdin, discarding its output (`:w !cmd`).
+fn shell_feed(cmd: &str, input: &str) {
+    use std::io::Write;
+    if let Ok(mut child) = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+    {
+        if let Some(stdin) = child.stdin.as_mut() {
+            let _ = stdin.write_all(input.as_bytes());
+        }
+        let _ = child.wait();
+    }
+}
+
+/// Filter text through a shell command, returning its stdout lines (`:range!cmd`).
+fn shell_filter(cmd: &str, input: &str) -> Vec<String> {
+    use std::io::Write;
+    let child = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn();
+    let mut child = match child {
+        Ok(c) => c,
+        Err(_) => return input.lines().map(str::to_string).collect(),
+    };
+    if let Some(stdin) = child.stdin.take() {
+        let mut stdin = stdin;
+        let _ = stdin.write_all(input.as_bytes());
+    }
+    child
+        .wait_with_output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Port of `ex_move()` (Neovim ex_cmds.c) — move lines `lo`..`hi` to after

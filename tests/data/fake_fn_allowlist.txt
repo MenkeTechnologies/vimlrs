@@ -340,3 +340,13 @@ split_delim
 ex_move
 ex_copy
 ex_join
+
+# ── round 12: stream-editor Ex commands (ex_cmds.c / ops.c) ──
+# :r/:w/:e file I/O, :sort, :>/:< shift, :!/:%! shell filter. ex_sort/ex_shift
+# are real Neovim functions; shell_capture/shell_feed/shell_filter are the
+# std-only shell-out adapters (no single C name).
+ex_sort
+ex_shift
+shell_capture
+shell_feed
+shell_filter
