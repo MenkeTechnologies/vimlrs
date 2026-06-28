@@ -917,38 +917,6 @@ pub fn f_readblob(argvars: &[typval_T], rettv: &mut typval_T) {
         .extend_from_slice(&data[off..off + size]);
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn simplify_paths() {
-        assert_eq!(simplify_filename("/a/b/../c"), "/a/c");
-        assert_eq!(simplify_filename("a/./b//c"), "a/b/c");
-        assert_eq!(simplify_filename("/a/b/../../c"), "/c");
-        assert_eq!(simplify_filename("./a"), "a");
-        assert_eq!(simplify_filename("a/.."), ".");
-        assert_eq!(simplify_filename("/"), "/");
-    }
-
-    #[test]
-    fn absolute_paths() {
-        assert!(path_is_absolute("/usr/bin"));
-        assert!(path_is_absolute("~/foo"));
-        assert!(!path_is_absolute("foo/bar"));
-    }
-
-    #[test]
-    fn getfperm_format() {
-        #[cfg(unix)]
-        {
-            assert_eq!(perm_string!(0o644u32), "rw-r--r--");
-            assert_eq!(perm_string!(0o755u32), "rwxr-xr-x");
-            assert_eq!(perm_string!(0o000u32), "---------");
-        }
-    }
-}
-
 /// Expand a leading `~`/`~/` to `$HOME` and `$VAR`/`${VAR}` references in a
 /// path (`expand_env` subset — enough for glob/expand patterns standalone).
 fn expand_env(s: &str) -> String {
@@ -1151,4 +1119,36 @@ pub fn f_finddir(_argvars: &[typval_T], rettv: &mut typval_T) {
 pub fn f_findfile(_argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.v_type = VAR_STRING;
     rettv.vval = v_string(String::new());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn simplify_paths() {
+        assert_eq!(simplify_filename("/a/b/../c"), "/a/c");
+        assert_eq!(simplify_filename("a/./b//c"), "a/b/c");
+        assert_eq!(simplify_filename("/a/b/../../c"), "/c");
+        assert_eq!(simplify_filename("./a"), "a");
+        assert_eq!(simplify_filename("a/.."), ".");
+        assert_eq!(simplify_filename("/"), "/");
+    }
+
+    #[test]
+    fn absolute_paths() {
+        assert!(path_is_absolute("/usr/bin"));
+        assert!(path_is_absolute("~/foo"));
+        assert!(!path_is_absolute("foo/bar"));
+    }
+
+    #[test]
+    fn getfperm_format() {
+        #[cfg(unix)]
+        {
+            assert_eq!(perm_string!(0o644u32), "rw-r--r--");
+            assert_eq!(perm_string!(0o755u32), "rwxr-xr-x");
+            assert_eq!(perm_string!(0o000u32), "---------");
+        }
+    }
 }

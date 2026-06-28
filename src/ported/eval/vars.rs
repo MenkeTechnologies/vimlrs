@@ -912,40 +912,6 @@ pub fn list_vim_vars(_first: &mut i32) {}
 /// Port of `list_script_vars()` — interactive `:let` listing; no-op standalone.
 pub fn list_script_vars(_first: &mut i32) {}
 
-#[cfg(test)]
-mod misc_helper_tests {
-    use super::*;
-    use crate::ported::eval::typval::tv_get_string;
-
-    #[test]
-    fn internal_string_var_and_vimvar_save_restore() {
-        // set_internal_string_var writes a global readable via eval_variable.
-        set_internal_string_var("g:port_test", "hello");
-        assert_eq!(
-            tv_get_string(&eval_variable("g:port_test").unwrap()),
-            "hello"
-        );
-
-        // prepare_vimvar saves, then restore_vimvar puts the value back.
-        set_vim_var_string(vv::VV_VAL, "original");
-        let saved = prepare_vimvar(vv::VV_VAL);
-        set_vim_var_string(vv::VV_VAL, "temporary");
-        assert_eq!(get_vim_var_str(vv::VV_VAL), "temporary");
-        restore_vimvar(vv::VV_VAL, saved);
-        assert_eq!(get_vim_var_str(vv::VV_VAL), "original");
-        set_internal_string_var("g:unlet_me", "x");
-        assert!(eval_variable("g:unlet_me").is_some());
-        assert_eq!(do_unlet("g:unlet_me", 0, false), crate::ported::eval_h::OK);
-        assert!(eval_variable("g:unlet_me").is_none());
-        assert!(var_wrong_func_name("lowercase", false));
-        assert!(!var_wrong_func_name("Capital", false));
-
-        // GC is a no-op under Rc.
-        assert_eq!(garbage_collect_globvars(0), 0);
-        assert!(!garbage_collect_vimvars(0));
-    }
-}
-
 // ── more vars.c helpers (unlet, funcref-name check, reg var, clears) ──
 
 /// Port of `do_unlet()` from `Src/eval/vars.c` — delete variable `name` from its
@@ -1060,3 +1026,37 @@ pub fn list_tab_vars(_first: &mut i32) {}
 /// Port of `list_one_var_a()` from `Src/eval/vars.c` — print one variable; no
 /// interactive output standalone, no-op.
 pub fn list_one_var_a(_prefix: &str, _name: &str, _name_len: isize) {}
+
+#[cfg(test)]
+mod misc_helper_tests {
+    use super::*;
+    use crate::ported::eval::typval::tv_get_string;
+
+    #[test]
+    fn internal_string_var_and_vimvar_save_restore() {
+        // set_internal_string_var writes a global readable via eval_variable.
+        set_internal_string_var("g:port_test", "hello");
+        assert_eq!(
+            tv_get_string(&eval_variable("g:port_test").unwrap()),
+            "hello"
+        );
+
+        // prepare_vimvar saves, then restore_vimvar puts the value back.
+        set_vim_var_string(vv::VV_VAL, "original");
+        let saved = prepare_vimvar(vv::VV_VAL);
+        set_vim_var_string(vv::VV_VAL, "temporary");
+        assert_eq!(get_vim_var_str(vv::VV_VAL), "temporary");
+        restore_vimvar(vv::VV_VAL, saved);
+        assert_eq!(get_vim_var_str(vv::VV_VAL), "original");
+        set_internal_string_var("g:unlet_me", "x");
+        assert!(eval_variable("g:unlet_me").is_some());
+        assert_eq!(do_unlet("g:unlet_me", 0, false), crate::ported::eval_h::OK);
+        assert!(eval_variable("g:unlet_me").is_none());
+        assert!(var_wrong_func_name("lowercase", false));
+        assert!(!var_wrong_func_name("Capital", false));
+
+        // GC is a no-op under Rc.
+        assert_eq!(garbage_collect_globvars(0), 0);
+        assert!(!garbage_collect_vimvars(0));
+    }
+}

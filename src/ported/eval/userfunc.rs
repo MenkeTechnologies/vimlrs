@@ -125,6 +125,25 @@ pub fn fname_trans_sid(name: &str) -> String {
     name.to_string()
 }
 
+/// Port of `func_ref()` from `Src/eval/userfunc.c` — increment a function's
+/// reference count; the `Rc`/registry model refcounts automatically, so no-op.
+pub fn func_ref() {}
+
+/// Port of `func_unref()` from `Src/eval/userfunc.c` — decrement a function's
+/// reference count; `Rc`/`Drop`-managed, so no-op.
+pub fn func_unref() {}
+
+/// Port of `can_add_defer()` from `Src/eval/userfunc.c` — whether a `:defer` can
+/// be registered (inside a running function). The bridge drives calls, so no
+/// `:defer` stack is tracked here → false.
+pub fn can_add_defer() -> bool {
+    false
+}
+
+/// Port of `add_defer()` from `Src/eval/userfunc.c` — register a deferred call;
+/// not tracked standalone, no-op.
+pub fn add_defer() {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,22 +169,3 @@ mod tests {
         assert!(!function_list_modified(0));
     }
 }
-
-/// Port of `func_ref()` from `Src/eval/userfunc.c` — increment a function's
-/// reference count; the `Rc`/registry model refcounts automatically, so no-op.
-pub fn func_ref() {}
-
-/// Port of `func_unref()` from `Src/eval/userfunc.c` — decrement a function's
-/// reference count; `Rc`/`Drop`-managed, so no-op.
-pub fn func_unref() {}
-
-/// Port of `can_add_defer()` from `Src/eval/userfunc.c` — whether a `:defer` can
-/// be registered (inside a running function). The bridge drives calls, so no
-/// `:defer` stack is tracked here → false.
-pub fn can_add_defer() -> bool {
-    false
-}
-
-/// Port of `add_defer()` from `Src/eval/userfunc.c` — register a deferred call;
-/// not tracked standalone, no-op.
-pub fn add_defer() {}

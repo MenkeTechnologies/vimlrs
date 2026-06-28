@@ -2827,6 +2827,193 @@ pub fn tv_dict_watcher_notify(
     }
 }
 
+// ── List / Dict structural operations (typval.c) ──
+//
+// RUST-PORT NOTE: the C versions thread `listitem_T *`/`dictitem_T *` pointers
+// through a linked list; the value-layer model stores items in a `Vec` /
+// `IndexMap`, so these adapt the pointer parameters to indices/keys. `lv_len`
+// is kept equal to `lv_items.len()` after every mutation, as elsewhere.
+
+/// Port of `tv_list_item_alloc()` — allocate a fresh (empty) list item.
+pub fn tv_list_item_alloc() -> listitem_T {
+    listitem_T {
+        li_tv: typval_T {
+            v_type: VAR_UNKNOWN,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_special(kSpecialVarNull),
+        },
+    }
+}
+
+/// Port of `tv_list_append()` — append an existing item as the last element.
+pub fn tv_list_append(l: &mut list_T, item: listitem_T) {
+    l.lv_items.push(item);
+    l.lv_len = l.lv_items.len() as i32;
+}
+
+/// Port of `tv_list_append_owned_tv()` — append `tv` (taking ownership) and
+/// return its new index.
+pub fn tv_list_append_owned_tv(l: &mut list_T, tv: typval_T) -> usize {
+    l.lv_items.push(listitem_T { li_tv: tv });
+    l.lv_len = l.lv_items.len() as i32;
+    l.lv_items.len() - 1
+}
+
+/// Port of `tv_list_insert()` — insert `item` before index `before` (== len
+/// appends).
+pub fn tv_list_insert(l: &mut list_T, item: listitem_T, before: usize) {
+    let at = before.min(l.lv_items.len());
+    l.lv_items.insert(at, item);
+    l.lv_len = l.lv_items.len() as i32;
+}
+
+/// Port of `tv_list_insert_tv()` — insert a copy of `tv` before index `before`.
+pub fn tv_list_insert_tv(l: &mut list_T, tv: &typval_T, before: usize) {
+    let mut ni = tv_list_item_alloc();
+    tv_copy(tv, &mut ni.li_tv);
+    tv_list_insert(l, ni, before);
+}
+
+/// Port of `tv_list_idx_of_item()` — the index of the first item equal to `tv`,
+/// or -1. (Pointer identity in C; value equality here.)
+pub fn tv_list_idx_of_item(l: &list_T, tv: &typval_T) -> i32 {
+    l.lv_items
+        .iter()
+        .position(|it| tv_equal(&it.li_tv, tv, false))
+        .map_or(-1, |i| i as i32)
+}
+
+/// Port of `tv_list_drop_items()` — unlink items `[i1, i2]` (inclusive) without
+/// clearing them.
+pub fn tv_list_drop_items(l: &mut list_T, i1: usize, i2: usize) {
+    let end = (i2 + 1).min(l.lv_items.len());
+    if i1 < end {
+        l.lv_items.drain(i1..end);
+    }
+    l.lv_len = l.lv_items.len() as i32;
+}
+
+/// Port of `tv_list_remove_items()` — remove and free items `[i1, i2]`.
+pub fn tv_list_remove_items(l: &mut list_T, i1: usize, i2: usize) {
+    tv_list_drop_items(l, i1, i2);
+}
+
+/// Port of `tv_list_item_remove()` — remove the item at `idx`, returning the
+/// index that now follows (== `idx`), or the new length when it was last.
+pub fn tv_list_item_remove(l: &mut list_T, idx: usize) -> usize {
+    if idx < l.lv_items.len() {
+        l.lv_items.remove(idx);
+        l.lv_len = l.lv_items.len() as i32;
+    }
+    idx.min(l.lv_items.len())
+}
+
+/// Port of `tv_list_move_items()` — move items `[i1, i2]` out of `l` and append
+/// them to `tgt`.
+pub fn tv_list_move_items(l: &mut list_T, i1: usize, i2: usize, tgt: &mut list_T) {
+    let end = (i2 + 1).min(l.lv_items.len());
+    if i1 < end {
+        let moved: Vec<listitem_T> = l.lv_items.drain(i1..end).collect();
+        l.lv_len = l.lv_items.len() as i32;
+        tgt.lv_items.extend(moved);
+        tgt.lv_len = tgt.lv_items.len() as i32;
+    }
+}
+
+/// Port of `tv_list_init_static()` — initialise an empty (single-item-capable)
+/// static list.
+pub fn tv_list_init_static(l: &mut list_T) {
+    *l = list_T::default();
+}
+
+/// Port of `tv_list_init_static10()` — initialise an empty 10-item static list.
+pub fn tv_list_init_static10(l: &mut list_T) {
+    *l = list_T::default();
+}
+
+/// Port of `tv_dict_item_remove()` — remove the entry under `key`.
+pub fn tv_dict_item_remove(dict: &mut dict_T, key: &str) {
+    dict.dv_hashtab.shift_remove(key);
+}
+
+/// Port of `tv_dict_item_copy()` — a deep copy of a dictionary value.
+pub fn tv_dict_item_copy(tv: &typval_T) -> typval_T {
+    let mut out = typval_T {
+        v_type: VAR_UNKNOWN,
+        v_lock: VarLockStatus::VAR_UNLOCKED,
+        vval: v_special(kSpecialVarNull),
+    };
+    tv_copy(tv, &mut out);
+    out
+}
+
+/// Port of `tv_dict_item_free()` — freeing is handled by `Drop`; no-op.
+pub fn tv_dict_item_free() {}
+
+/// Port of `tv_dict_free_dict()` — the dict is reference-counted (`Rc`) and
+/// freed by `Drop`; clearing its contents is the observable effect.
+pub fn tv_dict_free_dict(dict: &mut dict_T) {
+    dict.dv_hashtab.clear();
+    dict.dv_watchers.clear();
+}
+
+/// Port of `tv_dict_add_func()` — add a `VAR_FUNC` entry `key` → `fname`,
+/// failing if the key already exists.
+pub fn tv_dict_add_func(d: &mut dict_T, key: &str, fname: &str) -> i32 {
+    tv_dict_add(
+        d,
+        key,
+        typval_T {
+            v_type: VAR_FUNC,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_string(fname.to_string()),
+        },
+    )
+}
+
+/// Port of `tv_dict_wrong_func_name()` — true when `key` would shadow a global
+/// function but `tv` is not a matching funcref (the dup-name guard); the bare
+/// value model only flags a non-funcref under an existing key.
+pub fn tv_dict_wrong_func_name(d: &dict_T, tv: &typval_T, key: &str) -> bool {
+    d.dv_hashtab.contains_key(key)
+        && tv.v_type != VAR_FUNC
+        && key.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+}
+
+/// Port of `_nothing_conv_empty_dict()` — the "nothing" encoder discards an
+/// empty dict; clearing it is the observable effect.
+pub fn _nothing_conv_empty_dict(dict: &mut dict_T) {
+    dict.dv_hashtab.clear();
+}
+
+/// Port of `_nothing_conv_dict_end()` — end of a dict in the "nothing" encoder;
+/// no output is produced (no-op).
+pub fn _nothing_conv_dict_end() {}
+
+// ── "nothing" encoder callbacks + list watchers (no-ops in this model) ──
+//
+// The `encode_vim_to_nothing` walk frees a structure without producing output;
+// under `Rc`/`Drop` there is nothing to free, so the per-node callbacks are
+// no-ops. List watchers (`tv_list_watch_*`) are not modeled (no script-visible
+// list-watch API), so registering/fixing them is also a no-op.
+
+/// Port of `_nothing_conv_func_start()` (typval.c) — no-op (Rc/Drop frees funcs).
+pub fn _nothing_conv_func_start() {}
+/// Port of `_nothing_conv_func_end()` (typval.c) — no-op.
+pub fn _nothing_conv_func_end() {}
+/// Port of `_nothing_conv_real_list_after_start()` (typval.c) — no-op.
+pub fn _nothing_conv_real_list_after_start() {}
+/// Port of `_nothing_conv_list_end()` (typval.c) — no-op.
+pub fn _nothing_conv_list_end() {}
+/// Port of `_nothing_conv_real_dict_after_start()` (typval.c) — no-op.
+pub fn _nothing_conv_real_dict_after_start() {}
+/// Port of `tv_list_watch_add()` (typval.c) — list watchers are not modeled → no-op.
+pub fn tv_list_watch_add(_l: &mut list_T) {}
+/// Port of `tv_list_watch_remove()` (typval.c) — no-op.
+pub fn tv_list_watch_remove(_l: &mut list_T) {}
+/// Port of `tv_list_watch_fix()` (typval.c) — no-op.
+pub fn tv_list_watch_fix(_l: &mut list_T) {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3273,190 +3460,3 @@ mod tests {
         }));
     }
 }
-
-// ── List / Dict structural operations (typval.c) ──
-//
-// RUST-PORT NOTE: the C versions thread `listitem_T *`/`dictitem_T *` pointers
-// through a linked list; the value-layer model stores items in a `Vec` /
-// `IndexMap`, so these adapt the pointer parameters to indices/keys. `lv_len`
-// is kept equal to `lv_items.len()` after every mutation, as elsewhere.
-
-/// Port of `tv_list_item_alloc()` — allocate a fresh (empty) list item.
-pub fn tv_list_item_alloc() -> listitem_T {
-    listitem_T {
-        li_tv: typval_T {
-            v_type: VAR_UNKNOWN,
-            v_lock: VarLockStatus::VAR_UNLOCKED,
-            vval: v_special(kSpecialVarNull),
-        },
-    }
-}
-
-/// Port of `tv_list_append()` — append an existing item as the last element.
-pub fn tv_list_append(l: &mut list_T, item: listitem_T) {
-    l.lv_items.push(item);
-    l.lv_len = l.lv_items.len() as i32;
-}
-
-/// Port of `tv_list_append_owned_tv()` — append `tv` (taking ownership) and
-/// return its new index.
-pub fn tv_list_append_owned_tv(l: &mut list_T, tv: typval_T) -> usize {
-    l.lv_items.push(listitem_T { li_tv: tv });
-    l.lv_len = l.lv_items.len() as i32;
-    l.lv_items.len() - 1
-}
-
-/// Port of `tv_list_insert()` — insert `item` before index `before` (== len
-/// appends).
-pub fn tv_list_insert(l: &mut list_T, item: listitem_T, before: usize) {
-    let at = before.min(l.lv_items.len());
-    l.lv_items.insert(at, item);
-    l.lv_len = l.lv_items.len() as i32;
-}
-
-/// Port of `tv_list_insert_tv()` — insert a copy of `tv` before index `before`.
-pub fn tv_list_insert_tv(l: &mut list_T, tv: &typval_T, before: usize) {
-    let mut ni = tv_list_item_alloc();
-    tv_copy(tv, &mut ni.li_tv);
-    tv_list_insert(l, ni, before);
-}
-
-/// Port of `tv_list_idx_of_item()` — the index of the first item equal to `tv`,
-/// or -1. (Pointer identity in C; value equality here.)
-pub fn tv_list_idx_of_item(l: &list_T, tv: &typval_T) -> i32 {
-    l.lv_items
-        .iter()
-        .position(|it| tv_equal(&it.li_tv, tv, false))
-        .map_or(-1, |i| i as i32)
-}
-
-/// Port of `tv_list_drop_items()` — unlink items `[i1, i2]` (inclusive) without
-/// clearing them.
-pub fn tv_list_drop_items(l: &mut list_T, i1: usize, i2: usize) {
-    let end = (i2 + 1).min(l.lv_items.len());
-    if i1 < end {
-        l.lv_items.drain(i1..end);
-    }
-    l.lv_len = l.lv_items.len() as i32;
-}
-
-/// Port of `tv_list_remove_items()` — remove and free items `[i1, i2]`.
-pub fn tv_list_remove_items(l: &mut list_T, i1: usize, i2: usize) {
-    tv_list_drop_items(l, i1, i2);
-}
-
-/// Port of `tv_list_item_remove()` — remove the item at `idx`, returning the
-/// index that now follows (== `idx`), or the new length when it was last.
-pub fn tv_list_item_remove(l: &mut list_T, idx: usize) -> usize {
-    if idx < l.lv_items.len() {
-        l.lv_items.remove(idx);
-        l.lv_len = l.lv_items.len() as i32;
-    }
-    idx.min(l.lv_items.len())
-}
-
-/// Port of `tv_list_move_items()` — move items `[i1, i2]` out of `l` and append
-/// them to `tgt`.
-pub fn tv_list_move_items(l: &mut list_T, i1: usize, i2: usize, tgt: &mut list_T) {
-    let end = (i2 + 1).min(l.lv_items.len());
-    if i1 < end {
-        let moved: Vec<listitem_T> = l.lv_items.drain(i1..end).collect();
-        l.lv_len = l.lv_items.len() as i32;
-        tgt.lv_items.extend(moved);
-        tgt.lv_len = tgt.lv_items.len() as i32;
-    }
-}
-
-/// Port of `tv_list_init_static()` — initialise an empty (single-item-capable)
-/// static list.
-pub fn tv_list_init_static(l: &mut list_T) {
-    *l = list_T::default();
-}
-
-/// Port of `tv_list_init_static10()` — initialise an empty 10-item static list.
-pub fn tv_list_init_static10(l: &mut list_T) {
-    *l = list_T::default();
-}
-
-/// Port of `tv_dict_item_remove()` — remove the entry under `key`.
-pub fn tv_dict_item_remove(dict: &mut dict_T, key: &str) {
-    dict.dv_hashtab.shift_remove(key);
-}
-
-/// Port of `tv_dict_item_copy()` — a deep copy of a dictionary value.
-pub fn tv_dict_item_copy(tv: &typval_T) -> typval_T {
-    let mut out = typval_T {
-        v_type: VAR_UNKNOWN,
-        v_lock: VarLockStatus::VAR_UNLOCKED,
-        vval: v_special(kSpecialVarNull),
-    };
-    tv_copy(tv, &mut out);
-    out
-}
-
-/// Port of `tv_dict_item_free()` — freeing is handled by `Drop`; no-op.
-pub fn tv_dict_item_free() {}
-
-/// Port of `tv_dict_free_dict()` — the dict is reference-counted (`Rc`) and
-/// freed by `Drop`; clearing its contents is the observable effect.
-pub fn tv_dict_free_dict(dict: &mut dict_T) {
-    dict.dv_hashtab.clear();
-    dict.dv_watchers.clear();
-}
-
-/// Port of `tv_dict_add_func()` — add a `VAR_FUNC` entry `key` → `fname`,
-/// failing if the key already exists.
-pub fn tv_dict_add_func(d: &mut dict_T, key: &str, fname: &str) -> i32 {
-    tv_dict_add(
-        d,
-        key,
-        typval_T {
-            v_type: VAR_FUNC,
-            v_lock: VarLockStatus::VAR_UNLOCKED,
-            vval: v_string(fname.to_string()),
-        },
-    )
-}
-
-/// Port of `tv_dict_wrong_func_name()` — true when `key` would shadow a global
-/// function but `tv` is not a matching funcref (the dup-name guard); the bare
-/// value model only flags a non-funcref under an existing key.
-pub fn tv_dict_wrong_func_name(d: &dict_T, tv: &typval_T, key: &str) -> bool {
-    d.dv_hashtab.contains_key(key)
-        && tv.v_type != VAR_FUNC
-        && key.chars().next().is_some_and(|c| c.is_ascii_uppercase())
-}
-
-/// Port of `_nothing_conv_empty_dict()` — the "nothing" encoder discards an
-/// empty dict; clearing it is the observable effect.
-pub fn _nothing_conv_empty_dict(dict: &mut dict_T) {
-    dict.dv_hashtab.clear();
-}
-
-/// Port of `_nothing_conv_dict_end()` — end of a dict in the "nothing" encoder;
-/// no output is produced (no-op).
-pub fn _nothing_conv_dict_end() {}
-
-// ── "nothing" encoder callbacks + list watchers (no-ops in this model) ──
-//
-// The `encode_vim_to_nothing` walk frees a structure without producing output;
-// under `Rc`/`Drop` there is nothing to free, so the per-node callbacks are
-// no-ops. List watchers (`tv_list_watch_*`) are not modeled (no script-visible
-// list-watch API), so registering/fixing them is also a no-op.
-
-/// Port of `_nothing_conv_func_start()` (typval.c) — no-op (Rc/Drop frees funcs).
-pub fn _nothing_conv_func_start() {}
-/// Port of `_nothing_conv_func_end()` (typval.c) — no-op.
-pub fn _nothing_conv_func_end() {}
-/// Port of `_nothing_conv_real_list_after_start()` (typval.c) — no-op.
-pub fn _nothing_conv_real_list_after_start() {}
-/// Port of `_nothing_conv_list_end()` (typval.c) — no-op.
-pub fn _nothing_conv_list_end() {}
-/// Port of `_nothing_conv_real_dict_after_start()` (typval.c) — no-op.
-pub fn _nothing_conv_real_dict_after_start() {}
-/// Port of `tv_list_watch_add()` (typval.c) — list watchers are not modeled → no-op.
-pub fn tv_list_watch_add(_l: &mut list_T) {}
-/// Port of `tv_list_watch_remove()` (typval.c) — no-op.
-pub fn tv_list_watch_remove(_l: &mut list_T) {}
-/// Port of `tv_list_watch_fix()` (typval.c) — no-op.
-pub fn tv_list_watch_fix(_l: &mut list_T) {}
