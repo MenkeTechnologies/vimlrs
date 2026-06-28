@@ -217,3 +217,89 @@ Areas probed in round 2 that PASSED: `reduce`/`flatten`/`flattennew`/`extendnew`
 `\+ \? \{n,m}`, `tr`/`escape`/`shellescape`/`fnameescape`/`strgetchar`/`strcharpart`/
 `byteidx`/`matchstrpos`, `json_encode`/`json_decode`, substitute case escapes
 (`\U \L \u \l \E`), `printf %b %c %x(neg) %05.2f %e`, `get()` dict default.
+
+---
+
+# Round 3 — additional confirmed divergences (vs Vim 9.2)
+
+Third deep pass against the current binary. Reproduced by sourcing the *same* `.vim`
+probe through both interpreters (regex patterns must be single-quoted Vim strings).
+Regex engine is `src/viml_regex.rs` (hand-written subset; atom table ~344-354).
+
+### R3-1. Regex lookaround unsupported (`\@=`, `\@!`, `\@<=`, `\@<!`)
+- `matchstr('foobar','foo\(bar\)\@=')` → Vim `foo`, vimlrs `` (empty)
+- `matchstr('foobaz','foo\(bar\)\@!')` → Vim `foo`, vimlrs ``
+- `matchstr('foobarbaz','\(foo\)\@<=bar')` → Vim `bar`, vimlrs ``
+- `matchstr('xxbar','\(foo\)\@<!bar')` → Vim `bar`, vimlrs ``
+- None of the four lookahead/lookbehind atoms are implemented.
+
+### R3-2. POSIX bracket classes `[[:...:]]` entirely unsupported
+- `matchstr('abc123','[[:digit:]]\+')` → Vim `123`, vimlrs ``
+- `matchstr('abc123','[[:alpha:]]\+')` → Vim `abc`, vimlrs ``
+- Also broken: `[[:alnum:]]`/`[[:upper:]]`/`[[:lower:]]`/`[[:xdigit:]]`/`[[:punct:]]`/
+  `[[:space:]]`. The `[: :]` syntax inside a bracket expression isn't parsed.
+
+### R3-3. `substitute()` with `\zs` replaces the wrong (un-narrowed) region
+- `substitute('foobar','o\zsb','X','')` → Vim `fooXar`, vimlrs `foXar`
+- `matchstr` honors `\zs`, but `substitute()` still deletes from the full match start,
+  eating the `o` too. Silent wrong result.
+
+### R3-4. `printf('%s', …)` of a List/Dict/Blob errors instead of stringifying
+- `printf('%s',[1,2])` → Vim `[1, 2]`, vimlrs `E730: Using a List/Dict/Funcref/Blob as a String`
+- `printf('%s',{'a':1})` → Vim `{'a': 1}`, vimlrs `E730…`; `printf('%s',0z1234)` → `0z1234` vs `E730…`
+- Vim's `%s` formats composites via `string()`; vimlrs rejects them.
+
+### R3-5. `:const` declaration unsupported (parse error)
+- `const C = 5` → Vim defines `C`=5; vimlrs `E15: Invalid expression: trailing tokens`
+- No `"const"` handler in `src/`; any script using `:const` fails to parse (and the
+  re-assignment lock, Vim `E741`, is absent). Common in modern scripts.
+
+### R3-6. `:echoerr` command unsupported (parse error)
+- `echoerr 'boom'` → Vim raises catchable `Vim(echoerr):boom`; vimlrs `E15: Invalid expression`
+- Breaks the standard error-reporting idiom and `try/catch` around it.
+
+### R3-7. Defining a function into a Dict key (`function d.key()`) unsupported
+- `function d.greet() dict … endfunction` → Vim makes `d.greet` a funcref; vimlrs
+  `E716: Key not present in Dictionary: greet` (member never created).
+
+### R3-8. Calling a funcref stored in a Dict member fails to parse
+- `d.greet()` / `d['greet']()` (member = funcref) → Vim `hi X`; vimlrs `E15: Invalid
+  expression: unexpected RParen`. Calling the result of a dict/index expression with
+  `(...)` isn't parsed. (Distinct from R2-7; the common OOP idiom.)
+
+### R3-9. Duplicate key in a `{}` Dict literal silently accepted
+- `{'a':1,'a':2}` → Vim errors `E721: Duplicate key in Dictionary: "a"`; vimlrs `{'a': 2}` (no error)
+
+### R3-10. `\&` concat/AND branch unsupported
+- `matchstr('foobar','foo\&...')` → Vim `foo`, vimlrs `` (the all-branches-must-match operator)
+
+### R3-11. Codepoint atoms `\%d` / `\%u` / `\%x` unsupported
+- `matchstr('A','\%d65')` → Vim `A`, vimlrs ``; `matchstr('AB','\%u0041')` → `A` vs ``
+
+### R3-12. Char-class atoms `\k`, `\f`, `\p` unsupported
+- `matchstr('hello_world','\k\+')` → Vim `hello_world`, vimlrs `` (keyword)
+- `matchstr('foo/bar','\f\+')` → Vim `foo/bar`, vimlrs `f` (treats `\f` as literal); `\p` (printable) → ``
+- Atom table lists only `\d \w \s \a \l \u \x`.
+
+### R3-13. `printf('%c', n)` for n > 255 should truncate to a byte
+- `printf('%c',321)` → Vim `A` (321 & 0xFF = 65), vimlrs `Ł` (full codepoint)
+- `printf('%c',0x263A)` → Vim `:` (low byte 0x3A), vimlrs `☺`
+
+### R3-14. `printf('%f'/'%e', NaN)` uses wrong case
+- `printf('%f',0.0/0.0)` → Vim `nan`, vimlrs `NaN` (same for `%e`). `%g` and `string()` are already correct.
+
+### R3-15. `matchfuzzypos()` returns different scores — low severity
+- `matchfuzzypos(['hello','help'],'hl')` → Vim scores `[885,880]`, vimlrs `[113,112]`.
+  Ordering and positions agree; only the numeric weights differ. (`matchfuzzy` ordering matches.)
+
+Areas probed in round 3 that PASSED: `\{-}`/`\{-n,m}`/`\{n}`/`\{n,m}` quantifiers, `\zs`/
+`\ze` in `matchstr`, `\c`/`\C`, `\a\l\u\s\w\d` atoms, `[a-c]`/`[^a-c]`, backref-in-
+replacement `\2\1`; `trim(mask,dir)`/`strcharlen`/`strwidth`/`reverse`(string)/`slice`/
+`strcharpart`/`byteidxcomp`/`list2str`/`str2list`/`strtrans`; `str2nr`(bases)/`str2float`
+(`1.5e3`/inf/nan)/`printf('%d',"0x10")`; integer overflow wrap, `float2nr(inf/nan)`/
+`pow(0,0)`/`fmod`/`round`(half-away, negatives); `0=='0'`/`'abc'==0`; `sort('n'/'f'/'N')`
+mixed, `uniq`, `flatten(l,depth)`, `extend` keep/force/error, `count(ic,start)`,
+`index(neg)`, `insert(neg)`, `#{}` literal, `matchfuzzy`; `:let +=` append, `:for [k,v] in
+items()`, `:let [a,b;rest]`, `:try/:catch/:finally`+`:throw`+`v:exception`, `:unlet`,
+lambda-call `{->42}()`, partial bound args + `string()` of partial, `eval()`, `type(funcref)`,
+`printf('%s',funcref)`, substitute `\r`/`\n`.
