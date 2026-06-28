@@ -403,9 +403,11 @@ fn slot_plan(stmts: &[Stmt], in_function: bool) -> SlotPlan {
                 return;
             }
             match s {
-                Stmt::Function { .. } | Stmt::Execute(_) | Stmt::Set(_) | Stmt::Try { .. } => {
-                    *cx.bail = true
-                }
+                Stmt::Function { .. }
+                | Stmt::Execute(_)
+                | Stmt::Set(_)
+                | Stmt::Map(_)
+                | Stmt::Try { .. } => *cx.bail = true,
                 // `for VAR in range(...)` keeps its var slottable (range yields
                 // Numbers) — bare or, in a function, `l:`-scoped; recurse the body.
                 Stmt::For {
@@ -752,6 +754,12 @@ impl Compiler {
             Stmt::Set(args) => {
                 self.load_str(args);
                 self.emit(Op::CallBuiltin(h::VIML_SET, 1));
+                self.emit(Op::Pop);
+                Ok(())
+            }
+            Stmt::Map(line) => {
+                self.load_str(line);
+                self.emit(Op::CallBuiltin(h::VIML_MAP, 1));
                 self.emit(Op::Pop);
                 Ok(())
             }

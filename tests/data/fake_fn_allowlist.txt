@@ -276,3 +276,15 @@ f_preinserted
 f_getscriptinfo
 f_getstacktrace
 f_fullcommand
+
+# ── round 6: real mapping subsystem (mapping.c) ──
+# An in-memory mapping table populated by mapset() and queried by maparg()/
+# mapcheck()/maplist()/hasmapto(). These are the real mapping.c functions behind
+# them (home file mapping.c, outside the vendored eval tree).
+mode_str2flags
+map_mode_to_chars
+mapblock_fill_dict
+map_add
+getmaparg
+get_map_mode
+do_map

@@ -277,4 +277,7 @@ pub enum Stmt {
     Source(String),
     /// `:unlet[!] {name}…` — delete one or more variables by name.
     Unlet(Vec<String>),
+    /// A `:map`-family command (`nmap`, `inoremap`, `vunmap`, `mapclear`, …):
+    /// the whole raw command line, re-parsed by the mapping runtime.
+    Map(String),
 }

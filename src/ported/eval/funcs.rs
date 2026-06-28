@@ -4393,38 +4393,318 @@ pub fn f_foldclosedend(_argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.vval = v_number(-1);
 }
 
-// ── hasmapto()/maparg()/mapcheck()/maplist() — Neovim mapping.c. No mappings
-//    are defined standalone. ──
+// ── Real mapping subsystem (Neovim mapping.c). An in-memory mapping table
+//    (`maphash`) populated programmatically through mapset() and queried by
+//    maparg()/mapcheck()/maplist()/hasmapto(). No editor is needed — a mapping
+//    is just data. ──
 
-/// Port of `f_hasmapto()` (Neovim mapping.c) — whether a mapping maps to
-/// `{what}`. No mappings standalone → 0.
-pub fn f_hasmapto(_argvars: &[typval_T], rettv: &mut typval_T) {
-    rettv.vval = v_number(0);
+// Mode flag bits (internal; the dict `mode` key is the mode-char string). The
+// exact values are not observable, only how modes intersect.
+const MAP_NORMAL: i32 = 0x01;
+const MAP_VISUAL: i32 = 0x02;
+const MAP_SELECT: i32 = 0x04;
+const MAP_OP_PENDING: i32 = 0x08;
+const MAP_INSERT: i32 = 0x10;
+const MAP_CMDLINE: i32 = 0x20;
+const MAP_LANG: i32 = 0x40;
+const MAP_TERMINAL: i32 = 0x80;
+/// The `:map` default — normal, visual, select and operator-pending.
+const MAP_DEFAULT: i32 = MAP_NORMAL | MAP_VISUAL | MAP_SELECT | MAP_OP_PENDING;
+
+/// A single mapping (`mapblock_T` in mapping.c), reduced to the fields the
+/// builtins expose. Keeps the C struct name.
+#[derive(Clone)]
+#[allow(non_camel_case_types)]
+pub struct mapblock_T {
+    pub lhs: String,
+    pub rhs: String,
+    pub mode: i32,
+    pub noremap: bool,
+    pub expr: bool,
+    pub silent: bool,
+    pub nowait: bool,
+    pub buffer: bool,
+    pub sid: varnumber_T,
+    pub lnum: varnumber_T,
+    pub desc: String,
 }
 
-/// Port of `f_maparg()` (Neovim mapping.c) — the rhs that `{name}` maps to. No
-/// mapping → "" (or an empty Dict when the `{dict}` argument is truthy).
-pub fn f_maparg(argvars: &[typval_T], rettv: &mut typval_T) {
-    let want_dict = argvars.len() >= 4 && tv_get_bool(&argvars[3]) != 0;
+thread_local! {
+    /// The mapping table (`maphash[]` in mapping.c), a flat list standalone.
+    static MAPHASH: std::cell::RefCell<Vec<mapblock_T>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Port of `mode_str2flags()` (Neovim mapping.c) — a mode-char string (`"n"`,
+/// `"v"`, `"!"`, …) to its mode-flag bits; ""/" " is the `:map` default.
+fn mode_str2flags(modechars: &str) -> i32 {
+    if modechars.is_empty() || modechars == " " {
+        return MAP_DEFAULT;
+    }
+    let mut f = 0;
+    for c in modechars.chars() {
+        f |= match c {
+            'n' => MAP_NORMAL,
+            'v' => MAP_VISUAL | MAP_SELECT,
+            'x' => MAP_VISUAL,
+            's' => MAP_SELECT,
+            'o' => MAP_OP_PENDING,
+            'i' => MAP_INSERT,
+            'c' => MAP_CMDLINE,
+            'l' => MAP_LANG,
+            't' => MAP_TERMINAL,
+            '!' => MAP_INSERT | MAP_CMDLINE,
+            _ => 0,
+        };
+    }
+    f
+}
+
+/// Port of `map_mode_to_chars()` (Neovim mapping.c) — mode bits to the
+/// canonical mode-char `maparg()` reports (" " for the normal/visual/op-pending
+/// default, "!" for insert+cmdline, "v" for visual+select).
+fn map_mode_to_chars(mode: i32) -> String {
+    if mode == MAP_DEFAULT {
+        return " ".to_string();
+    }
+    if mode == MAP_INSERT | MAP_CMDLINE {
+        return "!".to_string();
+    }
+    if mode == MAP_VISUAL | MAP_SELECT {
+        return "v".to_string();
+    }
+    let mut s = String::new();
+    for (bit, c) in [
+        (MAP_NORMAL, 'n'),
+        (MAP_VISUAL, 'x'),
+        (MAP_SELECT, 's'),
+        (MAP_OP_PENDING, 'o'),
+        (MAP_INSERT, 'i'),
+        (MAP_CMDLINE, 'c'),
+        (MAP_LANG, 'l'),
+        (MAP_TERMINAL, 't'),
+    ] {
+        if mode & bit != 0 {
+            s.push(c);
+        }
+    }
+    s
+}
+
+/// Port of `mapblock_fill_dict()` (Neovim mapping.c) — build the `maparg()`/
+/// `maplist()` Dict describing one mapping.
+fn mapblock_fill_dict(mb: &mapblock_T) -> typval_T {
+    let d = tv_dict_alloc();
+    {
+        let mut db = d.borrow_mut();
+        tv_dict_add_str(&mut db, "lhs", &mb.lhs);
+        tv_dict_add_str(&mut db, "lhsraw", &mb.lhs);
+        tv_dict_add_str(&mut db, "rhs", &mb.rhs);
+        tv_dict_add_nr(&mut db, "noremap", mb.noremap as varnumber_T);
+        tv_dict_add_nr(&mut db, "expr", mb.expr as varnumber_T);
+        tv_dict_add_nr(&mut db, "silent", mb.silent as varnumber_T);
+        tv_dict_add_nr(&mut db, "nowait", mb.nowait as varnumber_T);
+        tv_dict_add_nr(&mut db, "buffer", mb.buffer as varnumber_T);
+        tv_dict_add_nr(&mut db, "script", 0);
+        tv_dict_add_nr(&mut db, "sid", mb.sid);
+        tv_dict_add_nr(&mut db, "scriptversion", 1);
+        tv_dict_add_nr(&mut db, "lnum", mb.lnum);
+        tv_dict_add_str(&mut db, "mode", &map_mode_to_chars(mb.mode));
+        tv_dict_add_nr(&mut db, "mode_bits", mb.mode as varnumber_T);
+        tv_dict_add_str(&mut db, "desc", &mb.desc);
+        tv_dict_add_nr(&mut db, "abbr", 0);
+    }
+    match_dict_val(d)
+}
+
+/// Port of `map_add()` (Neovim mapping.c) — insert `mb`, replacing any existing
+/// mapping with the same lhs in overlapping modes.
+fn map_add(mb: mapblock_T) {
+    MAPHASH.with(|h| {
+        let mut h = h.borrow_mut();
+        h.retain(|e| !(e.lhs == mb.lhs && e.mode & mb.mode != 0));
+        h.push(mb);
+    });
+}
+
+/// Port of `getmaparg()` (Neovim mapping.c) — the mapping for `name` in `mode`
+/// returned as the rhs String or (when `want_dict`) a Dict; empty if none.
+fn getmaparg(name: &str, mode: i32, want_dict: bool, rettv: &mut typval_T) {
+    let found = MAPHASH.with(|h| {
+        h.borrow()
+            .iter()
+            .find(|e| e.lhs == name && e.mode & mode != 0)
+            .cloned()
+    });
     if want_dict {
-        let _ = tv_dict_alloc_ret(rettv);
+        match found {
+            Some(mb) => *rettv = mapblock_fill_dict(&mb),
+            None => {
+                let _ = tv_dict_alloc_ret(rettv);
+            }
+        }
     } else {
         rettv.v_type = VAR_STRING;
-        rettv.vval = v_string(String::new());
+        rettv.vval = v_string(found.map(|m| m.rhs).unwrap_or_default());
     }
 }
 
-/// Port of `f_mapcheck()` (Neovim mapping.c) — the rhs of any mapping that
-/// `{name}` could start. None standalone → "".
-pub fn f_mapcheck(_argvars: &[typval_T], rettv: &mut typval_T) {
+/// Port of `f_hasmapto()` (Neovim mapping.c) — whether some mapping in the given
+/// mode maps *to* `{what}`.
+pub fn f_hasmapto(argvars: &[typval_T], rettv: &mut typval_T) {
+    let what = tv_get_string(&argvars[0]);
+    let mode = mode_str2flags(&argvars.get(1).map(tv_get_string).unwrap_or_default());
+    let found = MAPHASH.with(|h| {
+        h.borrow()
+            .iter()
+            .any(|e| e.mode & mode != 0 && e.rhs.contains(&what))
+    });
+    rettv.vval = v_number(found as varnumber_T);
+}
+
+/// Port of `f_maparg()` (Neovim mapping.c) — the rhs that `{name}` maps to in
+/// `{mode}` (a String, or a full Dict when the `{dict}` argument is truthy).
+pub fn f_maparg(argvars: &[typval_T], rettv: &mut typval_T) {
+    let name = tv_get_string(&argvars[0]);
+    let mode = mode_str2flags(&argvars.get(1).map(tv_get_string).unwrap_or_default());
+    let want_dict = argvars.len() >= 4 && tv_get_bool(&argvars[3]) != 0;
+    getmaparg(&name, mode, want_dict, rettv);
+}
+
+/// Port of `f_mapcheck()` (Neovim mapping.c) — the rhs of a mapping whose lhs
+/// `{name}` could begin (or that begins with `{name}`); "" if none.
+pub fn f_mapcheck(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(String::new());
+    let name = tv_get_string(&argvars[0]);
+    let mode = mode_str2flags(&argvars.get(1).map(tv_get_string).unwrap_or_default());
+    let rhs = MAPHASH.with(|h| {
+        h.borrow()
+            .iter()
+            .find(|e| e.mode & mode != 0 && (e.lhs.starts_with(&name) || name.starts_with(&e.lhs)))
+            .map(|e| e.rhs.clone())
+    });
+    rettv.vval = v_string(rhs.unwrap_or_default());
 }
 
 /// Port of `f_maplist()` (Neovim mapping.c) — every mapping as a List of Dicts.
-/// None standalone → an empty List.
 pub fn f_maplist(_argvars: &[typval_T], rettv: &mut typval_T) {
-    let _ = tv_list_alloc_ret(rettv, 0);
+    let maps = MAPHASH.with(|h| h.borrow().clone());
+    let l = tv_list_alloc_ret(rettv, maps.len() as isize);
+    let mut lb = l.borrow_mut();
+    for mb in &maps {
+        tv_list_append_tv(&mut lb, mapblock_fill_dict(mb));
+    }
+}
+
+/// Port of `get_map_mode()` (Neovim mapping.c) — parse a `:map`-family command
+/// word (e.g. `nmap`, `inoremap`, `vunmap`, `cmapclear`, `map!`) into its mode
+/// bits and the action it requests: `(mode, is_unmap, is_clear, is_noremap)`.
+/// Returns `None` if `cmd` is not a map-family command.
+pub fn get_map_mode(cmd: &str) -> Option<(i32, bool, bool, bool)> {
+    let (base, bang) = match cmd.strip_suffix('!') {
+        Some(b) => (b, true),
+        None => (cmd, false),
+    };
+    let (prefix, unmap, clear, noremap) = if let Some(p) = base.strip_suffix("mapclear") {
+        (p, false, true, false)
+    } else if let Some(p) = base.strip_suffix("noremap") {
+        (p, false, false, true)
+    } else if let Some(p) = base.strip_suffix("unmap") {
+        (p, true, false, false)
+    } else if let Some(p) = base.strip_suffix("map") {
+        (p, false, false, false)
+    } else {
+        return None;
+    };
+    let mode = match prefix {
+        "" => {
+            if bang {
+                MAP_INSERT | MAP_CMDLINE
+            } else {
+                MAP_DEFAULT
+            }
+        }
+        "n" => MAP_NORMAL,
+        "i" => MAP_INSERT,
+        "v" => MAP_VISUAL | MAP_SELECT,
+        "x" => MAP_VISUAL,
+        "s" => MAP_SELECT,
+        "o" => MAP_OP_PENDING,
+        "c" => MAP_CMDLINE,
+        "t" => MAP_TERMINAL,
+        "l" => MAP_LANG,
+        _ => return None,
+    };
+    Some((mode, unmap, clear, noremap))
+}
+
+/// Port of `do_map()` (Neovim mapping.c) — execute a parsed `:map`-family
+/// command: clear the mode's mappings, remove the `{lhs}` mapping, or add a
+/// `{lhs}` → `{rhs}` mapping (honoring the `<silent>`/`<expr>`/`<nowait>`/
+/// `<buffer>` argument prefixes). `arg` is the text after the command word.
+pub fn do_map(arg: &str, mode: i32, unmap: bool, clear: bool, noremap: bool) {
+    if clear {
+        MAPHASH.with(|h| h.borrow_mut().retain(|e| e.mode & mode == 0));
+        return;
+    }
+    // c: consume the leading <silent>/<expr>/<nowait>/<buffer>/… map arguments.
+    let mut rest = arg.trim_start();
+    let (mut silent, mut expr, mut nowait, mut buffer) = (false, false, false, false);
+    loop {
+        let lower = rest.to_ascii_lowercase();
+        if let Some(r) = lower.strip_prefix("<silent>") {
+            silent = true;
+            rest = &rest[rest.len() - r.len()..];
+        } else if let Some(r) = lower.strip_prefix("<expr>") {
+            expr = true;
+            rest = &rest[rest.len() - r.len()..];
+        } else if let Some(r) = lower.strip_prefix("<nowait>") {
+            nowait = true;
+            rest = &rest[rest.len() - r.len()..];
+        } else if let Some(r) = lower.strip_prefix("<buffer>") {
+            buffer = true;
+            rest = &rest[rest.len() - r.len()..];
+        } else if let Some(r) = lower
+            .strip_prefix("<unique>")
+            .or(lower.strip_prefix("<script>"))
+        {
+            rest = &rest[rest.len() - r.len()..];
+        } else {
+            break;
+        }
+        rest = rest.trim_start();
+    }
+    let (lhs, rhs) = match rest.find(char::is_whitespace) {
+        Some(i) => (&rest[..i], rest[i..].trim()),
+        None => (rest, ""),
+    };
+    if lhs.is_empty() {
+        return;
+    }
+    if unmap {
+        MAPHASH.with(|h| {
+            h.borrow_mut()
+                .retain(|e| !(e.lhs == lhs && e.mode & mode != 0))
+        });
+        return;
+    }
+    // c: `:map {lhs}` with no rhs lists the mapping — a no-op standalone.
+    if rhs.is_empty() {
+        return;
+    }
+    map_add(mapblock_T {
+        lhs: lhs.to_string(),
+        rhs: rhs.to_string(),
+        mode,
+        noremap,
+        expr,
+        silent,
+        nowait,
+        buffer,
+        sid: 0,
+        lnum: 0,
+        desc: String::new(),
+    });
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -5244,9 +5524,62 @@ pub fn f_getcompletiontype(_argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.vval = v_string(String::new());
 }
 
-/// Port of `f_mapset()` (Neovim mapping.c) — restore a mapping from a
-/// `maparg()`-style Dict. No mapping table wired standalone → a no-op.
-pub fn f_mapset(_argvars: &[typval_T], _rettv: &mut typval_T) {}
+/// Port of `f_mapset()` (Neovim mapping.c) — create/restore a mapping from a
+/// `maparg()`-style Dict. Supports both the modern `mapset({dict})` (mode from
+/// the dict's `mode`/`mode_bits`) and the older `mapset({mode}, {abbr},
+/// {dict})` forms.
+pub fn f_mapset(argvars: &[typval_T], _rettv: &mut typval_T) {
+    // Locate the option Dict and the explicit mode (3-arg form) if present.
+    let (mode_str, dict) = if argvars[0].v_type == VAR_DICT {
+        (None, &argvars[0])
+    } else {
+        match argvars.get(2) {
+            Some(d) => (Some(tv_get_string(&argvars[0])), d),
+            None => return,
+        }
+    };
+    let d = match (dict.v_type, &dict.vval) {
+        (VAR_DICT, v_dict(Some(d))) => d.clone(),
+        _ => {
+            emsg("E715: Dictionary required");
+            return;
+        }
+    };
+    let db = d.borrow();
+    let get_s = |k: &str| tv_dict_find(&db, k).map(tv_get_string).unwrap_or_default();
+    let get_n = |k: &str| tv_dict_find(&db, k).map(tv_get_number).unwrap_or(0);
+    let mode = match mode_str {
+        Some(m) => mode_str2flags(&m),
+        None => {
+            // c: modern form takes the mode from the dict's `mode`/`mode_bits`.
+            let mc = get_s("mode");
+            if !mc.is_empty() {
+                mode_str2flags(&mc)
+            } else if tv_dict_find(&db, "mode_bits").is_some() {
+                get_n("mode_bits") as i32
+            } else {
+                MAP_DEFAULT
+            }
+        }
+    };
+    let lhs = get_s("lhs");
+    if lhs.is_empty() {
+        return;
+    }
+    map_add(mapblock_T {
+        lhs,
+        rhs: get_s("rhs"),
+        mode,
+        noremap: get_n("noremap") != 0,
+        expr: get_n("expr") != 0,
+        silent: get_n("silent") != 0,
+        nowait: get_n("nowait") != 0,
+        buffer: get_n("buffer") != 0,
+        sid: get_n("sid"),
+        lnum: get_n("lnum"),
+        desc: get_s("desc"),
+    });
+}
 
 /// Port of `f_complete()` (Neovim insexpand.c) — set the insert-mode completion
 /// matches. Only valid in insert mode → a no-op standalone.

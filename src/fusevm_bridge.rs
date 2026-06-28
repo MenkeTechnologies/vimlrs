@@ -380,6 +380,8 @@ pub const VIML_FN_LOG10: u16 = 3183;
 pub const VIML_EXEC_STMT: u16 = 3184;
 /// `:set` statement: pop the argument string, apply via `option::do_set`.
 pub const VIML_SET: u16 = 3185;
+/// `:map`-family statement: pop the raw command line, apply via `do_map`.
+pub const VIML_MAP: u16 = 3562;
 /// `:source {file}`: pop the filename, read and run it in the current scope.
 pub const VIML_SOURCE: u16 = 3500;
 /// `:unlet {name}`: pop the name, delete the variable.
@@ -2255,6 +2257,28 @@ fn b_set(vm: &mut VM, _: u8) -> Value {
     crate::ported::option::do_set(&args);
     Value::Undef
 }
+
+/// `:map`-family statement: pop the raw command line, split off its command
+/// word, and apply via the ported `get_map_mode()` + `do_map()`.
+fn b_map(vm: &mut VM, _: u8) -> Value {
+    let line = tv_get_string(&pop_tv(vm));
+    let line = line.trim();
+    // The command word is the leading run of letters plus an optional `!`.
+    let alpha_end = line
+        .find(|c: char| !c.is_ascii_alphabetic())
+        .unwrap_or(line.len());
+    let cmd_end = if line[alpha_end..].starts_with('!') {
+        alpha_end + 1
+    } else {
+        alpha_end
+    };
+    let cmd = &line[..cmd_end];
+    let rest = &line[cmd_end..];
+    if let Some((mode, unmap, clear, noremap)) = crate::ported::eval::funcs::get_map_mode(cmd) {
+        crate::ported::eval::funcs::do_map(rest, mode, unmap, clear, noremap);
+    }
+    Value::Undef
+}
 fn b_getreg(_: &mut VM, _: u8) -> Value {
     Value::str("")
 }
@@ -2705,6 +2729,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_SOURCE, b_source);
     vm.register_builtin(VIML_UNLET, b_unlet);
     vm.register_builtin(VIML_SET, b_set);
+    vm.register_builtin(VIML_MAP, b_map);
     vm.register_builtin(VIML_FN_JSON_ENCODE, |vm, n| call_func(vm, n, f_json_encode));
     vm.register_builtin(VIML_FN_JSON_DECODE, |vm, n| call_func(vm, n, f_json_decode));
     vm.register_builtin(VIML_FN_STRGETCHAR, |vm, n| call_func(vm, n, f_strgetchar));

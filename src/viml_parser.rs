@@ -69,8 +69,30 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
             Stmt::Return(Some(parse_expr(rest)?))
         }),
         "throw" => Ok(Stmt::Throw(parse_expr(rest)?)),
+        // `:map`-family commands (`nmap`/`inoremap`/`vunmap`/`mapclear`/`map!`).
+        // The bare `map`/`unmap`/… forms collide with the `map()`/`filter()`
+        // builtins, so a name immediately followed by `(` stays an expression.
+        _ if is_map_command(cmd) && !line[cmd.len()..].starts_with('(') => {
+            Ok(Stmt::Map(line.to_string()))
+        }
         _ => Ok(Stmt::Expr(parse_expr(line)?)),
     }
+}
+
+/// Whether `cmd` is the (alphabetic) word of a `:map`-family command — any of
+/// `[nivxsoctl]?(map|noremap|unmap|mapclear)`. The optional trailing `!` of
+/// `map!`/`noremap!`/`unmap!` is not part of `cmd` (it is non-alphabetic), so a
+/// bare `map`/`noremap`/`unmap`/`mapclear` also matches here.
+fn is_map_command(cmd: &str) -> bool {
+    let prefix = cmd
+        .strip_suffix("mapclear")
+        .or_else(|| cmd.strip_suffix("noremap"))
+        .or_else(|| cmd.strip_suffix("unmap"))
+        .or_else(|| cmd.strip_suffix("map"));
+    matches!(
+        prefix,
+        Some("" | "n" | "i" | "v" | "x" | "s" | "o" | "c" | "t" | "l")
+    )
 }
 
 /// Split a statement line into its leading command word (ASCII letters) and the
