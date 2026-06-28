@@ -49,7 +49,6 @@ use crate::ported::profile::{
 };
 use crate::ported::sha256::sha256_bytes;
 use crate::viml_regex::regex_match;
-use crate::viml_regex::{regex_matchlist, regex_matchstrpos};
 
 /// Port of `f_len()` from `Src/eval/funcs.c`.
 ///
@@ -2395,8 +2394,84 @@ pub fn f_indexof(argvars: &[typval_T], rettv: &mut typval_T) {
 
 // ── pattern / option / editor-absent builtins (funcs.c) ──────────────────────
 
+/// Port of `get_matches_in_str()` — `csrc/eval/funcs.c:4272`. Append a dict for
+/// **every** match of `pat` in `s` to `mlist`: `{idx|lnum, byteidx, text
+/// [, submatches]}`. `matchbuf` selects the `lnum` key (`matchbufline`) over
+/// `idx` (`matchstrlist`); `submatches` adds the `\1`..`\9` group list.
+///
+/// RUST-PORT NOTE: positions come from the char-indexed regex engine; `byteidx`
+/// is the byte offset of the match start, as Vim reports.
+fn get_matches_in_str(
+    s: &str,
+    pat: &str,
+    ic: bool,
+    mlist: &std::rc::Rc<std::cell::RefCell<list_T>>,
+    idx: varnumber_T,
+    submatches: bool,
+    matchbuf: bool,
+) {
+    use crate::ported::eval::typval_defs_h::VarLockStatus::VAR_UNLOCKED;
+    let chars: Vec<char> = s.chars().collect();
+    let mut from = 0usize;
+    // c: while ((match = vim_regexec_nl(rmp, str, startidx))) { ... startidx = endp; }
+    while let Some((cstart, cend, groups)) =
+        crate::viml_regex::regex_search_nth(pat, s, ic, from, 1)
+    {
+        // c: byteidx = startp[0] - str (a BYTE offset).
+        let byteidx: usize = chars[..cstart as usize].iter().map(|c| c.len_utf8()).sum();
+        let d = tv_dict_alloc();
+        {
+            let mut db = d.borrow_mut();
+            // c: matchbuf ? "lnum" : "idx".
+            tv_dict_add_tv(
+                &mut db,
+                if matchbuf { "lnum" } else { "idx" },
+                typval_T::from(idx),
+            );
+            tv_dict_add_tv(&mut db, "byteidx", typval_T::from(byteidx as varnumber_T));
+            tv_dict_add_tv(&mut db, "text", typval_T::from(groups[0].clone()));
+            if submatches {
+                // c: the 9 \1..\9 backrefs, "" for groups that did not match.
+                let sub = tv_list_alloc(0);
+                {
+                    let mut sb = sub.borrow_mut();
+                    for g in groups.iter().take(10).skip(1) {
+                        tv_list_append_string(&mut sb, g);
+                    }
+                }
+                tv_dict_add_tv(
+                    &mut db,
+                    "submatches",
+                    typval_T {
+                        v_type: VAR_LIST,
+                        v_lock: VAR_UNLOCKED,
+                        vval: v_list(Some(sub)),
+                    },
+                );
+            }
+        }
+        tv_list_append_tv(
+            &mut mlist.borrow_mut(),
+            typval_T {
+                v_type: VAR_DICT,
+                v_lock: VAR_UNLOCKED,
+                vval: v_dict(Some(d)),
+            },
+        );
+        // c: startidx = endp[0] - str; stop on end/zero-width to avoid a stall.
+        from = if cend > cstart {
+            cend as usize
+        } else {
+            cstart as usize + 1
+        };
+        if from > chars.len() {
+            break;
+        }
+    }
+}
+
 /// Port of `f_matchstrlist()` from `Src/eval/funcs.c` — for each String in a
-/// List, the first match of `{pat}`: `{idx, byteidx, text [, submatches]}`.
+/// List, **every** match of `{pat}`: `{idx, byteidx, text [, submatches]}`.
 pub fn f_matchstrlist(argvars: &[typval_T], rettv: &mut typval_T) {
     let l = tv_list_alloc_ret(rettv, 0);
     let list = match (argvars[0].v_type, &argvars[0].vval) {
@@ -2426,48 +2501,9 @@ pub fn f_matchstrlist(argvars: &[typval_T], rettv: &mut typval_T) {
         .iter()
         .map(|it| it.li_tv.clone())
         .collect();
-    let mk = |t, v| typval_T {
-        v_type: t,
-        v_lock: crate::ported::eval::typval_defs_h::VarLockStatus::VAR_UNLOCKED,
-        vval: v,
-    };
     for (idx, item) in items.iter().enumerate() {
         let s = tv_get_string(item);
-        let (text, cstart, _) = regex_matchstrpos(&pat, &s, ic);
-        if cstart < 0 {
-            continue;
-        }
-        // c: byteidx is a BYTE offset; regex returns a char index.
-        let byteidx: usize = s.chars().take(cstart as usize).map(char::len_utf8).sum();
-        let d = tv_dict_alloc();
-        tv_dict_add_tv(
-            &mut d.borrow_mut(),
-            "idx",
-            typval_T::from(idx as varnumber_T),
-        );
-        tv_dict_add_tv(
-            &mut d.borrow_mut(),
-            "byteidx",
-            typval_T::from(byteidx as varnumber_T),
-        );
-        tv_dict_add_tv(&mut d.borrow_mut(), "text", typval_T::from(text));
-        if submatches {
-            // c: always the 9 \1..\9 backrefs, "" for groups that didn't match.
-            let groups = regex_matchlist(&pat, &s, ic);
-            let sub = tv_list_alloc(0);
-            for i in 1..=9 {
-                tv_list_append_string(
-                    &mut sub.borrow_mut(),
-                    groups.get(i).map_or("", |g| g.as_str()),
-                );
-            }
-            tv_dict_add_tv(
-                &mut d.borrow_mut(),
-                "submatches",
-                mk(VAR_LIST, v_list(Some(sub))),
-            );
-        }
-        tv_list_append_tv(&mut l.borrow_mut(), mk(VAR_DICT, v_dict(Some(d))));
+        get_matches_in_str(&s, &pat, ic, &l, idx as varnumber_T, submatches, false);
     }
 }
 
@@ -3611,22 +3647,23 @@ pub fn f_matchbufline(argvars: &[typval_T], rettv: &mut typval_T) {
     let lnum = tv_get_lnum(&argvars[2]);
     let end = tv_get_lnum(&argvars[3]);
     let ic = tv_get_number_chk(&get_option_value("ignorecase"), None) != 0;
+    // c: optional {dict} with "submatches".
+    let submatches = argvars.get(4).is_some_and(|d| match &d.vval {
+        v_dict(Some(dd)) => {
+            dd.borrow()
+                .dv_hashtab
+                .get("submatches")
+                .map(tv_get_bool)
+                .unwrap_or(0)
+                != 0
+        }
+        _ => false,
+    });
     let out = tv_list_alloc_ret(rettv, 0);
-    let mut ob = out.borrow_mut();
     for (i, line) in get_buffer_lines(lnum, end).iter().enumerate() {
         let ln = lnum + i as varnumber_T;
-        let mut from = 0usize;
-        while let Some((s, e)) = line_match_from(&pat, line, from, ic) {
-            let d = tv_dict_alloc();
-            {
-                let mut db = d.borrow_mut();
-                tv_dict_add_nr(&mut db, "lnum", ln);
-                tv_dict_add_nr(&mut db, "byteidx", s as varnumber_T);
-                tv_dict_add_str(&mut db, "text", &line[s..e]);
-            }
-            tv_list_append_tv(&mut ob, match_dict_val(d));
-            from = if e > s { e } else { s + 1 };
-        }
+        // c: matchbuf = true → the dict uses "lnum".
+        get_matches_in_str(line, &pat, ic, &out, ln, submatches, true);
     }
 }
 /// Port of `f_menu_get()` — no menus → empty List.

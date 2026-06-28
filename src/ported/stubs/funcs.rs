@@ -175,12 +175,6 @@ pub fn libcall_common() {
     unimplemented!("STUB libcall_common — csrc/eval/funcs.c:3940")
 }
 
-/// Port of `get_matches_in_str()` — `csrc/eval/funcs.c:4272`. STUB: not yet ported.
-/// C: `static void get_matches_in_str(const char *str, regmatch_T *rmp, list_T *mlist, int idx,`
-pub fn get_matches_in_str() {
-    unimplemented!("STUB get_matches_in_str — csrc/eval/funcs.c:4272")
-}
-
 /// Port of `may_add_state_char()` — `csrc/eval/funcs.c:4589`. STUB: not yet ported.
 /// C: `static void may_add_state_char(garray_T *gap, const char *include, uint8_t c)`
 pub fn may_add_state_char() {
