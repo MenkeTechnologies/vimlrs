@@ -27,6 +27,13 @@ call assert_equal(b, list2blob([0, 17, 34, 51]))
 " ── an empty blob ──
 call assert_equal(0, len(0z))
 
+" ── add()/insert()/remove() operate on a Blob's bytes ──
+call assert_equal(0z0102, add(0z01, 2))
+call assert_equal(0zFF0102, insert(0z0102, 255))
+call assert_equal(0z010902, insert(0z0102, 9, 1))
+call assert_equal(2, remove(0z010203, 1))
+call assert_fails('call insert(0z0102, 300)', 'E475')
+
 " ── hex case-insensitive ──
 call assert_equal(0zdeadbeef, 0zDEADBEEF)
 

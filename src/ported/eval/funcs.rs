@@ -537,14 +537,25 @@ pub fn f_range(argvars: &[typval_T], rettv: &mut typval_T) {
     }
 }
 
-/// Port of `f_add()` from `Src/eval/funcs.c` — append `{item}` to `{list}` and
-/// return the list.
+/// Port of `f_add()` — `csrc/eval/list.c:429`. Append `{expr}` to a List (any
+/// value) or a Blob (as a byte); else E897. Returns the same object, or 1 on
+/// failure.
 pub fn f_add(argvars: &[typval_T], rettv: &mut typval_T) {
-    if let (VAR_LIST, v_list(Some(l))) = (argvars[0].v_type, &argvars[0].vval) {
-        tv_list_append_tv(&mut l.borrow_mut(), argvars[1].clone());
-        *rettv = argvars[0].clone();
-    } else {
-        emsg("E897: List or Blob required");
+    // c: rettv->vval.v_number = 1;  — default failed.
+    *rettv = typval_T::from(1 as varnumber_T);
+    match (argvars[0].v_type, &argvars[0].vval) {
+        // c: VAR_LIST — append the value.
+        (VAR_LIST, v_list(Some(l))) => {
+            tv_list_append_tv(&mut l.borrow_mut(), argvars[1].clone());
+            *rettv = argvars[0].clone();
+        }
+        // c: VAR_BLOB — append the value as a byte.
+        (VAR_BLOB, v_blob(Some(b))) => {
+            let n = tv_get_number_chk(&argvars[1], None);
+            b.borrow_mut().bv_ga.push(n as u8);
+            *rettv = argvars[0].clone();
+        }
+        _ => emsg("E897: List or Blob required"),
     }
 }
 
@@ -1123,25 +1134,65 @@ pub fn f_invert(argvars: &[typval_T], rettv: &mut typval_T) {
 
 // ── more list / dict functions (Src/eval/funcs.c) ──
 
-/// Port of `f_insert()` from `Src/eval/funcs.c` — insert `{item}` at `{idx}`
-/// (default 0) in `{list}`, returning the list.
+/// Port of `f_insert()` — `csrc/eval/list.c:735`. Insert `{item}` before index
+/// `{idx}` (default 0; negative counts from the end) in a List, or insert a byte
+/// in a Blob. Out-of-range `{idx}` errors (E684 for a List, E475 for a Blob).
 pub fn f_insert(argvars: &[typval_T], rettv: &mut typval_T) {
-    if let (VAR_LIST, v_list(Some(l))) = (argvars[0].v_type, &argvars[0].vval) {
-        let mut lb = l.borrow_mut();
-        let len = lb.lv_len as varnumber_T;
-        let mut idx = argvars.get(2).map_or(0, |t| tv_get_number_chk(t, None));
-        if idx < 0 {
-            idx += len;
+    let before_arg = argvars.get(2).filter(|t| t.v_type != VAR_UNKNOWN);
+    // c: VAR_BLOB — insert a byte (0..255) at {idx} in 0..=len.
+    if let (VAR_BLOB, v_blob(b)) = (argvars[0].v_type, &argvars[0].vval) {
+        let Some(b) = b else { return };
+        let len = b.borrow().bv_ga.len() as varnumber_T;
+        let before = before_arg.map_or(0, |t| tv_get_number_chk(t, None));
+        if before < 0 || before > len {
+            crate::ported::message::semsg(&format!(
+                "E475: Invalid argument: {}",
+                tv_get_string(&argvars[2])
+            ));
+            return;
         }
-        let idx = (idx.max(0) as usize).min(lb.lv_items.len());
-        lb.lv_items.insert(
-            idx,
-            crate::ported::eval::typval_defs_h::listitem_T {
-                li_tv: argvars[1].clone(),
-            },
-        );
-        lb.lv_len = lb.lv_items.len() as i32;
+        let val = tv_get_number_chk(&argvars[1], None);
+        if !(0..=255).contains(&val) {
+            crate::ported::message::semsg(&format!(
+                "E475: Invalid argument: {}",
+                tv_get_string(&argvars[1])
+            ));
+            return;
+        }
+        b.borrow_mut().bv_ga.insert(before as usize, val as u8);
+        *rettv = argvars[0].clone();
+        return;
     }
+    // c: else must be a List.
+    let l = match (argvars[0].v_type, &argvars[0].vval) {
+        (VAR_LIST, v_list(Some(l))) => l.clone(),
+        (VAR_LIST, _) => {
+            *rettv = argvars[0].clone();
+            return;
+        }
+        _ => {
+            emsg("E897: List or Blob required");
+            return;
+        }
+    };
+    let mut lb = l.borrow_mut();
+    let len = lb.lv_len as varnumber_T;
+    let orig = before_arg.map_or(0, |t| tv_get_number_chk(t, None));
+    // c: tv_list_find handles a negative index (from the end); an out-of-range
+    // index (other than == len, which appends) is E684.
+    let idx = if orig < 0 { orig + len } else { orig };
+    if orig != len && (idx < 0 || idx >= len) {
+        crate::ported::message::semsg(&format!("E684: list index out of range: {orig}"));
+        return;
+    }
+    lb.lv_items.insert(
+        idx.clamp(0, len) as usize,
+        crate::ported::eval::typval_defs_h::listitem_T {
+            li_tv: argvars[1].clone(),
+        },
+    );
+    lb.lv_len = lb.lv_items.len() as i32;
+    drop(lb);
     *rettv = argvars[0].clone();
 }
 
