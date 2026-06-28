@@ -244,8 +244,13 @@ pub fn f_byteidx(argvars: &[typval_T], rettv: &mut typval_T) {
     });
 }
 
-/// Port of `f_charidx()` from `Src/strings.c` — the character index of the byte
-/// at `{idx}` in `{string}`, or -1 if `{idx}` is out of range.
+/// Port of `f_charidx()` from Neovim `src/nvim/strings.c` (home file not under
+/// the vendored `csrc/eval/` tree). The character index of the byte at `{idx}`
+/// in `{string}`, or -1 if `{idx}` is out of range.
+///
+/// SUBSET: the optional `{countcc}` (count composing chars) and `{utf16}`
+/// arguments are not modelled — this counts every character (i.e. behaves as
+/// `{countcc}` = 1). The core multibyte byte→char mapping is faithful.
 pub fn f_charidx(argvars: &[typval_T], rettv: &mut typval_T) {
     let s = tv_get_string(&argvars[0]);
     let idx = tv_get_number_chk(&argvars[1], None);

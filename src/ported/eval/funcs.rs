@@ -436,9 +436,9 @@ pub fn f_add(argvars: &[typval_T], rettv: &mut typval_T) {
     }
 }
 
-/// Port of `f_reverse()` from `Src/eval/funcs.c` — reverse a List or Blob in
+/// Port of `f_reverse()` — `csrc/eval/list.c:826`. Reverse a List or Blob in
 /// place (returning the same object), or a String (returning a new, reversed
-/// String). Anything else returns 0.
+/// String via `reverse_text()`). Anything else returns 0.
 pub fn f_reverse(argvars: &[typval_T], rettv: &mut typval_T) {
     match (argvars[0].v_type, &argvars[0].vval) {
         // c: VAR_LIST — reversed in place, the same List returned.
@@ -672,8 +672,16 @@ pub fn f_index(argvars: &[typval_T], rettv: &mut typval_T) {
     }
 }
 
-/// Port of `f_has()` from `Src/eval/funcs.c` (subset) — feature presence. Phase
-/// 3 reports the always-true pseudo-features and `0` otherwise.
+/// Port of `f_has()` from `csrc/eval/funcs.c:2654` — feature presence.
+///
+/// NOT a faithful copy of the C `has_list[]`: that table is gated by Neovim's
+/// build (`#ifdef UNIX`, `#ifdef __APPLE__`, …) and also lists editor features
+/// (windows/syntax/folding/…) that a standalone eval engine does not provide.
+/// This deliberately reports (a) the platform features via `cfg!()` — the same
+/// conditions the C compiles them under — and (b) only the language/runtime
+/// features vimlrs actually implements, so `has()` never claims an absent
+/// capability. The fast-path runtime probes (`ttyin`/`ttyout`/`patch-*`/…) follow
+/// the C's pre-`has_list[]` checks.
 pub fn f_has(argvars: &[typval_T], rettv: &mut typval_T) {
     use std::io::IsTerminal;
     // c: name comparison is case-insensitive (STRICMP) throughout.
@@ -5550,19 +5558,22 @@ pub fn set_arglist(args: &[String]) {
     ARGLIST.with(|a| *a.borrow_mut() = args.to_vec());
 }
 
-/// Port of `f_argc()` (Neovim eval/funcs.c) — the size of the argument list.
+/// Port of `f_argc()` — Neovim `src/nvim/arglist.c` (home file not under the
+/// vendored `csrc/eval/` tree, so allowlisted category-A). The size of the
+/// global argument list (here the script files from the command line).
 pub fn f_argc(_argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.vval = v_number(ARGLIST.with(|a| a.borrow().len()) as varnumber_T);
 }
 
-/// Port of `f_argidx()` (Neovim eval/funcs.c) — the current index in the
-/// argument list. vimlrs sources every file in order rather than tracking a
-/// "current" buffer, so the index rests at 0 (the first), as in a fresh Vim.
+/// Port of `f_argidx()` — Neovim `src/nvim/arglist.c` (not vendored). The current
+/// index in the argument list. vimlrs sources every file in order rather than
+/// tracking a "current" buffer, so the index rests at 0, as in a fresh Vim.
 pub fn f_argidx(_argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.vval = v_number(0);
 }
 
-/// Port of `f_argv()` (Neovim eval/funcs.c) — with no argument or `-1`, the whole
+/// Port of `f_argv()` — Neovim `src/nvim/arglist.c` (not vendored). With no
+/// argument or `-1`, the whole
 /// argument list as a List; with an index `N`, that entry as a String ("" when
 /// out of range). The optional trailing window-id argument is accepted and
 /// ignored (there is one global arglist).
@@ -5621,11 +5632,11 @@ pub fn f_assert_equalfile(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.vval = v_number(1);
 }
 
-// ── arglistid() — eval/funcs.c (full table); foldlevel() — fold.c. ──
+// ── arglistid() — arglist.c (not vendored); foldlevel() — fold.c. ──
 
-/// Port of `f_arglistid()` (Neovim eval/funcs.c) — the id of the argument list
-/// of the (optionally specified) window. vimlrs runs a single script with one
-/// global, unnamed argument list, so the id is always 0.
+/// Port of `f_arglistid()` — Neovim `src/nvim/arglist.c` (not vendored). The id
+/// of the argument list of the (optionally specified) window. vimlrs runs with
+/// one global, unnamed argument list, so the id is always 0.
 pub fn f_arglistid(_argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.vval = v_number(0);
 }
