@@ -2375,7 +2375,7 @@ fn indexof_list(
     -1
 }
 
-/// Port of `f_indexof()` — `csrc/eval/funcs.c:3084`. The index of the first
+/// Port of `f_indexof()` — `csrc/eval/funcs.c:3086`. The index of the first
 /// List/Blob item for which `{expr}` (string or funcref, seeing `v:key`/`v:val`)
 /// is true, or -1. An optional `{opts}` Dict's `startidx` begins the scan later.
 pub fn f_indexof(argvars: &[typval_T], rettv: &mut typval_T) {
