@@ -242,6 +242,7 @@ fn repeat_blob(
     n: varnumber_T,
     rettv: &mut typval_T,
 ) {
+    // c: blob_T *const blob = blob_tv->vval.v_blob; tv_blob_alloc_ret(rettv);
     let out = tv_blob_alloc_ret(rettv);
     // c: if (blob == NULL || n <= 0) return;
     let Some(blob) = blob else { return };
@@ -249,16 +250,26 @@ fn repeat_blob(
         return;
     }
     let src = blob.borrow().bv_ga.clone();
-    let slen = src.len() as varnumber_T;
-    let len = slen * n;
-    if len <= 0 {
+    // c: const int slen = blob->bv_ga.ga_len; const int len = (int)(slen * n);
+    let slen = src.len();
+    let len = slen * n as usize;
+    // c: if (len <= 0) return;
+    if len == 0 {
         return;
     }
-    // c: all-zero fast path leaves the (already zero-filled) ga; here we just
-    // build the repeated bytes directly.
-    let mut data = Vec::with_capacity(len as usize);
-    for _ in 0..n {
-        data.extend_from_slice(&src);
+    // c: ga_grow(&...bv_ga, len); ...bv_ga.ga_len = len; — ga_grow zero-fills the
+    // grown space, which `vec![0; len]` reproduces.
+    let mut data = vec![0u8; len];
+    // c: for (i=0;i<slen;i++) if (tv_blob_get(blob,i)!=0) break; if (i==slen) return;
+    // — all source bytes 0, so the already zero-filled destination is correct.
+    if src.iter().all(|&b| b == 0) {
+        out.borrow_mut().bv_ga = data;
+        return;
+    }
+    // c: for (i=0;i<n;i++) tv_blob_set_range(rettv->vval.v_blob, i*slen,
+    //    (i+1)*slen-1, blob_tv);
+    for i in 0..n as usize {
+        data[i * slen..(i + 1) * slen].copy_from_slice(&src);
     }
     out.borrow_mut().bv_ga = data;
 }
@@ -272,13 +283,33 @@ fn repeat_string(str_tv: &typval_T, n: varnumber_T, rettv: &mut typval_T) {
         rettv.vval = v_string(String::new());
         return;
     }
+    // c: const char *const p = tv_get_string(str_tv); const size_t slen = strlen(p);
     let p = tv_get_string(str_tv);
-    // c: if (slen == 0) return; (NULL result)
-    if p.is_empty() {
+    let bytes = p.as_bytes();
+    let slen = bytes.len();
+    // c: if (slen == 0) return;  (NULL → empty here)
+    if slen == 0 {
         rettv.vval = v_string(String::new());
         return;
     }
-    rettv.vval = v_string(p.repeat(n as usize));
+    // c: const size_t len = slen * n; if (len / n != slen) return;  (overflow)
+    let Some(len) = slen.checked_mul(n as usize) else {
+        rettv.vval = v_string(String::new());
+        return;
+    };
+    // c: char *r = xmallocz(len); memmove(r, p, slen);  then the doubling copy:
+    // c: while (done < len) { copy_len = min(done, len-done); memmove(r+done, r,
+    //    copy_len); done += copy_len; }
+    let mut r = vec![0u8; len];
+    r[..slen].copy_from_slice(bytes);
+    let mut done = slen;
+    while done < len {
+        let copy_len = done.min(len - done);
+        r.copy_within(0..copy_len, done);
+        done += copy_len;
+    }
+    // The source is a valid VAR_STRING (UTF-8 here), so the repeat is valid too.
+    rettv.vval = v_string(String::from_utf8_lossy(&r).into_owned());
 }
 
 /// Port of `f_repeat()` — `csrc/eval/funcs.c:5393`. Repeat a List, Blob, or
