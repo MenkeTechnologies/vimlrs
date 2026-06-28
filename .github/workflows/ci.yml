@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --all-targets --locked
+
+  test:
+    name: Test
+    runs-on: ${{ matrix.os }}
+    env:
+      RUST_BACKTRACE: 1
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # No-op on macOS via runner.os guard inside the composite action.
+      - uses: Swatinem/rust-cache@v2
+      # Includes the drift gate (tests/ported_fn_names_match_c.rs), which
+      # derives the legal-name set straight from the vendored csrc/ tree — it
+      # needs no generated artifact, so a fresh checkout passes.
+      - run: cargo test --locked --no-fail-fast
+
+  # Formatting is handled by the local pre-commit hook (auto-runs `cargo fmt`
+  # on staged .rs files). No CI enforcement — fmt drift is cosmetic, not a bug.
+  # Clippy is omitted: opinionated lints drown out real-bug signal.
+
+  doc:
+    name: Doc
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # No `-D warnings`: the ported tree carries many faithful-to-C doc
+      # comments whose `[bracket]` snippets trip rustdoc's intra-doc-link
+      # lint. Hard doc errors still fail the build; cosmetic warnings do not.
+      - run: cargo doc --no-deps --locked
+
+  release-build:
+    name: Release Build
+    needs: [check, test, doc]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      # No-op on macOS via runner.os guard in the composite action.
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vimlrs-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/vimlrs

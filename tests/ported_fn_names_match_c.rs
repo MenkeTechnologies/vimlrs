@@ -48,6 +48,65 @@ fn read_set(path: &Path) -> HashSet<String> {
         .collect()
 }
 
+/// Collect every function-like C identifier from the vendored `csrc/` tree — the
+/// same set `scripts/gen_c_functions.sh` writes to `docs/nvim_c_functions.txt`,
+/// computed in-process so the gate needs no generated, git-ignored artifact (it
+/// would be empty on a fresh CI checkout). An identifier "appears as a callable"
+/// when it is immediately followed (allowing whitespace) by `(`, matching the
+/// generator's `\b[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(` grep.
+fn c_names_from_csrc(csrc: &Path) -> HashSet<String> {
+    let mut files = Vec::new();
+    rs_or_ext_files(csrc, &["c", "h", "lua"], &mut files);
+    let mut names = HashSet::new();
+    for f in &files {
+        let Ok(src) = fs::read_to_string(f) else {
+            continue;
+        };
+        for line in src.lines() {
+            let b = line.as_bytes();
+            let mut i = 0;
+            while i < b.len() {
+                if b[i] == b'_' || b[i].is_ascii_alphabetic() {
+                    let start = i;
+                    while i < b.len() && (b[i] == b'_' || b[i].is_ascii_alphanumeric()) {
+                        i += 1;
+                    }
+                    let ident_end = i;
+                    let mut j = i;
+                    while j < b.len() && b[j].is_ascii_whitespace() {
+                        j += 1;
+                    }
+                    if j < b.len() && b[j] == b'(' {
+                        names.insert(line[start..ident_end].to_string());
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    }
+    names
+}
+
+/// Recurse `dir`, pushing every file whose extension is in `exts`.
+fn rs_or_ext_files(dir: &Path, exts: &[&str], out: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            rs_or_ext_files(&p, exts, out);
+        } else if p
+            .extension()
+            .and_then(|x| x.to_str())
+            .is_some_and(|x| exts.contains(&x))
+        {
+            out.push(p);
+        }
+    }
+}
+
 fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
@@ -81,11 +140,17 @@ fn fn_name(line: &str) -> Option<String> {
 #[test]
 fn ported_fn_names_exist_in_c_or_allowlist() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let c_names = read_set(&root.join("docs/nvim_c_functions.txt"));
+    // Derive the legal-name set straight from the vendored C (works on a fresh
+    // checkout / in CI); fall back to a pre-generated file only if csrc/ is
+    // somehow absent.
+    let mut c_names = c_names_from_csrc(&root.join("csrc"));
+    if c_names.is_empty() {
+        c_names = read_set(&root.join("docs/nvim_c_functions.txt"));
+    }
     let allow = read_set(&root.join("tests/data/fake_fn_allowlist.txt"));
     assert!(
         !c_names.is_empty(),
-        "docs/nvim_c_functions.txt empty — run scripts/gen_c_functions.sh"
+        "no C names found — csrc/ missing and docs/nvim_c_functions.txt empty"
     );
 
     let mut files = Vec::new();
