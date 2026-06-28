@@ -135,7 +135,12 @@ pub fn run() -> ExitCode {
     if let Some(src) = cli.expr {
         return match eval_expr(&src) {
             Ok(v) => {
-                println!("{}", encode_tv2echo(&v));
+                // As with :echo, a runtime error during evaluation means there is
+                // no valid result to print — emit only the error (already on
+                // stderr), not a spurious fallback value.
+                if !had_error() {
+                    println!("{}", encode_tv2echo(&v));
+                }
                 exit_for_errors()
             }
             Err(e) => fail(e),

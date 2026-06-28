@@ -101,7 +101,12 @@ Covered by `examples/index_get.vim`.
 
 ## Error-output / edge
 
-### 9. Spurious fallback value printed after a runtime error
+### 9. Spurious fallback value printed after a runtime error — ✅ FIXED
+A `VIML_ERR_MARK` op snapshots `did_emsg` before `:echo`/`:echon` evaluate their
+args; the echo prints nothing if it rose (the command aborted on error). The
+`-e` path suppresses its result the same way. So `echo [1,2,3][10]` prints only
+E684 and `echo printf('%d',3.7)` only E805 — no trailing fallback. Covered by
+`examples/error_output.vim`.
 - `echo printf('%d',3.7)` → Vim prints only `E805: Using a Float as a Number`; vimlrs prints the error **and then** `-1`
 - `echo [1,2,3][10]` → Vim prints only `E684: List index out of range: 10`; vimlrs prints the error **and then** `v:null`
 - On error vimlrs still emits a fallback result value, so erroring expressions produce

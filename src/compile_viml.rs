@@ -1225,6 +1225,10 @@ impl Compiler {
     }
 
     fn echo(&mut self, args: &[Expr], id: u16) -> Result<(), VimlError> {
+        // Snapshot did_emsg before evaluating the args so the echo can suppress
+        // its output (and the spurious fallback value) if evaluation errors.
+        self.emit(Op::CallBuiltin(h::VIML_ERR_MARK, 0));
+        self.emit(Op::Pop);
         for a in args {
             self.expr(a)?;
         }

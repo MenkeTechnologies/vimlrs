@@ -1165,6 +1165,9 @@ pub const VIML_SET_LINENO: u16 = 3070;
 pub const VIML_CALL_USER: u16 = 3071;
 /// Funcref-value call: pop `argc` args then a Funcref/Partial value → call it.
 pub const VIML_CALL_FUNCREF: u16 = 3574;
+/// Snapshot `did_emsg` before a statement evaluates its expression, so the
+/// statement (e.g. `:echo`) can suppress its output if an error was raised.
+pub const VIML_ERR_MARK: u16 = 3575;
 /// `:return {expr}`: pop the value → store it as the current call's result.
 pub const VIML_SET_RETURN: u16 = 3072;
 /// `:throw {expr}`: pop the value → raise it as the pending exception.
@@ -1227,6 +1230,9 @@ thread_local! {
     static LAST_RESULT: RefCell<Option<typval_T>> = const { RefCell::new(None) };
     /// `:echo` sink: `Some(buf)` captures (tests/embedding), `None` is stdout.
     static ECHO_SINK: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// `did_emsg` snapshot taken by `VIML_ERR_MARK` at a statement's start, so
+    /// `:echo`/`:echon` can skip output when evaluating its args raised an error.
+    static ERR_MARK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// Registry of user-defined functions, by name (populated from a compiled
     /// program before its `main` chunk runs).
     static FUNCTIONS: RefCell<std::collections::HashMap<String, crate::compile_viml::UserFuncDef>> =
@@ -1721,6 +1727,12 @@ fn echo_impl(vm: &mut VM, argc: u8, newline: bool) {
         parts.push(pop_tv(vm));
     }
     parts.reverse();
+    // Vim aborts a command whose expression raised an error: if `did_emsg` rose
+    // since VIML_ERR_MARK (set just before the args were evaluated), print
+    // nothing — no spurious fallback value after the error message.
+    if message::did_emsg.with(|d| d.get()) > ERR_MARK.with(|m| m.get()) {
+        return;
+    }
     let sep = if newline { " " } else { "" };
     let rendered: Vec<String> = parts.iter().map(encode_tv2echo).collect();
     let mut line = rendered.join(sep);
@@ -1775,6 +1787,13 @@ fn b_source(vm: &mut VM, _: u8) -> Value {
 fn b_unlet(vm: &mut VM, _: u8) -> Value {
     let name = tv_get_string(&pop_tv(vm));
     crate::ported::eval::vars::do_unlet(&name, name.len(), true);
+    Value::Undef
+}
+
+/// `VIML_ERR_MARK` — record the current `did_emsg` so a following `:echo` can
+/// tell whether evaluating its arguments raised an error.
+fn b_err_mark(_vm: &mut VM, _: u8) -> Value {
+    ERR_MARK.with(|m| m.set(message::did_emsg.with(|d| d.get())));
     Value::Undef
 }
 
@@ -3460,6 +3479,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_SET_LINENO, b_set_lineno);
     vm.register_builtin(VIML_CALL_USER, b_call_user);
     vm.register_builtin(VIML_CALL_FUNCREF, b_call_funcref);
+    vm.register_builtin(VIML_ERR_MARK, b_err_mark);
     vm.register_builtin(VIML_SET_RETURN, b_set_return);
     vm.register_builtin(VIML_THROW, b_throw);
     vm.register_builtin(VIML_CHECK_EXC, b_check_exc);
