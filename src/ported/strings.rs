@@ -300,10 +300,26 @@ pub fn f_charidx(argvars: &[typval_T], rettv: &mut typval_T) {
         return;
     }
     let idx = idx as usize;
-    // The character index of the character whose byte span contains byte `idx`
-    // (a byte in the middle of a multibyte character maps to that character) —
-    // counted via char boundaries so a non-boundary {idx} never panics.
-    let ci = s.char_indices().take_while(|(b, _)| *b <= idx).count() as varnumber_T - 1;
+    // c: {countcc} (argvars[2]) — default 0 folds composing characters into their
+    // base character (so the index is of the base); 1 counts each separately.
+    let countcc = argvars
+        .get(2)
+        .is_some_and(|t| tv_get_number_chk(t, None) != 0);
+    // Character index of the character whose byte span contains byte `idx`, via
+    // char boundaries (a non-boundary `idx` maps to its containing char and never
+    // panics). With folding, a composing char does not advance the index.
+    let mut ci: varnumber_T = -1;
+    let mut prev = false;
+    for (b, c) in s.char_indices() {
+        if b > idx {
+            break;
+        }
+        let folds = !countcc && prev && utf_iscomposing(c);
+        if !folds {
+            ci += 1;
+        }
+        prev = true;
+    }
     rettv.vval = v_number(ci);
 }
 

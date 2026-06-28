@@ -74,6 +74,14 @@ call assert_equal([0, 1, 3, 4],
 call assert_equal(-1, byteidx(cc, 9))
 call assert_equal(3, byteidx('héllo', 2))
 
+" ── charidx() byte->char index; default folds composing chars into the base,
+"    {countcc}=1 counts them separately ──
+call assert_equal(1, charidx(cc, 3))
+call assert_equal(2, charidx(cc, 3, 1))
+call assert_equal(0, charidx(cc, 1))
+call assert_equal(2, charidx('héllo', 3))
+call assert_equal(-1, charidx('abc', 9))
+
 " ── strpart() byte substring; a negative {start} clamps to 0 AND folds its
 "    offset into the length, so strpart('hello',-2,3) keeps only 'h' ──
 call assert_equal('hel', strpart('hello', 0, 3))
