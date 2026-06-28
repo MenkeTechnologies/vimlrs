@@ -69,18 +69,20 @@ use crate::ported::eval::funcs::{
 };
 use crate::ported::eval::funcs::{
     f_argc, f_argidx, f_arglistid, f_argv, f_assert_equalfile, f_cindent, f_clearmatches,
-    f_cmdcomplete_info, f_complete_add, f_complete_check, f_complete_info, f_diff_filler,
-    f_digraph_get, f_digraph_getlist, f_digraph_set, f_digraph_setlist, f_foldclosed,
-    f_foldclosedend, f_foldlevel, f_foldtext, f_foldtextresult, f_getchar, f_getcharmod,
-    f_getcharstr, f_getcmdcomplpat, f_getcmdcompltype, f_getcmdline, f_getcmdpos, f_getcmdprompt,
-    f_getcmdscreenpos, f_getcmdtype, f_getcompletion, f_getloclist, f_getmatches, f_getqflist,
-    f_hasmapto, f_highlight_exists, f_histadd, f_histdel, f_histget, f_histnr, f_hostname, f_iconv,
-    f_indent, f_lispindent, f_maparg, f_mapcheck, f_maplist, f_matchadd, f_matchaddpos, f_matcharg,
-    f_matchdelete, f_matchfuzzy, f_matchfuzzypos, f_menu_info, f_searchcount, f_setcmdline,
+    f_cmdcomplete_info, f_complete, f_complete_add, f_complete_check, f_complete_info,
+    f_diff_filler, f_digraph_get, f_digraph_getlist, f_digraph_set, f_digraph_setlist,
+    f_foldclosed, f_foldclosedend, f_foldlevel, f_foldtext, f_foldtextresult, f_fullcommand,
+    f_getchar, f_getcharmod, f_getcharstr, f_getcmdcomplpat, f_getcmdcompltype, f_getcmdline,
+    f_getcmdpos, f_getcmdprompt, f_getcmdscreenpos, f_getcmdtype, f_getcompletion,
+    f_getcompletiontype, f_getloclist, f_getmatches, f_getmousepos, f_getqflist, f_getscriptinfo,
+    f_getstacktrace, f_hasmapto, f_highlight_exists, f_histadd, f_histdel, f_histget, f_histnr,
+    f_hostname, f_iconv, f_indent, f_lispindent, f_maparg, f_mapcheck, f_maplist, f_mapset,
+    f_matchadd, f_matchaddpos, f_matcharg, f_matchdelete, f_matchfuzzy, f_matchfuzzypos,
+    f_menu_info, f_preinserted, f_pyeval, f_pyxeval, f_screenpos, f_searchcount, f_setcmdline,
     f_setcmdpos, f_setloclist, f_setmatches, f_setqflist, f_sign_define, f_sign_getdefined,
     f_sign_getplaced, f_sign_jump, f_sign_place, f_sign_placelist, f_sign_undefine, f_sign_unplace,
-    f_sign_unplacelist, f_test_garbagecollect_now, f_test_write_list_log, f_virtcol2col,
-    f_wildtrigger,
+    f_sign_unplacelist, f_test_garbagecollect_now, f_test_write_list_log, f_undofile, f_undotree,
+    f_virtcol2col, f_wildtrigger,
 };
 use crate::ported::eval::list::{
     f_count, f_extend, f_extendnew, f_filter, f_foreach, f_map, f_mapnew, f_remove,
@@ -1082,6 +1084,36 @@ pub const VIML_FN_MENU_INFO: u16 = 3544;
 pub const VIML_FN_TEST_GARBAGECOLLECT_NOW: u16 = 3545;
 /// `test_write_list_log()`
 pub const VIML_FN_TEST_WRITE_LIST_LOG: u16 = 3546;
+/// `pyeval()`
+pub const VIML_FN_PYEVAL: u16 = 3547;
+/// `pyxeval()`
+pub const VIML_FN_PYXEVAL: u16 = 3548;
+/// `undofile()`
+pub const VIML_FN_UNDOFILE: u16 = 3549;
+/// `undotree()`
+pub const VIML_FN_UNDOTREE: u16 = 3550;
+/// `getmousepos()`
+pub const VIML_FN_GETMOUSEPOS: u16 = 3551;
+/// `screenpos()`
+pub const VIML_FN_SCREENPOS: u16 = 3552;
+/// `getcompletiontype()`
+pub const VIML_FN_GETCOMPLETIONTYPE: u16 = 3553;
+/// `mapset()`
+pub const VIML_FN_MAPSET: u16 = 3554;
+/// `complete()`
+pub const VIML_FN_COMPLETE: u16 = 3555;
+/// `preinserted()`
+pub const VIML_FN_PREINSERTED: u16 = 3556;
+/// `getscriptinfo()`
+pub const VIML_FN_GETSCRIPTINFO: u16 = 3557;
+/// `getstacktrace()`
+pub const VIML_FN_GETSTACKTRACE: u16 = 3558;
+/// `fullcommand()`
+pub const VIML_FN_FULLCOMMAND: u16 = 3559;
+/// `assert_beeps()`
+pub const VIML_FN_ASSERT_BEEPS: u16 = 3560;
+/// `assert_nobeep()`
+pub const VIML_FN_ASSERT_NOBEEP: u16 = 3561;
 /// `flattennew()`
 pub const VIML_FN_FLATTENNEW: u16 = 3211;
 /// `sha256()`
@@ -2010,6 +2042,59 @@ fn b_assert_fails(vm: &mut VM, argc: u8) -> Value {
 /// Append a message to `v:errors` (thin wrapper over the ported `assert_error`).
 fn set_var_errors(msg: &str) {
     crate::ported::eval::vars::assert_error(msg);
+}
+
+/// Run `{cmd}` (errors captured) and report whether it "rang the bell": an Ex
+/// command that errors triggers a beep in Vim, so a reported error (parse error
+/// or a raised `emsg`) models the beep. Shared by `assert_beeps()`/
+/// `assert_nobeep()`. Restores `did_emsg`/`v:exception` around the run.
+fn assert_beeps_run(cmd: &str) -> bool {
+    let before = message::did_emsg.with(|d| d.get());
+    let saved_exc = V_EXCEPTION.with(|e| e.borrow().clone());
+    message::capture_errors_begin();
+    let parse_err = run_source_nested(cmd).err();
+    PENDING_EXC.with(|p| *p.borrow_mut() = None);
+    let _ = message::capture_errors_take();
+    let beeped = parse_err.is_some() || message::did_emsg.with(|d| d.get()) > before;
+    message::did_emsg.with(|d| d.set(before));
+    set_vim_var_string(VV_EXCEPTION, &saved_exc);
+    V_EXCEPTION.with(|e| *e.borrow_mut() = saved_exc);
+    beeped
+}
+
+/// `assert_beeps({cmd})` — run `{cmd}` and record a failure in `v:errors` if it
+/// does NOT cause a beep. Bridge-level (runs a command, like `assert_fails()`);
+/// spec in `csrc/eval.lua`, implementation follows Neovim's testing.c.
+fn b_assert_beeps(vm: &mut VM, argc: u8) -> Value {
+    let mut args = Vec::with_capacity(argc as usize);
+    for _ in 0..argc {
+        args.push(pop_tv(vm));
+    }
+    args.reverse();
+    let cmd = tv_get_string(&args[0]);
+    if assert_beeps_run(&cmd) {
+        Value::Int(0)
+    } else {
+        set_var_errors(&format!("command did not beep: {cmd}"));
+        Value::Int(1)
+    }
+}
+
+/// `assert_nobeep({cmd})` — run `{cmd}` and record a failure in `v:errors` if it
+/// DOES cause a beep. The complement of `assert_beeps()`.
+fn b_assert_nobeep(vm: &mut VM, argc: u8) -> Value {
+    let mut args = Vec::with_capacity(argc as usize);
+    for _ in 0..argc {
+        args.push(pop_tv(vm));
+    }
+    args.reverse();
+    let cmd = tv_get_string(&args[0]);
+    if assert_beeps_run(&cmd) {
+        set_var_errors(&format!("command did beep: {cmd}"));
+        Value::Int(1)
+    } else {
+        Value::Int(0)
+    }
 }
 
 /// Evaluate a `map`/`filter` callback for one element: either a string
@@ -3148,6 +3233,27 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FN_TEST_WRITE_LIST_LOG, |vm, n| {
         call_func(vm, n, f_test_write_list_log)
     });
+    vm.register_builtin(VIML_FN_PYEVAL, |vm, n| call_func(vm, n, f_pyeval));
+    vm.register_builtin(VIML_FN_PYXEVAL, |vm, n| call_func(vm, n, f_pyxeval));
+    vm.register_builtin(VIML_FN_UNDOFILE, |vm, n| call_func(vm, n, f_undofile));
+    vm.register_builtin(VIML_FN_UNDOTREE, |vm, n| call_func(vm, n, f_undotree));
+    vm.register_builtin(VIML_FN_GETMOUSEPOS, |vm, n| call_func(vm, n, f_getmousepos));
+    vm.register_builtin(VIML_FN_SCREENPOS, |vm, n| call_func(vm, n, f_screenpos));
+    vm.register_builtin(VIML_FN_GETCOMPLETIONTYPE, |vm, n| {
+        call_func(vm, n, f_getcompletiontype)
+    });
+    vm.register_builtin(VIML_FN_MAPSET, |vm, n| call_func(vm, n, f_mapset));
+    vm.register_builtin(VIML_FN_COMPLETE, |vm, n| call_func(vm, n, f_complete));
+    vm.register_builtin(VIML_FN_PREINSERTED, |vm, n| call_func(vm, n, f_preinserted));
+    vm.register_builtin(VIML_FN_GETSCRIPTINFO, |vm, n| {
+        call_func(vm, n, f_getscriptinfo)
+    });
+    vm.register_builtin(VIML_FN_GETSTACKTRACE, |vm, n| {
+        call_func(vm, n, f_getstacktrace)
+    });
+    vm.register_builtin(VIML_FN_FULLCOMMAND, |vm, n| call_func(vm, n, f_fullcommand));
+    vm.register_builtin(VIML_FN_ASSERT_BEEPS, b_assert_beeps);
+    vm.register_builtin(VIML_FN_ASSERT_NOBEEP, b_assert_nobeep);
     vm.register_builtin(VIML_SET_LINENO, b_set_lineno);
     vm.register_builtin(VIML_CALL_USER, b_call_user);
     vm.register_builtin(VIML_SET_RETURN, b_set_return);

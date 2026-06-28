@@ -257,3 +257,22 @@ f_cmdcomplete_info
 f_menu_info
 f_test_garbagecollect_now
 f_test_write_list_log
+
+# ── round 5: completing the eval.lua builtin table ──
+# Provider evals with no provider (v:null), undo-file path computation, and the
+# remaining mouse/screen/completion/command-name/stacktrace queries. Home files:
+# if_py.c / if_pyx.c / undo.c / mouse.c / screen.c / cmdexpand.c / insexpand.c /
+# mapping.c / runtime.c / userfunc.c / ex_docmd.c — all outside csrc/eval/.
+f_pyeval
+f_pyxeval
+f_undofile
+f_undotree
+f_getmousepos
+f_screenpos
+f_getcompletiontype
+f_mapset
+f_complete
+f_preinserted
+f_getscriptinfo
+f_getstacktrace
+f_fullcommand

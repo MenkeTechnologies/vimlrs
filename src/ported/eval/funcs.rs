@@ -5137,3 +5137,197 @@ pub fn f_test_garbagecollect_now(_argvars: &[typval_T], _rettv: &mut typval_T) {
 /// Port of `f_test_write_list_log()` (Neovim eval.c) — a debug hook that logs
 /// list-allocation activity; no such log standalone → no-op.
 pub fn f_test_write_list_log(_argvars: &[typval_T], _rettv: &mut typval_T) {}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Round-5 builtin expansion — completing the eval.lua builtin table. Provider
+// evals with no provider (eval/funcs.c), undo-file path computation (undofile.c),
+// and the remaining mouse/screen/completion/command-name queries. All outside
+// the vendored csrc/eval/ tree.
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Port of `f_pyeval()` (Neovim if_py.c) — evaluate Python. No Python provider →
+/// v:null (the same as `py3eval()`/`perleval()`).
+pub fn f_pyeval(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.v_type = VAR_SPECIAL;
+    rettv.vval = v_special(kSpecialVarNull);
+}
+
+/// Port of `f_pyxeval()` (Neovim if_pyx.c) — evaluate Python (2-or-3). No
+/// provider → v:null.
+pub fn f_pyxeval(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.v_type = VAR_SPECIAL;
+    rettv.vval = v_special(kSpecialVarNull);
+}
+
+/// Port of `f_undofile()` (Neovim undo.c) — the undo-file path for `{name}`.
+/// With the default `'undodir'` of ".", the undo file sits in the file's own
+/// directory as `.{name}.un~`. An empty name yields "".
+pub fn f_undofile(argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.v_type = VAR_STRING;
+    let name = tv_get_string(&argvars[0]);
+    if name.is_empty() {
+        rettv.vval = v_string(String::new());
+        return;
+    }
+    let p = std::path::Path::new(&name);
+    let fname = p
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let undoname = format!(".{fname}.un~");
+    let result = match p.parent() {
+        Some(par) if !par.as_os_str().is_empty() => {
+            par.join(&undoname).to_string_lossy().into_owned()
+        }
+        _ => undoname,
+    };
+    rettv.vval = v_string(result);
+}
+
+/// Port of `f_undotree()` (Neovim undo.c) — the undo-tree state. No undo history
+/// standalone → a synced tree with no entries.
+pub fn f_undotree(_argvars: &[typval_T], rettv: &mut typval_T) {
+    let d = tv_dict_alloc_ret(rettv);
+    let mut db = d.borrow_mut();
+    tv_dict_add_nr(&mut db, "seq_last", 0);
+    tv_dict_add_nr(&mut db, "seq_cur", 0);
+    tv_dict_add_nr(&mut db, "time_cur", 0);
+    tv_dict_add_nr(&mut db, "save_last", 0);
+    tv_dict_add_nr(&mut db, "save_cur", 0);
+    tv_dict_add_nr(&mut db, "synced", 1);
+    let entries = tv_list_alloc(0);
+    tv_dict_add_tv(
+        &mut db,
+        "entries",
+        typval_T {
+            v_type: VAR_LIST,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_list(Some(entries)),
+        },
+    );
+}
+
+/// Port of `f_getmousepos()` (Neovim mouse.c) — the last mouse position. No
+/// mouse standalone → an all-zero position dict.
+pub fn f_getmousepos(_argvars: &[typval_T], rettv: &mut typval_T) {
+    let d = tv_dict_alloc_ret(rettv);
+    let mut db = d.borrow_mut();
+    for k in [
+        "screenrow",
+        "screencol",
+        "winid",
+        "winrow",
+        "wincol",
+        "line",
+        "column",
+        "coladd",
+    ] {
+        tv_dict_add_nr(&mut db, k, 0);
+    }
+}
+
+/// Port of `f_screenpos()` (Neovim screen.c) — the screen position of buffer
+/// line/column `{lnum}`/`{col}` in window `{winid}`. No screen standalone → all
+/// zeros.
+pub fn f_screenpos(_argvars: &[typval_T], rettv: &mut typval_T) {
+    let d = tv_dict_alloc_ret(rettv);
+    let mut db = d.borrow_mut();
+    for k in ["row", "col", "curscol", "endcol"] {
+        tv_dict_add_nr(&mut db, k, 0);
+    }
+}
+
+/// Port of `f_getcompletiontype()` (Neovim cmdexpand.c) — the completion type
+/// that would apply to command-line `{pat}`. No active command line → "".
+pub fn f_getcompletiontype(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.v_type = VAR_STRING;
+    rettv.vval = v_string(String::new());
+}
+
+/// Port of `f_mapset()` (Neovim mapping.c) — restore a mapping from a
+/// `maparg()`-style Dict. No mapping table wired standalone → a no-op.
+pub fn f_mapset(_argvars: &[typval_T], _rettv: &mut typval_T) {}
+
+/// Port of `f_complete()` (Neovim insexpand.c) — set the insert-mode completion
+/// matches. Only valid in insert mode → a no-op standalone.
+pub fn f_complete(_argvars: &[typval_T], _rettv: &mut typval_T) {}
+
+/// Port of `f_preinserted()` (Neovim insexpand.c) — the text pre-inserted by
+/// completion. None standalone → "".
+pub fn f_preinserted(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.v_type = VAR_STRING;
+    rettv.vval = v_string(String::new());
+}
+
+/// Port of `f_getscriptinfo()` (Neovim runtime.c) — info about sourced scripts.
+/// The script registry is not introspectable standalone → an empty List.
+pub fn f_getscriptinfo(_argvars: &[typval_T], rettv: &mut typval_T) {
+    let _ = tv_list_alloc_ret(rettv, 0);
+}
+
+/// Port of `f_getstacktrace()` (Neovim userfunc.c) — the current call stack.
+/// Not introspectable standalone → an empty List.
+pub fn f_getstacktrace(_argvars: &[typval_T], rettv: &mut typval_T) {
+    let _ = tv_list_alloc_ret(rettv, 0);
+}
+
+/// Port of `f_fullcommand()` (Neovim ex_docmd.c) — expand a (possibly
+/// abbreviated) Ex command `{name}` to its full name, "" if it resolves to no
+/// command. Resolves against a table of common commands using Vim's rule: the
+/// input must be at least the command's minimum abbreviation and a prefix of
+/// its full name.
+pub fn f_fullcommand(argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.v_type = VAR_STRING;
+    let mut name = tv_get_string(&argvars[0]);
+    // c: a leading range/`:`/bang is stripped before matching.
+    name = name
+        .trim_start_matches([':', ' '])
+        .trim_end_matches('!')
+        .to_string();
+    // (minimum-abbreviation, full-name), in command-table precedence order.
+    const CMDS: &[(&str, &str)] = &[
+        ("printf", "printf"),
+        ("e", "edit"),
+        ("ec", "echo"),
+        ("echom", "echomsg"),
+        ("w", "write"),
+        ("wq", "wq"),
+        ("q", "quit"),
+        ("qa", "quitall"),
+        ("s", "substitute"),
+        ("sp", "split"),
+        ("se", "set"),
+        ("so", "source"),
+        ("g", "global"),
+        ("norm", "normal"),
+        ("vs", "vsplit"),
+        ("b", "buffer"),
+        ("bn", "bnext"),
+        ("bp", "bprevious"),
+        ("d", "delete"),
+        ("y", "yank"),
+        ("pu", "put"),
+        ("co", "copy"),
+        ("m", "move"),
+        ("r", "read"),
+        ("let", "let"),
+        ("cal", "call"),
+        ("fu", "function"),
+        ("retu", "return"),
+        ("if", "if"),
+        ("for", "for"),
+        ("wh", "while"),
+        ("try", "try"),
+        ("au", "autocmd"),
+        ("com", "command"),
+    ];
+    let result = if name.is_empty() {
+        String::new()
+    } else {
+        CMDS.iter()
+            .find(|(min, full)| name.starts_with(min) && full.starts_with(&name))
+            .map(|(_, full)| full.to_string())
+            .unwrap_or_default()
+    };
+    rettv.vval = v_string(result);
+}
