@@ -61,6 +61,10 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
             ))
         }
         "let" => parse_let(rest),
+        // `:const {name} = {expr}` assigns like `:let`. RUST-PORT NOTE: Vim also
+        // locks the variable (reassigning is E741); that immutability is not yet
+        // enforced here — `:const` parses and assigns as `:let`.
+        "const" | "cons" => parse_let(rest),
         "call" => Ok(Stmt::Call(parse_expr(rest)?)),
         "eval" => Ok(Stmt::Expr(parse_expr(rest)?)),
         "break" => Ok(Stmt::Break),

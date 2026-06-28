@@ -46,6 +46,14 @@ call assert_equal({'a': 3}, #{a: 1 + 2})
 call assert_equal({'vim': 3, 'rust': 2, 'c': 1}, freq)
 call assert_equal(3, freq['vim'])
 
+" ── :const assigns like :let (immutability is not enforced here) ──
+const PI = 3
+call assert_equal(3, PI)
+const NAMES = ['a', 'b']
+call assert_equal('b', NAMES[1])
+const CFG = #{width: 80}
+call assert_equal(80, CFG.width)
+
 " ── demo ──
 echo 'nums       :' nums
 echo 'evens      :' evens
