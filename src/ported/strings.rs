@@ -250,17 +250,39 @@ pub fn f_strcharpart(argvars: &[typval_T], rettv: &mut typval_T) {
 /// character of `{expr}`. `nr == strcharlen` yields the byte length; `nr` past
 /// the end yields -1.
 pub fn f_byteidx(argvars: &[typval_T], rettv: &mut typval_T) {
+    // c: byteidx() folds composing characters into the preceding base character.
+    rettv.vval = v_number(byteidx_impl(argvars, true));
+}
+
+/// Shared core of byteidx()/byteidxcomp(): the byte index of the `{nr}`'th
+/// character, or the string length when `{nr}` equals the character count, else
+/// -1. When `skipcc`, a composing character is folded into the preceding base
+/// character (byteidx); otherwise each codepoint is its own character
+/// (byteidxcomp).
+fn byteidx_impl(argvars: &[typval_T], skipcc: bool) -> varnumber_T {
     let s = tv_get_string(&argvars[0]);
     let nr = tv_get_number_chk(&argvars[1], None);
-    rettv.vval = v_number(if nr < 0 {
-        -1
-    } else {
-        match s.char_indices().nth(nr as usize) {
-            Some((b, _)) => b as varnumber_T,
-            None if nr as usize == s.chars().count() => s.len() as varnumber_T,
-            None => -1,
+    if nr < 0 {
+        return -1;
+    }
+    let nr = nr as usize;
+    let mut count = 0usize;
+    let mut prev = false; // a base char has been seen to fold a composing one into
+    for (b, c) in s.char_indices() {
+        let folds = skipcc && prev && utf_iscomposing(c);
+        if !folds {
+            if count == nr {
+                return b as varnumber_T;
+            }
+            count += 1;
         }
-    });
+        prev = true;
+    }
+    if nr == count {
+        s.len() as varnumber_T
+    } else {
+        -1
+    }
 }
 
 /// Port of `f_charidx()` from Neovim `src/nvim/strings.c` (home file not under
@@ -289,7 +311,8 @@ pub fn f_charidx(argvars: &[typval_T], rettv: &mut typval_T) {
 /// `{nr}`'th character. Identical to `byteidx()` here: vimlrs does not track
 /// composing characters separately, so each character is one index either way.
 pub fn f_byteidxcomp(argvars: &[typval_T], rettv: &mut typval_T) {
-    f_byteidx(argvars, rettv);
+    // c: byteidxcomp() counts each composing character separately.
+    rettv.vval = v_number(byteidx_impl(argvars, false));
 }
 
 /// True for the common Unicode combining-mark ranges (`utf_iscomposing`), used

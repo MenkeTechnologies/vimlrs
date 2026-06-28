@@ -24,6 +24,7 @@ f_strgetchar
 f_strcharpart
 f_byteidx
 f_byteidxcomp
+byteidx_impl
 f_charidx
 f_strpart
 f_stridx

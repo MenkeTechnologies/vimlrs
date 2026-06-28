@@ -65,6 +65,15 @@ call assert_equal(1, strchars(s, 1))
 call assert_equal(1, strcharlen(s))
 call assert_equal(3, strchars('abc', 1))
 
+" ── byteidx() folds a composing char into its base; byteidxcomp() counts it
+"    separately. s = 'e' + combining-acute + 'x' (bytes: 1 + 2 + 1) ──
+let cc = 'e' . nr2char(0x301) . 'x'
+call assert_equal([0, 3, 4], [byteidx(cc, 0), byteidx(cc, 1), byteidx(cc, 2)])
+call assert_equal([0, 1, 3, 4],
+      \ [byteidxcomp(cc, 0), byteidxcomp(cc, 1), byteidxcomp(cc, 2), byteidxcomp(cc, 3)])
+call assert_equal(-1, byteidx(cc, 9))
+call assert_equal(3, byteidx('héllo', 2))
+
 " ── strpart() byte substring; a negative {start} clamps to 0 AND folds its
 "    offset into the length, so strpart('hello',-2,3) keeps only 'h' ──
 call assert_equal('hel', strpart('hello', 0, 3))
