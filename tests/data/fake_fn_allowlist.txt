@@ -76,3 +76,11 @@ fill_assert_error
 assert_equal_common
 assert_match_common
 assert_bool
+
+# ── message.c (not vendored) — emsg capture for assert_fails() ──
+# emsg/semsg/did_emsg appear as calls in the vendored eval tree, so the
+# generator recognizes them. These two model message.c's emsg_silent + the saved
+# error list that testing.c's assert_fails() inspects; they have no single C
+# function name (extension plumbing), so they are sanctioned here.
+capture_errors_begin
+capture_errors_take

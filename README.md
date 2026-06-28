@@ -75,7 +75,7 @@ Early / in development.
 | `:try`/`:catch`/`:finally`/`:throw` exceptions, `v:exception` | Working |
 | `funcs.c` builtin table | In progress (~113 ported: string/list/dict, char-indexed string ops, float math + `isinf`/`isnan`, regex, `eval`/`execute`, `json_encode`/`json_decode`, env (`getenv`/`setenv`), `shellescape`, `getpid`/`localtime`/`soundfold`, `reltime`/`reltimestr`/`reltimefloat`, `rand`/`srand` (xoshiro128**, bit-exact vs Neovim), `strftime`/`strptime`, `pathshorten`, `flattennew`, `sha256` (FIPS-180-2), `list2blob`/`blob2list` (+ blob index/slice), …) |
 | `map`/`filter`/`sort`/`reduce`/`call` (lists **and** dicts; string-expr + funcref) | Working |
-| Unit-testing framework — `assert_equal`/`assert_notequal`/`assert_true`/`assert_false`/`assert_match`/`assert_notmatch`/`assert_report`/`assert_inrange` → `v:errors` (message wording per `eval.lua`) | Working — every `examples/*.vim` is a self-test, run in CI via `tests/examples.rs` |
+| Unit-testing framework — `assert_equal`/`assert_notequal`/`assert_true`/`assert_false`/`assert_match`/`assert_notmatch`/`assert_report`/`assert_inrange`/`assert_exception` → `v:errors`, plus `assert_fails` (run a command, require it to error/match a code) — message wording per `eval.lua` | Working — every `examples/*.vim` is a self-test, run in CI via `tests/examples.rs` |
 | `eval()` / `execute()` (run-string metaprogramming) | Working |
 | Regex engine — Vim magic dialect, backing `=~`/`matchstr`/`match`/`substitute`/`split`/`:catch` | Working |
 | autoload (`foo#bar`), one-line block bars (`if … \| … \| endif`), `:source`/`:command`/`:autocmd` | Planned |

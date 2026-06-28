@@ -1,0 +1,184 @@
+<idea-plugin>
+    <id>com.menketechnologies.vimlrs</id>
+    <name>Vimlrs</name>
+    <vendor email="linux.dev25@gmail.com" url="https://github.com/MenkeTechnologies/vimlrs">MenkeTechnologies</vendor>
+
+    <!-- BEGIN-CANONICAL: plugin-description -->
+    <description><![CDATA[
+        <p>JetBrains IDE support for <b>vimlrs</b> — a standalone VimL
+        (Vimscript) interpreter on the fusevm bytecode VM.</p>
+
+        <ul>
+            <li><b>.vim</b> + the <b>vimrc / gvimrc / exrc / init.vim</b> family
+                file association with syntax highlighting (keywords, ex commands,
+                builtin functions, scope/special variables, options, registers,
+                environment variables).</li>
+            <li><b>LSP integration</b> via <code>vimlrs --lsp</code>: completion,
+                hover docs, goto-definition, find-references, rename, document
+                symbols, folding, formatting, diagnostics (Vim-style
+                <code>E121: Undefined variable</code> messages).</li>
+            <li><b>Run configurations</b> for any VimL script — runs
+                <code>vimlrs FILE.vim</code> (positional file argument) with an
+                optional <code>--disasm</code> bytecode listing, working
+                directory, and interpreter / script args.</li>
+            <li><b>Debugger</b> wired to <code>vimlrs --dap</code> over stdio:
+                line breakpoints, step over/into/out, frames, scopes, variables,
+                evaluate.</li>
+            <li><b>Color settings page</b> with a slot for every token category.</li>
+            <li><b>Settings → Tools → Vimlrs</b> to point at a non-PATH
+                <code>vimlrs</code> binary and tune LSP args / environment.</li>
+            <li><b>Comments</b> with the VimL leading-<code>"</code> form;
+                Complete-Current-Statement closes <code>if</code> / <code>while</code>
+                / <code>for</code> / <code>function</code> / <code>try</code> blocks.</li>
+        </ul>
+
+        <p><b>Requirements:</b> a paid JetBrains IDE on 2025.2+ (RustRover, IDEA
+        Ultimate, GoLand, PyCharm Pro, WebStorm, etc.) because vimlrs uses the
+        platform LSP API. Community editions are not supported.</p>
+    ]]></description>
+    <!-- END-CANONICAL: plugin-description -->
+
+    <change-notes><![CDATA[
+        <h3>0.1.0</h3>
+        <ul>
+            <li>Initial release. .vim + vimrc-family file types, hand-rolled
+                lexer-based highlighting, LSP client over <code>vimlrs --lsp</code>,
+                DAP debugger over <code>vimlrs --dap</code>, run configurations,
+                color scheme, <code>"</code> line comments.</li>
+        </ul>
+    ]]></change-notes>
+
+    <!-- Platform LSP API (paid IDEs) -->
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.modules.ultimate</depends>
+    <!-- Plugin model v2 dependencies block (2025.2+). Bundled modules
+         like `intellij.spellchecker` are V2 modules with their own
+         classloader, NOT separately-installable plugin IDs — they must be
+         declared as `<module name="..."/>` here, not via the legacy
+         `<depends>com.intellij.spellchecker</depends>` tag. build.gradle.kts
+         has the matching `bundledModule("intellij.spellchecker")` for
+         compile-time class resolution.
+
+         Required for the `spellchecker.support` EP registration below to
+         actually wire up at runtime — without it the SpellcheckingStrategy
+         class loads but the EP no-ops and TypoInspection still fires on every
+         STRING_DQ / STRING_SQ / COMMENT / SHEBANG token. -->
+    <dependencies>
+        <module name="intellij.spellchecker"/>
+    </dependencies>
+
+
+    <extensions defaultExtensionNs="com.intellij">
+        <!-- File types. `.vim` by extension, plus the vimrc / gvimrc / exrc /
+             nvim rc family by exact filename (these dotfiles have no `.vim`
+             extension). Settings.isSupportedFile mirrors this set for the LSP /
+             run / debug code paths. -->
+        <fileType
+            name="VimL"
+            implementationClass="com.menketechnologies.vimlrs.VimlrsFileType"
+            fieldName="INSTANCE"
+            language="vimlrs"
+            extensions="vim"
+            fileNames="vimrc;.vimrc;_vimrc;gvimrc;.gvimrc;_gvimrc;.exrc;_exrc;.nvimrc;init.vim"/>
+
+        <!-- Parser definition (flat — token-stream PSI, no nested AST). Required
+             for line-comment toggle, brace match, refactoring keymaps, and LSP
+             code actions surfacing via Alt-Enter. -->
+        <lang.parserDefinition
+            language="vimlrs"
+            implementationClass="com.menketechnologies.vimlrs.VimlrsParserDefinition"/>
+
+        <!-- Highlighter -->
+        <lang.syntaxHighlighterFactory
+            language="vimlrs"
+            implementationClass="com.menketechnologies.vimlrs.VimlrsSyntaxHighlighterFactory"/>
+
+        <!-- Color settings page -->
+        <colorSettingsPage implementation="com.menketechnologies.vimlrs.VimlrsColorSettingsPage"/>
+
+        <!-- Spell-check strategy: suppress TypoInspection on string / comment /
+             shebang tokens. VimL is full of option names, key-notation
+             (<C-R>, <leader>), highlight groups, and one-letter identifiers
+             that the platform dictionary flags as typos by default. -->
+        <spellchecker.support
+            language="vimlrs"
+            implementationClass="com.menketechnologies.vimlrs.VimlrsSpellcheckingStrategy"/>
+
+        <!-- Commenter (line comment with the leading `"`) -->
+        <lang.commenter language="vimlrs" implementationClass="com.menketechnologies.vimlrs.VimlrsCommenter"/>
+
+        <!-- Complete Current Statement (Cmd-Shift-Enter):
+             `if cond|` → `if cond\n    |\nendif`,
+             `function Foo()|` → `function Foo()\n    |\nendfunction`,
+             plus bracket balance. -->
+        <lang.smartEnterProcessor language="vimlrs"
+            implementationClass="com.menketechnologies.vimlrs.VimlrsSmartEnterProcessor"/>
+
+        <!-- Brace / quote auto-pairing -->
+        <lang.braceMatcher language="vimlrs" implementationClass="com.menketechnologies.vimlrs.VimlrsBraceMatcher"/>
+        <lang.quoteHandler language="vimlrs" implementationClass="com.menketechnologies.vimlrs.VimlrsQuoteHandler"/>
+        <!-- Skip-over `)` `]` `}` when the next char already matches. -->
+        <typedHandler implementation="com.menketechnologies.vimlrs.VimlrsTypedHandler"/>
+
+        <!-- Refactoring bridge: hooks Cmd-Opt-M / Cmd-Opt-V / Cmd-Opt-C / Ctrl-T
+             into LSP code actions; hooks Shift-F6 into LSP rename. -->
+        <lang.refactoringSupport
+            language="vimlrs"
+            implementationClass="com.menketechnologies.vimlrs.refactor.VimlrsRefactoringSupportProvider"/>
+        <renameHandler implementation="com.menketechnologies.vimlrs.refactor.VimlrsRenameHandler"/>
+
+        <!-- LSP server provider -->
+        <platform.lsp.serverSupportProvider
+            implementation="com.menketechnologies.vimlrs.lsp.VimlrsLspServerSupportProvider"/>
+
+        <!-- Cmd-B (Go To → Declaration or Usages) bridge for the flat-PSI
+             LSP-backed language. -->
+        <gotoDeclarationHandler implementation="com.menketechnologies.vimlrs.navigate.VimlrsGotoDeclarationHandler"/>
+
+        <!-- Settings -->
+        <applicationService serviceImplementation="com.menketechnologies.vimlrs.VimlrsSettings"/>
+        <applicationConfigurable
+            parentId="tools"
+            instance="com.menketechnologies.vimlrs.VimlrsSettingsConfigurable"
+            id="com.menketechnologies.vimlrs.settings"
+            displayName="Vimlrs"/>
+
+        <!-- Run configuration -->
+        <configurationType implementation="com.menketechnologies.vimlrs.run.VimlrsRunConfigurationType"/>
+        <runConfigurationProducer
+            implementation="com.menketechnologies.vimlrs.run.VimlrsRunConfigurationProducer"/>
+        <programRunner implementation="com.menketechnologies.vimlrs.run.VimlrsProgramRunner"/>
+        <programRunner implementation="com.menketechnologies.vimlrs.run.VimlrsDebugRunner"/>
+
+        <!-- Debugger: line-breakpoint type -->
+        <xdebugger.breakpointType implementation="com.menketechnologies.vimlrs.dap.VimlrsBreakpointType"/>
+
+        <!-- Notifications for refactoring failure modes (no LSP, no matching
+             code action, etc.). Without this registration
+             `NotificationGroupManager.getNotificationGroup` returns null and
+             balloons silently no-op. -->
+        <notificationGroup id="vimlrs Refactoring" displayType="BALLOON"/>
+    </extensions>
+
+    <actions>
+        <action
+            id="vimlrs.RunFile"
+            class="com.menketechnologies.vimlrs.actions.RunVimlrsFileAction"
+            text="Run with vimlrs"
+            description="Run the selected VimL script with the vimlrs interpreter"
+            icon="com.menketechnologies.vimlrs.VimlrsIcons.FILE">
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+            <add-to-group group-id="ProjectViewPopupMenu" anchor="last"/>
+        </action>
+
+        <!-- File > New > VimL File (and right-click in Project view → New). -->
+        <action
+            id="vimlrs.NewFile"
+            class="com.menketechnologies.vimlrs.actions.CreateVimlrsFileAction"
+            text="VimL File"
+            description="Create a new VimL / vimlrs script"
+            icon="com.menketechnologies.vimlrs.VimlrsIcons.FILE">
+            <add-to-group group-id="NewGroup" anchor="before" relative-to-action="NewFile"/>
+        </action>
+    </actions>
+</idea-plugin>

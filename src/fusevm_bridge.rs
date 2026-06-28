@@ -28,8 +28,7 @@ use crate::ported::eval::fs::{
 use crate::ported::eval::funcs::{
     f_abs, f_add, f_and, f_assert_equal, f_assert_exception, f_assert_false, f_assert_inrange,
     f_assert_match, f_assert_notequal, f_assert_notmatch, f_assert_report, f_assert_true, f_atan2,
-    f_byte2line,
-    f_changenr, f_char2nr, f_charcol, f_col, f_confirm, f_copy, f_cursor, f_deepcopy,
+    f_byte2line, f_changenr, f_char2nr, f_charcol, f_col, f_confirm, f_copy, f_cursor, f_deepcopy,
     f_dictwatcheradd, f_dictwatcherdel, f_did_filetype, f_empty, f_escape, f_eventhandler,
     f_exists, f_flatten, f_flattennew, f_float2nr, f_fmod, f_fnameescape, f_foreground, f_funcref,
     f_function, f_garbagecollect, f_get, f_getchangelist, f_getcharpos, f_getcharsearch,
@@ -67,7 +66,7 @@ use crate::ported::eval::typval_defs_h::{
     blob_T, listitem_T, typval_T, typval_vval_union::*, varnumber_T, SpecialVarValue::*,
     VarLockStatus::VAR_UNLOCKED, VarType::*,
 };
-use crate::ported::eval::vars::{eval_variable, set_var};
+use crate::ported::eval::vars::{eval_variable, set_var, set_vim_var_string, vv::VV_EXCEPTION};
 use crate::ported::eval_h::exprtype_T::{self, *};
 use crate::ported::message;
 use crate::ported::strings::{
@@ -830,6 +829,7 @@ fn b_throw(vm: &mut VM, _: u8) -> Value {
     let v = tv_get_string(&pop_tv(vm));
     // c: throw_exception — set current_exception and v:exception.
     V_EXCEPTION.with(|e| *e.borrow_mut() = v.clone());
+    set_vim_var_string(VV_EXCEPTION, &v);
     PENDING_EXC.with(|p| *p.borrow_mut() = Some(v));
     Value::Undef
 }
@@ -849,6 +849,7 @@ fn b_catch_match(vm: &mut VM, _: u8) -> Value {
     if matched {
         // c: caught — clear the pending exception; v:exception already set.
         PENDING_EXC.with(|p| *p.borrow_mut() = None);
+        set_vim_var_string(VV_EXCEPTION, &exc);
         V_EXCEPTION.with(|e| *e.borrow_mut() = exc);
     }
     Value::Bool(matched)
@@ -1418,10 +1419,17 @@ fn b_assert_fails(vm: &mut VM, argc: u8) -> Value {
     args.reverse();
     let cmd = tv_get_string(&args[0]);
     let opt_msg = args.get(2).filter(|m| m.v_type != VAR_UNKNOWN);
-    let prefix = opt_msg.map(|m| format!("{}: ", encode_tv2echo(m))).unwrap_or_default();
+    let prefix = opt_msg
+        .map(|m| format!("{}: ", encode_tv2echo(m)))
+        .unwrap_or_default();
 
     // Run the command with errors captured (suppressed) instead of printed.
+    // The command under test is *expected* to error, so its errors must not
+    // count against the surrounding script — save and restore did_emsg and
+    // v:exception around the run (as Vim resets called_emsg / restores
+    // v:exception in assert_fails).
     let before = message::did_emsg.with(|d| d.get());
+    let saved_exc = V_EXCEPTION.with(|e| e.borrow().clone());
     message::capture_errors_begin();
     let parse_err = run_source_nested(&cmd).err();
     // A throw that unwound to the nested top level is reported + cleared there;
@@ -1432,6 +1440,9 @@ fn b_assert_fails(vm: &mut VM, argc: u8) -> Value {
         errs.insert(0, e.to_string());
     }
     let failed = parse_err.is_some() || message::did_emsg.with(|d| d.get()) > before;
+    message::did_emsg.with(|d| d.set(before));
+    set_vim_var_string(VV_EXCEPTION, &saved_exc);
+    V_EXCEPTION.with(|e| *e.borrow_mut() = saved_exc);
 
     if !failed {
         set_var_errors(&format!("{prefix}command did not fail: {cmd}"));
@@ -1445,10 +1456,15 @@ fn b_assert_fails(vm: &mut VM, argc: u8) -> Value {
         let ok = match (want.v_type, &want.vval) {
             (VAR_LIST, v_list(Some(l))) => {
                 let items = &l.borrow().lv_items;
-                let pat0 = items.first().map(|it| tv_get_string(&it.li_tv)).unwrap_or_default();
+                let pat0 = items
+                    .first()
+                    .map(|it| tv_get_string(&it.li_tv))
+                    .unwrap_or_default();
                 let m0 = pat0.is_empty() || crate::viml_regex::regex_match(&pat0, &first, false);
                 let m1 = match items.get(1) {
-                    Some(it) => crate::viml_regex::regex_match(&tv_get_string(&it.li_tv), &last, false),
+                    Some(it) => {
+                        crate::viml_regex::regex_match(&tv_get_string(&it.li_tv), &last, false)
+                    }
                     None => true,
                 };
                 m0 && m1
