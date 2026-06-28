@@ -346,12 +346,53 @@ pub fn f_add(argvars: &[typval_T], rettv: &mut typval_T) {
     }
 }
 
-/// Port of `f_reverse()` from `Src/eval/funcs.c` — reverse a List in place.
+/// Port of `f_reverse()` from `Src/eval/funcs.c` — reverse a List or Blob in
+/// place (returning the same object), or a String (returning a new, reversed
+/// String). Anything else returns 0.
 pub fn f_reverse(argvars: &[typval_T], rettv: &mut typval_T) {
-    if let (VAR_LIST, v_list(Some(l))) = (argvars[0].v_type, &argvars[0].vval) {
-        l.borrow_mut().lv_items.reverse();
-        *rettv = argvars[0].clone();
+    match (argvars[0].v_type, &argvars[0].vval) {
+        // c: VAR_LIST — reversed in place, the same List returned.
+        (VAR_LIST, v_list(Some(l))) => {
+            l.borrow_mut().lv_items.reverse();
+            *rettv = argvars[0].clone();
+        }
+        // c: VAR_BLOB — bytes reversed in place, the same Blob returned.
+        (VAR_BLOB, v_blob(Some(b))) => {
+            b.borrow_mut().bv_ga.reverse();
+            *rettv = argvars[0].clone();
+        }
+        // c: VAR_STRING — a new String from reverse_text() (by character).
+        (VAR_STRING, v_string(s)) => {
+            rettv.v_type = VAR_STRING;
+            rettv.vval = v_string(reverse_text(s));
+        }
+        _ => {}
     }
+}
+
+/// Port of `reverse_text()` (Neovim strings.c) — reverse a string by character,
+/// keeping each base character together with its trailing composing marks (so
+/// "e" + combining-acute stays a valid grapheme after reversal). Returns a new
+/// owned string.
+fn reverse_text(s: &str) -> String {
+    use crate::ported::strings::utf_iscomposing;
+    let chars: Vec<char> = s.chars().collect();
+    // Group each base char with the composing chars that follow it.
+    let mut groups: Vec<&[char]> = Vec::new();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while i < chars.len() {
+        let next = i + 1;
+        // Extend the current group over following composing characters.
+        if next < chars.len() && utf_iscomposing(chars[next]) {
+            i = next;
+            continue;
+        }
+        groups.push(&chars[start..=i]);
+        i = next;
+        start = i;
+    }
+    groups.iter().rev().flat_map(|g| g.iter()).collect()
 }
 
 /// Port of `f_get()` from `Src/eval/funcs.c` — `get({list}, {idx} [, {def}])` /
@@ -449,20 +490,64 @@ fn max_min(argvars: &[typval_T], rettv: &mut typval_T, domax: bool) {
 // `{expr}` in a List. `f_count` lives in its real home file,
 // `src/ported/eval/list.rs` (eval/list.c).
 
-/// Port of `f_index()` from `Src/eval/funcs.c` (subset) — first index of
-/// `{expr}` in a List, or -1.
+/// Port of `f_index()` from `Src/eval/funcs.c` — the first index of `{expr}` in
+/// a List or Blob, or -1. Honours `{start}` (a user index; negative counts from
+/// the end) and, for the List form, `{ic}` (ignore case in the comparison).
 pub fn f_index(argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.vval = v_number(-1);
     let needle = &argvars[1];
-    let idx = match (argvars[0].v_type, &argvars[0].vval) {
-        (VAR_LIST, v_list(Some(l))) => l
-            .borrow()
-            .lv_items
-            .iter()
-            .position(|it| crate::ported::eval::typval::tv_equal(&it.li_tv, needle, false))
-            .map_or(-1, |i| i as varnumber_T),
-        _ => -1,
+
+    // c: VAR_BLOB — scan bytes from {start}; ic is never applied to a Blob.
+    if let (VAR_BLOB, v_blob(b)) = (argvars[0].v_type, &argvars[0].vval) {
+        let Some(b) = b else { return };
+        let b = b.borrow();
+        let len = tv_blob_len(&b);
+        let mut start = argvars.get(2).map_or(0, tv_get_number) as i32;
+        if start < 0 {
+            start = (len + start).max(0);
+        }
+        for idx in start..len {
+            let tv = typval_T::from(tv_blob_get(&b, idx) as varnumber_T);
+            if tv_equal(&tv, needle, false) {
+                rettv.vval = v_number(idx as varnumber_T);
+                return;
+            }
+        }
+        return;
+    }
+
+    // c: otherwise it must be a List (else e_listblobreq).
+    let l = match (argvars[0].v_type, &argvars[0].vval) {
+        (VAR_LIST, v_list(Some(l))) => l.clone(),
+        (VAR_LIST, _) => return, // NULL list → not found
+        _ => {
+            emsg("E897: List or Blob required");
+            return;
+        }
     };
-    rettv.vval = v_number(idx);
+    let lb = l.borrow();
+    let len = lb.lv_items.len() as isize;
+    // c: {start} via tv_list_uidx — a user index, negative from the end; an
+    // out-of-range start yields no item (→ -1).
+    let mut start: isize = 0;
+    if let Some(a2) = argvars.get(2) {
+        let mut n = tv_get_number(a2) as isize;
+        if n < 0 {
+            n += len;
+        }
+        if n < 0 || n >= len {
+            return;
+        }
+        start = n;
+    }
+    // c: {ic} — ignore case (only the List form reads it).
+    let ic = argvars.get(3).is_some_and(|t| tv_get_number(t) != 0);
+    for (i, it) in lb.lv_items.iter().enumerate().skip(start as usize) {
+        if tv_equal(&it.li_tv, needle, ic) {
+            rettv.vval = v_number(i as varnumber_T);
+            return;
+        }
+    }
 }
 
 /// Port of `f_has()` from `Src/eval/funcs.c` (subset) — feature presence. Phase
@@ -541,7 +626,27 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
             continue;
         }
         i += 1; // past '%'
-                // Flags.
+                // Positional argument: `%N$conv` selects the Nth argument
+                // (1-based, arg 1 = first after the format). The digit run is a
+                // position only when followed by `$`; otherwise it is the width.
+        let mut explicit_idx: Option<usize> = None;
+        {
+            let save = i;
+            let mut n = 0usize;
+            let mut got = false;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                n = n * 10 + (bytes[i] as usize - '0' as usize);
+                got = true;
+                i += 1;
+            }
+            if got && i < bytes.len() && bytes[i] == '$' {
+                i += 1; // past '$'
+                explicit_idx = Some(n);
+            } else {
+                i = save; // not positional — rewind for the width parse
+            }
+        }
+        // Flags.
         let mut left = false;
         let mut zero = false;
         let mut plus = false;
@@ -582,7 +687,7 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
             out.push('%');
             continue;
         }
-        let cur = argvars.get(arg);
+        let cur = argvars.get(explicit_idx.unwrap_or(arg));
         let core = match conv {
             'd' | 'i' => cur.map_or(0, |t| tv_get_number_chk(t, None)).to_string(),
             's' => {
@@ -641,7 +746,10 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
                 continue;
             }
         };
-        arg += 1;
+        // A positional spec does not advance the sequential argument counter.
+        if explicit_idx.is_none() {
+            arg += 1;
+        }
         // For signed numeric conversions the `+`/space flag forces a sign on
         // non-negative values; split it off `core` so zero-padding lands between
         // the sign and the digits (`%+05d` of 7 → `+0007`).

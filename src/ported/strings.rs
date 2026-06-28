@@ -85,17 +85,29 @@ pub fn f_strchars(argvars: &[typval_T], rettv: &mut typval_T) {
 pub fn f_strpart(argvars: &[typval_T], rettv: &mut typval_T) {
     let s = tv_get_string(&argvars[0]);
     let bytes = s.as_bytes();
-    let mut start = tv_get_number_chk(&argvars[1], None);
-    if start < 0 {
-        start = 0;
-    }
-    let start = (start as usize).min(bytes.len());
-    let end = if argvars.len() >= 3 {
-        let len = tv_get_number_chk(&argvars[2], None).max(0) as usize;
-        (start + len).min(bytes.len())
+    let slen = bytes.len() as varnumber_T;
+    // c: nbyte = start; len = {len} present ? that : slen - nbyte.
+    let mut nbyte = tv_get_number_chk(&argvars[1], None);
+    let mut len = if argvars.len() >= 3 {
+        tv_get_number_chk(&argvars[2], None)
     } else {
-        bytes.len()
+        slen - nbyte
     };
+    // c: a negative start clamps to 0 but folds its offset into the length, so
+    // strpart('hello', -2, 3) keeps only the first character.
+    if nbyte < 0 {
+        len += nbyte;
+        nbyte = 0;
+    } else if nbyte > slen {
+        nbyte = slen;
+    }
+    if len < 0 {
+        len = 0;
+    } else if nbyte + len > slen {
+        len = slen - nbyte;
+    }
+    let start = nbyte as usize;
+    let end = start + len as usize;
     rettv.v_type = VAR_STRING;
     rettv.vval = v_string(String::from_utf8_lossy(&bytes[start..end]).into_owned());
 }
@@ -253,7 +265,7 @@ pub fn f_byteidxcomp(argvars: &[typval_T], rettv: &mut typval_T) {
 
 /// True for the common Unicode combining-mark ranges (`utf_iscomposing`), used
 /// by `strcharlen()` to fold composing characters into their base character.
-fn utf_iscomposing(c: char) -> bool {
+pub(crate) fn utf_iscomposing(c: char) -> bool {
     let u = c as u32;
     matches!(u,
         0x0300..=0x036F | 0x0483..=0x0489 | 0x0591..=0x05BD | 0x05BF

@@ -189,7 +189,13 @@ pub fn tv_equal(tv1: &typval_T, tv2: &typval_T, ic: bool) -> bool {
         (v_float(a), v_float(b)) => a == b,
         (v_string(a), v_string(b)) => {
             // VAR_FUNC and VAR_STRING both use v_string; compare only same type.
-            tv1.v_type == tv2.v_type && a == b
+            // c: with `ic` the compare is case-insensitive (mb_strcmp_ic).
+            tv1.v_type == tv2.v_type
+                && if ic {
+                    a.to_lowercase() == b.to_lowercase()
+                } else {
+                    a == b
+                }
         }
         (v_bool(a), v_bool(b)) => a == b,
         (v_special(a), v_special(b)) => a == b,
