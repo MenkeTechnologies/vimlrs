@@ -68,9 +68,11 @@ use crate::ported::eval::funcs::{
     f_winrestcmd, f_winrestview, f_winsaveview, f_winwidth, f_wordcount, f_xor, float_op_wrapper,
 };
 use crate::ported::eval::funcs::{
-    f_argc, f_argidx, f_arglistid, f_argv, f_assert_equalfile, f_digraph_get, f_digraph_getlist,
-    f_digraph_set, f_digraph_setlist, f_foldlevel, f_histadd, f_histdel, f_histget, f_histnr,
-    f_hostname, f_iconv, f_matchfuzzy, f_matchfuzzypos,
+    f_argc, f_argidx, f_arglistid, f_argv, f_assert_equalfile, f_clearmatches, f_digraph_get,
+    f_digraph_getlist, f_digraph_set, f_digraph_setlist, f_foldclosed, f_foldclosedend,
+    f_foldlevel, f_getmatches, f_hasmapto, f_histadd, f_histdel, f_histget, f_histnr, f_hostname,
+    f_iconv, f_maparg, f_mapcheck, f_maplist, f_matchadd, f_matchaddpos, f_matcharg, f_matchdelete,
+    f_matchfuzzy, f_matchfuzzypos, f_setmatches, f_sign_define, f_sign_getdefined, f_sign_undefine,
 };
 use crate::ported::eval::list::{
     f_count, f_extend, f_extendnew, f_filter, f_foreach, f_map, f_mapnew, f_remove,
@@ -960,6 +962,38 @@ pub const VIML_FN_ASSERT_EQUALFILE: u16 = 3485;
 pub const VIML_FN_ARGLISTID: u16 = 3486;
 /// `foldlevel()`
 pub const VIML_FN_FOLDLEVEL: u16 = 3487;
+/// `matchadd()`
+pub const VIML_FN_MATCHADD: u16 = 3488;
+/// `matchaddpos()`
+pub const VIML_FN_MATCHADDPOS: u16 = 3489;
+/// `matchdelete()`
+pub const VIML_FN_MATCHDELETE: u16 = 3490;
+/// `getmatches()`
+pub const VIML_FN_GETMATCHES: u16 = 3491;
+/// `setmatches()`
+pub const VIML_FN_SETMATCHES: u16 = 3492;
+/// `clearmatches()`
+pub const VIML_FN_CLEARMATCHES: u16 = 3493;
+/// `matcharg()`
+pub const VIML_FN_MATCHARG: u16 = 3494;
+/// `sign_define()`
+pub const VIML_FN_SIGN_DEFINE: u16 = 3495;
+/// `sign_getdefined()`
+pub const VIML_FN_SIGN_GETDEFINED: u16 = 3496;
+/// `sign_undefine()`
+pub const VIML_FN_SIGN_UNDEFINE: u16 = 3497;
+/// `foldclosed()`
+pub const VIML_FN_FOLDCLOSED: u16 = 3498;
+/// `foldclosedend()`
+pub const VIML_FN_FOLDCLOSEDEND: u16 = 3499;
+/// `hasmapto()`
+pub const VIML_FN_HASMAPTO: u16 = 3503;
+/// `maparg()`
+pub const VIML_FN_MAPARG: u16 = 3504;
+/// `mapcheck()`
+pub const VIML_FN_MAPCHECK: u16 = 3505;
+/// `maplist()`
+pub const VIML_FN_MAPLIST: u16 = 3506;
 /// `flattennew()`
 pub const VIML_FN_FLATTENNEW: u16 = 3211;
 /// `sha256()`
@@ -2928,6 +2962,30 @@ pub fn install(vm: &mut VM) {
     });
     vm.register_builtin(VIML_FN_ARGLISTID, |vm, n| call_func(vm, n, f_arglistid));
     vm.register_builtin(VIML_FN_FOLDLEVEL, |vm, n| call_func(vm, n, f_foldlevel));
+    vm.register_builtin(VIML_FN_MATCHADD, |vm, n| call_func(vm, n, f_matchadd));
+    vm.register_builtin(VIML_FN_MATCHADDPOS, |vm, n| call_func(vm, n, f_matchaddpos));
+    vm.register_builtin(VIML_FN_MATCHDELETE, |vm, n| call_func(vm, n, f_matchdelete));
+    vm.register_builtin(VIML_FN_GETMATCHES, |vm, n| call_func(vm, n, f_getmatches));
+    vm.register_builtin(VIML_FN_SETMATCHES, |vm, n| call_func(vm, n, f_setmatches));
+    vm.register_builtin(VIML_FN_CLEARMATCHES, |vm, n| {
+        call_func(vm, n, f_clearmatches)
+    });
+    vm.register_builtin(VIML_FN_MATCHARG, |vm, n| call_func(vm, n, f_matcharg));
+    vm.register_builtin(VIML_FN_SIGN_DEFINE, |vm, n| call_func(vm, n, f_sign_define));
+    vm.register_builtin(VIML_FN_SIGN_GETDEFINED, |vm, n| {
+        call_func(vm, n, f_sign_getdefined)
+    });
+    vm.register_builtin(VIML_FN_SIGN_UNDEFINE, |vm, n| {
+        call_func(vm, n, f_sign_undefine)
+    });
+    vm.register_builtin(VIML_FN_FOLDCLOSED, |vm, n| call_func(vm, n, f_foldclosed));
+    vm.register_builtin(VIML_FN_FOLDCLOSEDEND, |vm, n| {
+        call_func(vm, n, f_foldclosedend)
+    });
+    vm.register_builtin(VIML_FN_HASMAPTO, |vm, n| call_func(vm, n, f_hasmapto));
+    vm.register_builtin(VIML_FN_MAPARG, |vm, n| call_func(vm, n, f_maparg));
+    vm.register_builtin(VIML_FN_MAPCHECK, |vm, n| call_func(vm, n, f_mapcheck));
+    vm.register_builtin(VIML_FN_MAPLIST, |vm, n| call_func(vm, n, f_maplist));
     vm.register_builtin(VIML_SET_LINENO, b_set_lineno);
     vm.register_builtin(VIML_CALL_USER, b_call_user);
     vm.register_builtin(VIML_SET_RETURN, b_set_return);

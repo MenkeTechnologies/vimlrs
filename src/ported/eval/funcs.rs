@@ -4100,3 +4100,329 @@ pub fn f_arglistid(_argvars: &[typval_T], rettv: &mut typval_T) {
 pub fn f_foldlevel(_argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.vval = v_number(0);
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// Round-2 builtin expansion. Match highlighting (window.c), sign definitions
+// (sign.c), fold-close queries (fold.c) and mapping queries (mapping.c) — all
+// outside the vendored csrc/eval/ tree, so recorded in the drift-gate
+// allowlist. Standalone there are no windows/buffers, so the match and sign
+// tables are pure in-memory bookkeeping and the editor-only queries return
+// their documented "nothing here" values.
+// ════════════════════════════════════════════════════════════════════════════
+
+// ── matchadd()/matchaddpos()/matchdelete()/getmatches()/setmatches()/
+//    clearmatches()/matcharg() — Neovim window.c (the w_match_head list). ──
+
+thread_local! {
+    /// The window match list (`w_match_head` in window.c), each entry a Dict
+    /// `{group, pattern|pos…, priority, id}`. One global list standalone.
+    static MATCHES: std::cell::RefCell<Vec<typval_T>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Counter for auto-assigned match ids (`-1` argument), like Vim's
+    /// increasing default ids.
+    static MATCH_LAST_ID: std::cell::Cell<varnumber_T> = const { std::cell::Cell::new(1000) };
+}
+
+/// Make a `VAR_DICT` typval owning `d`.
+fn match_dict_val(
+    d: std::rc::Rc<std::cell::RefCell<crate::ported::eval::typval_defs_h::dict_T>>,
+) -> typval_T {
+    typval_T {
+        v_type: VAR_DICT,
+        v_lock: VarLockStatus::VAR_UNLOCKED,
+        vval: v_dict(Some(d)),
+    }
+}
+
+/// Port of `f_matchadd()` (Neovim window.c `match_add`) — add a pattern match in
+/// highlight `{group}`, returning its id (an explicit `{id}`, else an
+/// auto-assigned one). Returns -1 on a bad id.
+pub fn f_matchadd(argvars: &[typval_T], rettv: &mut typval_T) {
+    let group = tv_get_string(&argvars[0]);
+    let pattern = tv_get_string(&argvars[1]);
+    let priority = if argvars.len() >= 3 {
+        tv_get_number(&argvars[2])
+    } else {
+        10
+    };
+    let mut id = if argvars.len() >= 4 {
+        tv_get_number(&argvars[3])
+    } else {
+        -1
+    };
+    if id == 0 || id < -1 {
+        // c: emsg(_("E799: Invalid ID: %" PRId64)) — ids are >= 1, or -1 (auto).
+        crate::ported::message::semsg(&format!("E799: Invalid ID: {id}"));
+        rettv.vval = v_number(-1);
+        return;
+    }
+    if id == -1 {
+        id = MATCH_LAST_ID.with(|c| {
+            let v = c.get() + 1;
+            c.set(v);
+            v
+        });
+    }
+    let d = tv_dict_alloc();
+    {
+        let mut db = d.borrow_mut();
+        tv_dict_add_str(&mut db, "group", &group);
+        tv_dict_add_str(&mut db, "pattern", &pattern);
+        tv_dict_add_nr(&mut db, "priority", priority);
+        tv_dict_add_nr(&mut db, "id", id);
+    }
+    MATCHES.with(|m| m.borrow_mut().push(match_dict_val(d)));
+    rettv.vval = v_number(id);
+}
+
+/// Port of `f_matchaddpos()` (Neovim window.c `matchaddpos`) — like
+/// `matchadd()` but matches the line/column positions in `{pos}` instead of a
+/// pattern. Returns the match id.
+pub fn f_matchaddpos(argvars: &[typval_T], rettv: &mut typval_T) {
+    let group = tv_get_string(&argvars[0]);
+    let priority = if argvars.len() >= 3 {
+        tv_get_number(&argvars[2])
+    } else {
+        10
+    };
+    let mut id = if argvars.len() >= 4 {
+        tv_get_number(&argvars[3])
+    } else {
+        -1
+    };
+    if id == 0 || id < -1 {
+        crate::ported::message::semsg(&format!("E799: Invalid ID: {id}"));
+        rettv.vval = v_number(-1);
+        return;
+    }
+    if id == -1 {
+        id = MATCH_LAST_ID.with(|c| {
+            let v = c.get() + 1;
+            c.set(v);
+            v
+        });
+    }
+    let d = tv_dict_alloc();
+    {
+        let mut db = d.borrow_mut();
+        tv_dict_add_str(&mut db, "group", &group);
+        tv_dict_add_nr(&mut db, "priority", priority);
+        tv_dict_add_nr(&mut db, "id", id);
+        // c: store each position as pos1, pos2, … (verbatim list items).
+        if let (VAR_LIST, v_list(Some(l))) = (argvars[1].v_type, &argvars[1].vval) {
+            for (i, it) in l.borrow().lv_items.iter().enumerate() {
+                tv_dict_add_tv(&mut db, &format!("pos{}", i + 1), it.li_tv.clone());
+            }
+        }
+    }
+    MATCHES.with(|m| m.borrow_mut().push(match_dict_val(d)));
+    rettv.vval = v_number(id);
+}
+
+/// Port of `f_matchdelete()` (Neovim window.c `match_delete`) — delete the match
+/// with id `{id}`. Returns 0 on success, -1 if there is no such match.
+pub fn f_matchdelete(argvars: &[typval_T], rettv: &mut typval_T) {
+    let id = tv_get_number(&argvars[0]);
+    let removed = MATCHES.with(|m| {
+        let mut m = m.borrow_mut();
+        let before = m.len();
+        m.retain(|tv| match (tv.v_type, &tv.vval) {
+            (VAR_DICT, v_dict(Some(d))) => {
+                tv_dict_find(&d.borrow(), "id").map(tv_get_number) != Some(id)
+            }
+            _ => true,
+        });
+        before != m.len()
+    });
+    if !removed {
+        // c: emsg(_(e_no_match_id)) — E803.
+        crate::ported::message::semsg(&format!("E803: ID not found: {id}"));
+        rettv.vval = v_number(-1);
+    }
+}
+
+/// Port of `f_getmatches()` (Neovim window.c) — the current match list as a List
+/// of Dicts (a copy).
+pub fn f_getmatches(_argvars: &[typval_T], rettv: &mut typval_T) {
+    let snapshot = MATCHES.with(|m| m.borrow().clone());
+    let out = tv_list_alloc_ret(rettv, snapshot.len() as isize);
+    let mut ob = out.borrow_mut();
+    for tv in snapshot {
+        tv_list_append_tv(&mut ob, tv);
+    }
+}
+
+/// Port of `f_setmatches()` (Neovim window.c) — replace the whole match list
+/// with the List of Dicts `{list}`. Returns 0 on success, -1 on a type error.
+pub fn f_setmatches(argvars: &[typval_T], rettv: &mut typval_T) {
+    let l = match (argvars[0].v_type, &argvars[0].vval) {
+        (VAR_LIST, v_list(Some(l))) => l.clone(),
+        _ => {
+            emsg("E714: List required");
+            rettv.vval = v_number(-1);
+            return;
+        }
+    };
+    let mut next: Vec<typval_T> = Vec::new();
+    for it in l.borrow().lv_items.iter() {
+        if it.li_tv.v_type != VAR_DICT {
+            // c: emsg(_(e_dictreq)) — every list item must be a Dict.
+            emsg("E715: Dictionary required");
+            rettv.vval = v_number(-1);
+            return;
+        }
+        next.push(it.li_tv.clone());
+    }
+    MATCHES.with(|m| *m.borrow_mut() = next);
+}
+
+/// Port of `f_clearmatches()` (Neovim window.c `clear_matches`) — remove all
+/// matches.
+pub fn f_clearmatches(_argvars: &[typval_T], _rettv: &mut typval_T) {
+    MATCHES.with(|m| m.borrow_mut().clear());
+}
+
+/// Port of `f_matcharg()` (Neovim window.c) — the `{group, pattern}` of the
+/// `:match`/`:2match`/`:3match` command number `{nr}`. None are set standalone,
+/// so 1/2/3 yield `['', '']` and any other number an empty List.
+pub fn f_matcharg(argvars: &[typval_T], rettv: &mut typval_T) {
+    let nr = tv_get_number(&argvars[0]);
+    let l = tv_list_alloc_ret(rettv, 2);
+    if (1..=3).contains(&nr) {
+        let mut lb = l.borrow_mut();
+        tv_list_append_string(&mut lb, "");
+        tv_list_append_string(&mut lb, "");
+    }
+}
+
+// ── sign_define()/sign_getdefined()/sign_undefine() — Neovim sign.c. ──
+
+thread_local! {
+    /// Defined signs (`sign_define` table in sign.c): name → option Dict.
+    static SIGNS: std::cell::RefCell<std::collections::BTreeMap<String, typval_T>> =
+        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+}
+
+/// Port of `f_sign_define()` (Neovim sign.c) — define sign `{name}` with the
+/// optional attribute Dict. Returns 0 on success, -1 on error.
+pub fn f_sign_define(argvars: &[typval_T], rettv: &mut typval_T) {
+    // c: the list form (sign_define([{dict}, …])) returns a List; here we port
+    // the scalar form sign_define({name} [, {dict}]).
+    if argvars[0].v_type == VAR_LIST {
+        emsg("E1206: Dictionary required");
+        rettv.vval = v_number(-1);
+        return;
+    }
+    let name = tv_get_string(&argvars[0]);
+    if name.is_empty() {
+        rettv.vval = v_number(-1);
+        return;
+    }
+    let opts = if argvars.len() >= 2 && argvars[1].v_type == VAR_DICT {
+        argvars[1].clone()
+    } else {
+        let d = tv_dict_alloc();
+        match_dict_val(d)
+    };
+    SIGNS.with(|s| s.borrow_mut().insert(name, opts));
+}
+
+/// Port of `f_sign_getdefined()` (Neovim sign.c) — the list of defined signs as
+/// Dicts (each `{name}` merged with its attributes); with `{name}` just that
+/// sign (or an empty List).
+pub fn f_sign_getdefined(argvars: &[typval_T], rettv: &mut typval_T) {
+    let want = if argvars.is_empty() {
+        None
+    } else {
+        Some(tv_get_string(&argvars[0]))
+    };
+    let entries: Vec<(String, typval_T)> = SIGNS.with(|s| {
+        s.borrow()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    });
+    let out = tv_list_alloc_ret(rettv, 0);
+    let mut ob = out.borrow_mut();
+    for (name, opts) in entries {
+        if let Some(w) = &want {
+            if w != &name {
+                continue;
+            }
+        }
+        let d = tv_dict_alloc();
+        {
+            let mut db = d.borrow_mut();
+            tv_dict_add_str(&mut db, "name", &name);
+            // c: copy the stored attributes alongside the name.
+            if let (VAR_DICT, v_dict(Some(src))) = (opts.v_type, &opts.vval) {
+                for (k, v) in src.borrow().dv_hashtab.iter() {
+                    tv_dict_add_tv(&mut db, k, v.clone());
+                }
+            }
+        }
+        tv_list_append_tv(&mut ob, match_dict_val(d));
+    }
+}
+
+/// Port of `f_sign_undefine()` (Neovim sign.c) — undefine sign `{name}`, or all
+/// signs when called with no argument. Returns 0 on success.
+pub fn f_sign_undefine(argvars: &[typval_T], rettv: &mut typval_T) {
+    if argvars.is_empty() {
+        SIGNS.with(|s| s.borrow_mut().clear());
+        return;
+    }
+    let name = tv_get_string(&argvars[0]);
+    let existed = SIGNS.with(|s| s.borrow_mut().remove(&name).is_some());
+    if !existed {
+        crate::ported::message::semsg(&format!("E155: Unknown sign: {name}"));
+        rettv.vval = v_number(-1);
+    }
+}
+
+// ── foldclosed()/foldclosedend() — Neovim fold.c. No folds standalone. ──
+
+/// Port of `f_foldclosed()` (Neovim fold.c) — the first line of the closed fold
+/// at `{lnum}`, or -1 when the line is not in a closed fold (always, standalone).
+pub fn f_foldclosed(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.vval = v_number(-1);
+}
+
+/// Port of `f_foldclosedend()` (Neovim fold.c) — the last line of the closed
+/// fold at `{lnum}`, or -1 (always, standalone).
+pub fn f_foldclosedend(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.vval = v_number(-1);
+}
+
+// ── hasmapto()/maparg()/mapcheck()/maplist() — Neovim mapping.c. No mappings
+//    are defined standalone. ──
+
+/// Port of `f_hasmapto()` (Neovim mapping.c) — whether a mapping maps to
+/// `{what}`. No mappings standalone → 0.
+pub fn f_hasmapto(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.vval = v_number(0);
+}
+
+/// Port of `f_maparg()` (Neovim mapping.c) — the rhs that `{name}` maps to. No
+/// mapping → "" (or an empty Dict when the `{dict}` argument is truthy).
+pub fn f_maparg(argvars: &[typval_T], rettv: &mut typval_T) {
+    let want_dict = argvars.len() >= 4 && tv_get_bool(&argvars[3]) != 0;
+    if want_dict {
+        let _ = tv_dict_alloc_ret(rettv);
+    } else {
+        rettv.v_type = VAR_STRING;
+        rettv.vval = v_string(String::new());
+    }
+}
+
+/// Port of `f_mapcheck()` (Neovim mapping.c) — the rhs of any mapping that
+/// `{name}` could start. None standalone → "".
+pub fn f_mapcheck(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.v_type = VAR_STRING;
+    rettv.vval = v_string(String::new());
+}
+
+/// Port of `f_maplist()` (Neovim mapping.c) — every mapping as a List of Dicts.
+/// None standalone → an empty List.
+pub fn f_maplist(_argvars: &[typval_T], rettv: &mut typval_T) {
+    let _ = tv_list_alloc_ret(rettv, 0);
+}

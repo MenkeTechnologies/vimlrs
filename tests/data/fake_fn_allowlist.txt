@@ -166,3 +166,29 @@ f_foldlevel
 
 # ── testing.c (not vendored) — assert_equalfile() ──
 f_assert_equalfile
+
+# ── window.c (not vendored) — match highlighting (w_match_head list) ──
+# Real Neovim match builtins; match_dict_val wraps a dict_T as a VAR_DICT typval.
+f_matchadd
+f_matchaddpos
+f_matchdelete
+f_getmatches
+f_setmatches
+f_clearmatches
+f_matcharg
+match_dict_val
+
+# ── sign.c (not vendored) — sign definitions ──
+f_sign_define
+f_sign_getdefined
+f_sign_undefine
+
+# ── fold.c (not vendored) — foldclosed()/foldclosedend() (no folds → -1) ──
+f_foldclosed
+f_foldclosedend
+
+# ── mapping.c (not vendored) — mapping queries (no mappings standalone) ──
+f_hasmapto
+f_maparg
+f_mapcheck
+f_maplist
