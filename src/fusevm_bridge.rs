@@ -26,19 +26,25 @@ use crate::ported::eval::fs::{
     f_readfile, f_rename, f_resolve, f_setfperm, f_simplify, f_tempname, f_writefile,
 };
 use crate::ported::eval::funcs::{
-    f_abs, f_add, f_and, f_atan2, f_char2nr, f_copy, f_deepcopy, f_dictwatcheradd,
-    f_dictwatcherdel, f_did_filetype, f_empty, f_escape, f_eventhandler, f_exists, f_flatten,
-    f_flattennew, f_float2nr, f_fmod, f_fnameescape, f_foreground, f_funcref, f_function,
-    f_garbagecollect, f_get, f_getenv, f_getfontname, f_getpid, f_getreg, f_getreginfo,
-    f_getregtype, f_gettext, f_has, f_has_key, f_hlexists, f_id, f_index, f_indexof, f_insert,
-    f_invert, f_isinf, f_isnan, f_items, f_json_decode, f_json_encode, f_keys, f_len, f_list2str,
+    f_abs, f_add, f_and, f_atan2, f_byte2line, f_char2nr, f_charcol, f_col, f_confirm, f_copy,
+    f_deepcopy, f_dictwatcheradd, f_dictwatcherdel, f_did_filetype, f_empty, f_escape,
+    f_eventhandler, f_exists, f_flatten, f_flattennew, f_float2nr, f_fmod, f_fnameescape,
+    f_foreground, f_funcref, f_function, f_garbagecollect, f_get, f_getchangelist, f_getcharpos,
+    f_getcharsearch, f_getcurpos, f_getcursorcharpos, f_getenv, f_getfontname, f_getjumplist,
+    f_getmarklist, f_getpid, f_getpos, f_getreg, f_getreginfo, f_getregtype, f_gettagstack,
+    f_gettext, f_has, f_has_key, f_hlexists, f_id, f_index, f_indexof, f_input, f_inputdialog,
+    f_inputlist, f_inputrestore, f_inputsave, f_inputsecret, f_insert, f_invert, f_isinf, f_isnan,
+    f_items, f_json_decode, f_json_encode, f_keys, f_len, f_line, f_line2byte, f_list2str,
     f_localtime, f_match, f_matchend, f_matchlist, f_matchstr, f_matchstrlist, f_matchstrpos,
-    f_max, f_min, f_mode, f_nr2char, f_or, f_pow, f_printf, f_prompt_getprompt, f_pum_getpos,
-    f_pumvisible, f_rand, f_range, f_reduce, f_reg_executing, f_reg_recorded, f_reg_recording,
-    f_reltime, f_reltimefloat, f_reltimestr, f_repeat, f_reverse, f_serverlist, f_setenv, f_setreg,
+    f_max, f_min, f_mode, f_nextnonblank, f_nr2char, f_or, f_pow, f_prevnonblank, f_printf,
+    f_prompt_getprompt, f_pum_getpos, f_pumvisible, f_rand, f_range, f_reduce, f_reg_executing,
+    f_reg_recorded, f_reg_recording, f_reltime, f_reltimefloat, f_reltimestr, f_repeat, f_reverse,
+    f_screenattr, f_screenchar, f_screenchars, f_screencol, f_screenrow, f_screenstring, f_search,
+    f_searchdecl, f_searchpair, f_searchpairpos, f_searchpos, f_serverlist, f_setenv, f_setreg,
     f_sha256, f_shellescape, f_shiftwidth, f_soundfold, f_split, f_srand, f_state, f_str2float,
-    f_strftime, f_strptime, f_substitute, f_type, f_values, f_visualmode, f_wildmenumode,
-    f_windowsversion, f_xor, float_op_wrapper,
+    f_strftime, f_strptime, f_substitute, f_tabpagebuflist, f_tagfiles, f_taglist, f_type,
+    f_values, f_virtcol, f_visualmode, f_wildmenumode, f_windowsversion, f_wordcount, f_xor,
+    float_op_wrapper,
 };
 use crate::ported::eval::list::{
     f_count, f_extend, f_extendnew, f_filter, f_foreach, f_map, f_mapnew, f_remove,
@@ -494,6 +500,84 @@ pub const VIML_FN_PROMPT_GETPROMPT: u16 = 3272;
 pub const VIML_FN_PUM_GETPOS: u16 = 3273;
 /// `serverlist()`
 pub const VIML_FN_SERVERLIST: u16 = 3274;
+/// `getpos()`
+pub const VIML_FN_GETPOS: u16 = 3275;
+/// `getcharpos()`
+pub const VIML_FN_GETCHARPOS: u16 = 3276;
+/// `getcurpos()`
+pub const VIML_FN_GETCURPOS: u16 = 3277;
+/// `getcursorcharpos()`
+pub const VIML_FN_GETCURSORCHARPOS: u16 = 3278;
+/// `col()`
+pub const VIML_FN_COL: u16 = 3279;
+/// `charcol()`
+pub const VIML_FN_CHARCOL: u16 = 3280;
+/// `line()`
+pub const VIML_FN_LINE: u16 = 3281;
+/// `virtcol()`
+pub const VIML_FN_VIRTCOL: u16 = 3282;
+/// `screenrow()`
+pub const VIML_FN_SCREENROW: u16 = 3283;
+/// `screencol()`
+pub const VIML_FN_SCREENCOL: u16 = 3284;
+/// `screenchar()`
+pub const VIML_FN_SCREENCHAR: u16 = 3285;
+/// `screenattr()`
+pub const VIML_FN_SCREENATTR: u16 = 3286;
+/// `screenchars()`
+pub const VIML_FN_SCREENCHARS: u16 = 3287;
+/// `screenstring()`
+pub const VIML_FN_SCREENSTRING: u16 = 3288;
+/// `line2byte()`
+pub const VIML_FN_LINE2BYTE: u16 = 3289;
+/// `byte2line()`
+pub const VIML_FN_BYTE2LINE: u16 = 3290;
+/// `nextnonblank()`
+pub const VIML_FN_NEXTNONBLANK: u16 = 3291;
+/// `prevnonblank()`
+pub const VIML_FN_PREVNONBLANK: u16 = 3292;
+/// `wordcount()`
+pub const VIML_FN_WORDCOUNT: u16 = 3293;
+/// `getjumplist()`
+pub const VIML_FN_GETJUMPLIST: u16 = 3294;
+/// `getchangelist()`
+pub const VIML_FN_GETCHANGELIST: u16 = 3295;
+/// `getmarklist()`
+pub const VIML_FN_GETMARKLIST: u16 = 3296;
+/// `gettagstack()`
+pub const VIML_FN_GETTAGSTACK: u16 = 3297;
+/// `tagfiles()`
+pub const VIML_FN_TAGFILES: u16 = 3298;
+/// `taglist()`
+pub const VIML_FN_TAGLIST: u16 = 3299;
+/// `tabpagebuflist()`
+pub const VIML_FN_TABPAGEBUFLIST: u16 = 3300;
+/// `search()`
+pub const VIML_FN_SEARCH: u16 = 3301;
+/// `searchpos()`
+pub const VIML_FN_SEARCHPOS: u16 = 3302;
+/// `searchpair()`
+pub const VIML_FN_SEARCHPAIR: u16 = 3303;
+/// `searchpairpos()`
+pub const VIML_FN_SEARCHPAIRPOS: u16 = 3304;
+/// `searchdecl()`
+pub const VIML_FN_SEARCHDECL: u16 = 3305;
+/// `getcharsearch()`
+pub const VIML_FN_GETCHARSEARCH: u16 = 3306;
+/// `input()`
+pub const VIML_FN_INPUT: u16 = 3307;
+/// `inputsecret()`
+pub const VIML_FN_INPUTSECRET: u16 = 3308;
+/// `inputdialog()`
+pub const VIML_FN_INPUTDIALOG: u16 = 3309;
+/// `inputlist()`
+pub const VIML_FN_INPUTLIST: u16 = 3310;
+/// `inputsave()`
+pub const VIML_FN_INPUTSAVE: u16 = 3311;
+/// `inputrestore()`
+pub const VIML_FN_INPUTRESTORE: u16 = 3312;
+/// `confirm()`
+pub const VIML_FN_CONFIRM: u16 = 3313;
 /// `flattennew()`
 pub const VIML_FN_FLATTENNEW: u16 = 3211;
 /// `sha256()`
@@ -1916,6 +2000,63 @@ pub fn install(vm: &mut VM) {
     });
     vm.register_builtin(VIML_FN_PUM_GETPOS, |vm, n| call_func(vm, n, f_pum_getpos));
     vm.register_builtin(VIML_FN_SERVERLIST, |vm, n| call_func(vm, n, f_serverlist));
+    vm.register_builtin(VIML_FN_GETPOS, |vm, n| call_func(vm, n, f_getpos));
+    vm.register_builtin(VIML_FN_GETCHARPOS, |vm, n| call_func(vm, n, f_getcharpos));
+    vm.register_builtin(VIML_FN_GETCURPOS, |vm, n| call_func(vm, n, f_getcurpos));
+    vm.register_builtin(VIML_FN_GETCURSORCHARPOS, |vm, n| {
+        call_func(vm, n, f_getcursorcharpos)
+    });
+    vm.register_builtin(VIML_FN_COL, |vm, n| call_func(vm, n, f_col));
+    vm.register_builtin(VIML_FN_CHARCOL, |vm, n| call_func(vm, n, f_charcol));
+    vm.register_builtin(VIML_FN_LINE, |vm, n| call_func(vm, n, f_line));
+    vm.register_builtin(VIML_FN_VIRTCOL, |vm, n| call_func(vm, n, f_virtcol));
+    vm.register_builtin(VIML_FN_SCREENROW, |vm, n| call_func(vm, n, f_screenrow));
+    vm.register_builtin(VIML_FN_SCREENCOL, |vm, n| call_func(vm, n, f_screencol));
+    vm.register_builtin(VIML_FN_SCREENCHAR, |vm, n| call_func(vm, n, f_screenchar));
+    vm.register_builtin(VIML_FN_SCREENATTR, |vm, n| call_func(vm, n, f_screenattr));
+    vm.register_builtin(VIML_FN_SCREENCHARS, |vm, n| call_func(vm, n, f_screenchars));
+    vm.register_builtin(VIML_FN_SCREENSTRING, |vm, n| {
+        call_func(vm, n, f_screenstring)
+    });
+    vm.register_builtin(VIML_FN_LINE2BYTE, |vm, n| call_func(vm, n, f_line2byte));
+    vm.register_builtin(VIML_FN_BYTE2LINE, |vm, n| call_func(vm, n, f_byte2line));
+    vm.register_builtin(VIML_FN_NEXTNONBLANK, |vm, n| {
+        call_func(vm, n, f_nextnonblank)
+    });
+    vm.register_builtin(VIML_FN_PREVNONBLANK, |vm, n| {
+        call_func(vm, n, f_prevnonblank)
+    });
+    vm.register_builtin(VIML_FN_WORDCOUNT, |vm, n| call_func(vm, n, f_wordcount));
+    vm.register_builtin(VIML_FN_GETJUMPLIST, |vm, n| call_func(vm, n, f_getjumplist));
+    vm.register_builtin(VIML_FN_GETCHANGELIST, |vm, n| {
+        call_func(vm, n, f_getchangelist)
+    });
+    vm.register_builtin(VIML_FN_GETMARKLIST, |vm, n| call_func(vm, n, f_getmarklist));
+    vm.register_builtin(VIML_FN_GETTAGSTACK, |vm, n| call_func(vm, n, f_gettagstack));
+    vm.register_builtin(VIML_FN_TAGFILES, |vm, n| call_func(vm, n, f_tagfiles));
+    vm.register_builtin(VIML_FN_TAGLIST, |vm, n| call_func(vm, n, f_taglist));
+    vm.register_builtin(VIML_FN_TABPAGEBUFLIST, |vm, n| {
+        call_func(vm, n, f_tabpagebuflist)
+    });
+    vm.register_builtin(VIML_FN_SEARCH, |vm, n| call_func(vm, n, f_search));
+    vm.register_builtin(VIML_FN_SEARCHPOS, |vm, n| call_func(vm, n, f_searchpos));
+    vm.register_builtin(VIML_FN_SEARCHPAIR, |vm, n| call_func(vm, n, f_searchpair));
+    vm.register_builtin(VIML_FN_SEARCHPAIRPOS, |vm, n| {
+        call_func(vm, n, f_searchpairpos)
+    });
+    vm.register_builtin(VIML_FN_SEARCHDECL, |vm, n| call_func(vm, n, f_searchdecl));
+    vm.register_builtin(VIML_FN_GETCHARSEARCH, |vm, n| {
+        call_func(vm, n, f_getcharsearch)
+    });
+    vm.register_builtin(VIML_FN_INPUT, |vm, n| call_func(vm, n, f_input));
+    vm.register_builtin(VIML_FN_INPUTSECRET, |vm, n| call_func(vm, n, f_inputsecret));
+    vm.register_builtin(VIML_FN_INPUTDIALOG, |vm, n| call_func(vm, n, f_inputdialog));
+    vm.register_builtin(VIML_FN_INPUTLIST, |vm, n| call_func(vm, n, f_inputlist));
+    vm.register_builtin(VIML_FN_INPUTSAVE, |vm, n| call_func(vm, n, f_inputsave));
+    vm.register_builtin(VIML_FN_INPUTRESTORE, |vm, n| {
+        call_func(vm, n, f_inputrestore)
+    });
+    vm.register_builtin(VIML_FN_CONFIRM, |vm, n| call_func(vm, n, f_confirm));
     vm.register_builtin(VIML_FN_FLATTENNEW, |vm, n| call_func(vm, n, f_flattennew));
     vm.register_builtin(VIML_FN_SHA256, |vm, n| call_func(vm, n, f_sha256));
     vm.register_builtin(VIML_FN_BLOB2LIST, |vm, n| call_func(vm, n, f_blob2list));

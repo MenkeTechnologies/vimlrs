@@ -20,7 +20,10 @@ use crate::ported::eval::typval::{
     tv_list_append_string, tv_list_append_tv, tv_list_copy, tv_list_find_nr, tv_list_flatten,
     tv_list_len, tv_list_ref,
 };
-use crate::ported::eval::typval::{tv_dict_alloc, tv_dict_alloc_ret, tv_list_alloc};
+use crate::ported::eval::typval::{
+    tv_dict_add_list, tv_dict_add_nr, tv_dict_add_str, tv_dict_alloc, tv_dict_alloc_ret,
+    tv_list_alloc, tv_list_append_list,
+};
 use crate::ported::eval::typval_defs_h::{
     typval_T, typval_vval_union::*, varnumber_T, BoolVarValue::*, SpecialVarValue::*, VarType::*,
     VAR_TYPE_BLOB, VAR_TYPE_BOOL, VAR_TYPE_DICT, VAR_TYPE_FLOAT, VAR_TYPE_FUNC, VAR_TYPE_LIST,
@@ -1983,4 +1986,347 @@ pub fn f_pum_getpos(_argvars: &[typval_T], rettv: &mut typval_T) {
 /// Port of `f_serverlist()` — no server standalone → empty List.
 pub fn f_serverlist(_argvars: &[typval_T], rettv: &mut typval_T) {
     tv_list_alloc_ret(rettv, 0);
+}
+
+// ── Editor-position / screen / search builtins (no buffer or UI standalone) ──
+//
+// A standalone VimL interpreter has no current buffer, window, cursor, or screen
+// grid, so the editor-coupled C bodies (`getpos_both`, `get_col`,
+// `search_cmn`, `ui_current_row`, `ml_find_line_or_offset`, …) reduce to the
+// fixed "nothing here" values their C returns when there is no match / no
+// buffer line / off-grid: a cursor list reads as all-zero, a search reports
+// "not found", an off-grid screen cell is -1. The list/dict *shapes* are kept
+// faithful to the C so callers that index `[lnum, col]` still work.
+
+/// Port of `getpos_both()` from `Src/eval/funcs.c` — the `[bufnum, lnum, col,
+/// off]` (plus `curswant` when `getcurpos`) position list. Standalone has no
+/// cursor (`fp == NULL`, `fnum == -1`), so every `tv_list_append_number` takes
+/// its NULL branch and the list is all zeros.
+fn getpos_both(rettv: &mut typval_T, getcurpos: bool) {
+    let len = 4 + getcurpos as isize;
+    let l = tv_list_alloc_ret(rettv, len);
+    let mut lb = l.borrow_mut();
+    for _ in 0..len {
+        tv_list_append_number(&mut lb, 0);
+    }
+}
+
+/// Port of `f_getpos()`/`getpos_both(…,false,false)` — no cursor → `[0,0,0,0]`.
+pub fn f_getpos(_argvars: &[typval_T], rettv: &mut typval_T) {
+    getpos_both(rettv, false);
+}
+/// Port of `f_getcharpos()`/`getpos_both(…,false,true)` — no cursor → `[0,0,0,0]`.
+pub fn f_getcharpos(_argvars: &[typval_T], rettv: &mut typval_T) {
+    getpos_both(rettv, false);
+}
+/// Port of `f_getcurpos()`/`getpos_both(…,true,false)` — no cursor →
+/// `[0,0,0,0,0]` (the 5th element is `curswant`).
+pub fn f_getcurpos(_argvars: &[typval_T], rettv: &mut typval_T) {
+    getpos_both(rettv, true);
+}
+/// Port of `f_getcursorcharpos()`/`getpos_both(…,true,true)` — `[0,0,0,0,0]`.
+pub fn f_getcursorcharpos(_argvars: &[typval_T], rettv: &mut typval_T) {
+    getpos_both(rettv, true);
+}
+/// Port of `f_col()`/`get_col(…,false)` — no cursor column → 0.
+pub fn f_col(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_charcol()`/`get_col(…,true)` — no cursor column → 0.
+pub fn f_charcol(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_line()` — no cursor line → 0.
+pub fn f_line(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_virtcol()` — no cursor → 0, or `[0,0]` when the second arg
+/// (`list`) is truthy, matching the C `theend:` branch.
+pub fn f_virtcol(argvars: &[typval_T], rettv: &mut typval_T) {
+    if argvars.len() > 1 && tv_get_bool(&argvars[1]) != 0 {
+        let l = tv_list_alloc_ret(rettv, 2);
+        let mut lb = l.borrow_mut();
+        tv_list_append_number(&mut lb, 0);
+        tv_list_append_number(&mut lb, 0);
+    } else {
+        *rettv = typval_T::from(0 as varnumber_T);
+    }
+}
+/// Port of `f_screenrow()`/`ui_current_row()` — no UI grid → 0.
+pub fn f_screenrow(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_screencol()`/`ui_current_col()` — no UI grid → 0.
+pub fn f_screencol(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_screenchar()` — off-grid (there is no grid) → -1.
+pub fn f_screenchar(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(-1 as varnumber_T);
+}
+/// Port of `f_screenattr()` — off-grid → -1.
+pub fn f_screenattr(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(-1 as varnumber_T);
+}
+/// Port of `f_screenchars()` — off-grid early `return` → empty List.
+pub fn f_screenchars(_argvars: &[typval_T], rettv: &mut typval_T) {
+    tv_list_alloc_ret(rettv, 0);
+}
+/// Port of `f_screenstring()` — off-grid → "" (empty cell string).
+pub fn f_screenstring(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(String::new());
+}
+/// Port of `f_line2byte()` — no buffer → -1.
+pub fn f_line2byte(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(-1 as varnumber_T);
+}
+/// Port of `f_byte2line()` — no buffer → -1.
+pub fn f_byte2line(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(-1 as varnumber_T);
+}
+/// Port of `f_nextnonblank()` — no buffer lines → 0.
+pub fn f_nextnonblank(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_prevnonblank()` — no buffer lines → 0.
+pub fn f_prevnonblank(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_wordcount()`/`cursor_pos_info()` — empty buffer → every count 0.
+pub fn f_wordcount(_argvars: &[typval_T], rettv: &mut typval_T) {
+    let d = tv_dict_alloc_ret(rettv);
+    let mut db = d.borrow_mut();
+    for key in [
+        "bytes",
+        "chars",
+        "words",
+        "cursor_bytes",
+        "cursor_chars",
+        "cursor_words",
+    ] {
+        tv_dict_add_nr(&mut db, key, 0);
+    }
+}
+
+/// Port of `f_getjumplist()` — no window → `[[], 0]` (entries, current index).
+pub fn f_getjumplist(_argvars: &[typval_T], rettv: &mut typval_T) {
+    let l = tv_list_alloc_ret(rettv, 2);
+    let inner = tv_list_alloc(0);
+    let mut lb = l.borrow_mut();
+    tv_list_append_list(&mut lb, inner);
+    tv_list_append_number(&mut lb, 0);
+}
+/// Port of `f_getchangelist()` — no buffer → `[[], 0]`.
+pub fn f_getchangelist(_argvars: &[typval_T], rettv: &mut typval_T) {
+    let l = tv_list_alloc_ret(rettv, 2);
+    let inner = tv_list_alloc(0);
+    let mut lb = l.borrow_mut();
+    tv_list_append_list(&mut lb, inner);
+    tv_list_append_number(&mut lb, 0);
+}
+/// Port of `f_getmarklist()` — no marks → empty List.
+pub fn f_getmarklist(_argvars: &[typval_T], rettv: &mut typval_T) {
+    tv_list_alloc_ret(rettv, 0);
+}
+/// Port of `f_gettagstack()`/`get_tagstack()` — empty stack → `{items:[],
+/// length:0, curidx:0}`.
+pub fn f_gettagstack(_argvars: &[typval_T], rettv: &mut typval_T) {
+    let d = tv_dict_alloc_ret(rettv);
+    let mut db = d.borrow_mut();
+    tv_dict_add_list(&mut db, "items", tv_list_alloc(0));
+    tv_dict_add_nr(&mut db, "length", 0);
+    tv_dict_add_nr(&mut db, "curidx", 0);
+}
+/// Port of `f_tagfiles()` — no `'tags'` files → empty List.
+pub fn f_tagfiles(_argvars: &[typval_T], rettv: &mut typval_T) {
+    tv_list_alloc_ret(rettv, 0);
+}
+/// Port of `f_taglist()` — empty pattern → 0 (`false`), else no tags → empty List.
+pub fn f_taglist(argvars: &[typval_T], rettv: &mut typval_T) {
+    if tv_get_string(&argvars[0]).is_empty() {
+        *rettv = typval_T::from(0 as varnumber_T);
+        return;
+    }
+    tv_list_alloc_ret(rettv, 0);
+}
+/// Port of `f_tabpagebuflist()` — no windows → 0 (rettv left a Number in C).
+pub fn f_tabpagebuflist(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+
+/// Port of `f_search()`/`search_cmn()` — pattern not found (no buffer) → 0.
+pub fn f_search(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_searchpos()` — not found → `[0, 0]`.
+pub fn f_searchpos(_argvars: &[typval_T], rettv: &mut typval_T) {
+    let l = tv_list_alloc_ret(rettv, 2);
+    let mut lb = l.borrow_mut();
+    tv_list_append_number(&mut lb, 0);
+    tv_list_append_number(&mut lb, 0);
+}
+/// Port of `f_searchpair()`/`searchpair_cmn()` — not found → 0.
+pub fn f_searchpair(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_searchpairpos()` — not found → `[0, 0]`.
+pub fn f_searchpairpos(_argvars: &[typval_T], rettv: &mut typval_T) {
+    let l = tv_list_alloc_ret(rettv, 2);
+    let mut lb = l.borrow_mut();
+    tv_list_append_number(&mut lb, 0);
+    tv_list_append_number(&mut lb, 0);
+}
+/// Port of `f_searchdecl()` — declaration not found → 1 (the C `FAIL` default).
+pub fn f_searchdecl(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(1 as varnumber_T);
+}
+/// Port of `f_getcharsearch()` — no prior `f`/`t` search → `{char:"",
+/// forward:1, until:0}` (the `last_csearch*()` defaults).
+pub fn f_getcharsearch(_argvars: &[typval_T], rettv: &mut typval_T) {
+    let d = tv_dict_alloc_ret(rettv);
+    let mut db = d.borrow_mut();
+    tv_dict_add_str(&mut db, "char", "");
+    tv_dict_add_nr(&mut db, "forward", 1);
+    tv_dict_add_nr(&mut db, "until", 0);
+}
+
+// ── Interactive input builtins (stdin-backed standalone equivalent) ──
+//
+// In the editor these prompt through the command-line UI (`get_user_input`,
+// `get_number`, …). A standalone interpreter is a terminal program, so the
+// faithful equivalent is to write the prompt to stdout and read one line from
+// stdin — the same role `read` plays in a shell script. On EOF the value the
+// editor returns when the user cancels (empty / the dialog cancel-arg) is used.
+
+/// Port of `get_user_input()` (the body behind `f_input`/`f_inputdialog` in
+/// `Src/eval/funcs.c`, defined outside the vendored tree) — write `{prompt}`
+/// (argvars[0]) to stdout and read one line from stdin. `{text}` (argvars[1])
+/// is the editable default returned on an empty line / EOF; for `inputdialog`
+/// argvars[2] is the value returned when the read is cancelled (EOF).
+fn get_user_input(argvars: &[typval_T], rettv: &mut typval_T, dialog: bool, _secret: bool) {
+    use std::io::Write;
+    let prompt = tv_get_string(&argvars[0]);
+    let default = if argvars.len() > 1 {
+        tv_get_string(&argvars[1])
+    } else {
+        String::new()
+    };
+    print!("{prompt}");
+    let _ = std::io::stdout().flush();
+
+    let mut line = String::new();
+    match std::io::stdin().read_line(&mut line) {
+        // EOF: the command line was cancelled.
+        Ok(0) => {
+            let cancel = if dialog && argvars.len() > 2 {
+                tv_get_string(&argvars[2])
+            } else {
+                default
+            };
+            *rettv = typval_T::from(cancel);
+            return;
+        }
+        Ok(_) => {}
+        Err(_) => {
+            *rettv = typval_T::from(default);
+            return;
+        }
+    }
+    while line.ends_with('\n') || line.ends_with('\r') {
+        line.pop();
+    }
+    // An empty line returns the (pre-filled) default, as pressing <CR> would.
+    if line.is_empty() && !default.is_empty() {
+        *rettv = typval_T::from(default);
+    } else {
+        *rettv = typval_T::from(line);
+    }
+}
+
+/// Port of `f_input()` — read a line from stdin after writing the prompt.
+pub fn f_input(argvars: &[typval_T], rettv: &mut typval_T) {
+    get_user_input(argvars, rettv, false, false);
+}
+/// Port of `f_inputsecret()` — like `input()`; standalone cannot suppress
+/// terminal echo without raw mode, so input is read normally (best effort).
+pub fn f_inputsecret(argvars: &[typval_T], rettv: &mut typval_T) {
+    get_user_input(argvars, rettv, false, true);
+}
+/// Port of `f_inputdialog()` — `input()` with a cancel value (argvars[2]).
+pub fn f_inputdialog(argvars: &[typval_T], rettv: &mut typval_T) {
+    get_user_input(argvars, rettv, true, false);
+}
+/// Port of `f_inputsave()` — typeahead stack push; nothing is buffered
+/// standalone, so this is a no-op returning 0 (OK), as in C.
+pub fn f_inputsave(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_inputrestore()` — typeahead stack pop; no-op returning 0 (OK).
+pub fn f_inputrestore(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+
+/// Port of `f_inputlist()` — print the `{textlist}` (a List of String lines, the
+/// first being a header) and read the selected 1-based index from stdin,
+/// returning 0 when the input is empty or not a number.
+pub fn f_inputlist(argvars: &[typval_T], rettv: &mut typval_T) {
+    use std::io::Write;
+    if argvars[0].v_type != VAR_LIST {
+        // c: semsg(_(e_listarg), "inputlist()");
+        emsg("E686: Argument of inputlist() must be a List");
+        return;
+    }
+    if let v_list(Some(l)) = &argvars[0].vval {
+        for it in &l.borrow().lv_items {
+            println!("{}", tv_get_string(&it.li_tv));
+        }
+    }
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    let n = match std::io::stdin().read_line(&mut line) {
+        Ok(n) if n > 0 => line.trim().parse::<varnumber_T>().unwrap_or(0),
+        _ => 0,
+    };
+    *rettv = typval_T::from(n);
+}
+
+/// Port of `f_confirm()` — print `{msg}` and the `&`-accelerated `{choices}`
+/// (split on `\n`, default "&OK") numbered from 1, then read the chosen number
+/// from stdin. Empty input returns the `{default}` button (argvars[2], default
+/// 1); EOF returns 0 (cancelled), as the editor's dialog does.
+pub fn f_confirm(argvars: &[typval_T], rettv: &mut typval_T) {
+    use std::io::Write;
+    let message = tv_get_string(&argvars[0]);
+    let buttons = if argvars.len() > 1 && argvars[1].v_type != VAR_UNKNOWN {
+        tv_get_string(&argvars[1])
+    } else {
+        "&OK".to_string()
+    };
+    let def = if argvars.len() > 2 && argvars[2].v_type != VAR_UNKNOWN {
+        tv_get_number(&argvars[2])
+    } else {
+        1
+    };
+    println!("{message}");
+    for (i, b) in buttons.split('\n').enumerate() {
+        // Drop the '&' accelerator markers (c: drops them from the label).
+        let label: String = b.chars().filter(|&c| c != '&').collect();
+        println!("{}) {}", i + 1, label);
+    }
+    print!("Type number and <Enter> (default {def}): ");
+    let _ = std::io::stdout().flush();
+
+    let mut line = String::new();
+    match std::io::stdin().read_line(&mut line) {
+        Ok(0) | Err(_) => *rettv = typval_T::from(0 as varnumber_T), // cancelled
+        Ok(_) => {
+            let t = line.trim();
+            let choice = if t.is_empty() {
+                def
+            } else {
+                t.parse::<varnumber_T>().unwrap_or(0)
+            };
+            *rettv = typval_T::from(choice);
+        }
+    }
 }
