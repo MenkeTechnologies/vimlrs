@@ -249,11 +249,16 @@ pub fn f_byteidx(argvars: &[typval_T], rettv: &mut typval_T) {
 pub fn f_charidx(argvars: &[typval_T], rettv: &mut typval_T) {
     let s = tv_get_string(&argvars[0]);
     let idx = tv_get_number_chk(&argvars[1], None);
-    rettv.vval = v_number(if idx < 0 || idx as usize >= s.len() {
-        -1
-    } else {
-        s[..idx as usize].chars().count() as varnumber_T
-    });
+    if idx < 0 || idx as usize >= s.len() {
+        rettv.vval = v_number(-1);
+        return;
+    }
+    let idx = idx as usize;
+    // The character index of the character whose byte span contains byte `idx`
+    // (a byte in the middle of a multibyte character maps to that character) —
+    // counted via char boundaries so a non-boundary {idx} never panics.
+    let ci = s.char_indices().take_while(|(b, _)| *b <= idx).count() as varnumber_T - 1;
+    rettv.vval = v_number(ci);
 }
 
 /// Port of `f_byteidxcomp()` from `Src/strings.c` — the byte index of the

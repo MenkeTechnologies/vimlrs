@@ -1467,15 +1467,16 @@ fn b_div(vm: &mut VM, _: u8) -> Value {
 fn b_mod(vm: &mut VM, _: u8) -> Value {
     let b = pop_tv(vm);
     let a = pop_tv(vm);
-    // c: eval6 — `%`: float fmod, else num_modulus.
+    // c: eval6 — `%` is integer-only; a Float operand is an error (unlike `*`/`/`
+    // which fall back to float arithmetic).
     if a.v_type == VAR_FLOAT || b.v_type == VAR_FLOAT {
-        tv_to_value(tv_flt(tv_get_float(&a) % tv_get_float(&b)))
-    } else {
-        tv_to_value(tv_num(crate::ported::eval::num_modulus(
-            tv_get_number_chk(&a, None),
-            tv_get_number_chk(&b, None),
-        )))
+        message::emsg("E804: Cannot use '%' with Float");
+        return tv_to_value(tv_num(0));
     }
+    tv_to_value(tv_num(crate::ported::eval::num_modulus(
+        tv_get_number_chk(&a, None),
+        tv_get_number_chk(&b, None),
+    )))
 }
 
 fn b_concat(vm: &mut VM, _: u8) -> Value {

@@ -127,3 +127,76 @@ bad string args; `matchstr`/`matchlist`/`match`/`matchend`; `repeat` (string & l
 `remove`/`extend`/`copy`/`deepcopy`; `has_key`/`items`; `and`/`or`/`xor`/`invert`;
 `=~`/`!~`/`=~#`; `stridx`/`strridx`; `string()` of nested list/dict; `"\t"`/`"\n"` vs
 `'\t'` escapes; `1/0` and float `inf`/`-inf`/`nan`.
+
+---
+
+# Round 2 — additional confirmed divergences (vs Vim 9.2)
+
+Found in a second, deeper pass; all reproduced against the current binary. (These
+supersede the earlier "`%g` … verified at parity" note in the coverage list —
+`%g`/`%G` are **not** at parity; see #R2-5.)
+
+### R2-1. `charidx()` PANICS (crashes the interpreter) on multibyte input
+- `charidx("héllo",2)` → Vim `1`, vimlrs **panics** (`thread 'main' panicked at
+  src/ported/strings.rs:255: end byte index 2 is not a char boundary; it is inside 'é'`,
+  process aborts with exit 101)
+- The byte-index arg slices a UTF-8 `&str` directly (`s[..idx]`) without a
+  char-boundary check. Any multibyte string crashes. **Highest severity.**
+
+### R2-2. Very-magic mode `\v` is entirely unsupported
+- `matchstr("abc123","\v\d+")` → Vim `123`, vimlrs `` (empty)
+- `matchstr("color","\vcolou?r")` → Vim `color`, vimlrs `` (empty)
+- The magic-mode equivalents (`\d\+`, `colou\?r`) work, so the `\v` prefix itself is
+  unhandled. Common in real scripts.
+
+### R2-3. Backreferences (`\1`, `\2`…) in patterns don't match
+- `matchstr("hello","\(l\)\1")` → Vim `ll`, vimlrs `` (empty)
+- `substitute("hello","\(l\)\1","X","")` → Vim `heXo`, vimlrs `hello`
+- Capture-group backreferences in the search pattern are not honored.
+
+### R2-4. `\%[...]` optional-sequence atom unsupported
+- `matchstr("function","f\%[unc]")` → Vim `func`, vimlrs `` (empty)
+
+### R2-5. `printf("%g"/"%G", …)` formatting diverges
+- `printf("%g",1.0)` → Vim `1.0`, vimlrs `1`
+- `printf("%g",1000000.0)` → Vim `1000000.0`, vimlrs `1e+06`
+- `printf("%g",0.0001)` → Vim `1.0e-4`, vimlrs `0.0001`
+- `printf("%G",1000000.0)` → Vim `1000000.0`, vimlrs `1E+06`
+- vimlrs emits raw C `%g` (drops `.0`, C-style `e+06`, different precision/threshold);
+  Vim post-processes like its float printer. (`%f`/`%e` are fine.)
+
+### R2-6. `printf` `%S` and `*`-width-from-arg unsupported (passed through literally)
+- `printf("%S","abc")` → Vim `abc`, vimlrs `%S`
+- `printf("%*d",5,3)` → Vim `    3`, vimlrs `%*d`
+
+### R2-7. A funcref value can't be called directly with `(...)`
+- `function("toupper")("hi")` → Vim `HI`, vimlrs `E15: Invalid expression: trailing tokens`
+- `call()` works; direct call syntax on a funcref expression does not.
+
+### R2-8. `%` on Floats should error (E804) but returns a value
+- `1.0 % 2.0` → Vim `E804: Cannot use '%' with Float`, vimlrs `1.0`
+
+### R2-9. `execute()` puts the newline at the wrong end
+- `string(execute("echo 5"))` → Vim `'\n5'` (leading), vimlrs `'5\n'` (trailing)
+
+### R2-10. `str2float()` doesn't parse hex
+- `str2float("0x1f")` → Vim `31.0`, vimlrs `0.0`
+
+### R2-11. `exists("*funcname")` returns 0 for existing builtins
+- `exists("*substitute")` → Vim `1`, vimlrs `0`. The `*` (callable-exists) form is
+  unimplemented; reports every function as absent.
+
+### R2-12. `string(v:none)` returns `v:null`
+- `string(v:none)` → Vim `v:none`, vimlrs `v:null` (`v:none`/`v:null` conflated;
+  `string(v:null)` alone is correct).
+
+### R2-13. `has("vim9script")` returns 0 — minor / feature gap
+- `has("vim9script")` → Vim `1`, vimlrs `0` (likely intentional if vim9script isn't
+  implemented; flagged for completeness).
+
+Areas probed in round 2 that PASSED: `reduce`/`flatten`/`flattennew`/`extendnew`/
+`mapnew`/`slice`, `sort` with `"i"`/`1`/funcref, `add`/`insert`/`remove(dict)` returns,
+`v:true`/`v:false`/`v:null` printing+arithmetic+compare, magic-mode quantifiers
+`\+ \? \{n,m}`, `tr`/`escape`/`shellescape`/`fnameescape`/`strgetchar`/`strcharpart`/
+`byteidx`/`matchstrpos`, `json_encode`/`json_decode`, substitute case escapes
+(`\U \L \u \l \E`), `printf %b %c %x(neg) %05.2f %e`, `get()` dict default.

@@ -102,6 +102,10 @@ enum Node {
     Eol,
     /// Word boundary: `true` = `\<` (start), `false` = `\>` (end).
     WordB(bool),
+    /// `\zs` — zero-width; moves the start of the whole match to here.
+    MatchStart,
+    /// `\ze` — zero-width; moves the end of the whole match to here.
+    MatchEnd,
     Class(Class),
     /// Alternation of branches; `Some(idx)` = capturing group index.
     Group(Vec<Branch>, Option<usize>),
@@ -326,6 +330,15 @@ impl Parser {
             }
             '<' => Node::WordB(true),
             '>' => Node::WordB(false),
+            // `\zs` / `\ze` — set the start / end of the matched text.
+            'z' if self.peek() == Some('s') => {
+                self.i += 1;
+                Node::MatchStart
+            }
+            'z' if self.peek() == Some('e') => {
+                self.i += 1;
+                Node::MatchEnd
+            }
             'd' => class_atom(false, ClassItem::Digit),
             'D' => class_atom(true, ClassItem::Digit),
             'w' => class_atom(false, ClassItem::Word),
@@ -424,9 +437,21 @@ impl Regex {
     pub fn find(&self, text: &[char], ic: bool) -> Option<Captures> {
         let ic = self.effective_ic(ic);
         for start in 0..=text.len() {
-            let mut groups = vec![None; self.ngroups + 1];
+            // Two extra trailing slots hold the `\zs`/`\ze` positions, if any.
+            let mut groups = vec![None; self.ngroups + 3];
             if let Some(end) = self.match_alt(&self.branches, text, start, &mut groups, ic) {
-                groups[0] = Some((start, end));
+                // `\zs` moves the reported start, `\ze` the reported end.
+                let s = match groups[self.ngroups + 1] {
+                    Some((zp, _)) => zp,
+                    None => start,
+                };
+                let e = match groups[self.ngroups + 2] {
+                    Some((ep, _)) => ep,
+                    None => end,
+                };
+                groups[0] = Some((s, e));
+                // Drop the working slots so matchlist() sees only real groups.
+                groups.truncate(self.ngroups + 1);
                 return Some(Captures { groups });
             }
         }
@@ -538,6 +563,22 @@ impl Regex {
             }
             Node::Bol => (pos == 0).then_some(pos),
             Node::Eol => (pos == text.len()).then_some(pos),
+            // c: `\zs`/`\ze` are zero-width and record where the reported match
+            // should start/end (slots reserved just past the capture groups).
+            Node::MatchStart => {
+                let slot = self.ngroups + 1;
+                if let Some(cell) = groups.get_mut(slot) {
+                    *cell = Some((pos, pos));
+                }
+                Some(pos)
+            }
+            Node::MatchEnd => {
+                let slot = self.ngroups + 2;
+                if let Some(cell) = groups.get_mut(slot) {
+                    *cell = Some((pos, pos));
+                }
+                Some(pos)
+            }
             Node::WordB(start) => {
                 let before = pos > 0 && is_word(text[pos - 1]);
                 let after = pos < text.len() && is_word(text[pos]);
@@ -791,34 +832,58 @@ fn expand_sub(sub: &str, chars: &[char], groups: &[Option<(usize, usize)>]) -> S
 /// pieces (from adjacent separators) are kept, matching Vim — only a leading or
 /// trailing empty item is dropped, and only when `keepempty` is false.
 pub fn regex_split(subject: &str, pat: &str, ic: bool, keepempty: bool) -> Vec<String> {
+    // Faithful port of `f_split()` (eval/funcs.c). At each step search for the
+    // next separator at/after the current position; the text before it becomes
+    // an item. The `col` offset keeps a zero-width separator (e.g. `\zs`, the
+    // "split into characters" idiom) from getting stuck at the same spot, so it
+    // advances one character per item.
     let chars: Vec<char> = subject.chars().collect();
+    let n = chars.len();
     let re = Regex::compile(pat);
     let eic = re.effective_ic(ic);
-    let mut out: Vec<String> = Vec::new();
-    let mut pos = 0usize;
-    let mut last = 0usize;
-    while pos <= chars.len() {
-        let mut groups = vec![None; re.ngroups + 1];
-        match re.match_alt(&re.branches, &chars, pos, &mut groups, eic) {
-            // Only a non-zero-width separator splits; the piece before it is
-            // kept even when empty (internal empties survive).
-            Some(end) if end > pos => {
-                out.push(chars[last..pos].iter().collect());
-                pos = end;
-                last = end;
+
+    // Find the first match at or after `from` (match_alt is anchored, so scan).
+    // Returns the separator span (`\zs`/`\ze`-adjusted, like Vim's startp/endp).
+    let find_from = |from: usize| -> Option<(usize, usize)> {
+        let mut p = from;
+        while p <= n {
+            let mut groups = vec![None; re.ngroups + 3];
+            if let Some(end) = re.match_alt(&re.branches, &chars, p, &mut groups, eic) {
+                let startp = groups[re.ngroups + 1].map_or(p, |(zp, _)| zp);
+                let endp = groups[re.ngroups + 2].map_or(end, |(ep, _)| ep);
+                return Some((startp, endp));
             }
-            _ => pos += 1,
+            p += 1;
         }
-    }
-    out.push(chars[last..].iter().collect());
-    if !keepempty {
-        // "When the first or last item is empty it is omitted."
-        if out.first().is_some_and(|s| s.is_empty()) {
-            out.remove(0);
+        None
+    };
+
+    let mut out: Vec<String> = Vec::new();
+    let mut str = 0usize; // start of the current item
+    let mut col = 0usize; // search offset, 1 right after a zero-width match
+    loop {
+        let at_end = str >= n;
+        // c: `while (*str != NUL || keepempty)` — stop unless a trailing empty
+        // item is wanted.
+        if at_end && !keepempty {
+            break;
         }
-        if out.last().is_some_and(|s| s.is_empty()) {
-            out.pop();
+        // c: match = (*str == NUL) ? false : vim_regexec_nl(..., str, col).
+        let m = if at_end { None } else { find_from(str + col) };
+        let (startp, endp) = m.unwrap_or((n, n));
+        let end = if m.is_some() { startp } else { n };
+        // c: keep this item unless it is an omitted leading/trailing empty; an
+        // internal empty between two real (non-zero-width) separators survives.
+        if keepempty || end > str || (!out.is_empty() && !at_end && m.is_some() && end < endp) {
+            out.push(chars[str..end].iter().collect());
         }
+        if m.is_none() {
+            break;
+        }
+        // c: advance past the match; on a zero-width match step one char so the
+        // next search makes progress.
+        col = if endp > str { 0 } else { 1 };
+        str = endp;
     }
     out
 }
