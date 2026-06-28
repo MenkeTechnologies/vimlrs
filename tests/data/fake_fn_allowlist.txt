@@ -356,3 +356,9 @@ shell_filter
 # getmarklist(), and :mark/:k/:delmarks. Home file mark.c, outside the eval tree.
 setmark
 getmark
+
+# ── round 16: normal-mode commands (normal.c / ops.c) ──
+# do_normal runs a bounded subset of normal-mode keys on the buffer; char_class
+# is the word-motion character classifier. Home files normal.c / ops.c.
+do_normal
+char_class

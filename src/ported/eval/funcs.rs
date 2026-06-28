@@ -6068,6 +6068,23 @@ pub fn do_excmd(line: &str) -> ExCmdResult {
             }
             ExCmdResult::Handled
         }
+        "normal" | "norm" => {
+            // `:[range]normal {keys}` runs the keys on each line (cursor at col
+            // 1); without a range it runs once at the cursor. A leading space
+            // after the command separates the keys verbatim.
+            let keys = rest[cmd_end + if bang { 1 } else { 0 }..]
+                .strip_prefix(' ')
+                .unwrap_or(args);
+            if had_range {
+                for lnum in lo..=hi.min(curbuf_len()) {
+                    set_cursorpos(lnum, 1);
+                    do_normal(keys);
+                }
+            } else {
+                do_normal(keys);
+            }
+            ExCmdResult::Handled
+        }
         "delmarks" | "delm" => {
             if bang {
                 MARKS.with(|m| m.borrow_mut().clear());
@@ -6338,6 +6355,311 @@ fn ex_join(lo: varnumber_T, hi: varnumber_T, keep: bool) {
         }
     });
     set_cursorpos(lo, 1);
+}
+
+// ── Normal-mode commands (Neovim normal.c / ops.c), a bounded subset that runs
+//    motions, deletes, yanks, puts and simple edits on the in-memory buffer.
+//    No insert mode (i/a/o…), so editing keys map to their delete equivalents. ──
+
+/// Character class for word motions: 0 blank, 1 keyword (alnum/`_`), 2 other.
+fn char_class(c: char) -> u8 {
+    if c.is_whitespace() {
+        0
+    } else if c.is_alphanumeric() || c == '_' {
+        1
+    } else {
+        2
+    }
+}
+
+/// Port of `do_normal()` / `normal_cmd()` (Neovim normal.c), bounded subset.
+/// Runs the key sequence `keys` against the current buffer/cursor (ASCII; the
+/// cursor column is treated as a character index).
+pub fn do_normal(keys: &str) {
+    let k: Vec<char> = keys.chars().collect();
+    let nlines = || curbuf_len();
+    let line_chars = |l: varnumber_T| -> Vec<char> {
+        get_buffer_lines(l, l)
+            .into_iter()
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .collect()
+    };
+    let put_line = |l: varnumber_T, cs: &[char]| {
+        set_buffer_lines(l, vec![cs.iter().collect()], false);
+    };
+    let cur = || CURPOS.with(|c| (c.borrow().0, c.borrow().1));
+    // Forward word motion (`w`): step to the next word's start.
+    let word_fwd = |l0: varnumber_T, ci0: usize| -> (varnumber_T, usize) {
+        let (mut l, mut ci) = (l0, ci0);
+        let mut line = line_chars(l);
+        if ci < line.len() {
+            let cls = char_class(line[ci]);
+            while ci < line.len() && char_class(line[ci]) == cls && cls != 0 {
+                ci += 1;
+            }
+        }
+        loop {
+            while ci < line.len() && char_class(line[ci]) == 0 {
+                ci += 1;
+            }
+            if ci < line.len() {
+                break;
+            }
+            if l < nlines() {
+                l += 1;
+                line = line_chars(l);
+                ci = 0;
+            } else {
+                ci = line.len();
+                break;
+            }
+        }
+        (l, ci)
+    };
+    // Word-end motion (`e`): step to the end of the next word.
+    let word_end = |l0: varnumber_T, ci0: usize| -> (varnumber_T, usize) {
+        let line = line_chars(l0);
+        let mut ci = ci0 + 1;
+        while ci < line.len() && char_class(line[ci]) == 0 {
+            ci += 1;
+        }
+        if ci < line.len() {
+            let cls = char_class(line[ci]);
+            while ci + 1 < line.len() && char_class(line[ci + 1]) == cls {
+                ci += 1;
+            }
+        }
+        (l0, ci.min(line.len().saturating_sub(1)))
+    };
+    // Back word motion (`b`).
+    let word_back = |l0: varnumber_T, ci0: usize| -> (varnumber_T, usize) {
+        let line = line_chars(l0);
+        let mut ci = ci0;
+        if ci == 0 {
+            return (l0, 0);
+        }
+        ci -= 1;
+        while ci > 0 && char_class(line[ci]) == 0 {
+            ci -= 1;
+        }
+        if ci < line.len() {
+            let cls = char_class(line[ci]);
+            while ci > 0 && char_class(line[ci - 1]) == cls {
+                ci -= 1;
+            }
+        }
+        (l0, ci)
+    };
+
+    let mut i = 0usize;
+    while i < k.len() {
+        // Leading count (a leading `0` is the start-of-line motion, not a count).
+        let mut count: i64 = 0;
+        let mut has_count = false;
+        while i < k.len() && k[i].is_ascii_digit() && (k[i] != '0' || has_count) {
+            count = count * 10 + (k[i] as i64 - '0' as i64);
+            has_count = true;
+            i += 1;
+        }
+        if i >= k.len() {
+            break;
+        }
+        let cmd = k[i];
+        i += 1;
+        let n = if has_count { count.max(1) } else { 1 };
+        let (l, ci) = {
+            let (cl, cc) = cur();
+            (cl, (cc - 1).max(0) as usize)
+        };
+        match cmd {
+            'h' => set_cursorpos(l, (ci as varnumber_T + 1 - n).max(1)),
+            'l' => set_cursorpos(l, ci as varnumber_T + 1 + n),
+            '0' => set_cursorpos(l, 1),
+            '^' => {
+                let line = line_chars(l);
+                let f = line.iter().position(|c| !c.is_whitespace()).unwrap_or(0);
+                set_cursorpos(l, f as varnumber_T + 1);
+            }
+            '$' => {
+                let len = line_chars(l).len().max(1);
+                set_cursorpos(l, len as varnumber_T);
+            }
+            'j' => set_cursorpos((l + n).min(nlines()), ci as varnumber_T + 1),
+            'k' => set_cursorpos((l - n).max(1), ci as varnumber_T + 1),
+            'G' => set_cursorpos(if has_count { count } else { nlines() }, 1),
+            '|' => set_cursorpos(l, n),
+            'g' => {
+                if i < k.len() && k[i] == 'g' {
+                    i += 1;
+                    set_cursorpos(if has_count { count } else { 1 }, 1);
+                }
+            }
+            'w' => {
+                let (mut tl, mut tc) = (l, ci);
+                for _ in 0..n {
+                    let (a, b) = word_fwd(tl, tc);
+                    tl = a;
+                    tc = b;
+                }
+                set_cursorpos(tl, tc as varnumber_T + 1);
+            }
+            'b' => {
+                let (mut tl, mut tc) = (l, ci);
+                for _ in 0..n {
+                    let (a, b) = word_back(tl, tc);
+                    tl = a;
+                    tc = b;
+                }
+                set_cursorpos(tl, tc as varnumber_T + 1);
+            }
+            'e' => {
+                let (mut tl, mut tc) = (l, ci);
+                for _ in 0..n {
+                    let (a, b) = word_end(tl, tc);
+                    tl = a;
+                    tc = b;
+                }
+                set_cursorpos(tl, tc as varnumber_T + 1);
+            }
+            'x' => {
+                let mut line = line_chars(l);
+                let end = (ci + n as usize).min(line.len());
+                if ci < line.len() {
+                    let removed: String = line[ci..end].iter().collect();
+                    write_reg_contents_lst('"', vec![removed], MotionType::CharWise, false);
+                    line.drain(ci..end);
+                    put_line(l, &line);
+                    set_cursorpos(
+                        l,
+                        (ci as varnumber_T + 1).min(line.len().max(1) as varnumber_T),
+                    );
+                }
+            }
+            'X' => {
+                let mut line = line_chars(l);
+                let start = ci.saturating_sub(n as usize);
+                if ci > 0 {
+                    line.drain(start..ci);
+                    put_line(l, &line);
+                    set_cursorpos(l, start as varnumber_T + 1);
+                }
+            }
+            'D' | 'C' => {
+                let mut line = line_chars(l);
+                if ci < line.len() {
+                    let removed: String = line[ci..].iter().collect();
+                    write_reg_contents_lst('"', vec![removed], MotionType::CharWise, false);
+                    line.truncate(ci);
+                    put_line(l, &line);
+                }
+            }
+            'd' | 'c' | 'y' => {
+                let op = cmd;
+                let m = if i < k.len() { k[i] } else { ' ' };
+                i += 1;
+                // Doubled operator (dd/cc/yy) → linewise on `n` lines.
+                if m == op || (op == 'c' && m == 'c') {
+                    let last = (l + n - 1).min(nlines());
+                    let lines = get_buffer_lines(l, last);
+                    write_reg_contents_lst('"', lines, MotionType::LineWise, false);
+                    if op != 'y' {
+                        CURBUF.with(|b| {
+                            let mut b = b.borrow_mut();
+                            let (a, z) = ((l - 1) as usize, (last as usize).min(b.len()));
+                            b.drain(a..z);
+                            if b.is_empty() {
+                                b.push(String::new());
+                            }
+                        });
+                        set_cursorpos(l, 1);
+                    }
+                } else {
+                    // Charwise operator + motion on the current line.
+                    let line = line_chars(l);
+                    let target = match m {
+                        '$' => line.len(),
+                        '0' => 0,
+                        'w' => word_fwd(l, ci).1.min(line.len()),
+                        'e' => word_end(l, ci).1 + 1,
+                        'l' => (ci + 1).min(line.len()),
+                        'h' => ci.saturating_sub(1),
+                        _ => ci,
+                    };
+                    let (a, z) = (ci.min(target), ci.max(target));
+                    let removed: String = line[a..z.min(line.len())].iter().collect();
+                    write_reg_contents_lst('"', vec![removed], MotionType::CharWise, false);
+                    if op != 'y' {
+                        let mut nl = line.clone();
+                        nl.drain(a..z.min(nl.len()));
+                        put_line(l, &nl);
+                        set_cursorpos(l, a as varnumber_T + 1);
+                    }
+                }
+            }
+            'Y' => {
+                let last = (l + n - 1).min(nlines());
+                write_reg_contents_lst('"', get_buffer_lines(l, last), MotionType::LineWise, false);
+            }
+            'p' | 'P' => {
+                let (mtype, _) = get_reg_type('"');
+                if let Some(reg) = get_reg_contents('"') {
+                    if mtype == MotionType::LineWise {
+                        let at = if cmd == 'p' { l } else { l - 1 };
+                        set_buffer_lines(at, reg.clone(), true);
+                        set_cursorpos(at + 1, 1);
+                    } else {
+                        let mut line = line_chars(l);
+                        let at = if cmd == 'p' {
+                            (ci + 1).min(line.len())
+                        } else {
+                            ci
+                        };
+                        let text: Vec<char> = reg.join("").chars().collect();
+                        for (j, c) in text.iter().enumerate() {
+                            line.insert(at + j, *c);
+                        }
+                        put_line(l, &line);
+                        set_cursorpos(l, (at + text.len()) as varnumber_T);
+                    }
+                }
+            }
+            'J' => {
+                let last = (l + n.max(2) - 1).min(nlines());
+                ex_join(l, last, false);
+            }
+            'r' => {
+                if i < k.len() {
+                    let rc = k[i];
+                    i += 1;
+                    let mut line = line_chars(l);
+                    for j in 0..n as usize {
+                        if ci + j < line.len() {
+                            line[ci + j] = rc;
+                        }
+                    }
+                    put_line(l, &line);
+                }
+            }
+            '~' => {
+                let mut line = line_chars(l);
+                for j in 0..n as usize {
+                    if ci + j < line.len() {
+                        let c = line[ci + j];
+                        line[ci + j] = if c.is_uppercase() {
+                            c.to_ascii_lowercase()
+                        } else {
+                            c.to_ascii_uppercase()
+                        };
+                    }
+                }
+                put_line(l, &line);
+                set_cursorpos(l, (ci + n as usize).min(line.len().max(1)) as varnumber_T);
+            }
+            _ => {}
+        }
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════════════
