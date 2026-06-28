@@ -228,9 +228,3 @@ pub fn searchpair_cmn() {
 pub fn set_position() {
     unimplemented!("STUB set_position — csrc/eval/funcs.c:6442")
 }
-
-/// Port of `get_xdg_var_list()` — `csrc/eval/funcs.c:7140`. STUB: not yet ported.
-/// C: `static void get_xdg_var_list(const XDGVarType xdg, typval_T *rettv)`
-pub fn get_xdg_var_list() {
-    unimplemented!("STUB get_xdg_var_list — csrc/eval/funcs.c:7140")
-}

@@ -383,3 +383,9 @@ mpack_pack_array_len
 mpack_pack_map_len
 mpack_decode_one
 mpack_input_bytes
+
+# ── round 22: stdpath appname (eval/funcs.c get_xdg_var_list + os/env.c) ──
+# get_appname is Neovim's $NVIM_APPNAME resolver (os/env.c, home file not under
+# the vendored csrc/eval/ tree). get_xdg_var_list is a real funcs.c name and
+# drops from the stub tree on regeneration.
+get_appname

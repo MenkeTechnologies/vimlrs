@@ -5037,24 +5037,42 @@ pub fn f_perleval(_argvars: &[typval_T], rettv: &mut typval_T) {
 /// Port of `f_stdpath()` from `Src/eval/funcs.c` — the standard Nvim path of a
 /// given kind, resolved from the XDG base-directory environment variables (with
 /// the usual `~/.config`-style defaults) plus the `nvim` app subdirectory.
+/// Port of `get_appname()` (Neovim `src/nvim/os/env.c`, home file not under the
+/// vendored `csrc/eval/` tree). The application name used in the XDG paths:
+/// `$NVIM_APPNAME` when set and non-empty, else "nvim".
+fn get_appname() -> String {
+    std::env::var("NVIM_APPNAME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "nvim".to_string())
+}
+
+/// Port of `get_xdg_var_list()` — `csrc/eval/funcs.c:7140`. Split the XDG
+/// directory list in `$env` (or `default` when unset/empty) on the path
+/// separator and append the appname to each entry. Used by stdpath()'s
+/// `config_dirs`/`data_dirs`.
+fn get_xdg_var_list(env: &str, default: &str) -> Vec<String> {
+    let appname = get_appname();
+    let val = std::env::var(env)
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| default.to_string());
+    val.split(':')
+        .filter(|s| !s.is_empty())
+        .map(|d| format!("{d}/{appname}"))
+        .collect()
+}
+
 pub fn f_stdpath(argvars: &[typval_T], rettv: &mut typval_T) {
     let home = std::env::var("HOME").unwrap_or_default();
+    let appname = get_appname();
+    // c: stdpaths_get_xdg_var(xdg) then concat the appname.
     let xdg_home = |env: &str, default_rel: &str| -> String {
         let base = std::env::var(env)
             .ok()
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| format!("{home}/{default_rel}"));
-        format!("{base}/nvim")
-    };
-    let xdg_dirs = |env: &str, default: &str| -> Vec<String> {
-        let val = std::env::var(env)
-            .ok()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| default.to_string());
-        val.split(':')
-            .filter(|s| !s.is_empty())
-            .map(|d| format!("{d}/nvim"))
-            .collect()
+        format!("{base}/{appname}")
     };
     let kind = tv_get_string(&argvars[0]);
     match kind.as_str() {
@@ -5070,13 +5088,13 @@ pub fn f_stdpath(argvars: &[typval_T], rettv: &mut typval_T) {
         }
         "run" => {
             let run = std::env::var("XDG_RUNTIME_DIR").unwrap_or_default();
-            *rettv = typval_T::from(format!("{run}/nvim"));
+            *rettv = typval_T::from(format!("{run}/{appname}"));
         }
         "config_dirs" | "data_dirs" => {
             let dirs = if kind == "config_dirs" {
-                xdg_dirs("XDG_CONFIG_DIRS", "/etc/xdg")
+                get_xdg_var_list("XDG_CONFIG_DIRS", "/etc/xdg")
             } else {
-                xdg_dirs("XDG_DATA_DIRS", "/usr/local/share:/usr/share")
+                get_xdg_var_list("XDG_DATA_DIRS", "/usr/local/share:/usr/share")
             };
             let l = tv_list_alloc_ret(rettv, dirs.len() as isize);
             let mut lb = l.borrow_mut();

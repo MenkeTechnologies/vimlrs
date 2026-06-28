@@ -20,6 +20,21 @@ call assert_equal(home . '/.config/nvim', stdpath('config'))
 call assert_equal(type([]), type(stdpath('config_dirs')))
 call assert_equal(type(''), type(stdpath('run')))
 
+" ── the app subdir honours $NVIM_APPNAME (get_appname), 'nvim' by default ──
+" Derive the expected appname so this holds whether or not NVIM_APPNAME is set.
+let appname = getenv('NVIM_APPNAME')
+if appname == v:null || appname ==# ''
+  let appname = 'nvim'
+endif
+for kind in ['config', 'data', 'cache', 'state']
+  call assert_match('/' . appname . '$', stdpath(kind))
+endfor
+for d in stdpath('config_dirs') + stdpath('data_dirs')
+  call assert_match('/' . appname . '$', d)
+endfor
+" An unknown kind is an error.
+call assert_fails("call stdpath('bogus')", 'E6100')
+
 " ── remaining inactive builtins ──
 call assert_equal('plain', keytrans('plain'))
 call assert_equal(v:null, luaeval('vim.fn'))
