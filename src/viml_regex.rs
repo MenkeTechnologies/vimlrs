@@ -108,6 +108,9 @@ enum Node {
     MatchEnd,
     /// `\1`..`\9` — backreference to the text captured by that group.
     BackRef(usize),
+    /// `\%[atoms]` — a sequence of optionally-matched atoms; matches the longest
+    /// in-order prefix of them (greedy), including the empty match.
+    OptSeq(Vec<Node>),
     Class(Class),
     /// Alternation of branches; `Some(idx)` = capturing group index.
     Group(Vec<Branch>, Option<usize>),
@@ -428,6 +431,21 @@ impl Parser {
                 self.close_group();
                 Node::Group(branches, None)
             }
+            // `\%[atoms]` — optional-sequence atom (matches a greedy prefix).
+            '%' if self.peek() == Some('[') => {
+                self.i += 1; // past '['
+                let mut nodes = Vec::new();
+                while self.peek().is_some() && self.peek() != Some(']') {
+                    match self.atom(false) {
+                        Some(n) => nodes.push(n),
+                        None => break,
+                    }
+                }
+                if self.peek() == Some(']') {
+                    self.i += 1; // past ']'
+                }
+                Node::OptSeq(nodes)
+            }
             '<' => Node::WordB(true),
             '>' => Node::WordB(false),
             // `\zs` / `\ze` — set the start / end of the matched text.
@@ -691,6 +709,18 @@ impl Regex {
                     before && !after
                 };
                 ok.then_some(pos)
+            }
+            Node::OptSeq(nodes) => {
+                // Greedily match the longest in-order prefix of the atoms; each
+                // is optional, so stop at the first that does not match.
+                let mut p = pos;
+                for n in nodes {
+                    match self.match_one(n, text, p, groups, ic) {
+                        Some(next) => p = next,
+                        None => break,
+                    }
+                }
+                Some(p)
             }
             Node::BackRef(n) => {
                 // Match the exact text previously captured by group `n`. An unset

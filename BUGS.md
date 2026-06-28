@@ -173,7 +173,10 @@ corresponding group captured (unset group → empty). Covered by
 - `substitute("hello","\(l\)\1","X","")` → Vim `heXo`, vimlrs `hello`
 - Capture-group backreferences in the search pattern are not honored.
 
-### R2-4. `\%[...]` optional-sequence atom unsupported
+### R2-4. `\%[...]` optional-sequence atom unsupported — ✅ FIXED
+Added `Node::OptSeq`: `\%[atoms]` matches a greedy in-order prefix of its atoms
+(each optional), e.g. `r\%[ead]` → r/re/rea/read. Covered by
+`examples/regex_optseq.vim`.
 - `matchstr("function","f\%[unc]")` → Vim `func`, vimlrs `` (empty)
 
 ### R2-5. `printf("%g"/"%G", …)` formatting diverges
