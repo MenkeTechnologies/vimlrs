@@ -1163,6 +1163,8 @@ pub const VIML_FN_DICTWATCHERDEL: u16 = 3218;
 pub const VIML_SET_LINENO: u16 = 3070;
 /// User-function call: pop `argc` args then the name → run the function.
 pub const VIML_CALL_USER: u16 = 3071;
+/// Funcref-value call: pop `argc` args then a Funcref/Partial value → call it.
+pub const VIML_CALL_FUNCREF: u16 = 3574;
 /// `:return {expr}`: pop the value → store it as the current call's result.
 pub const VIML_SET_RETURN: u16 = 3072;
 /// `:throw {expr}`: pop the value → raise it as the pending exception.
@@ -1796,6 +1798,25 @@ fn try_autoload(name: &str) -> bool {
             true
         }
         Err(_) => false,
+    }
+}
+
+/// Direct call of a funcref VALUE: stack is `[funcref, arg0, …, arg{argc-1}]`
+/// (the callee pushed first). Backs `expr(args)` for a funcref-valued `expr`.
+fn b_call_funcref(vm: &mut VM, argc: u8) -> Value {
+    let mut args = Vec::with_capacity(argc as usize);
+    for _ in 0..argc {
+        args.push(pop_tv(vm));
+    }
+    args.reverse();
+    let callee = pop_tv(vm);
+    if !matches!(callee.v_type, VAR_FUNC | VAR_PARTIAL) {
+        message::emsg("E15: not a function");
+        return Value::Undef;
+    }
+    match call_funcref(&callee, args) {
+        Some(rettv) => tv_to_value(rettv),
+        None => Value::Undef,
     }
 }
 
@@ -3423,6 +3444,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FN_ASSERT_NOBEEP, b_assert_nobeep);
     vm.register_builtin(VIML_SET_LINENO, b_set_lineno);
     vm.register_builtin(VIML_CALL_USER, b_call_user);
+    vm.register_builtin(VIML_CALL_FUNCREF, b_call_funcref);
     vm.register_builtin(VIML_SET_RETURN, b_set_return);
     vm.register_builtin(VIML_THROW, b_throw);
     vm.register_builtin(VIML_CHECK_EXC, b_check_exc);

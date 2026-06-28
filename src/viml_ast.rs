@@ -110,6 +110,14 @@ pub enum Expr {
         /// Argument expressions.
         args: Vec<Expr>,
     },
+    /// Direct call of a funcref-valued expression: `expr(args)` (e.g.
+    /// `function('toupper')('hi')` or `(F)(x)`).
+    CallExpr {
+        /// Expression evaluating to a Funcref/Partial.
+        callee: Box<Expr>,
+        /// Argument expressions.
+        args: Vec<Expr>,
+    },
     /// Method call `base->name(args)`.
     Method {
         /// Receiver (first argument).

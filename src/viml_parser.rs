@@ -962,6 +962,16 @@ impl Parser {
         }
     }
 
+    /// True when the `(` at the current position directly abuts the previous
+    /// token (no whitespace), i.e. it is a call applied to the preceding value
+    /// rather than a separate parenthesised argument.
+    fn lparen_abuts_prev(&self) -> bool {
+        let i = self.i;
+        i > 0
+            && self.toks.get(i).is_some_and(|t| t.kind == Tok::LParen)
+            && self.toks[i].span == self.toks[i - 1].end
+    }
+
     /// True when the `Tok::Dot` at the current position is a dict member access
     /// `d.key` rather than the `..`-style concat operator: it must directly abut
     /// the base (no space before) and be immediately followed by a bare name (no
@@ -1004,6 +1014,20 @@ impl Parser {
                     };
                     continue;
                 }
+            }
+            // `expr(args)` — call a funcref-valued expression directly. Only when
+            // `(` abuts the base (no space): a bare `name(...)` is already a Call
+            // from `primary`, so an abutting `(` here always follows another
+            // postfix result (`function('x')(a)`, `funcs[0](a)`); a spaced
+            // `echo F (1)` stays two arguments.
+            if matches!(self.peek(), Tok::LParen) && self.lparen_abuts_prev() {
+                self.advance(); // consume '('
+                let args = self.arg_list(&Tok::RParen)?;
+                base = Expr::CallExpr {
+                    callee: Box::new(base),
+                    args,
+                };
+                continue;
             }
             match self.peek() {
                 Tok::LBracket => {

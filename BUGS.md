@@ -185,7 +185,11 @@ next argument (negative width left-justifies). Covered by `examples/printf_exist
 - `printf("%S","abc")` → Vim `abc`, vimlrs `%S`
 - `printf("%*d",5,3)` → Vim `    3`, vimlrs `%*d`
 
-### R2-7. A funcref value can't be called directly with `(...)`
+### R2-7. A funcref value can't be called directly with `(...)` — ✅ FIXED
+Added an `Expr::CallExpr` AST node (an abutting `(` after a postfix value) and a
+`VIML_CALL_FUNCREF` op that calls the funcref value. Works for `function('x')(a)`,
+lambda literals `{x->x}(a)`, and indexed funcrefs `fns[0](a)`. Covered by
+`examples/funcref_call.vim`.
 - `function("toupper")("hi")` → Vim `HI`, vimlrs `E15: Invalid expression: trailing tokens`
 - `call()` works; direct call syntax on a funcref expression does not.
 

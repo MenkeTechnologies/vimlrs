@@ -107,6 +107,10 @@ fn collect_free_vars(
         }
         Expr::Member { base, .. } => collect_free_vars(base, bound, out),
         Expr::Call { args, .. } => args.iter().for_each(|a| collect_free_vars(a, bound, out)),
+        Expr::CallExpr { callee, args } => {
+            collect_free_vars(callee, bound, out);
+            args.iter().for_each(|a| collect_free_vars(a, bound, out));
+        }
         Expr::Method { base, args, .. } => {
             collect_free_vars(base, bound, out);
             args.iter().for_each(|a| collect_free_vars(a, bound, out));
@@ -1715,6 +1719,19 @@ impl Compiler {
                         self.emit_call_unwind_check();
                     }
                 }
+            }
+            // `expr(args)` — evaluate the callee to a Funcref/Partial, push the
+            // args, then call the value. Stack: [funcref, arg0, …, argN].
+            Expr::CallExpr { callee, args } => {
+                self.expr(callee)?;
+                for a in args {
+                    self.expr(a)?;
+                }
+                self.emit(Op::CallBuiltin(
+                    h::VIML_CALL_FUNCREF,
+                    Self::argc(args.len())?,
+                ));
+                self.emit_call_unwind_check();
             }
             Expr::Method { base, name, args } => match builtin_fn_id(name) {
                 Some(id) => {
