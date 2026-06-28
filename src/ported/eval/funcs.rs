@@ -477,7 +477,12 @@ pub fn f_has(argvars: &[typval_T], rettv: &mut typval_T) {
 /// exists (the `*func`/`:cmd`/option forms arrive with their ports).
 pub fn f_exists(argvars: &[typval_T], rettv: &mut typval_T) {
     let name = tv_get_string(&argvars[0]);
-    let present = crate::ported::eval::vars::eval_variable(&name).is_some();
+    // c: a leading '#' queries autocommands — `#{event}` or `#{event}#{pat}`.
+    let present = if let Some(au) = name.strip_prefix('#') {
+        au_exists(au)
+    } else {
+        crate::ported::eval::vars::eval_variable(&name).is_some()
+    };
     rettv.vval = v_number(present as varnumber_T);
 }
 
@@ -4840,6 +4845,176 @@ pub fn ex_delcommand(arg: &str) {
     USER_COMMANDS.with(|c| {
         c.borrow_mut().remove(name);
     });
+}
+
+// ── Autocommands (Neovim autocmd.c). `:autocmd {event} {pat} {cmd}` registers
+//    a command to run on an event; `:doautocmd {event} [{pat}]` fires matching
+//    ones. `:augroup` sets the active group. Self-contained — events do not
+//    auto-fire without an editor, but :doautocmd triggers them. ──
+
+/// One registered autocommand (`AutoCmd`/`AutoPat` in autocmd.c).
+#[derive(Clone)]
+pub struct AutoCmd {
+    pub group: String,
+    pub event: String,
+    pub pat: String,
+    pub cmd: String,
+}
+
+thread_local! {
+    /// The autocommand list (`first_autopat[]` in autocmd.c).
+    static AUTOCMDS: std::cell::RefCell<Vec<AutoCmd>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// The `:augroup` in effect (`current_augroup`), "" for the default group.
+    static CURRENT_AUGROUP: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// Port of `match_file_pat()` (Neovim autocmd.c/fileio.c) — whether the file
+/// glob `pat` (with `*`/`?`) matches `name`. Iterative wildcard match.
+fn match_file_pat(pat: &str, name: &str) -> bool {
+    let p: Vec<char> = pat.chars().collect();
+    let s: Vec<char> = name.chars().collect();
+    let (mut pi, mut si) = (0usize, 0usize);
+    let (mut star, mut mark): (Option<usize>, usize) = (None, 0);
+    while si < s.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == s[si]) {
+            pi += 1;
+            si += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some(pi);
+            mark = si;
+            pi += 1;
+        } else if let Some(sp) = star {
+            pi = sp + 1;
+            mark += 1;
+            si = mark;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
+/// Port of `do_augroup()` (Neovim autocmd.c) — set the active autocommand group;
+/// `END`/`end` (or empty) returns to the default group.
+pub fn do_augroup(name: &str) {
+    let name = name.trim();
+    let g = if name.is_empty() || name.eq_ignore_ascii_case("end") {
+        String::new()
+    } else {
+        name.to_string()
+    };
+    CURRENT_AUGROUP.with(|c| *c.borrow_mut() = g);
+}
+
+/// Port of `do_autocmd()` (Neovim autocmd.c) — register (or, with `!`, replace/
+/// remove) an autocommand from a `:autocmd` argument: `[!] {event} {pat}
+/// [{cmd}]`. Comma-separated events register one entry each.
+pub fn do_autocmd(arg: &str) {
+    let mut s = arg.trim();
+    let force = s.starts_with('!');
+    s = s.strip_prefix('!').unwrap_or(s).trim_start();
+    let group = CURRENT_AUGROUP.with(|c| c.borrow().clone());
+    if s.is_empty() {
+        // `:autocmd!` — remove every autocommand in the current group.
+        if force {
+            AUTOCMDS.with(|a| a.borrow_mut().retain(|ac| ac.group != group));
+        }
+        return;
+    }
+    let (events_tok, rest) = match s.find(char::is_whitespace) {
+        Some(i) => (&s[..i], s[i..].trim_start()),
+        None => (s, ""),
+    };
+    let events: Vec<String> = events_tok
+        .split(',')
+        .filter(|e| !e.is_empty())
+        .map(|e| e.to_ascii_lowercase())
+        .collect();
+    if rest.is_empty() {
+        // `:autocmd! {event}` — remove the event's autocommands in this group.
+        if force {
+            AUTOCMDS.with(|a| {
+                a.borrow_mut()
+                    .retain(|ac| !(ac.group == group && events.contains(&ac.event)))
+            });
+        }
+        return;
+    }
+    let (pat, cmd) = match rest.find(char::is_whitespace) {
+        Some(i) => (&rest[..i], rest[i..].trim()),
+        None => (rest, ""),
+    };
+    if cmd.is_empty() {
+        // `:autocmd! {event} {pat}` — remove that event+pattern in this group.
+        if force {
+            AUTOCMDS.with(|a| {
+                a.borrow_mut().retain(|ac| {
+                    !(ac.group == group && events.contains(&ac.event) && ac.pat == pat)
+                })
+            });
+        }
+        return;
+    }
+    AUTOCMDS.with(|a| {
+        let mut a = a.borrow_mut();
+        for event in &events {
+            // c: `:autocmd!` replaces any existing event+pattern first.
+            if force {
+                a.retain(|ac| !(ac.group == group && &ac.event == event && ac.pat == pat));
+            }
+            a.push(AutoCmd {
+                group: group.clone(),
+                event: event.clone(),
+                pat: pat.to_string(),
+                cmd: cmd.to_string(),
+            });
+        }
+    });
+}
+
+/// Port of `apply_autocmds()` (Neovim autocmd.c) — the commands of every
+/// autocommand for `event` whose pattern matches `target`, in registration
+/// order. The caller runs them.
+pub fn apply_autocmds(event: &str, target: &str) -> Vec<String> {
+    let evt = event.to_ascii_lowercase();
+    AUTOCMDS.with(|a| {
+        a.borrow()
+            .iter()
+            .filter(|ac| ac.event == evt && match_file_pat(&ac.pat, target))
+            .map(|ac| ac.cmd.clone())
+            .collect()
+    })
+}
+
+/// Port of `do_doautocmd()` (Neovim autocmd.c) — parse a `:doautocmd` argument
+/// (`[group] {event} [{target}]`) and return the matching autocommands to run.
+pub fn do_doautocmd(arg: &str) -> Vec<String> {
+    let s = arg.trim();
+    let (event, target) = match s.find(char::is_whitespace) {
+        Some(i) => (&s[..i], s[i..].trim()),
+        None => (s, "*"),
+    };
+    if event.is_empty() {
+        return Vec::new();
+    }
+    apply_autocmds(event, target)
+}
+
+/// Port of `au_exists()` (Neovim autocmd.c) — whether autocommands exist for an
+/// `exists()` query of the form `#{event}` or `#{event}#{pat}`.
+pub fn au_exists(arg: &str) -> bool {
+    let mut parts = arg.splitn(2, '#');
+    let event = parts.next().unwrap_or("").to_ascii_lowercase();
+    let pat = parts.next();
+    AUTOCMDS.with(|a| {
+        #[allow(clippy::unnecessary_map_or)]
+        a.borrow()
+            .iter()
+            .any(|ac| ac.event == event && pat.map_or(true, |p| ac.pat == p))
+    })
 }
 
 // ════════════════════════════════════════════════════════════════════════════

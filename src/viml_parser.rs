@@ -77,6 +77,16 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
         "delcommand" | "delc" if !line[cmd.len()..].starts_with('(') => {
             Ok(Stmt::CommandDel(rest.to_string()))
         }
+        // `:autocmd`/`:augroup`/`:doautocmd` (with abbreviations).
+        "autocmd" | "autocm" | "autoc" | "auto" | "au" if !line[cmd.len()..].starts_with('(') => {
+            Ok(Stmt::Autocmd(line[cmd.len()..].trim_start().to_string()))
+        }
+        "augroup" | "aug" if !line[cmd.len()..].starts_with('(') => {
+            Ok(Stmt::Augroup(rest.to_string()))
+        }
+        "doautocmd" | "doau" | "doautoall" if !line[cmd.len()..].starts_with('(') => {
+            Ok(Stmt::Doautocmd(rest.to_string()))
+        }
         // `:map`-family commands (`nmap`/`inoremap`/`vunmap`/`mapclear`/`map!`).
         // The bare `map`/`unmap`/… forms collide with the `map()`/`filter()`
         // builtins, so a name immediately followed by `(` stays an expression.

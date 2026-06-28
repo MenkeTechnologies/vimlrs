@@ -287,4 +287,10 @@ pub enum Stmt {
     /// Invocation of a user command (`:Name args`): the whole raw line,
     /// resolved against the user-command table at run time.
     UserCmd(String),
+    /// `:autocmd[!] {event} {pat} {cmd}` — register an autocommand (raw args).
+    Autocmd(String),
+    /// `:augroup {name}` / `:augroup END` — set the active autocommand group.
+    Augroup(String),
+    /// `:doautocmd {event} [{pat}]` — fire matching autocommands.
+    Doautocmd(String),
 }

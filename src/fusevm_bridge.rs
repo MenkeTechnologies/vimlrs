@@ -388,6 +388,12 @@ pub const VIML_COMMAND: u16 = 3563;
 pub const VIML_DELCOMMAND: u16 = 3564;
 /// User-command invocation: pop the raw line, expand + run the replacement.
 pub const VIML_USERCMD: u16 = 3565;
+/// `:autocmd` statement: pop the args, register via `do_autocmd`.
+pub const VIML_AUTOCMD: u16 = 3566;
+/// `:augroup` statement: pop the name, set the group via `do_augroup`.
+pub const VIML_AUGROUP: u16 = 3567;
+/// `:doautocmd` statement: pop the args, fire matching autocommands.
+pub const VIML_DOAUTOCMD: u16 = 3568;
 /// `:source {file}`: pop the filename, read and run it in the current scope.
 pub const VIML_SOURCE: u16 = 3500;
 /// `:unlet {name}`: pop the name, delete the variable.
@@ -2300,6 +2306,29 @@ fn b_delcommand(vm: &mut VM, _: u8) -> Value {
     Value::Undef
 }
 
+/// `:autocmd` statement: pop the args, register the autocommand.
+fn b_autocmd(vm: &mut VM, _: u8) -> Value {
+    let args = tv_get_string(&pop_tv(vm));
+    crate::ported::eval::funcs::do_autocmd(&args);
+    Value::Undef
+}
+
+/// `:augroup` statement: pop the name, set the active autocommand group.
+fn b_augroup(vm: &mut VM, _: u8) -> Value {
+    let name = tv_get_string(&pop_tv(vm));
+    crate::ported::eval::funcs::do_augroup(&name);
+    Value::Undef
+}
+
+/// `:doautocmd` statement: pop the args, run every matching autocommand.
+fn b_doautocmd(vm: &mut VM, _: u8) -> Value {
+    let args = tv_get_string(&pop_tv(vm));
+    for cmd in crate::ported::eval::funcs::do_doautocmd(&args) {
+        let _ = run_source_nested(&cmd);
+    }
+    Value::Undef
+}
+
 /// User-command invocation: pop the raw line (`Name[!] args`), expand the
 /// command's replacement and run it; error E492 if there is no such command.
 fn b_usercmd(vm: &mut VM, _: u8) -> Value {
@@ -2774,6 +2803,9 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_COMMAND, b_command);
     vm.register_builtin(VIML_DELCOMMAND, b_delcommand);
     vm.register_builtin(VIML_USERCMD, b_usercmd);
+    vm.register_builtin(VIML_AUTOCMD, b_autocmd);
+    vm.register_builtin(VIML_AUGROUP, b_augroup);
+    vm.register_builtin(VIML_DOAUTOCMD, b_doautocmd);
     vm.register_builtin(VIML_FN_JSON_ENCODE, |vm, n| call_func(vm, n, f_json_encode));
     vm.register_builtin(VIML_FN_JSON_DECODE, |vm, n| call_func(vm, n, f_json_decode));
     vm.register_builtin(VIML_FN_STRGETCHAR, |vm, n| call_func(vm, n, f_strgetchar));

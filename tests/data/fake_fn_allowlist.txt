@@ -298,3 +298,14 @@ uc_check_code
 do_ucmd
 ex_command
 ex_delcommand
+
+# ── round 8: autocommands (autocmd.c) ──
+# `:autocmd {event} {pat} {cmd}` registers; `:doautocmd` fires; `:augroup` sets
+# the group; exists('#event') queries. Home file autocmd.c (+ match_file_pat
+# from fileio.c), outside the vendored eval tree.
+do_augroup
+do_autocmd
+apply_autocmds
+do_doautocmd
+au_exists
+match_file_pat
