@@ -25,7 +25,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo check --all-targets --locked
 
   test:
@@ -49,9 +53,10 @@ jobs:
       # built-in assert_* framework and exits non-zero on a regression).
       - run: cargo test --locked --no-fail-fast
 
-  # Formatting is handled by the local pre-commit hook (auto-runs `cargo fmt`
-  # on staged .rs files). No CI enforcement — fmt drift is cosmetic, not a bug.
-  # Clippy is omitted: opinionated lints drown out real-bug signal.
+  # fmt + clippy (deny warnings) run in the `check` job above. The `doc` gate
+  # stays without `-D warnings`: the ported tree carries faithful-to-C doc
+  # comments whose [bracket] snippets trip rustdoc's intra-doc-link lint, so
+  # cosmetic doc warnings are advisory (hard doc errors still fail the build).
 
   doc:
     name: Doc
