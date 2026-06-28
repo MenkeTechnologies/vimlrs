@@ -83,7 +83,9 @@ significant digits, C-style `e+NN` exponent, `.0` appended when integral.
 vimlrs's `vim_float_g` already reproduces that exactly, so its output **matches
 Neovim** (`string(1.0e10)` → `1e+10`, `string(123456789.0)` → `1.23457e+08`).
 The values quoted here are Vim 9.x's distinct float printer; not a vimlrs/Neovim
-bug. (Same applies to R2-5.)
+bug. (Same applies to R2-5.) EXCEPTION — the negative-zero case WAS a real bug
+vs Neovim: `%g` keeps the sign of IEEE -0.0, but vim_float_g's `f == 0.0`
+early-return dropped it. ✅ FIXED: `string(-0.0)` → `-0.0`.
 - `string(1.0e10)` → Vim `1.0e10`, vimlrs `1e+10`
 - `string(123456789.0)` → Vim `1.234568e8`, vimlrs `1.23457e+08`
 - `string(0.0001)` → Vim `1.0e-4`, vimlrs `0.0001`

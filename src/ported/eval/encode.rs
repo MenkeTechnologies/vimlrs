@@ -20,7 +20,8 @@ use crate::ported::eval::typval_defs_h::{
 /// `.`/`e`, so `1.0` prints as `1.0` and `0.1 + 0.2` prints as `0.3`.
 pub(crate) fn vim_float_g(f: f64, prec: i32) -> String {
     if f == 0.0 {
-        return "0".to_string();
+        // c: printf("%g", …) keeps the sign of IEEE negative zero ("-0").
+        return if f.is_sign_negative() { "-0" } else { "0" }.to_string();
     }
     let p = prec.max(1);
     let strip = |s: &str| -> String {

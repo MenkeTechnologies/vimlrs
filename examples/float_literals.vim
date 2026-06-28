@@ -21,6 +21,11 @@ call assert_equal('3.14', string(3.14))
 call assert_equal('1.5', string(1.5))
 call assert_equal('-0.5', string(-0.5))
 
+" --- IEEE negative zero keeps its sign (C %g), unlike positive zero
+call assert_equal('0.0', string(0.0))
+call assert_equal('-0.0', string(-0.0))
+call assert_equal('-0.0', string(0.0 / -1.0))
+
 " --- %g switches to exponent form by magnitude (exp < -4 or >= 6 sig digits)
 call assert_equal('1e+06', string(1000000.0))
 call assert_equal('1.23457e+08', string(123456789.0))
