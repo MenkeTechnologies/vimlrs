@@ -229,24 +229,6 @@ pub fn return_register() {
     unimplemented!("STUB return_register — csrc/eval/funcs.c:5193")
 }
 
-/// Port of `repeat_list()` — `csrc/eval/funcs.c:5310`. STUB: not yet ported.
-/// C: `static void repeat_list(list_T *l, varnumber_T n, typval_T *rettv)`
-pub fn repeat_list() {
-    unimplemented!("STUB repeat_list — csrc/eval/funcs.c:5310")
-}
-
-/// Port of `repeat_blob()` — `csrc/eval/funcs.c:5319`. STUB: not yet ported.
-/// C: `static void repeat_blob(typval_T *blob_tv, varnumber_T n, typval_T *rettv)`
-pub fn repeat_blob() {
-    unimplemented!("STUB repeat_blob — csrc/eval/funcs.c:5319")
-}
-
-/// Port of `repeat_string()` — `csrc/eval/funcs.c:5356`. STUB: not yet ported.
-/// C: `static void repeat_string(typval_T *str_tv, varnumber_T n, typval_T *rettv)`
-pub fn repeat_string() {
-    unimplemented!("STUB repeat_string — csrc/eval/funcs.c:5356")
-}
-
 /// Port of `get_search_arg()` — `csrc/eval/funcs.c:5593`. STUB: not yet ported.
 /// C: `static int get_search_arg(typval_T *varp, int *flagsp)`
 pub fn get_search_arg() {

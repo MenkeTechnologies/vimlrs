@@ -19,17 +19,17 @@ use crate::ported::eval::typval::{
 use crate::ported::eval::typval::{
     tv_blob_alloc_ret, tv_blob_len, tv_dict_add_tv, tv_dict_find, tv_dict_len, tv_get_bool,
     tv_get_float, tv_get_number_chk, tv_get_string, tv_list_alloc_ret, tv_list_append_number,
-    tv_list_append_string, tv_list_append_tv, tv_list_copy, tv_list_find_nr, tv_list_flatten,
-    tv_list_len, tv_list_ref,
+    tv_list_append_string, tv_list_append_tv, tv_list_copy, tv_list_extend, tv_list_find_nr,
+    tv_list_flatten, tv_list_len, tv_list_ref,
 };
 use crate::ported::eval::typval::{
     tv_dict_add_list, tv_dict_add_nr, tv_dict_add_str, tv_dict_alloc, tv_dict_alloc_ret,
     tv_list_alloc, tv_list_append_list,
 };
 use crate::ported::eval::typval_defs_h::{
-    typval_T, typval_vval_union::*, varnumber_T, BoolVarValue::*, SpecialVarValue::*, VarType::*,
-    VAR_TYPE_BLOB, VAR_TYPE_BOOL, VAR_TYPE_DICT, VAR_TYPE_FLOAT, VAR_TYPE_FUNC, VAR_TYPE_LIST,
-    VAR_TYPE_NUMBER, VAR_TYPE_SPECIAL, VAR_TYPE_STRING,
+    blob_T, list_T, typval_T, typval_vval_union::*, varnumber_T, BoolVarValue::*,
+    SpecialVarValue::*, VarType::*, VAR_TYPE_BLOB, VAR_TYPE_BOOL, VAR_TYPE_DICT, VAR_TYPE_FLOAT,
+    VAR_TYPE_FUNC, VAR_TYPE_LIST, VAR_TYPE_NUMBER, VAR_TYPE_SPECIAL, VAR_TYPE_STRING,
 };
 use crate::ported::eval::vars::{
     assert_error, get_vim_var_str, set_vim_var_nr,
@@ -218,23 +218,82 @@ pub fn f_nr2char(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.vval = v_string(s);
 }
 
-/// Port of `f_repeat()` from `Src/eval/funcs.c` — repeat a String (or List)
-/// `count` times.
-pub fn f_repeat(argvars: &[typval_T], rettv: &mut typval_T) {
-    let count = tv_get_number_chk(&argvars[1], None).max(0) as usize;
-    if let (VAR_LIST, v_list(Some(l))) = (argvars[0].v_type, &argvars[0].vval) {
-        let src = l.borrow();
-        let out = tv_list_alloc_ret(rettv, (src.lv_len as usize * count) as isize);
-        let mut ob = out.borrow_mut();
-        for _ in 0..count {
-            for it in &src.lv_items {
-                tv_list_append_tv(&mut ob, it.li_tv.clone());
-            }
-        }
+/// Port of `repeat_list()` — `csrc/eval/funcs.c:5310`. Repeat list `l` `n` times
+/// into `rettv` (a new list).
+fn repeat_list(l: &std::rc::Rc<std::cell::RefCell<list_T>>, n: varnumber_T, rettv: &mut typval_T) {
+    // c: tv_list_alloc_ret(rettv, (n > 0) * n * tv_list_len(l));
+    let len = (n > 0) as varnumber_T * n * tv_list_len(&l.borrow()) as varnumber_T;
+    let out = tv_list_alloc_ret(rettv, len as isize);
+    // c: while (n-- > 0) tv_list_extend(rettv->vval.v_list, l, NULL);
+    // `out` is a freshly allocated list, distinct from `l`, so borrowing both is
+    // safe.
+    let src = l.borrow();
+    let mut count = n;
+    while count > 0 {
+        tv_list_extend(&mut out.borrow_mut(), &src, None);
+        count -= 1;
+    }
+}
+
+/// Port of `repeat_blob()` — `csrc/eval/funcs.c:5319`. Repeat blob `b` `n` times
+/// into `rettv` (a new blob).
+fn repeat_blob(
+    blob: Option<&std::rc::Rc<std::cell::RefCell<blob_T>>>,
+    n: varnumber_T,
+    rettv: &mut typval_T,
+) {
+    let out = tv_blob_alloc_ret(rettv);
+    // c: if (blob == NULL || n <= 0) return;
+    let Some(blob) = blob else { return };
+    if n <= 0 {
         return;
     }
+    let src = blob.borrow().bv_ga.clone();
+    let slen = src.len() as varnumber_T;
+    let len = slen * n;
+    if len <= 0 {
+        return;
+    }
+    // c: all-zero fast path leaves the (already zero-filled) ga; here we just
+    // build the repeated bytes directly.
+    let mut data = Vec::with_capacity(len as usize);
+    for _ in 0..n {
+        data.extend_from_slice(&src);
+    }
+    out.borrow_mut().bv_ga = data;
+}
+
+/// Port of `repeat_string()` — `csrc/eval/funcs.c:5356`. Repeat string `str_tv`
+/// `n` times into `rettv` (a new string).
+fn repeat_string(str_tv: &typval_T, n: varnumber_T, rettv: &mut typval_T) {
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(tv_get_string(&argvars[0]).repeat(count));
+    // c: if (n <= 0) { rettv->vval.v_string = NULL; return; }
+    if n <= 0 {
+        rettv.vval = v_string(String::new());
+        return;
+    }
+    let p = tv_get_string(str_tv);
+    // c: if (slen == 0) return; (NULL result)
+    if p.is_empty() {
+        rettv.vval = v_string(String::new());
+        return;
+    }
+    rettv.vval = v_string(p.repeat(n as usize));
+}
+
+/// Port of `f_repeat()` — `csrc/eval/funcs.c:5393`. Repeat a List, Blob, or
+/// String `{count}` times.
+pub fn f_repeat(argvars: &[typval_T], rettv: &mut typval_T) {
+    // c: varnumber_T n = tv_get_number(&argvars[1]);
+    let n = tv_get_number(&argvars[1]);
+    match (argvars[0].v_type, &argvars[0].vval) {
+        (VAR_LIST, v_list(Some(l))) => repeat_list(l, n, rettv),
+        (VAR_LIST, _) => {
+            tv_list_alloc_ret(rettv, 0);
+        }
+        (VAR_BLOB, v_blob(b)) => repeat_blob(b.as_ref(), n, rettv),
+        _ => repeat_string(&argvars[0], n, rettv),
+    }
 }
 
 /// Port of `f_split()` from `Src/eval/funcs.c`.
