@@ -178,10 +178,13 @@ pub const VIML_UPLUS: u16 = 3017;
 pub const VIML_NOT: u16 = 3018;
 /// comparison id base; per-operator offset via [`cmp_id`].
 pub const VIML_CMP_BASE: u16 = 3020;
-// Ignore-case comparison ids = base + op + this offset. Must clear ALL other
-// allocated VIML_* ids (the `0x20` it used to be put the ic range at 3052+,
-// colliding with VIML_INDEX/SLICE/SETINDEX/ECHO — so `==?` actually indexed).
-const VIML_CMP_IC_OFFSET: u16 = 0x200;
+// Ignore-case comparison ids = base + op + this offset. The match-case ids
+// occupy 3020..=3029; this offset places the ic ids in the reserved gap
+// 3030..=3039 (below the op cluster at 3050+ and the builtin-function ids at
+// 3100+). Earlier values collided: `0x20` overlapped VIML_INDEX/SLICE/ECHO and
+// `0x200` (=3532+) overlapped VIML_FN_GETCHAR…, so `==?` dispatched to those
+// instead of comparing — leaving 3030..=3039 reserved for the ic family.
+const VIML_CMP_IC_OFFSET: u16 = 10;
 /// list constructor (argc = element count).
 pub const VIML_MAKE_LIST: u16 = 3050;
 /// dict constructor (argc = 2 × pairs).

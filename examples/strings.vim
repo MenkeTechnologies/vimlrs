@@ -48,6 +48,14 @@ call assert_equal('1 x', printf('%d %s', 1, 'x'))
 call assert_equal(6, len('héllo'))
 call assert_equal(5, strchars('héllo'))
 
+" ── strpart() byte substring; a negative {start} clamps to 0 AND folds its
+"    offset into the length, so strpart('hello',-2,3) keeps only 'h' ──
+call assert_equal('hel', strpart('hello', 0, 3))
+call assert_equal('llo', strpart('hello', 2))
+call assert_equal('h', strpart('hello', -2, 3))
+call assert_equal('hello', strpart('hello', -2))
+call assert_equal('', strpart('hello', -5, 3))
+
 " ── trim() honours the {dir}: 0/none = both ends, 1 = left, 2 = right ──
 call assert_equal('x', trim('  x  '))
 call assert_equal('x  ', trim('  x  ', ' ', 1))

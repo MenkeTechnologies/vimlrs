@@ -395,9 +395,33 @@ fn reverse_text(s: &str) -> String {
     groups.iter().rev().flat_map(|g| g.iter()).collect()
 }
 
-/// Port of `f_get()` from `Src/eval/funcs.c` — `get({list}, {idx} [, {def}])` /
-/// `get({dict}, {key} [, {def}])`.
+/// Port of `f_get()` from `Src/eval/funcs.c` — `get({list}, {idx} [, {def}])`,
+/// `get({dict}, {key} [, {def}])`, `get({blob}, {idx} [, {def}])`. A String (or
+/// any non-container) errors with E1531, as in Vim — it never silently returns
+/// the default.
 pub fn f_get(argvars: &[typval_T], rettv: &mut typval_T) {
+    // c: VAR_BLOB — the byte at {idx} (negative from the end); out of range
+    // gives {def} when present, else -1.
+    if let (VAR_BLOB, v_blob(b)) = (argvars[0].v_type, &argvars[0].vval) {
+        rettv.v_type = VAR_NUMBER;
+        if let Some(b) = b {
+            let b = b.borrow();
+            let len = tv_blob_len(&b);
+            let mut idx = tv_get_number_chk(&argvars[1], None) as i32;
+            if idx < 0 {
+                idx += len;
+            }
+            if idx >= 0 && idx < len {
+                rettv.vval = v_number(tv_blob_get(&b, idx) as varnumber_T);
+                return;
+            }
+        }
+        match argvars.get(2) {
+            Some(d) => *rettv = d.clone(),
+            None => rettv.vval = v_number(-1),
+        }
+        return;
+    }
     let default = argvars.get(2).cloned();
     let found = match (argvars[0].v_type, &argvars[0].vval) {
         (VAR_LIST, v_list(Some(l))) => {
@@ -412,7 +436,15 @@ pub fn f_get(argvars: &[typval_T], rettv: &mut typval_T) {
         (VAR_DICT, v_dict(Some(d))) => {
             tv_dict_find(&d.borrow(), &tv_get_string(&argvars[1])).cloned()
         }
-        _ => None,
+        (VAR_LIST, _) | (VAR_DICT, _) => None,
+        // c: get() on a Funcref/Partial reads "func"/"name"/"dict"/"args" —
+        // not yet ported; fall through to the default rather than error.
+        (VAR_FUNC, _) | (VAR_PARTIAL, _) => None,
+        // c: else semsg(e_listdictblobarg, "get()").
+        _ => {
+            emsg("E1531: Argument of get() must be a List, Tuple, Dictionary or Blob");
+            return;
+        }
     };
     match found.or(default) {
         Some(v) => *rettv = v,

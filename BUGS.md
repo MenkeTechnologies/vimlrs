@@ -20,7 +20,12 @@ not a language bug, and is excluded below.)
 
 ## Core-semantics bugs (wrong results)
 
-### 1. Case-insensitive comparison operators broken (`==?`, `=~?`, `<?`, `!=?`, …)
+### 1. Case-insensitive comparison operators broken (`==?`, `=~?`, `<?`, `!=?`, …) — ✅ FIXED
+The ignore-case comparison builtin ids (`base+512` = 3532+) collided with the
+`getchar`/`getcmd*` function ids added at 3532+, so `==?` dispatched to a
+function instead of comparing. Remapped the ic offset to the reserved gap
+3030..=3039 (`VIML_CMP_IC_OFFSET`), bumped the script-cache format version.
+Covered by `examples/compare.vim`.
 - `'abc' ==? 'ABC'` → Vim `1`, vimlrs `0`
 - `'foo' =~? 'FOO'` → Vim `1`, vimlrs `0`
 - `'abc' <? 'ABD'` → Vim `1`, vimlrs *(no output at all)*
@@ -39,19 +44,24 @@ not a language bug, and is excluded below.)
 - Zero-width-match splitting (the standard "split into chars" idiom) isn't handled.
   `src/ported/strings.rs` split impl.
 
-### 4. `strpart()` with negative start doesn't shorten the length
+### 4. `strpart()` with negative start doesn't shorten the length — ✅ FIXED
+Ported the C offset-folding (`len += nbyte; nbyte = 0`). Covered by `examples/strings.vim`.
 - `strpart('hello',-2,3)` → Vim `h`, vimlrs `hel`
 - Vim clamps `start` to 0 **and** folds the negative offset into len
   (`len += off; off = 0`). vimlrs only clamps start, keeping full len.
   `src/ported/strings.rs:89` clamps `start < 0` but never subtracts the offset from len.
 
-### 5. `get()` on a String returns a value instead of erroring
+### 5. `get()` on a String returns a value instead of erroring — ✅ FIXED
+Now errors E1531 for a String/non-container, and the Blob form is ported too.
+Covered by `examples/index_get.vim`.
 - `get('hello',1)` → Vim errors `E1531: Argument of get() must be a List, Tuple, Dictionary or Blob`; vimlrs returns `0`
 - vimlrs wrongly accepts a String first arg.
 
-### 6. `index()` ignores the `{ic}` (ignore-case) argument
+### 6. `index()` ignores the `{ic}` (ignore-case) argument — ✅ FIXED
 - `index(['A','b'],'a',0,1)` → Vim `0`, vimlrs `-1`
 - The 4th-arg case-insensitive flag is not honored.
+- Fixed in `tv_equal` (now case-folds strings when `ic`) and `f_index` (honours
+  `{start}`/`{ic}`, plus the Blob form). Covered by `examples/index_get.vim`.
 
 ---
 

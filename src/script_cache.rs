@@ -34,8 +34,9 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 /// Magic header bytes — fail fast if a wrong-format file is mmap'd. ("VIML")
 pub const SHARD_MAGIC: u32 = 0x56_49_4D_4C;
-/// Bumped on incompatible rkyv schema changes.
-pub const SHARD_FORMAT_VERSION: u32 = 1;
+/// Bumped on incompatible rkyv schema changes (and when the meaning of emitted
+/// builtin ids changes, e.g. the ignore-case comparison id remap).
+pub const SHARD_FORMAT_VERSION: u32 = 2;
 
 // ── rkyv archived types ──
 
