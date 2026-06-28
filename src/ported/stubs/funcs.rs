@@ -163,24 +163,6 @@ pub fn dummy_timer_close_cb() {
     unimplemented!("STUB dummy_timer_close_cb — csrc/eval/funcs.c:2579")
 }
 
-/// Port of `indexof_eval_expr()` — `csrc/eval/funcs.c:2983`. STUB: not yet ported.
-/// C: `static varnumber_T indexof_eval_expr(typval_T *expr)`
-pub fn indexof_eval_expr() {
-    unimplemented!("STUB indexof_eval_expr — csrc/eval/funcs.c:2983")
-}
-
-/// Port of `indexof_blob()` — `csrc/eval/funcs.c:3005`. STUB: not yet ported.
-/// C: `static varnumber_T indexof_blob(blob_T *b, varnumber_T startidx, typval_T *expr)`
-pub fn indexof_blob() {
-    unimplemented!("STUB indexof_blob — csrc/eval/funcs.c:3005")
-}
-
-/// Port of `indexof_list()` — `csrc/eval/funcs.c:3042`. STUB: not yet ported.
-/// C: `static varnumber_T indexof_list(list_T *l, varnumber_T startidx, typval_T *expr)`
-pub fn indexof_list() {
-    unimplemented!("STUB indexof_list — csrc/eval/funcs.c:3042")
-}
-
 /// Port of `create_environment()` — `csrc/eval/funcs.c:3382`. STUB: not yet ported.
 /// C: `dict_T *create_environment(const dictitem_T *job_env, const bool clear_env, const bool pty,`
 pub fn create_environment() {

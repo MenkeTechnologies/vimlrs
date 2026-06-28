@@ -2152,11 +2152,109 @@ pub fn f_id(argvars: &[typval_T], rettv: &mut typval_T) {
     });
 }
 
-/// Port of `f_indexof()` from `Src/eval/funcs.c` — the index of the first
-/// List/Blob item for which `{expr}` (string or funcref, `v:key`/`v:val`) is
-/// true, or -1. An optional `{startidx:n}` dict starts the scan later.
+/// Port of `indexof_eval_expr()` — `csrc/eval/funcs.c:2983`. Evaluate `expr`
+/// with `v:key`/`v:val` bound and return whether it is true.
+///
+/// RUST-PORT NOTE: the C reads the globals `VV_KEY`/`VV_VAL` and calls
+/// `eval_expr_typval`; the value layer cannot evaluate expressions itself, so it
+/// goes through `FILTER_MAP_EVAL_HOOK` (installed by the bridge), which sets
+/// `v:key`/`v:val` and evaluates `expr` for us. An eval failure → false.
+fn indexof_eval_expr(expr: &typval_T, key: &typval_T, val: &typval_T) -> bool {
+    // c: if (eval_expr_typval(...) == FAIL) return false;
+    //    found = tv_get_bool_chk(&newtv, &error); return error ? false : found;
+    FILTER_MAP_EVAL_HOOK
+        .with(|h| *h.borrow())
+        .and_then(|f| f(expr, key, val))
+        .map(|r| tv_get_bool(&r) != 0)
+        .unwrap_or(false)
+}
+
+/// Port of `indexof_blob()` — `csrc/eval/funcs.c:3005`. The index of the first
+/// byte at/after `startidx` for which `expr` is true, or -1.
+fn indexof_blob(
+    b: Option<&std::rc::Rc<std::cell::RefCell<blob_T>>>,
+    startidx: varnumber_T,
+    expr: &typval_T,
+) -> varnumber_T {
+    // c: if (b == NULL) return -1;
+    let Some(b) = b else { return -1 };
+    let bytes = b.borrow().bv_ga.clone();
+    let blen = bytes.len() as varnumber_T;
+    // c: negative index counts from the last byte, clamped to 0.
+    let mut idx = startidx;
+    if idx < 0 {
+        idx += blen;
+        if idx < 0 {
+            idx = 0;
+        }
+    }
+    // c: for (; idx < tv_blob_len(b); idx++) { VV_KEY=idx; VV_VAL=byte; ... }
+    while idx < blen {
+        let key = typval_T::from(idx);
+        let val = typval_T::from(bytes[idx as usize] as varnumber_T);
+        if indexof_eval_expr(expr, &key, &val) {
+            return idx;
+        }
+        idx += 1;
+    }
+    -1
+}
+
+/// Port of `indexof_list()` — `csrc/eval/funcs.c:3042`. The index of the first
+/// item at/after `startidx` for which `expr` is true, or -1.
+fn indexof_list(
+    l: Option<&std::rc::Rc<std::cell::RefCell<list_T>>>,
+    startidx: varnumber_T,
+    expr: &typval_T,
+) -> varnumber_T {
+    // c: if (l == NULL) return -1;
+    let Some(l) = l else { return -1 };
+    let items: Vec<typval_T> = l
+        .borrow()
+        .lv_items
+        .iter()
+        .map(|it| it.li_tv.clone())
+        .collect();
+    let len = items.len() as varnumber_T;
+    // c: startidx==0 → first item; else idx = tv_list_uidx(l, startidx) — a user
+    // index (negative from the end) that is -1 (no item) when out of range.
+    let start = if startidx == 0 {
+        0
+    } else {
+        let s = if startidx < 0 {
+            startidx + len
+        } else {
+            startidx
+        };
+        if s < 0 || s >= len {
+            return -1;
+        }
+        s
+    };
+    // c: for (; item != NULL; item = next, idx++) { VV_KEY=idx; VV_VAL=item; ... }
+    let mut idx = start;
+    while idx < len {
+        let key = typval_T::from(idx);
+        if indexof_eval_expr(expr, &key, &items[idx as usize]) {
+            return idx;
+        }
+        idx += 1;
+    }
+    -1
+}
+
+/// Port of `f_indexof()` — `csrc/eval/funcs.c:3084`. The index of the first
+/// List/Blob item for which `{expr}` (string or funcref, seeing `v:key`/`v:val`)
+/// is true, or -1. An optional `{opts}` Dict's `startidx` begins the scan later.
 pub fn f_indexof(argvars: &[typval_T], rettv: &mut typval_T) {
+    // c: rettv->vval.v_number = -1;
     *rettv = typval_T::from(-1 as varnumber_T);
+    let expr = &argvars[1];
+    // c: empty string / NULL funcref expr → nothing to test.
+    if expr.v_type == VAR_STRING && tv_get_string(expr).is_empty() {
+        return;
+    }
+    // c: startidx = (argvars[2] is Dict) ? tv_dict_get_number_def(d,"startidx",0) : 0;
     let startidx = match argvars.get(2) {
         Some(d) if d.v_type == VAR_DICT => match &d.vval {
             v_dict(Some(dd)) => dd
@@ -2169,51 +2267,12 @@ pub fn f_indexof(argvars: &[typval_T], rettv: &mut typval_T) {
         },
         _ => 0,
     };
-    let expr = &argvars[1];
-    let test = |idx: i64, item: &typval_T| -> bool {
-        let key = typval_T::from(idx);
-        FILTER_MAP_EVAL_HOOK
-            .with(|h| *h.borrow())
-            .and_then(|f| f(expr, &key, item))
-            .map(|r| tv_get_number(&r) != 0)
-            .unwrap_or(false)
+    let found = match (argvars[0].v_type, &argvars[0].vval) {
+        (VAR_LIST, v_list(l)) => indexof_list(l.as_ref(), startidx, expr),
+        (VAR_BLOB, v_blob(b)) => indexof_blob(b.as_ref(), startidx, expr),
+        _ => -1,
     };
-    match (argvars[0].v_type, &argvars[0].vval) {
-        (VAR_LIST, v_list(Some(l))) => {
-            let items: Vec<typval_T> = l
-                .borrow()
-                .lv_items
-                .iter()
-                .map(|it| it.li_tv.clone())
-                .collect();
-            let start = if startidx < 0 {
-                (items.len() as i64 + startidx).max(0)
-            } else {
-                startidx
-            };
-            for (i, item) in items.iter().enumerate().skip(start as usize) {
-                if test(i as i64, item) {
-                    *rettv = typval_T::from(i as varnumber_T);
-                    return;
-                }
-            }
-        }
-        (VAR_BLOB, v_blob(Some(b))) => {
-            let bytes = b.borrow().bv_ga.clone();
-            let start = if startidx < 0 {
-                (bytes.len() as i64 + startidx).max(0)
-            } else {
-                startidx
-            };
-            for (i, byte) in bytes.iter().enumerate().skip(start as usize) {
-                if test(i as i64, &typval_T::from(*byte as varnumber_T)) {
-                    *rettv = typval_T::from(i as varnumber_T);
-                    return;
-                }
-            }
-        }
-        _ => {}
-    }
+    *rettv = typval_T::from(found);
 }
 
 // ── pattern / option / editor-absent builtins (funcs.c) ──────────────────────
