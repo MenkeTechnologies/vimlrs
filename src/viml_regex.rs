@@ -556,8 +556,15 @@ impl Regex {
     /// First match at or after each start position (leftmost). Returns char
     /// spans (whole + groups).
     pub fn find(&self, text: &[char], ic: bool) -> Option<Captures> {
+        self.find_from(text, ic, 0)
+    }
+
+    /// Leftmost match whose start is at or after char index `from`. `^`/`\<`
+    /// still anchor to the absolute string start (this is Vim's `startcol`
+    /// search, used by `match()`/`matchstr()` with a `{count}` argument).
+    pub fn find_from(&self, text: &[char], ic: bool, from: usize) -> Option<Captures> {
         let ic = self.effective_ic(ic);
-        for start in 0..=text.len() {
+        for start in from..=text.len() {
             // Two extra trailing slots hold the `\zs`/`\ze` positions, if any.
             let mut groups = vec![None; self.ngroups + 3];
             if let Some(end) = self.match_alt(&self.branches, text, start, &mut groups, ic) {
@@ -779,6 +786,46 @@ pub fn regex_matchstr(pat: &str, subject: &str, ic: bool) -> String {
             chars[s..e].iter().collect()
         }
         None => String::new(),
+    }
+}
+
+/// The `nth` (1-based) match of `pat` in `subject` whose start is at/after char
+/// index `from`. Returns `(start, end, [whole, \1..\9])` in char indices (the
+/// group list padded to 10, trailing empties), or `None`. `^`/`\<` anchor to the
+/// absolute string start. Backs `match()`/`matchstr()`/… `{start}`/`{count}`.
+pub fn regex_search_nth(
+    pat: &str,
+    subject: &str,
+    ic: bool,
+    from: usize,
+    nth: i64,
+) -> Option<(i64, i64, Vec<String>)> {
+    let chars: Vec<char> = subject.chars().collect();
+    let re = Regex::compile(pat);
+    let mut pos = from.min(chars.len());
+    let mut remaining = nth.max(1);
+    loop {
+        let caps = re.find_from(&chars, ic, pos)?;
+        let (s, e) = caps.whole();
+        remaining -= 1;
+        if remaining <= 0 {
+            let mut groups: Vec<String> = caps
+                .groups
+                .iter()
+                .map(|g| match g {
+                    Some((gs, ge)) => chars[*gs..*ge].iter().collect(),
+                    None => String::new(),
+                })
+                .collect();
+            groups.resize(10, String::new());
+            return Some((s as i64, e as i64, groups));
+        }
+        // Advance past this match to find the next; step one char on a
+        // zero-width match so the search makes progress.
+        pos = if e > s { e } else { s + 1 };
+        if pos > chars.len() {
+            return None;
+        }
     }
 }
 

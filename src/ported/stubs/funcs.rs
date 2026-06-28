@@ -175,12 +175,6 @@ pub fn libcall_common() {
     unimplemented!("STUB libcall_common — csrc/eval/funcs.c:3940")
 }
 
-/// Port of `find_some_match()` — `csrc/eval/funcs.c:4060`. STUB: not yet ported.
-/// C: `static void find_some_match(typval_T *const argvars, typval_T *const rettv,`
-pub fn find_some_match() {
-    unimplemented!("STUB find_some_match — csrc/eval/funcs.c:4060")
-}
-
 /// Port of `get_matches_in_str()` — `csrc/eval/funcs.c:4272`. STUB: not yet ported.
 /// C: `static void get_matches_in_str(const char *str, regmatch_T *rmp, list_T *mlist, int idx,`
 pub fn get_matches_in_str() {

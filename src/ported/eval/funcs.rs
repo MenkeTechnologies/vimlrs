@@ -356,26 +356,64 @@ pub fn f_split(argvars: &[typval_T], rettv: &mut typval_T) {
 /// Port of `f_matchstr()` from `Src/eval/funcs.c` — the matched substring of the
 /// Vim regex `{pat}` in `{expr}`, or "".
 pub fn f_matchstr(argvars: &[typval_T], rettv: &mut typval_T) {
-    let s = tv_get_string(&argvars[0]);
-    let pat = tv_get_string(&argvars[1]);
+    // c: kSomeMatchStr — the matched substring, or "".
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(crate::viml_regex::regex_matchstr(
-        &pat,
-        &s,
-        tv_get_bool(&get_option_value("ignorecase")) != 0,
-    ));
+    let s = find_some_match(argvars).map_or(String::new(), |(_, _, g)| {
+        g.into_iter().next().unwrap_or_default()
+    });
+    rettv.vval = v_string(s);
 }
 
 /// Port of `f_match()` from `Src/eval/funcs.c` — the char index of the first
 /// match of `{pat}` in `{expr}`, or -1.
-pub fn f_match(argvars: &[typval_T], rettv: &mut typval_T) {
+/// Port of `find_some_match()` — `csrc/eval/funcs.c:4060`. The shared backend of
+/// `match()`/`matchstr()`/`matchend()`/`matchstrpos()`/`matchlist()`: resolves
+/// `{start}` (startcol when `{count}` is given, else the subject is chopped) and
+/// `{count}` (the Nth match), returning the selected match's `(start, end)` char
+/// span and its `[whole, \1..\9]` groups, or `None`.
+///
+/// RUST-PORT NOTE: the C writes `rettv` directly per `SomeMatchType`; this returns
+/// the data and each `f_*` formats its own result. vimlrs's regex engine works in
+/// character indices, so `{start}` and the returned positions are char indices
+/// (== byte indices for ASCII). The List-subject form is not handled here.
+fn find_some_match(argvars: &[typval_T]) -> Option<(i64, i64, Vec<String>)> {
     let s = tv_get_string(&argvars[0]);
     let pat = tv_get_string(&argvars[1]);
-    rettv.vval = v_number(crate::viml_regex::regex_match_index(
-        &pat,
-        &s,
-        tv_get_bool(&get_option_value("ignorecase")) != 0,
-    ));
+    let ic = tv_get_bool(&get_option_value("ignorecase")) != 0;
+    let nchars = s.chars().count() as i64;
+    let has_count = argvars.len() > 3 && argvars[3].v_type != VAR_UNKNOWN;
+    let count = if has_count {
+        tv_get_number(&argvars[3])
+    } else {
+        1
+    };
+    match argvars.get(2).filter(|t| t.v_type != VAR_UNKNOWN) {
+        // c: no {start} — search from the head for the nth match.
+        None => crate::viml_regex::regex_search_nth(&pat, &s, ic, 0, count),
+        Some(t) => {
+            // c: if (start < 0) start = 0; if (start > len) goto theend;
+            let st = tv_get_number(t).max(0);
+            if st > nchars {
+                return None;
+            }
+            if has_count {
+                // c: with {count}, {start} is a startcol — `^`/`\<` anchor to 0.
+                crate::viml_regex::regex_search_nth(&pat, &s, ic, st as usize, count)
+            } else {
+                // c: without {count}, the subject is chopped at {start} (str +=
+                // start; len -= start), so `^` matches at the chop; add {start}
+                // back to the reported indices.
+                let suffix: String = s.chars().skip(st as usize).collect();
+                crate::viml_regex::regex_search_nth(&pat, &suffix, ic, 0, count)
+                    .map(|(a, b, g)| (a + st, b + st, g))
+            }
+        }
+    }
+}
+
+pub fn f_match(argvars: &[typval_T], rettv: &mut typval_T) {
+    // c: kSomeMatch — the start index of the match, or -1.
+    rettv.vval = v_number(find_some_match(argvars).map_or(-1, |(s, _, _)| s));
 }
 
 /// Port of `f_substitute()` from `Src/eval/funcs.c` — replace matches of `{pat}`
@@ -1081,30 +1119,26 @@ pub fn f_items(argvars: &[typval_T], rettv: &mut typval_T) {
 /// Port of `f_matchlist()` from `Src/eval/funcs.c` — `[whole, sub1, …]` of the
 /// first match of `{pat}` in `{expr}`.
 pub fn f_matchlist(argvars: &[typval_T], rettv: &mut typval_T) {
-    let s = tv_get_string(&argvars[0]);
-    let pat = tv_get_string(&argvars[1]);
-    let parts = crate::viml_regex::regex_matchlist(
-        &pat,
-        &s,
-        tv_get_bool(&get_option_value("ignorecase")) != 0,
-    );
-    let l = tv_list_alloc_ret(rettv, parts.len() as isize);
-    let mut lb = l.borrow_mut();
-    for p in &parts {
-        tv_list_append_string(&mut lb, p);
+    // c: kSomeMatchList — [whole, \1..\9] (10 slots), or [] when no match.
+    match find_some_match(argvars) {
+        Some((_, _, groups)) => {
+            let l = tv_list_alloc_ret(rettv, groups.len() as isize);
+            let mut lb = l.borrow_mut();
+            for g in &groups {
+                tv_list_append_string(&mut lb, g);
+            }
+        }
+        None => {
+            tv_list_alloc_ret(rettv, 0);
+        }
     }
 }
 
 /// Port of `f_matchend()` from `Src/eval/funcs.c` — char index just past the
 /// first match of `{pat}`, or -1.
 pub fn f_matchend(argvars: &[typval_T], rettv: &mut typval_T) {
-    let s = tv_get_string(&argvars[0]);
-    let pat = tv_get_string(&argvars[1]);
-    rettv.vval = v_number(crate::viml_regex::regex_matchend(
-        &pat,
-        &s,
-        tv_get_bool(&get_option_value("ignorecase")) != 0,
-    ));
+    // c: kSomeMatchEnd — the end index of the match, or -1.
+    rettv.vval = v_number(find_some_match(argvars).map_or(-1, |(_, e, _)| e));
 }
 
 /// Port of `f_escape()` from `Src/eval/funcs.c` — prefix each character of
@@ -1293,13 +1327,11 @@ pub fn f_json_decode(argvars: &[typval_T], rettv: &mut typval_T) {
 /// (character indices) of the first match of `{pat}` in `{expr}`, or `['', -1,
 /// -1]`. (c: `find_some_match(argvars, rettv, kSomeMatchStrPos)`.)
 pub fn f_matchstrpos(argvars: &[typval_T], rettv: &mut typval_T) {
-    let s = tv_get_string(&argvars[0]);
-    let pat = tv_get_string(&argvars[1]);
-    let (m, start, end) = crate::viml_regex::regex_matchstrpos(
-        &pat,
-        &s,
-        tv_get_bool(&get_option_value("ignorecase")) != 0,
-    );
+    // c: kSomeMatchStrPos — [match, start, end], or ["", -1, -1] when no match.
+    let (m, start, end) = match find_some_match(argvars) {
+        Some((s, e, g)) => (g.into_iter().next().unwrap_or_default(), s, e),
+        None => (String::new(), -1, -1),
+    };
     let l = tv_list_alloc_ret(rettv, 3);
     let mut lb = l.borrow_mut();
     tv_list_append_string(&mut lb, &m);
