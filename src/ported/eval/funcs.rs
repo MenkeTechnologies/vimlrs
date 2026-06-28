@@ -2133,12 +2133,35 @@ fn tv_get_lnum(tv: &typval_T) -> varnumber_T {
             "." => CURPOS.with(|c| c.borrow().0),
             "$" | "w$" => curbuf_len(),
             "w0" => 1,
-            _ if s.starts_with('\'') => 0,
+            _ if s.starts_with('\'') => {
+                // c: a `'m` mark address resolves to the mark's line (0 if unset).
+                s.chars().nth(1).and_then(getmark).map_or(0, |(l, _)| l)
+            }
             _ => s.parse().unwrap_or(0),
         }
     } else {
         tv_get_number(tv)
     }
+}
+
+thread_local! {
+    /// The mark table (`namedfm[]` / `curbuf->b_namedm[]` in mark.c): mark name
+    /// → `(lnum, col)`, both 1-based.
+    static MARKS: std::cell::RefCell<std::collections::BTreeMap<char, (varnumber_T, varnumber_T)>> =
+        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+}
+
+/// Port of `setmark()` (Neovim mark.c) — set mark `name` to `(lnum, col)`.
+fn setmark(name: char, lnum: varnumber_T, col: varnumber_T) {
+    MARKS.with(|m| {
+        m.borrow_mut().insert(name, (lnum, col));
+    });
+}
+
+/// Port of `getmark()` (Neovim mark.c) — the `(lnum, col)` of mark `name`, or
+/// `None` if it is not set.
+fn getmark(name: char) -> Option<(varnumber_T, varnumber_T)> {
+    MARKS.with(|m| m.borrow().get(&name).copied())
 }
 
 /// Port of `get_buffer_lines()` (Neovim buffer.c) — the current buffer's lines
@@ -2227,7 +2250,7 @@ pub fn set_cursorpos(lnum: varnumber_T, col: varnumber_T) {
 }
 
 /// Port of `f_getpos()`/`getpos_both(…,false,false)` — the position of `{expr}`
-/// as `[bufnum, lnum, col, off]`; `.` is the cursor, marks are `[0,0,0,0]`.
+/// as `[bufnum, lnum, col, off]`; `.` is the cursor, `'m` a mark.
 pub fn f_getpos(argvars: &[typval_T], rettv: &mut typval_T) {
     let s = tv_get_string(&argvars[0]);
     let (lnum, col) = if s == "." {
@@ -2235,6 +2258,8 @@ pub fn f_getpos(argvars: &[typval_T], rettv: &mut typval_T) {
             let c = c.borrow();
             (c.0, c.1)
         })
+    } else if let Some(name) = s.strip_prefix('\'').and_then(|r| r.chars().next()) {
+        getmark(name).unwrap_or((0, 0))
     } else {
         (tv_get_lnum(&argvars[0]), 0)
     };
@@ -2281,7 +2306,7 @@ pub fn f_col(argvars: &[typval_T], rettv: &mut typval_T) {
         "$" => get_buffer_lines(lnum, lnum)
             .first()
             .map_or(1, |l| l.len() as varnumber_T + 1),
-        _ if s.starts_with('\'') => 0,
+        _ if s.starts_with('\'') => s.chars().nth(1).and_then(getmark).map_or(0, |(_, c)| c),
         _ => 0,
     };
     *rettv = typval_T::from(col);
@@ -2439,7 +2464,35 @@ pub fn f_getchangelist(_argvars: &[typval_T], rettv: &mut typval_T) {
 }
 /// Port of `f_getmarklist()` — no marks → empty List.
 pub fn f_getmarklist(_argvars: &[typval_T], rettv: &mut typval_T) {
-    tv_list_alloc_ret(rettv, 0);
+    let marks: Vec<(char, (varnumber_T, varnumber_T))> =
+        MARKS.with(|m| m.borrow().iter().map(|(k, v)| (*k, *v)).collect());
+    let out = tv_list_alloc_ret(rettv, marks.len() as isize);
+    let mut ob = out.borrow_mut();
+    for (name, (lnum, col)) in marks {
+        let d = tv_dict_alloc();
+        {
+            let mut db = d.borrow_mut();
+            tv_dict_add_str(&mut db, "mark", &format!("'{name}"));
+            let pos = tv_list_alloc(4);
+            {
+                let mut pb = pos.borrow_mut();
+                tv_list_append_number(&mut pb, 0);
+                tv_list_append_number(&mut pb, lnum);
+                tv_list_append_number(&mut pb, col);
+                tv_list_append_number(&mut pb, 0);
+            }
+            tv_dict_add_tv(
+                &mut db,
+                "pos",
+                typval_T {
+                    v_type: VAR_LIST,
+                    v_lock: VarLockStatus::VAR_UNLOCKED,
+                    vval: v_list(Some(pos)),
+                },
+            );
+        }
+        tv_list_append_tv(&mut ob, match_dict_val(d));
+    }
 }
 /// Port of `f_gettagstack()`/`get_tagstack()` — empty stack → `{items:[],
 /// length:0, curidx:0}`.
@@ -2992,13 +3045,16 @@ pub fn f_timer_stopall(_argvars: &[typval_T], rettv: &mut typval_T) {
 /// position in → -1 (the C error default).
 pub fn f_setpos(argvars: &[typval_T], rettv: &mut typval_T) {
     let expr = tv_get_string(&argvars[0]);
-    // c: `.` sets the cursor from [bufnum, lnum, col, off]; marks are accepted.
-    if expr == "." {
-        if let (VAR_LIST, v_list(Some(l))) = (argvars[1].v_type, &argvars[1].vval) {
-            let items = &l.borrow().lv_items;
-            let lnum = items.get(1).map_or(0, |it| tv_get_number(&it.li_tv));
-            let col = items.get(2).map_or(1, |it| tv_get_number(&it.li_tv));
+    // c: the position List is [bufnum, lnum, col, off]; `.` sets the cursor and
+    // `'m` sets mark m.
+    if let (VAR_LIST, v_list(Some(l))) = (argvars[1].v_type, &argvars[1].vval) {
+        let items = &l.borrow().lv_items;
+        let lnum = items.get(1).map_or(0, |it| tv_get_number(&it.li_tv));
+        let col = items.get(2).map_or(1, |it| tv_get_number(&it.li_tv));
+        if expr == "." {
             set_cursorpos(lnum, col);
+        } else if let Some(name) = expr.strip_prefix('\'').and_then(|r| r.chars().next()) {
+            setmark(name, lnum, col);
         }
     }
     *rettv = typval_T::from(0 as varnumber_T);
@@ -5601,6 +5657,11 @@ fn parse_addr(s: &str) -> (varnumber_T, usize, bool) {
     } else if i < b.len() && b[i] == b'$' {
         i += 1;
         (last, true)
+    } else if i + 1 < b.len() && b[i] == b'\'' {
+        // c: a `'m` mark address.
+        let name = b[i + 1] as char;
+        i += 2;
+        (getmark(name).map_or(0, |(l, _)| l), true)
     } else if i < b.len() && b[i].is_ascii_digit() {
         let start = i;
         while i < b.len() && b[i].is_ascii_digit() {
@@ -5835,6 +5896,25 @@ pub fn do_excmd(line: &str) -> ExCmdResult {
         "sort" | "sor" => {
             let (lo2, hi2) = if had_range { (lo, hi) } else { (1, len) };
             ex_sort(lo2, hi2, bang, args);
+            ExCmdResult::Handled
+        }
+        "mark" | "ma" | "k" => {
+            // `:[line]mark x` / `:[line]k x` sets mark x at the range's last line.
+            if let Some(name) = args.chars().next() {
+                setmark(name, hi, 1);
+            }
+            ExCmdResult::Handled
+        }
+        "delmarks" | "delm" => {
+            if bang {
+                MARKS.with(|m| m.borrow_mut().clear());
+            } else {
+                for name in args.chars().filter(|c| !c.is_whitespace()) {
+                    MARKS.with(|m| {
+                        m.borrow_mut().remove(&name);
+                    });
+                }
+            }
             ExCmdResult::Handled
         }
         "p" | "pr" | "print" | "nu" | "number" => {

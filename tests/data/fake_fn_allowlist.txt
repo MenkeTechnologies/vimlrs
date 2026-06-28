@@ -350,3 +350,9 @@ ex_shift
 shell_capture
 shell_feed
 shell_filter
+
+# ── round 13: marks (mark.c) ──
+# A mark table backing `'m` addresses, getpos("'m")/setpos("'m"), line/col("'m"),
+# getmarklist(), and :mark/:k/:delmarks. Home file mark.c, outside the eval tree.
+setmark
+getmark
