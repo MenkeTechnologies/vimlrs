@@ -468,9 +468,47 @@ pub fn f_index(argvars: &[typval_T], rettv: &mut typval_T) {
 /// Port of `f_has()` from `Src/eval/funcs.c` (subset) — feature presence. Phase
 /// 3 reports the always-true pseudo-features and `0` otherwise.
 pub fn f_has(argvars: &[typval_T], rettv: &mut typval_T) {
-    let feat = tv_get_string(&argvars[0]);
-    let yes = matches!(feat.as_str(), "eval" | "float" | "vimlrs");
-    rettv.vval = v_number(yes as varnumber_T);
+    use std::io::IsTerminal;
+    // c: name comparison is case-insensitive (STRICMP) throughout.
+    let name = tv_get_string(&argvars[0]).to_ascii_lowercase();
+
+    // c: fast-path features checked before the has_list[] scan. vimlrs reports
+    // only what it genuinely is, so the runtime probes resolve to real answers:
+    // ttyin/ttyout from the actual std handles, no GUI, and — unlike Neovim —
+    // it is not Vim or Nvim, so version/patch and the `nvim` feature are absent.
+    let n = match name.as_str() {
+        "ttyin" => std::io::stdin().is_terminal(),
+        "ttyout" => std::io::stdout().is_terminal(),
+        "multi_byte_encoding" => true, // always UTF-8 here
+        "gui_running" | "vim_starting" | "syntax_items" | "wsl" => false,
+        _ if name.starts_with("patch") || name.starts_with("nvim-") => false,
+        // Platform features: provably true from the build target (Neovim's
+        // has_list[] gates these the same way with #ifdef).
+        "unix" => cfg!(unix),
+        "linux" => cfg!(target_os = "linux"),
+        "mac" | "macunix" | "osx" | "osxdarwin" => cfg!(target_os = "macos"),
+        "bsd" => {
+            cfg!(any(
+                target_os = "freebsd",
+                target_os = "openbsd",
+                target_os = "netbsd",
+                target_os = "dragonfly"
+            )) && !cfg!(target_os = "macos")
+        }
+        "win32" => cfg!(windows),
+        "win64" => cfg!(all(windows, target_pointer_width = "64")),
+        "sun" => cfg!(target_os = "solaris"),
+        "fork" => cfg!(unix),
+        // Language/runtime features vimlrs actually implements (each backed by a
+        // working builtin or core behaviour). Editor features Neovim's has_list[]
+        // claims — windows, syntax, folding, mouse, statusline, … — are
+        // deliberately omitted: vimlrs is a standalone eval engine without them.
+        "eval" | "float" | "vimlrs" | "lambda" | "num64" | "vimscript-1" | "multi_byte"
+        | "reltime" | "nanotime" | "iconv" | "digraphs" | "modify_fname" | "gettext"
+        | "byte_offset" => true,
+        _ => false,
+    };
+    rettv.vval = v_number(n as varnumber_T);
 }
 
 /// Port of `f_exists()` from `Src/eval/funcs.c` (subset) — whether a variable
