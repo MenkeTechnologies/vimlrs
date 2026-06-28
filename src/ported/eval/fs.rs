@@ -1087,3 +1087,47 @@ pub fn f_globpath(argvars: &[typval_T], rettv: &mut typval_T) {
         rettv.vval = v_string(matches.join("\n"));
     }
 }
+
+/// Port of `f_expand()` from `Src/eval/funcs.c` — expand `{string}`: `$VAR`/`~`
+/// references, then file wildcards. Editor specials (`%`/`#`/`<…>`) have no
+/// current file standalone, so they expand to "". With `{list}` (arg 3) truthy
+/// the result is a List of matches.
+pub fn f_expand(argvars: &[typval_T], rettv: &mut typval_T) {
+    let s = tv_get_string(&argvars[0]);
+    let want_list =
+        argvars.len() >= 3 && argvars[2].v_type != VAR_UNKNOWN && tv_get_bool(&argvars[2]) != 0;
+    let results: Vec<String> = if s.starts_with(['%', '#', '<']) {
+        Vec::new()
+    } else {
+        let expanded = expand_env(&s);
+        if expanded.contains(['*', '?', '[']) {
+            let m = unix_expandpath(&expanded);
+            // expand() returns the pattern itself when nothing matches.
+            if m.is_empty() {
+                vec![expanded]
+            } else {
+                m
+            }
+        } else {
+            vec![expanded]
+        }
+    };
+    if want_list {
+        let l = tv_list_alloc_ret(rettv, results.len() as isize);
+        let mut lb = l.borrow_mut();
+        for m in &results {
+            tv_list_append_string(&mut lb, m);
+        }
+    } else {
+        rettv.v_type = VAR_STRING;
+        rettv.vval = v_string(results.join("\n"));
+    }
+}
+
+/// Port of `f_expandcmd()` from `Src/eval/funcs.c` — expand `$VAR`/`~` in a
+/// command string. (Editor specials like `%` need a current file and are left
+/// as-is standalone.)
+pub fn f_expandcmd(argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.v_type = VAR_STRING;
+    rettv.vval = v_string(expand_env(&tv_get_string(&argvars[0])));
+}

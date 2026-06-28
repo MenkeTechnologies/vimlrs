@@ -2933,3 +2933,94 @@ pub fn f_win_screenpos(_argvars: &[typval_T], rettv: &mut typval_T) {
     tv_list_append_number(&mut lb, 0);
     tv_list_append_number(&mut lb, 0);
 }
+
+// ── Window-view / prompt / server / context builtins (inactive standalone) ──
+
+/// Port of `f_win_id2tabwin()` (window.c) — id not found → `[0, 0]`.
+pub fn f_win_id2tabwin(_argvars: &[typval_T], rettv: &mut typval_T) {
+    let l = tv_list_alloc_ret(rettv, 2);
+    let mut lb = l.borrow_mut();
+    tv_list_append_number(&mut lb, 0);
+    tv_list_append_number(&mut lb, 0);
+}
+/// Port of `f_win_splitmove()` (window.c) — no window → -1 (FAIL).
+pub fn f_win_splitmove(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(-1 as varnumber_T);
+}
+/// Port of `f_win_move_separator()` (window.c) — no window → 0 (false).
+pub fn f_win_move_separator(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_win_move_statusline()` (window.c) — no window → 0 (false).
+pub fn f_win_move_statusline(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_getcmdwintype()` (window.c) — not in the command-line window → "".
+pub fn f_getcmdwintype(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(String::new());
+}
+/// Port of `f_winrestview()` (window.c) — no window to restore → no-op (0).
+pub fn f_winrestview(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_winsaveview()` (window.c) — the view Dict for the implicit window
+/// at the origin: line 1, everything else 0.
+pub fn f_winsaveview(_argvars: &[typval_T], rettv: &mut typval_T) {
+    let d = tv_dict_alloc_ret(rettv);
+    let mut db = d.borrow_mut();
+    tv_dict_add_nr(&mut db, "lnum", 1);
+    tv_dict_add_nr(&mut db, "col", 0);
+    tv_dict_add_nr(&mut db, "coladd", 0);
+    tv_dict_add_nr(&mut db, "curswant", 0);
+    tv_dict_add_nr(&mut db, "topline", 1);
+    tv_dict_add_nr(&mut db, "topfill", 0);
+    tv_dict_add_nr(&mut db, "leftcol", 0);
+    tv_dict_add_nr(&mut db, "skipcol", 0);
+}
+/// Port of `f_bufload()` (buffer.c) — no buffers to load → no-op (0).
+pub fn f_bufload(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_prompt_getinput()` (buffer.c) — no prompt buffer → "".
+pub fn f_prompt_getinput(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(String::new());
+}
+/// Port of `f_prompt_setprompt()` (buffer.c) — no prompt buffer → no-op (0).
+pub fn f_prompt_setprompt(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_prompt_setcallback()` (buffer.c) — no prompt buffer → no-op (0).
+pub fn f_prompt_setcallback(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_prompt_setinterrupt()` (buffer.c) — no prompt buffer → no-op (0).
+pub fn f_prompt_setinterrupt(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_interrupt()` (funcs.c) — sets `got_int`; the standalone
+/// interpreter has no interactive interrupt to raise, so it is a no-op (0).
+pub fn f_interrupt(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_debugbreak()` (funcs.c) — no process to signal → FAIL (0).
+pub fn f_debugbreak(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_api_info()` (funcs.c) — no embedded API → empty Dict.
+pub fn f_api_info(_argvars: &[typval_T], rettv: &mut typval_T) {
+    tv_dict_alloc_ret(rettv);
+}
+/// Port of `f_swapinfo()`/`swapfile_dict()` (funcs.c) — no swap file to read →
+/// `{error: 'Cannot open file'}`.
+pub fn f_swapinfo(_argvars: &[typval_T], rettv: &mut typval_T) {
+    let d = tv_dict_alloc_ret(rettv);
+    tv_dict_add_str(&mut d.borrow_mut(), "error", "Cannot open file");
+}
+/// Port of `f_serverstart()` (funcs.c) — no server standalone → "" (the C NULL).
+pub fn f_serverstart(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(String::new());
+}
+/// Port of `f_serverstop()` (funcs.c) — no server → no-op (0).
+pub fn f_serverstop(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}

@@ -53,14 +53,6 @@ pub fn f_bufadd(
     unimplemented!("STUB f_bufadd — csrc/eval/buffer.c:364")
 }
 
-/// Port of `f_bufload()` — `csrc/eval/buffer.c:387`. STUB: not yet ported.
-pub fn f_bufload(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_bufload — csrc/eval/buffer.c:387")
-}
-
 /// Port of `buf_win_common()` — `csrc/eval/buffer.c:462`. STUB: not yet ported.
 /// C: `static void buf_win_common(typval_T *argvars, typval_T *rettv, bool get_nr)`
 pub fn buf_win_common() {
@@ -95,28 +87,4 @@ pub fn switch_buffer() {
 /// C: `void restore_buffer(bufref_T *save_curbuf)`
 pub fn restore_buffer() {
     unimplemented!("STUB restore_buffer — csrc/eval/buffer.c:795")
-}
-
-/// Port of `f_prompt_setcallback()` — `csrc/eval/buffer.c:808`. STUB: not yet ported.
-pub fn f_prompt_setcallback(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_prompt_setcallback — csrc/eval/buffer.c:808")
-}
-
-/// Port of `f_prompt_setinterrupt()` — `csrc/eval/buffer.c:829`. STUB: not yet ported.
-pub fn f_prompt_setinterrupt(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_prompt_setinterrupt — csrc/eval/buffer.c:829")
-}
-
-/// Port of `f_prompt_setprompt()` — `csrc/eval/buffer.c:850`. STUB: not yet ported.
-pub fn f_prompt_setprompt(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_prompt_setprompt — csrc/eval/buffer.c:850")
 }

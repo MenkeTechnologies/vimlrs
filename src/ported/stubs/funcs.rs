@@ -61,14 +61,6 @@ pub fn lua_wrapper() {
     unimplemented!("STUB lua_wrapper — csrc/eval/funcs.c:397")
 }
 
-/// Port of `f_api_info()` — `csrc/eval/funcs.c:451`. STUB: not yet ported.
-pub fn f_api_info(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_api_info — csrc/eval/funcs.c:451")
-}
-
 /// Port of `tv_get_buf()` — `csrc/eval/funcs.c:471`. STUB: not yet ported.
 /// C: `buf_T *tv_get_buf(typval_T *tv, int curtab_only)`
 pub fn tv_get_buf() {
@@ -169,14 +161,6 @@ pub fn set_cursorpos() {
     unimplemented!("STUB set_cursorpos — csrc/eval/funcs.c:965")
 }
 
-/// Port of `f_debugbreak()` — `csrc/eval/funcs.c:1041`. STUB: not yet ported.
-pub fn f_debugbreak(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_debugbreak — csrc/eval/funcs.c:1041")
-}
-
 /// Port of `f_eval()` — `csrc/eval/funcs.c:1233`. STUB: not yet ported.
 pub fn f_eval(
     _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
@@ -203,22 +187,6 @@ pub fn f_execute(
     _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
 ) {
     unimplemented!("STUB f_execute — csrc/eval/funcs.c:1357")
-}
-
-/// Port of `f_expand()` — `csrc/eval/funcs.c:1403`. STUB: not yet ported.
-pub fn f_expand(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_expand — csrc/eval/funcs.c:1403")
-}
-
-/// Port of `f_expandcmd()` — `csrc/eval/funcs.c:1491`. STUB: not yet ported.
-pub fn f_expandcmd(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_expandcmd — csrc/eval/funcs.c:1491")
 }
 
 /// Port of `f_feedkeys()` — `csrc/eval/funcs.c:1588`. STUB: not yet ported.
@@ -303,14 +271,6 @@ pub fn indexof_blob() {
 /// C: `static varnumber_T indexof_list(list_T *l, varnumber_T startidx, typval_T *expr)`
 pub fn indexof_list() {
     unimplemented!("STUB indexof_list — csrc/eval/funcs.c:3042")
-}
-
-/// Port of `f_interrupt()` — `csrc/eval/funcs.c:3211`. STUB: not yet ported.
-pub fn f_interrupt(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_interrupt — csrc/eval/funcs.c:3211")
 }
 
 /// Port of `f_islocked()` — `csrc/eval/funcs.c:3223`. STUB: not yet ported.
@@ -457,14 +417,6 @@ pub fn f_msgpackparse(
     unimplemented!("STUB f_msgpackparse — csrc/eval/funcs.c:4773")
 }
 
-/// Port of `f_prompt_getinput()` — `csrc/eval/funcs.c:4914`. STUB: not yet ported.
-pub fn f_prompt_getinput(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_prompt_getinput — csrc/eval/funcs.c:4914")
-}
-
 /// Port of `f_py3eval()` — `csrc/eval/funcs.c:4949`. STUB: not yet ported.
 pub fn f_py3eval(
     _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
@@ -559,22 +511,6 @@ pub fn do_searchpair() {
     unimplemented!("STUB do_searchpair — csrc/eval/funcs.c:6173")
 }
 
-/// Port of `f_serverstart()` — `csrc/eval/funcs.c:6376`. STUB: not yet ported.
-pub fn f_serverstart(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_serverstart — csrc/eval/funcs.c:6376")
-}
-
-/// Port of `f_serverstop()` — `csrc/eval/funcs.c:6420`. STUB: not yet ported.
-pub fn f_serverstop(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_serverstop — csrc/eval/funcs.c:6420")
-}
-
 /// Port of `set_position()` — `csrc/eval/funcs.c:6442`. STUB: not yet ported.
 /// C: `static void set_position(typval_T *argvars, typval_T *rettv, bool charpos)`
 pub fn set_position() {
@@ -617,12 +553,4 @@ pub fn f_submatch(
     _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
 ) {
     unimplemented!("STUB f_submatch — csrc/eval/funcs.c:7297")
-}
-
-/// Port of `f_swapinfo()` — `csrc/eval/funcs.c:7364`. STUB: not yet ported.
-pub fn f_swapinfo(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_swapinfo — csrc/eval/funcs.c:7364")
 }

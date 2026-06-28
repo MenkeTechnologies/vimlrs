@@ -105,62 +105,6 @@ pub fn f_win_execute(
     unimplemented!("STUB f_win_execute — csrc/eval/window.c:578")
 }
 
-/// Port of `f_win_id2tabwin()` — `csrc/eval/window.c:638`. STUB: not yet ported.
-pub fn f_win_id2tabwin(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_win_id2tabwin — csrc/eval/window.c:638")
-}
-
-/// Port of `f_win_move_separator()` — `csrc/eval/window.c:650`. STUB: not yet ported.
-pub fn f_win_move_separator(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_win_move_separator — csrc/eval/window.c:650")
-}
-
-/// Port of `f_win_move_statusline()` — `csrc/eval/window.c:669`. STUB: not yet ported.
-pub fn f_win_move_statusline(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_win_move_statusline — csrc/eval/window.c:669")
-}
-
-/// Port of `f_win_splitmove()` — `csrc/eval/window.c:700`. STUB: not yet ported.
-pub fn f_win_splitmove(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_win_splitmove — csrc/eval/window.c:700")
-}
-
-/// Port of `f_getcmdwintype()` — `csrc/eval/window.c:787`. STUB: not yet ported.
-pub fn f_getcmdwintype(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_getcmdwintype — csrc/eval/window.c:787")
-}
-
-/// Port of `f_winrestview()` — `csrc/eval/window.c:887`. STUB: not yet ported.
-pub fn f_winrestview(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_winrestview — csrc/eval/window.c:887")
-}
-
-/// Port of `f_winsaveview()` — `csrc/eval/window.c:936`. STUB: not yet ported.
-pub fn f_winsaveview(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_winsaveview — csrc/eval/window.c:936")
-}
-
 /// Port of `switch_win()` — `csrc/eval/window.c:972`. STUB: not yet ported.
 /// C: `int switch_win(switchwin_T *switchwin, win_T *win, tabpage_T *tp, bool no_display)`
 pub fn switch_win() {
