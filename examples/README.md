@@ -13,6 +13,8 @@ cargo build
 | [`fib.vim`](fib.vim) | `:function`/recursion + a numeric `while` loop (trace-JIT target) |
 | [`lists_dicts.vim`](lists_dicts.vim) | list/dict literals, slicing, `map`/`filter`/`reduce`/`sort` |
 | [`strings.vim`](strings.vim) | `split`/`join`/`printf`, the Vim-magic regex engine (`=~`, `matchstr`, `substitute`) |
+| [`floatmath.vim`](floatmath.vim) | the floating-point math library: `floor`/`ceil`/`round`/`trunc`, the trig/hyperbolic/`exp`/`log` family, `isnan`/`isinf` |
+| [`strindex.vim`](strindex.vim) | byte/char indexing on multibyte strings: `byteidx`/`byteidxcomp`/`charidx`, `strgetchar`/`strcharpart`, `values`/`shellescape`/`matchstrpos` |
 | [`json.vim`](json.vim) | `json_encode()` / `json_decode()` round-trip |
 | [`editor_compat.vim`](editor_compat.vim) | editor-position builtins (`getpos`, `search`, `wordcount`, …) returning faithful "no editor" values so editor-oriented scripts still load |
 | [`interactive.vim`](interactive.vim) | `input()` / `inputlist()` / `confirm()` reading from the terminal (stdin) |
