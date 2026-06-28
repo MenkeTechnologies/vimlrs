@@ -369,3 +369,17 @@ char_class
 # counterpart of Vim's file arglist); it is the std-only plumbing between the
 # binary and argv()/argc()/argidx(), with no single Neovim C name.
 set_arglist
+
+# ── round 18: MessagePack codec (eval/encode.c + eval/decode.c) ──
+# msgpackdump()/msgpackparse() back onto a hand-rolled msgpack codec for the
+# lossless subset. encode_vim_to_msgpack/unpack_typval are the C entry points;
+# these helpers are the byte-level packers/unpackers (msgpack-c's msgpack_pack_*
+# / template_decode), which have no 1:1 Neovim C names of their own.
+mpack_encode_tv
+mpack_pack_int
+mpack_pack_str
+mpack_pack_bin
+mpack_pack_array_len
+mpack_pack_map_len
+mpack_decode_one
+mpack_input_bytes

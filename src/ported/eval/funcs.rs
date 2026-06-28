@@ -17,8 +17,8 @@ use crate::ported::eval::typval::{
     tv_get_string_chk, Callback, CALL_FUNC_HOOK,
 };
 use crate::ported::eval::typval::{
-    tv_blob_len, tv_dict_add_tv, tv_dict_find, tv_dict_len, tv_get_bool, tv_get_float,
-    tv_get_number_chk, tv_get_string, tv_list_alloc_ret, tv_list_append_number,
+    tv_blob_alloc_ret, tv_blob_len, tv_dict_add_tv, tv_dict_find, tv_dict_len, tv_get_bool,
+    tv_get_float, tv_get_number_chk, tv_get_string, tv_list_alloc_ret, tv_list_append_number,
     tv_list_append_string, tv_list_append_tv, tv_list_copy, tv_list_find_nr, tv_list_flatten,
     tv_list_len, tv_list_ref,
 };
@@ -4027,13 +4027,438 @@ pub fn f_libcall(_argvars: &[typval_T], rettv: &mut typval_T) {
 pub fn f_libcallnr(_argvars: &[typval_T], rettv: &mut typval_T) {
     *rettv = typval_T::from(0 as varnumber_T);
 }
-/// Port of `f_msgpackdump()` (funcs.c) — nothing to encode → empty List.
-pub fn f_msgpackdump(_argvars: &[typval_T], rettv: &mut typval_T) {
-    tv_list_alloc_ret(rettv, 0);
+// ── msgpack: msgpackdump()/msgpackparse() — eval/funcs.c dispatch over the
+//    encode.c (`encode_vim_to_msgpack`) / decode.c (`unpack_typval`) codecs.
+//
+//    Faithful port of the MessagePack value↔typval mapping for the lossless,
+//    self-describing subset, matching msgpack-c's minimal-width packing so the
+//    bytes are identical to Neovim's:
+//      nil↔v:null  bool↔v:true/v:false  int↔Number  float64↔Float
+//      str↔Dict keys (always STR on dump)  bin↔String/Blob (always BIN on dump)
+//      array↔List  map(string keys)↔Dict
+//    On dump a BIN/STR is read back by msgpackparse as a Blob/String, so (per
+//    the C's documented limitation 3/4) String→Blob is intentionally lossy.
+//
+//    Architecture note: this crate stores VAR_STRING as a UTF-8 `String`, so the
+//    raw msgpack byte stream is exact only in the Blob form (`msgpackdump(l,'B')`
+//    / `msgpackparse(0z…)`). The readfile()-style list form reuses the project's
+//    existing text convention (split/join on '\n', `from_utf8_lossy`) and so is
+//    exact only for text/number payloads — the same fidelity as readfile() here.
+
+/// Append the minimal-width MessagePack encoding of `tv` to `out`. Mirrors
+/// `encode_vim_to_msgpack()` (encode.c) over msgpack-c's `msgpack_pack_*`.
+/// Returns the Vim error string (E5004/E5005) for an unencodable value.
+fn mpack_encode_tv(tv: &typval_T, out: &mut Vec<u8>) -> Result<(), &'static str> {
+    match (tv.v_type, &tv.vval) {
+        // c: every special (v:null / v:none) encodes as msgpack nil; v:true /
+        // v:false → bool.
+        (VAR_SPECIAL, _) => out.push(0xc0),
+        (VAR_BOOL, v_bool(b)) => out.push(if *b == kBoolVarTrue { 0xc3 } else { 0xc2 }),
+        (VAR_NUMBER, v_number(n)) => mpack_pack_int(*n, out),
+        // c: msgpack_pack_double — Float is always float64.
+        (VAR_FLOAT, v_float(f)) => {
+            out.push(0xcb);
+            out.extend_from_slice(&f.to_bits().to_be_bytes());
+        }
+        // c: dict keys / encode_vim_to_msgpack STR path. Strings dump as STR here
+        // only when used as a map key; a standalone String dumps as BIN (limit 4).
+        (VAR_STRING, v_string(s)) => mpack_pack_bin(s.as_bytes(), out),
+        (VAR_BLOB, v_blob(b)) => {
+            let bytes = b
+                .as_ref()
+                .map(|b| b.borrow().bv_ga.clone())
+                .unwrap_or_default();
+            mpack_pack_bin(&bytes, out);
+        }
+        (VAR_LIST, v_list(l)) => {
+            let items: Vec<typval_T> = l
+                .as_ref()
+                .map(|l| {
+                    l.borrow()
+                        .lv_items
+                        .iter()
+                        .map(|it| it.li_tv.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            mpack_pack_array_len(items.len(), out);
+            for it in &items {
+                mpack_encode_tv(it, out)?;
+            }
+        }
+        (VAR_DICT, v_dict(d)) => {
+            let pairs: Vec<(String, typval_T)> = d
+                .as_ref()
+                .map(|d| {
+                    d.borrow()
+                        .dv_hashtab
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            mpack_pack_map_len(pairs.len(), out);
+            for (k, v) in &pairs {
+                // c: keys are always dumped as STR strings (limitation 3).
+                mpack_pack_str(k.as_bytes(), out);
+                mpack_encode_tv(v, out)?;
+            }
+        }
+        // c: E5004 — Funcref/Partial cannot be dumped.
+        (VAR_FUNC, _) | (VAR_PARTIAL, _) => {
+            return Err("E5004: Error while dumping: attempt to dump function reference")
+        }
+        _ => return Err("E5004: Error while dumping: attempt to dump unsupported type"),
+    }
+    Ok(())
 }
-/// Port of `f_msgpackparse()` (funcs.c) — nothing to parse → empty List.
-pub fn f_msgpackparse(_argvars: &[typval_T], rettv: &mut typval_T) {
-    tv_list_alloc_ret(rettv, 0);
+
+/// `msgpack_pack_int64` — minimal signed/unsigned width (non-negative ≥128 use
+/// the UINT family, negatives use the INT family), matching msgpack-c exactly.
+fn mpack_pack_int(n: varnumber_T, out: &mut Vec<u8>) {
+    if n >= 0 {
+        let u = n as u64;
+        if u < 0x80 {
+            out.push(u as u8); // positive fixint
+        } else if u <= 0xff {
+            out.push(0xcc);
+            out.push(u as u8);
+        } else if u <= 0xffff {
+            out.push(0xcd);
+            out.extend_from_slice(&(u as u16).to_be_bytes());
+        } else if u <= 0xffff_ffff {
+            out.push(0xce);
+            out.extend_from_slice(&(u as u32).to_be_bytes());
+        } else {
+            out.push(0xcf);
+            out.extend_from_slice(&u.to_be_bytes());
+        }
+    } else if n >= -32 {
+        out.push((n as i8) as u8); // negative fixint (0xe0..0xff)
+    } else if n >= -128 {
+        out.push(0xd0);
+        out.push((n as i8) as u8);
+    } else if n >= -32768 {
+        out.push(0xd1);
+        out.extend_from_slice(&(n as i16).to_be_bytes());
+    } else if n >= -(1i64 << 31) {
+        out.push(0xd2);
+        out.extend_from_slice(&(n as i32).to_be_bytes());
+    } else {
+        out.push(0xd3);
+        out.extend_from_slice(&n.to_be_bytes());
+    }
+}
+
+fn mpack_pack_str(b: &[u8], out: &mut Vec<u8>) {
+    let n = b.len();
+    if n < 32 {
+        out.push(0xa0 | n as u8);
+    } else if n <= 0xff {
+        out.push(0xd9);
+        out.push(n as u8);
+    } else if n <= 0xffff {
+        out.push(0xda);
+        out.extend_from_slice(&(n as u16).to_be_bytes());
+    } else {
+        out.push(0xdb);
+        out.extend_from_slice(&(n as u32).to_be_bytes());
+    }
+    out.extend_from_slice(b);
+}
+
+fn mpack_pack_bin(b: &[u8], out: &mut Vec<u8>) {
+    let n = b.len();
+    if n <= 0xff {
+        out.push(0xc4);
+        out.push(n as u8);
+    } else if n <= 0xffff {
+        out.push(0xc5);
+        out.extend_from_slice(&(n as u16).to_be_bytes());
+    } else {
+        out.push(0xc6);
+        out.extend_from_slice(&(n as u32).to_be_bytes());
+    }
+    out.extend_from_slice(b);
+}
+
+fn mpack_pack_array_len(n: usize, out: &mut Vec<u8>) {
+    if n < 16 {
+        out.push(0x90 | n as u8);
+    } else if n <= 0xffff {
+        out.push(0xdc);
+        out.extend_from_slice(&(n as u16).to_be_bytes());
+    } else {
+        out.push(0xdd);
+        out.extend_from_slice(&(n as u32).to_be_bytes());
+    }
+}
+
+fn mpack_pack_map_len(n: usize, out: &mut Vec<u8>) {
+    if n < 16 {
+        out.push(0x80 | n as u8);
+    } else if n <= 0xffff {
+        out.push(0xde);
+        out.extend_from_slice(&(n as u16).to_be_bytes());
+    } else {
+        out.push(0xdf);
+        out.extend_from_slice(&(n as u32).to_be_bytes());
+    }
+}
+
+/// Decode one MessagePack object at `bytes[*pos]`, advancing `*pos`. Mirrors
+/// `unpack_typval()` (decode.c) for the lossless subset; returns a Vim error
+/// string for truncated input or an unsupported (ext) type.
+fn mpack_decode_one(bytes: &[u8], pos: &mut usize) -> Result<typval_T, &'static str> {
+    let need = |p: usize, n: usize| -> Result<(), &'static str> {
+        if p + n <= bytes.len() {
+            Ok(())
+        } else {
+            Err("E5071: Invalid msgpack: truncated input")
+        }
+    };
+    need(*pos, 1)?;
+    let c = bytes[*pos];
+    *pos += 1;
+    let rd = |pos: &mut usize, n: usize| -> Result<u64, &'static str> {
+        need(*pos, n)?;
+        let mut v: u64 = 0;
+        for &b in &bytes[*pos..*pos + n] {
+            v = (v << 8) | b as u64;
+        }
+        *pos += n;
+        Ok(v)
+    };
+    let mk = |v_type, vval| typval_T {
+        v_type,
+        v_lock: VarLockStatus::VAR_UNLOCKED,
+        vval,
+    };
+    let read_str = |bytes: &[u8], pos: &mut usize, len: usize| -> Result<String, &'static str> {
+        need(*pos, len)?;
+        let s = String::from_utf8_lossy(&bytes[*pos..*pos + len]).into_owned();
+        *pos += len;
+        Ok(s)
+    };
+    let read_blob = |bytes: &[u8], pos: &mut usize, len: usize| -> Result<typval_T, &'static str> {
+        need(*pos, len)?;
+        let blob = std::rc::Rc::new(std::cell::RefCell::new(
+            crate::ported::eval::typval_defs_h::blob_T {
+                bv_ga: bytes[*pos..*pos + len].to_vec(),
+                ..Default::default()
+            },
+        ));
+        *pos += len;
+        Ok(mk(VAR_BLOB, v_blob(Some(blob))))
+    };
+    let decode_array =
+        |bytes: &[u8], pos: &mut usize, n: usize| -> Result<typval_T, &'static str> {
+            let l = tv_list_alloc(n as isize);
+            for _ in 0..n {
+                let item = mpack_decode_one(bytes, pos)?;
+                tv_list_append_tv(&mut l.borrow_mut(), item);
+            }
+            Ok(mk(VAR_LIST, v_list(Some(l))))
+        };
+    let decode_map = |bytes: &[u8], pos: &mut usize, n: usize| -> Result<typval_T, &'static str> {
+        let d = tv_dict_alloc();
+        for _ in 0..n {
+            let key = mpack_decode_one(bytes, pos)?;
+            let val = mpack_decode_one(bytes, pos)?;
+            // For the lossless subset, keys must be String/Blob (string-typed).
+            let k = match (key.v_type, &key.vval) {
+                (VAR_STRING, v_string(s)) => s.clone(),
+                (VAR_BLOB, v_blob(Some(b))) => {
+                    String::from_utf8_lossy(&b.borrow().bv_ga).into_owned()
+                }
+                _ => return Err("E5072: Invalid msgpack: map key is not a string"),
+            };
+            tv_dict_add_tv(&mut d.borrow_mut(), &k, val);
+        }
+        Ok(mk(VAR_DICT, v_dict(Some(d))))
+    };
+    match c {
+        0x00..=0x7f => Ok(mk(VAR_NUMBER, v_number(c as varnumber_T))), // positive fixint
+        0xe0..=0xff => Ok(mk(VAR_NUMBER, v_number((c as i8) as varnumber_T))), // negative fixint
+        0xc0 => Ok(mk(VAR_SPECIAL, v_special(kSpecialVarNull))),
+        0xc2 => Ok(mk(VAR_BOOL, v_bool(kBoolVarFalse))),
+        0xc3 => Ok(mk(VAR_BOOL, v_bool(kBoolVarTrue))),
+        0xcc => Ok(mk(VAR_NUMBER, v_number(rd(pos, 1)? as varnumber_T))),
+        0xcd => Ok(mk(VAR_NUMBER, v_number(rd(pos, 2)? as varnumber_T))),
+        0xce => Ok(mk(VAR_NUMBER, v_number(rd(pos, 4)? as varnumber_T))),
+        0xcf => {
+            let u = rd(pos, 8)?;
+            if u > i64::MAX as u64 {
+                return Err("E5073: Invalid msgpack: integer too large for Number");
+            }
+            Ok(mk(VAR_NUMBER, v_number(u as varnumber_T)))
+        }
+        0xd0 => Ok(mk(
+            VAR_NUMBER,
+            v_number((rd(pos, 1)? as u8 as i8) as varnumber_T),
+        )),
+        0xd1 => Ok(mk(
+            VAR_NUMBER,
+            v_number((rd(pos, 2)? as u16 as i16) as varnumber_T),
+        )),
+        0xd2 => Ok(mk(
+            VAR_NUMBER,
+            v_number((rd(pos, 4)? as u32 as i32) as varnumber_T),
+        )),
+        0xd3 => Ok(mk(VAR_NUMBER, v_number(rd(pos, 8)? as i64))),
+        0xca => {
+            let bits = rd(pos, 4)? as u32;
+            Ok(mk(VAR_FLOAT, v_float(f32::from_bits(bits) as f64)))
+        }
+        0xcb => {
+            let bits = rd(pos, 8)?;
+            Ok(mk(VAR_FLOAT, v_float(f64::from_bits(bits))))
+        }
+        0xa0..=0xbf => {
+            let s = read_str(bytes, pos, (c & 0x1f) as usize)?;
+            Ok(mk(VAR_STRING, v_string(s)))
+        }
+        0xd9 => {
+            let n = rd(pos, 1)? as usize;
+            Ok(mk(VAR_STRING, v_string(read_str(bytes, pos, n)?)))
+        }
+        0xda => {
+            let n = rd(pos, 2)? as usize;
+            Ok(mk(VAR_STRING, v_string(read_str(bytes, pos, n)?)))
+        }
+        0xdb => {
+            let n = rd(pos, 4)? as usize;
+            Ok(mk(VAR_STRING, v_string(read_str(bytes, pos, n)?)))
+        }
+        0xc4 => {
+            let n = rd(pos, 1)? as usize;
+            read_blob(bytes, pos, n)
+        }
+        0xc5 => {
+            let n = rd(pos, 2)? as usize;
+            read_blob(bytes, pos, n)
+        }
+        0xc6 => {
+            let n = rd(pos, 4)? as usize;
+            read_blob(bytes, pos, n)
+        }
+        0x90..=0x9f => decode_array(bytes, pos, (c & 0x0f) as usize),
+        0xdc => {
+            let n = rd(pos, 2)? as usize;
+            decode_array(bytes, pos, n)
+        }
+        0xdd => {
+            let n = rd(pos, 4)? as usize;
+            decode_array(bytes, pos, n)
+        }
+        0x80..=0x8f => decode_map(bytes, pos, (c & 0x0f) as usize),
+        0xde => {
+            let n = rd(pos, 2)? as usize;
+            decode_map(bytes, pos, n)
+        }
+        0xdf => {
+            let n = rd(pos, 4)? as usize;
+            decode_map(bytes, pos, n)
+        }
+        // c: ext / fixext map to msgpack-special-dicts in Neovim; unsupported in
+        // this lossless subset.
+        _ => Err("E5074: Invalid msgpack: unsupported (ext) type"),
+    }
+}
+
+/// Collect the input byte stream of `msgpackparse()`: a Blob is taken verbatim;
+/// a readfile()-style List is joined on '\n' (the project's text convention).
+fn mpack_input_bytes(tv: &typval_T) -> Result<Vec<u8>, &'static str> {
+    match (tv.v_type, &tv.vval) {
+        (VAR_BLOB, v_blob(b)) => Ok(b
+            .as_ref()
+            .map(|b| b.borrow().bv_ga.clone())
+            .unwrap_or_default()),
+        (VAR_LIST, v_list(l)) => {
+            let items: Vec<String> = l
+                .as_ref()
+                .map(|l| {
+                    l.borrow()
+                        .lv_items
+                        .iter()
+                        .map(|it| tv_get_string(&it.li_tv))
+                        .collect()
+                })
+                .unwrap_or_default();
+            Ok(items.join("\n").into_bytes())
+        }
+        _ => Err("E5070: msgpackparse() argument must be a List or Blob"),
+    }
+}
+
+/// Port of `f_msgpackdump()` (funcs.c → encode.c). Encode a List of objects to
+/// MessagePack. The default return is a readfile()-style List; when `{type}`
+/// contains "B" a Blob is returned instead. `Funcref`s raise E5004.
+pub fn f_msgpackdump(argvars: &[typval_T], rettv: &mut typval_T) {
+    // c: first argument must be a List of objects to dump.
+    let items: Vec<typval_T> = match &argvars[0].vval {
+        v_list(Some(l)) => l
+            .borrow()
+            .lv_items
+            .iter()
+            .map(|it| it.li_tv.clone())
+            .collect(),
+        _ => {
+            emsg("E1211: List required for argument 1");
+            tv_list_alloc_ret(rettv, 0);
+            return;
+        }
+    };
+    let want_blob = argvars.len() > 1 && tv_get_string(&argvars[1]).contains('B');
+    let mut bytes = Vec::new();
+    for it in &items {
+        if let Err(e) = mpack_encode_tv(it, &mut bytes) {
+            emsg(e);
+            tv_list_alloc_ret(rettv, 0);
+            return;
+        }
+    }
+    if want_blob {
+        let blob = tv_blob_alloc_ret(rettv);
+        blob.borrow_mut().bv_ga = bytes;
+        return;
+    }
+    // readfile()-style List: split the byte stream on '\n' (project convention).
+    // An empty stream yields an empty List (as readfile() of an empty file does),
+    // not a single empty line.
+    let l = tv_list_alloc_ret(rettv, 0);
+    if bytes.is_empty() {
+        return;
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let mut lb = l.borrow_mut();
+    for line in text.split('\n') {
+        tv_list_append_string(&mut lb, line);
+    }
+}
+
+/// Port of `f_msgpackparse()` (funcs.c → decode.c). Convert a readfile()-style
+/// List or a Blob of MessagePack into a List of Vimscript objects.
+pub fn f_msgpackparse(argvars: &[typval_T], rettv: &mut typval_T) {
+    let bytes = match mpack_input_bytes(&argvars[0]) {
+        Ok(b) => b,
+        Err(e) => {
+            emsg(e);
+            tv_list_alloc_ret(rettv, 0);
+            return;
+        }
+    };
+    let l = tv_list_alloc_ret(rettv, 0);
+    let mut pos = 0usize;
+    while pos < bytes.len() {
+        match mpack_decode_one(&bytes, &mut pos) {
+            Ok(obj) => tv_list_append_tv(&mut l.borrow_mut(), obj),
+            Err(e) => {
+                emsg(e);
+                break;
+            }
+        }
+    }
 }
 /// Port of `f_rpcnotify()` (funcs.c) — no RPC channel → 0.
 pub fn f_rpcnotify(_argvars: &[typval_T], rettv: &mut typval_T) {
