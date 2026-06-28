@@ -21,6 +21,24 @@ call assert_equal('2', matchlist('a1b2', '\d', 2)[0])
 call assert_equal(['2', 3, 4], matchstrpos('a1b2', '\d', 2))
 call assert_equal(['', -1, -1], matchstrpos('abc', '\d'))
 
+" --- List subject: match/matchend return the matching item's index
+call assert_equal(1, match(['foo', 'bar', 'baz'], 'ba'))
+call assert_equal(1, matchend(['foo', 'bar'], 'ba'))
+call assert_equal(-1, match(['foo', 'bar'], 'zzz'))
+
+" --- matchstr() on a List returns the whole matching item
+call assert_equal('bar', matchstr(['foo', 'bar', 'baz'], 'a'))
+
+" --- matchstrpos() on a List is [match, item_idx, start_col, end_col]
+call assert_equal(['a', 1, 1, 2], matchstrpos(['foo', 'bar'], 'a'))
+
+" --- matchlist() on a List gives the groups within the matching item
+call assert_equal('1', matchlist(['foo', 'b1r'], '\d')[0])
+
+" --- List {start} is an item index; {count} picks the Nth matching item
+call assert_equal(1, match(['x', 'ax', 'x'], 'a', 1))
+call assert_equal(2, match(['a', 'b', 'a'], 'a', 0, 2))
+
 " --- regressions: no {start}/{count} behaves as before
 call assert_equal(1, match('foobar', 'o'))
 call assert_equal('oo', matchstr('foobar', 'o\+'))

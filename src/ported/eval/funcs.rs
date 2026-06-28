@@ -356,38 +356,106 @@ pub fn f_split(argvars: &[typval_T], rettv: &mut typval_T) {
 /// Port of `f_matchstr()` from `Src/eval/funcs.c` — the matched substring of the
 /// Vim regex `{pat}` in `{expr}`, or "".
 pub fn f_matchstr(argvars: &[typval_T], rettv: &mut typval_T) {
-    // c: kSomeMatchStr — the matched substring, or "".
-    rettv.v_type = VAR_STRING;
-    let s = find_some_match(argvars).map_or(String::new(), |(_, _, g)| {
-        g.into_iter().next().unwrap_or_default()
-    });
-    rettv.vval = v_string(s);
+    // c: kSomeMatchStr — List → the matching item (whole); String → the matched
+    // substring; else "".
+    match find_some_match(argvars) {
+        Some(m) if m.list_idx.is_some() => *rettv = m.item,
+        Some(m) => {
+            rettv.v_type = VAR_STRING;
+            rettv.vval = v_string(m.groups.into_iter().next().unwrap_or_default());
+        }
+        None => {
+            rettv.v_type = VAR_STRING;
+            rettv.vval = v_string(String::new());
+        }
+    }
 }
 
 /// Port of `f_match()` from `Src/eval/funcs.c` — the char index of the first
 /// match of `{pat}` in `{expr}`, or -1.
+/// The selected match found by [`find_some_match`].
+struct SomeMatch {
+    /// `Some(item index)` when the subject is a List, else `None` (a String).
+    list_idx: Option<i64>,
+    /// Match start / end char index (a column within the item for a List).
+    start: i64,
+    end: i64,
+    /// `[whole, \1..\9]` group strings (padded to 10).
+    groups: Vec<String>,
+    /// The matching List item (List subject only) — `matchstr()` returns it.
+    item: typval_T,
+}
+
 /// Port of `find_some_match()` — `csrc/eval/funcs.c:4060`. The shared backend of
-/// `match()`/`matchstr()`/`matchend()`/`matchstrpos()`/`matchlist()`: resolves
-/// `{start}` (startcol when `{count}` is given, else the subject is chopped) and
-/// `{count}` (the Nth match), returning the selected match's `(start, end)` char
-/// span and its `[whole, \1..\9]` groups, or `None`.
+/// `match()`/`matchstr()`/`matchend()`/`matchstrpos()`/`matchlist()`.
 ///
-/// RUST-PORT NOTE: the C writes `rettv` directly per `SomeMatchType`; this returns
-/// the data and each `f_*` formats its own result. vimlrs's regex engine works in
-/// character indices, so `{start}` and the returned positions are char indices
-/// (== byte indices for ASCII). The List-subject form is not handled here.
-fn find_some_match(argvars: &[typval_T]) -> Option<(i64, i64, Vec<String>)> {
-    let s = tv_get_string(&argvars[0]);
+/// String subject: `{start}` is a startcol when `{count}` is given (so `^`/`\<`
+/// anchor to 0), else the subject is chopped at `{start}`; `{count}` selects the
+/// Nth match. List subject: each item is stringified and tested in turn from
+/// `{start}` (an item index), and `{count}` picks the Nth *matching item*.
+///
+/// RUST-PORT NOTE: the C writes `rettv` per `SomeMatchType`; this returns the
+/// data and each `f_*` formats its own result. Positions are char indices
+/// (== byte indices for ASCII), as elsewhere in the engine. Both the String and
+/// List subject forms are handled.
+fn find_some_match(argvars: &[typval_T]) -> Option<SomeMatch> {
     let pat = tv_get_string(&argvars[1]);
     let ic = tv_get_bool(&get_option_value("ignorecase")) != 0;
-    let nchars = s.chars().count() as i64;
     let has_count = argvars.len() > 3 && argvars[3].v_type != VAR_UNKNOWN;
     let count = if has_count {
         tv_get_number(&argvars[3])
     } else {
         1
     };
-    match argvars.get(2).filter(|t| t.v_type != VAR_UNKNOWN) {
+
+    // c: List subject — stringify each item and match it; {start} is an item
+    // index (tv_list_uidx), {count} picks the Nth matching item.
+    if argvars[0].v_type == VAR_LIST {
+        let items: Vec<typval_T> = match &argvars[0].vval {
+            v_list(Some(l)) => l
+                .borrow()
+                .lv_items
+                .iter()
+                .map(|it| it.li_tv.clone())
+                .collect(),
+            _ => return None,
+        };
+        let len = items.len() as i64;
+        let start = match argvars.get(2).filter(|t| t.v_type != VAR_UNKNOWN) {
+            None => 0,
+            Some(t) => {
+                let s = tv_get_number(t);
+                let s = if s < 0 { s + len } else { s };
+                if s < 0 || s >= len {
+                    return None;
+                }
+                s
+            }
+        };
+        let mut remaining = count.max(1);
+        for idx in start..len {
+            let str = encode_tv2echo(&items[idx as usize]);
+            if let Some((s, e, groups)) = crate::viml_regex::regex_search_nth(&pat, &str, ic, 0, 1)
+            {
+                remaining -= 1;
+                if remaining <= 0 {
+                    return Some(SomeMatch {
+                        list_idx: Some(idx),
+                        start: s,
+                        end: e,
+                        groups,
+                        item: items[idx as usize].clone(),
+                    });
+                }
+            }
+        }
+        return None;
+    }
+
+    // String subject.
+    let s = tv_get_string(&argvars[0]);
+    let nchars = s.chars().count() as i64;
+    let hit = match argvars.get(2).filter(|t| t.v_type != VAR_UNKNOWN) {
         // c: no {start} — search from the head for the nth match.
         None => crate::viml_regex::regex_search_nth(&pat, &s, ic, 0, count),
         Some(t) => {
@@ -408,12 +476,19 @@ fn find_some_match(argvars: &[typval_T]) -> Option<(i64, i64, Vec<String>)> {
                     .map(|(a, b, g)| (a + st, b + st, g))
             }
         }
-    }
+    };
+    hit.map(|(start, end, groups)| SomeMatch {
+        list_idx: None,
+        start,
+        end,
+        groups,
+        item: typval_T::default(),
+    })
 }
 
 pub fn f_match(argvars: &[typval_T], rettv: &mut typval_T) {
-    // c: kSomeMatch — the start index of the match, or -1.
-    rettv.vval = v_number(find_some_match(argvars).map_or(-1, |(s, _, _)| s));
+    // c: kSomeMatch — List → matching item index; String → match start; else -1.
+    rettv.vval = v_number(find_some_match(argvars).map_or(-1, |m| m.list_idx.unwrap_or(m.start)));
 }
 
 /// Port of `f_substitute()` from `Src/eval/funcs.c` — replace matches of `{pat}`
@@ -1121,10 +1196,10 @@ pub fn f_items(argvars: &[typval_T], rettv: &mut typval_T) {
 pub fn f_matchlist(argvars: &[typval_T], rettv: &mut typval_T) {
     // c: kSomeMatchList — [whole, \1..\9] (10 slots), or [] when no match.
     match find_some_match(argvars) {
-        Some((_, _, groups)) => {
-            let l = tv_list_alloc_ret(rettv, groups.len() as isize);
+        Some(m) => {
+            let l = tv_list_alloc_ret(rettv, m.groups.len() as isize);
             let mut lb = l.borrow_mut();
-            for g in &groups {
+            for g in &m.groups {
                 tv_list_append_string(&mut lb, g);
             }
         }
@@ -1137,8 +1212,8 @@ pub fn f_matchlist(argvars: &[typval_T], rettv: &mut typval_T) {
 /// Port of `f_matchend()` from `Src/eval/funcs.c` — char index just past the
 /// first match of `{pat}`, or -1.
 pub fn f_matchend(argvars: &[typval_T], rettv: &mut typval_T) {
-    // c: kSomeMatchEnd — the end index of the match, or -1.
-    rettv.vval = v_number(find_some_match(argvars).map_or(-1, |(_, e, _)| e));
+    // c: kSomeMatchEnd — List → matching item index; String → match end; else -1.
+    rettv.vval = v_number(find_some_match(argvars).map_or(-1, |m| m.list_idx.unwrap_or(m.end)));
 }
 
 /// Port of `f_escape()` from `Src/eval/funcs.c` — prefix each character of
@@ -1327,16 +1402,27 @@ pub fn f_json_decode(argvars: &[typval_T], rettv: &mut typval_T) {
 /// (character indices) of the first match of `{pat}` in `{expr}`, or `['', -1,
 /// -1]`. (c: `find_some_match(argvars, rettv, kSomeMatchStrPos)`.)
 pub fn f_matchstrpos(argvars: &[typval_T], rettv: &mut typval_T) {
-    // c: kSomeMatchStrPos — [match, start, end], or ["", -1, -1] when no match.
-    let (m, start, end) = match find_some_match(argvars) {
-        Some((s, e, g)) => (g.into_iter().next().unwrap_or_default(), s, e),
-        None => (String::new(), -1, -1),
-    };
+    // c: kSomeMatchStrPos — String → [match, start, end]; List → [match, idx,
+    // start, end]; no match → ["", -1, -1].
     let l = tv_list_alloc_ret(rettv, 3);
     let mut lb = l.borrow_mut();
-    tv_list_append_string(&mut lb, &m);
-    tv_list_append_number(&mut lb, start);
-    tv_list_append_number(&mut lb, end);
+    match find_some_match(argvars) {
+        Some(m) => {
+            let sub = m.groups.into_iter().next().unwrap_or_default();
+            tv_list_append_string(&mut lb, &sub);
+            // The List form inserts the matching item index before start/end.
+            if let Some(idx) = m.list_idx {
+                tv_list_append_number(&mut lb, idx);
+            }
+            tv_list_append_number(&mut lb, m.start);
+            tv_list_append_number(&mut lb, m.end);
+        }
+        None => {
+            tv_list_append_string(&mut lb, "");
+            tv_list_append_number(&mut lb, -1);
+            tv_list_append_number(&mut lb, -1);
+        }
+    }
 }
 
 /// Port of `f_getenv()` from `Src/eval/funcs.c` — the value of environment
