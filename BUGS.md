@@ -154,7 +154,12 @@ slices mid-character. Covered by `examples/numeric_edge.vim`.
 - The byte-index arg slices a UTF-8 `&str` directly (`s[..idx]`) without a
   char-boundary check. Any multibyte string crashes. **Highest severity.**
 
-### R2-2. Very-magic mode `\v` is entirely unsupported
+### R2-2. Very-magic mode `\v` is entirely unsupported — ✅ FIXED
+A `preprocess_magic` pass rewrites a `\v` segment into the equivalent default-magic
+pattern (operators `( ) | + ? = { } < >` lose their backslash; a backslash makes
+them literal; classes copied verbatim), so the magic parser handles it unchanged.
+`\m` switches back. Exotic `\v` atoms (`@`, `&`, `%[`) are not yet modelled.
+Covered by `examples/regex_verymagic.vim`.
 - `matchstr("abc123","\v\d+")` → Vim `123`, vimlrs `` (empty)
 - `matchstr("color","\vcolou?r")` → Vim `color`, vimlrs `` (empty)
 - The magic-mode equivalents (`\d\+`, `colou\?r`) work, so the `\v` prefix itself is
@@ -312,3 +317,76 @@ mixed, `uniq`, `flatten(l,depth)`, `extend` keep/force/error, `count(ic,start)`,
 items()`, `:let [a,b;rest]`, `:try/:catch/:finally`+`:throw`+`v:exception`, `:unlet`,
 lambda-call `{->42}()`, partial bound args + `string()` of partial, `eval()`, `type(funcref)`,
 `printf('%s',funcref)`, substitute `\r`/`\n`.
+
+---
+
+# Round 4 — additional confirmed divergences (vs Vim 9.2)
+
+Fourth pass against the current binary, reproduced by sourcing the same `.vim` probe
+through both interpreters. No overlap with rounds 1–3.
+
+## High severity
+
+### R4-1. Unspaced `.` concatenation is mis-parsed as dict member access
+- `let a="foo" | let b="bar" | echo a.b` → Vim `foobar`, vimlrs `f`
+- `map(['a','b'],{i,v->'x'.v})` → Vim `['xa','xb']`, vimlrs `['x','x']`
+- `reduce(['a','b','c'],{a,b->a.b},'')` → Vim `'abc'`, vimlrs `''`
+- The parser's `at_member_dot()` (`src/viml_parser.rs:979-1010`) treats a `.` abutting an
+  identifier (no surrounding space) as `dict.key`. In legacy Vim script `.` is overloaded and
+  resolved by runtime type, so `a.b` on non-dicts is **concatenation**. Spaced `a . b`, `a..b`,
+  `'a'.'b'` (literal RHS), and `a.func()` (call) all work. **This is the root cause behind
+  round-1 #2** (substitute `\=` with `.`). Very common idiom (`s:prefix.name`). Highest impact.
+
+### R4-2. Numbered variadic-arg access `a:1`, `a:2`, … doesn't work
+- `func! F(...) | return [a:1, a:2] | endfunc` then `F(10,20)` → Vim `[10, 20]`, vimlrs
+  `E121: Undefined variable: a:1`
+- `a:0` (count) and `a:000` (list) are correct; only by-number positional access is broken
+  (also with a named+vararg signature).
+
+## Medium severity
+
+### R4-3. `#{…}` literal: single-char bareword key with no space after `:` fails to parse
+- `#{a:1}` → Vim `{'a': 1}`, vimlrs `E15: expected Colon, found RBrace`
+- The lexer swallows `a:`/`x:`/`g:` as a scope sigil, so the dict parser then expects another
+  colon. Multi-char keys (`#{one:1}`) and a space after the colon (`#{a: 1}`) work — which is
+  why round 3's "`#{}` PASSED" missed it. `#{a:1}` is a common spelling.
+
+### R4-4. `strpart()` 4-arg charwise mode counts `len` in bytes, not characters
+- `strpart('héllo',1,3,1)` → Vim `éll`, vimlrs `él`
+- With `{chars}`=1, `start` is a char index correctly but `len` is still applied as a byte
+  count. (3-arg byte mode is fine.)
+
+### R4-5. `lockvar` / `unlockvar` commands unsupported (parse error)
+- `let x=1` then `lockvar x` → Vim locks `x` (later write → `E741`); vimlrs `E15: Invalid
+  expression: trailing tokens`. No command handler; lock semantics absent.
+
+### R4-6. `typename()` builtin missing
+- `typename([1,2])` → Vim `list<number>`, vimlrs `E117: Unknown function: typename`
+
+### R4-7. `js_encode()` / `js_decode()` builtins missing
+- `js_encode(v:null)` → Vim `null`, vimlrs `E117`; `js_decode('{a:1}')` → Vim `{'a': 1}`, vimlrs
+  `E117`. The whole `js_*` pair is absent (`json_encode`/`json_decode` are at parity).
+
+## Low severity
+
+### R4-8. `float2nr()` negative overflow clamps one short of Vim
+- `float2nr(-1.0e20)` → Vim `-9223372036854775807` (−(2^63−1)), vimlrs `-9223372036854775808`
+  (i64::MIN). Positive overflow matches; only the negative side is off by one.
+
+### R4-9. `islocked()` on a nonexistent variable returns 0 instead of -1
+- `islocked('nope')` → Vim `-1`, vimlrs `0`. Vim distinguishes "no such variable" (`-1`) from
+  "exists, unlocked" (`0`).
+
+### R4-10. `:for`-loop closures capture a per-iteration value; Vim shares one loop variable
+- `for i in range(3) | call add(fns,{->i}) | endfor` then calling each → Vim `[-1, -1, -1]`
+  (all share the one loop var, left `-1` after the loop), vimlrs `[0, 1, 2]`. vimlrs is
+  arguably "more correct," but it diverges from Vim's (quirky) ground truth.
+
+Areas probed in round 4 that PASSED: `abs`/`round`/`ceil`/`floor`/`trunc` of negatives, `fmod`
+sign, `log`/`log10`/`sqrt`/`pow` domains, `and`/`or`/`xor`/`invert` with negatives & >i32,
+`min([])`/`max([])`→0, `remove(l,1,2)` range, `get([],5,'d')`, `extendnew`/`deepcopy`/
+`insert(neg)`/`sort`(default+`'N'`)/`uniq`/`flattennew`, `reduce` over List/Blob/String **with
+spaced/`..` dot**, `nr2char(…,1)`/`char2nr(…,1)`/`strgetchar`/`strchars(skipcc)`/`strcharpart`,
+`escape`/`tr`(ranges)/`split('\d')`/`join('')`/`repeat([..])`, `eval(string(…))` round-trip,
+`:while`/`:break`/`:continue`, nested `:try`/`:finally` rethrow, `execute "let …"`, script-local
+`s:` vars across calls.

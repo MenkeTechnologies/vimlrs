@@ -148,6 +148,104 @@ impl Captures {
 
 const INF: u32 = u32::MAX;
 
+/// Rewrite a `\v` (very-magic) segment into the equivalent default-magic
+/// pattern, so the magic-mode parser handles it unchanged. In very-magic mode
+/// every ASCII punctuation char is an operator (no backslash needed) and a
+/// backslash makes it literal — the inverse of magic mode for
+/// `( ) | + ? = { } < >`. `\v` switches very-magic on for the rest of the
+/// pattern; `\m` switches back. Character classes `[...]` are copied verbatim.
+/// (Exotic `\v` atoms — `@`, `&`, `%[` — are left as-is; not yet modelled.)
+fn preprocess_magic(pat: &str) -> String {
+    if !pat.contains("\\v") {
+        return pat.to_string();
+    }
+    let chars: Vec<char> = pat.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    let mut very = false;
+    const OPS: &str = "(){}+?=|<>";
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\\' && i + 1 < chars.len() {
+            match chars[i + 1] {
+                'v' => {
+                    very = true;
+                    i += 2;
+                    continue;
+                }
+                'm' => {
+                    very = false;
+                    i += 2;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        if !very {
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        match c {
+            '\\' => {
+                if let Some(&n) = chars.get(i + 1) {
+                    if OPS.contains(n) {
+                        out.push(n); // `\(` → literal '(' (bare in magic)
+                    } else {
+                        out.push('\\'); // keep `\d`, `\zs`, `\1`, `\\`, …
+                        out.push(n);
+                    }
+                    i += 2;
+                } else {
+                    out.push('\\');
+                    i += 1;
+                }
+            }
+            '[' => {
+                // Copy the class verbatim (internals are mode-independent).
+                out.push('[');
+                i += 1;
+                if chars.get(i) == Some(&'^') {
+                    out.push('^');
+                    i += 1;
+                }
+                if chars.get(i) == Some(&']') {
+                    out.push(']');
+                    i += 1;
+                }
+                while i < chars.len() && chars[i] != ']' {
+                    if chars[i] == '\\' && i + 1 < chars.len() {
+                        out.push('\\');
+                        out.push(chars[i + 1]);
+                        i += 2;
+                    } else {
+                        out.push(chars[i]);
+                        i += 1;
+                    }
+                }
+                if i < chars.len() {
+                    out.push(']');
+                    i += 1;
+                }
+            }
+            '%' if chars.get(i + 1) == Some(&'(') => {
+                out.push_str("\\%("); // non-capturing group
+                i += 2;
+            }
+            _ if OPS.contains(c) => {
+                out.push('\\'); // operator → magic backslash form
+                out.push(c);
+                i += 1;
+            }
+            _ => {
+                out.push(c); // . * ^ $ ~ and word chars are the same in both
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
 // ── parser (magic mode) ──
 
 struct Parser {
@@ -418,6 +516,7 @@ impl Regex {
     /// Compile a Vim magic-mode pattern. Always succeeds (a malformed tail is
     /// treated literally, as Vim is lenient).
     pub fn compile(pat: &str) -> Regex {
+        let pat = preprocess_magic(pat);
         let mut parser = Parser {
             p: pat.chars().collect(),
             i: 0,
