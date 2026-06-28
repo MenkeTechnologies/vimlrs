@@ -299,9 +299,9 @@ pub fn f_substitute(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.vval = v_string(crate::viml_regex::regex_substitute(&s, &pat, &sub, &flags));
 }
 
-/// Port of `f_join()` from `Src/eval/funcs.c` — join a List with a separator
-/// (default " ").
-// `f_join` lives in its real home file, `src/ported/eval/typval.rs` (eval/typval.c).
+// Port of `f_join()` from `Src/eval/funcs.c` — join a List with a separator
+// (default " "). `f_join` lives in its real home file,
+// `src/ported/eval/typval.rs` (eval/typval.c).
 
 /// Port of `f_range()` from `Src/eval/funcs.c`.
 ///
@@ -445,9 +445,9 @@ fn max_min(argvars: &[typval_T], rettv: &mut typval_T, domax: bool) {
     rettv.vval = v_number(n);
 }
 
-/// Port of `f_count()` from `Src/eval/funcs.c` (subset) — occurrences of
-/// `{expr}` in a List.
-// `f_count` lives in its real home file, `src/ported/eval/list.rs` (eval/list.c).
+// Port of `f_count()` from `Src/eval/funcs.c` (subset) — occurrences of
+// `{expr}` in a List. `f_count` lives in its real home file,
+// `src/ported/eval/list.rs` (eval/list.c).
 
 /// Port of `f_index()` from `Src/eval/funcs.c` (subset) — first index of
 /// `{expr}` in a List, or -1.
@@ -715,9 +715,9 @@ pub fn f_insert(argvars: &[typval_T], rettv: &mut typval_T) {
     *rettv = argvars[0].clone();
 }
 
-/// Port of `f_remove()` from `Src/eval/funcs.c` (subset) — remove and return an
-/// item from a `{list}` by index, or a value from a `{dict}` by key.
-// `f_remove` lives in its real home file, `src/ported/eval/list.rs` (eval/list.c).
+// Port of `f_remove()` from `Src/eval/funcs.c` (subset) — remove and return an
+// item from a `{list}` by index, or a value from a `{dict}` by key. `f_remove`
+// lives in its real home file, `src/ported/eval/list.rs` (eval/list.c).
 
 // `f_extend`/`f_extendnew` live in their real home file, `src/ported/eval/list.rs`.
 
@@ -769,9 +769,9 @@ pub fn f_items(argvars: &[typval_T], rettv: &mut typval_T) {
     }
 }
 
-/// Port of `f_uniq()` from `Src/eval/funcs.c` (subset) — remove adjacent
-/// duplicate items from a `{list}`, returning it.
-// `f_sort`/`f_uniq` live in their real home file, `src/ported/eval/typval.rs`.
+// Port of `f_uniq()` from `Src/eval/funcs.c` (subset) — remove adjacent
+// duplicate items from a `{list}`, returning it. `f_sort`/`f_uniq` live in
+// their real home file, `src/ported/eval/typval.rs`.
 
 // ── batch 4: regex-list, more string, list helpers (Src/eval/funcs.c) ──
 

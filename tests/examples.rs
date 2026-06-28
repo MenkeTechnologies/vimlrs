@@ -6,6 +6,7 @@
 //! just runs each script through the built `vimlrs` binary and requires it to
 //!   1. exit successfully, and
 //!   2. emit no Vim error (`E<num>: …`) on stderr.
+//!
 //! So an assertion that regresses fails the script, which fails this test.
 //!
 //! A `tests/fixtures/<name>.in` file, when present, is piped to stdin (used by

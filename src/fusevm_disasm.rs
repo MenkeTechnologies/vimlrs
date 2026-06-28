@@ -68,6 +68,9 @@ mod tests {
     }
 
     #[test]
+    // `Chunk` is an external (fusevm) struct; build-then-set keeps the test
+    // independent of its private fields, so the default-then-assign form stays.
+    #[allow(clippy::field_reassign_with_default)]
     fn ops_numbered_four_digit_width() {
         let mut c = Chunk::default();
         c.ops = vec![fusevm::Op::Nop, fusevm::Op::Nop];

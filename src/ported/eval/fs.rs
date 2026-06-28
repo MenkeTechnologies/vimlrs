@@ -512,9 +512,9 @@ pub fn f_writefile(argvars: &[typval_T], rettv: &mut typval_T) {
         .map(|it| tv_get_string(&it.li_tv))
         .collect();
     let mut buf = items.join("\n");
-    if !binary && !buf.is_empty() {
-        buf.push('\n');
-    } else if !binary && buf.is_empty() && !items.is_empty() {
+    // Append a trailing newline unless writing binary: either the joined text is
+    // non-empty, or it is empty only because the list held empty item(s).
+    if !binary && (!buf.is_empty() || !items.is_empty()) {
         buf.push('\n');
     }
 

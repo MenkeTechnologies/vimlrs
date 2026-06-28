@@ -1091,10 +1091,8 @@ pub fn tv_blob_set_range(dest: &mut blob_T, n1: varnumber_T, n2: varnumber_T, sr
         emsg("E972: Blob value does not have the right number of bytes");
         return FAIL;
     }
-    let mut ir = 0;
-    for il in n1..=n2 {
-        tv_blob_set(dest, il as i32, tv_blob_get(src, ir));
-        ir += 1;
+    for (ir, il) in (n1..=n2).enumerate() {
+        tv_blob_set(dest, il as i32, tv_blob_get(src, ir as i32));
     }
     OK
 }
@@ -2297,19 +2295,24 @@ pub struct sortinfo_T {
     pub item_compare_func_err: std::cell::Cell<bool>,
 }
 
+/// Funcref comparator for `sort()`/`uniq()` (`(name, a, b) -> Some(cmp)`).
+type SortFuncrefFn = fn(&str, &typval_T, &typval_T) -> Option<varnumber_T>;
+/// Generic "call a Funcref/Partial typval with args → result" hook.
+type CallFuncFn = fn(&typval_T, &[typval_T]) -> Option<typval_T>;
+
 thread_local! {
     /// Bridge-installed funcref comparator for `sort()`/`uniq()` with a `{func}`
     /// argument: `(name, a, b) -> Some(cmp)`, or `None` on a call/type error.
     /// The value layer can't call user functions itself (that lives in the
     /// bridge), so the bridge installs this hook in `install()`.
-    pub static SORT_FUNCREF_HOOK: std::cell::RefCell<Option<fn(&str, &typval_T, &typval_T) -> Option<varnumber_T>>> =
+    pub static SORT_FUNCREF_HOOK: std::cell::RefCell<Option<SortFuncrefFn>> =
         const { std::cell::RefCell::new(None) };
 
     /// Generic "call a Funcref/Partial typval with args → result" hook, installed
     /// by the bridge (the value layer can't call user functions itself). Used by
     /// `reduce()`. The first argument is the callee typval (VAR_FUNC name or
     /// VAR_PARTIAL), so bound partial args are honored. `None` on a call error.
-    pub static CALL_FUNC_HOOK: std::cell::RefCell<Option<fn(&typval_T, &[typval_T]) -> Option<typval_T>>> =
+    pub static CALL_FUNC_HOOK: std::cell::RefCell<Option<CallFuncFn>> =
         const { std::cell::RefCell::new(None) };
 }
 

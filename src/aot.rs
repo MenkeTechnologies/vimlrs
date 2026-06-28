@@ -280,6 +280,10 @@ pub fn build(script_paths: &[PathBuf], out_path: &Path) -> Result<PathBuf, Strin
 /// # Safety
 /// `vm` is the live run VM passed by the fusevm runtime; borrowed only here.
 #[no_mangle]
+// FFI entry point registered with the AOT runtime by raw `extern "C"` fn
+// pointer; the `# Safety` contract above governs the deref. Marking the fn
+// `unsafe` would change its type and break registration.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn fusevm_aot_register_builtins(vm: *mut fusevm::VM) {
     // SAFETY: the fusevm runtime hands us the live run VM for this call.
     let vm = unsafe { &mut *vm };

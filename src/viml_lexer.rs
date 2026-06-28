@@ -304,7 +304,7 @@ impl<'a> Lexer<'a> {
                 // odd trailing nibble — stop (Vim requires pairs)
                 break;
             }
-            let s = std::str::from_utf8(&self.s.as_bytes()[self.pos..self.pos + 2]).unwrap_or("00");
+            let s = &self.s[self.pos..self.pos + 2];
             bytes.push(u8::from_str_radix(s, 16).unwrap_or(0));
             self.pos += 2;
         }
@@ -597,6 +597,8 @@ mod tests {
     }
 
     #[test]
+    // `3.14` here is a lexer fixture, not an attempt to express π.
+    #[allow(clippy::approx_constant)]
     fn numbers_and_floats() {
         assert_eq!(kinds("0xff"), vec![Tok::Number(255), Tok::Eof]);
         assert_eq!(kinds("3.14"), vec![Tok::Float(3.14), Tok::Eof]);

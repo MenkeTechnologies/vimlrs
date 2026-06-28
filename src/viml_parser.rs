@@ -383,12 +383,13 @@ fn split_commands(line: &str) -> Vec<&str> {
     segs
 }
 
+/// A parsed block body plus the terminator `(cmd, rest)` it stopped on
+/// (`None` at EOF).
+type ParseBlockResult = Result<(Vec<Stmt>, Option<(String, String)>), VimlError>;
+
 /// Parse statements until a terminator in `terms`. Returns the body and the
 /// terminator `(cmd, rest)` it stopped on (`None` at EOF).
-fn parse_block(
-    cur: &mut Lines,
-    terms: &[&str],
-) -> Result<(Vec<Stmt>, Option<(String, String)>), VimlError> {
+fn parse_block(cur: &mut Lines, terms: &[&str]) -> ParseBlockResult {
     let mut stmts = Vec::new();
     loop {
         cur.skip_blanks();
@@ -551,7 +552,7 @@ fn parse_let(rest: &str) -> Result<Stmt, VimlError> {
     // Compound assignment (`+= -= *= /= %= .=`, ex_let's `tv_op`): the char just
     // before `=` is the operator. A `:let` target never ends in one of these, so
     // its presence unambiguously marks a compound assign.
-    let op = match rest[..eq].as_bytes().last() {
+    let op = match rest.as_bytes()[..eq].last() {
         Some(b'+') => Some(ArithOp::Add),
         Some(b'-') => Some(ArithOp::Sub),
         Some(b'*') => Some(ArithOp::Mul),

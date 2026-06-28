@@ -286,15 +286,20 @@ pub enum filtermap_T {
 }
 use filtermap_T::*;
 
+/// Per-item evaluator hook for map/filter/foreach (`(key, val, expr) -> result`).
+type FilterMapEvalFn = fn(&typval_T, &typval_T, &typval_T) -> Option<typval_T>;
+/// `foreach()`-with-String command-line hook (`(cmd, key, val) -> ok`).
+type FilterMapCmdFn = fn(&str, &typval_T, &typval_T) -> bool;
+
 thread_local! {
     /// Per-item evaluator for map/filter/foreach: set `v:key`/`v:val`, then eval
     /// the expr (string) or call the funcref → result. Installed by the bridge
     /// in `install()` (the value layer cannot evaluate expressions itself).
-    pub static FILTER_MAP_EVAL_HOOK: RefCell<Option<fn(&typval_T, &typval_T, &typval_T) -> Option<typval_T>>> =
+    pub static FILTER_MAP_EVAL_HOOK: RefCell<Option<FilterMapEvalFn>> =
         const { RefCell::new(None) };
     /// `foreach()` with a String runs it as a command line (`do_cmdline_cmd`).
     /// Installed by the bridge.
-    pub static FILTER_MAP_CMD_HOOK: RefCell<Option<fn(&str, &typval_T, &typval_T) -> bool>> =
+    pub static FILTER_MAP_CMD_HOOK: RefCell<Option<FilterMapCmdFn>> =
         const { RefCell::new(None) };
 }
 

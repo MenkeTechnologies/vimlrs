@@ -641,6 +641,8 @@ mod tests {
     use super::string2float;
 
     #[test]
+    // `3.14` here is a parse fixture, not an attempt to express π.
+    #[allow(clippy::approx_constant)]
     fn string2float_leading_prefix() {
         assert_eq!(string2float("3.14"), (3.14, 4));
         assert_eq!(string2float("3.14abc"), (3.14, 4));

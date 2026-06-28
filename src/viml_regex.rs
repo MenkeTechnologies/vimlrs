@@ -17,12 +17,15 @@
 
 use std::cell::RefCell;
 
+/// `\=`-replacement expression evaluator hook (`expr -> string`).
+type SubstExprFn = fn(&str) -> String;
+
 thread_local! {
     /// Hook (installed by the bridge) that evaluates a `\=`-prefixed substitute
     /// replacement *expression* to its string result. `submatch()` reads
     /// [`SUBMATCHES`] while this runs. `None` when no evaluator is wired (then a
     /// `\=` replacement falls back to literal text).
-    pub static SUBST_EXPR_HOOK: RefCell<Option<fn(&str) -> String>> =
+    pub static SUBST_EXPR_HOOK: RefCell<Option<SubstExprFn>> =
         const { RefCell::new(None) };
     /// Groups of the match currently being replaced (index 0 = whole match),
     /// exposed to a `\=` expression through `submatch()`.
@@ -298,11 +301,10 @@ impl Parser {
 
     /// `$` is the end anchor only at the end of a branch.
     fn is_eol_pos(&self) -> bool {
-        match (self.p.get(self.i + 1), self.p.get(self.i + 2)) {
-            (None, _) => true,
-            (Some('\\'), Some('|')) | (Some('\\'), Some(')')) => true,
-            _ => false,
-        }
+        matches!(
+            (self.p.get(self.i + 1), self.p.get(self.i + 2)),
+            (None, _) | (Some('\\'), Some('|')) | (Some('\\'), Some(')'))
+        )
     }
 
     fn escape(&mut self) -> Option<Node> {
