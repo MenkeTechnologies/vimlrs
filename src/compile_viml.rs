@@ -11,7 +11,7 @@ use fusevm::{ChunkBuilder, Op, Value};
 use serde::{Deserialize, Serialize};
 
 use crate::fusevm_bridge as h;
-use crate::viml_ast::{ArithOp, Expr, ForVars, LetTarget, Stmt, UnaryOp};
+use crate::viml_ast::{ArithOp, Expr, ForVars, LetTarget, Stmt, UnaryOp, UnletArg};
 use crate::viml_lexer::{CmpOp, VimlError};
 
 /// A compiled user function: its name, parameter names, and body chunk.
@@ -822,10 +822,22 @@ impl Compiler {
                 self.emit(Op::Pop);
                 Ok(())
             }
-            Stmt::Unlet(names) => {
-                for name in names {
-                    self.load_str(name);
-                    self.emit(Op::CallBuiltin(h::VIML_UNLET, 1));
+            Stmt::Unlet(args) => {
+                for arg in args {
+                    match arg {
+                        UnletArg::Name(name) => {
+                            self.load_str(name);
+                            self.emit(Op::CallBuiltin(h::VIML_UNLET, 1));
+                        }
+                        // `unlet base[index]` / `unlet base.key` — push the
+                        // container then the index; the bridge removes the
+                        // element in place (mirroring `do_unlet_var()`).
+                        UnletArg::Item { base, index } => {
+                            self.expr(base)?;
+                            self.expr(index)?;
+                            self.emit(Op::CallBuiltin(h::VIML_UNLET_INDEX, 2));
+                        }
+                    }
                     self.emit(Op::Pop);
                 }
                 Ok(())

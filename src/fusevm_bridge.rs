@@ -408,6 +408,9 @@ pub const VIML_EXCMD: u16 = 3569;
 pub const VIML_SOURCE: u16 = 3500;
 /// `:unlet {name}`: pop the name, delete the variable.
 pub const VIML_UNLET: u16 = 3501;
+/// `:unlet base[index]` / `:unlet base.key`: pop index then container, remove
+/// the List item or Dict entry in place.
+pub const VIML_UNLET_INDEX: u16 = 3502;
 /// `json_encode()`
 pub const VIML_FN_JSON_ENCODE: u16 = 3186;
 /// `json_decode()`
@@ -1809,6 +1812,47 @@ fn b_unlet(vm: &mut VM, _: u8) -> Value {
     Value::Undef
 }
 
+/// `:unlet base[index]` / `:unlet base.key` — remove one List item or Dict
+/// entry. Mirrors the two element branches of `do_unlet_var()`
+/// (csrc/eval/vars.c): list → `tv_list_item_remove`, dict → `tv_dict_item_remove`
+/// (with a watcher notification), else E689.
+fn b_unlet_index(vm: &mut VM, _: u8) -> Value {
+    use crate::ported::eval::typval::{
+        tv_dict_item_remove, tv_dict_watcher_notify, tv_list_item_remove,
+    };
+    let index = pop_tv(vm);
+    let base = pop_tv(vm);
+    match (base.v_type, &base.vval) {
+        (VAR_DICT, v_dict(Some(d))) => {
+            let key = tv_get_string(&index);
+            let old = d.borrow().dv_hashtab.get(&key).cloned();
+            match old {
+                None => {
+                    message::semsg(&format!("E716: Key not present in Dictionary: \"{key}\""));
+                }
+                Some(oldtv) => {
+                    tv_dict_item_remove(&mut d.borrow_mut(), &key);
+                    tv_dict_watcher_notify(d, &key, None, Some(&oldtv));
+                }
+            }
+        }
+        (VAR_LIST, v_list(Some(l))) => {
+            let len = l.borrow().lv_len as varnumber_T;
+            let mut i = tv_get_number_chk(&index, None);
+            if i < 0 {
+                i += len;
+            }
+            if i >= 0 && i < len {
+                tv_list_item_remove(&mut l.borrow_mut(), i as usize);
+            } else {
+                message::emsg("E684: list index out of range");
+            }
+        }
+        _ => message::emsg("E689: Can only index a List, Dictionary or Blob"),
+    }
+    Value::Undef
+}
+
 /// `VIML_ERR_MARK` — record the current `did_emsg` so a following `:echo` can
 /// tell whether evaluating its arguments raised an error.
 fn b_err_mark(_vm: &mut VM, _: u8) -> Value {
@@ -2938,6 +2982,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_EXEC_STMT, b_exec_stmt);
     vm.register_builtin(VIML_SOURCE, b_source);
     vm.register_builtin(VIML_UNLET, b_unlet);
+    vm.register_builtin(VIML_UNLET_INDEX, b_unlet_index);
     vm.register_builtin(VIML_SET, b_set);
     vm.register_builtin(VIML_MAP, b_map);
     vm.register_builtin(VIML_COMMAND, b_command);

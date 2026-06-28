@@ -195,6 +195,23 @@ pub enum LetTarget {
     },
 }
 
+/// A single `:unlet` argument: either a bare variable name or a List/Dict
+/// element target. Mirrors the two non-name branches of `do_unlet_var()`
+/// (`csrc/eval/vars.c`).
+#[derive(Debug, Clone)]
+pub enum UnletArg {
+    /// `unlet x` / `unlet g:x` / `unlet $ENV` — remove a variable by name.
+    Name(String),
+    /// `unlet l[i]` / `unlet d.key` / `unlet d['key']` — remove one List item
+    /// or Dict entry. `base` is the container expression, `index` the key/index.
+    Item {
+        /// The container expression.
+        base: Box<Expr>,
+        /// The index/key expression.
+        index: Box<Expr>,
+    },
+}
+
 /// `:for` loop variable: a single name, or a `[a, b]` unpack of each item.
 #[derive(Debug, Clone)]
 pub enum ForVars {
@@ -283,8 +300,10 @@ pub enum Stmt {
     /// `:source {file}` — read and run another `.vim` file in the current scope
     /// (its functions and globals persist). The raw (unquoted) filename.
     Source(String),
-    /// `:unlet[!] {name}…` — delete one or more variables by name.
-    Unlet(Vec<String>),
+    /// `:unlet[!] {name}…` — delete one or more variables, list items, or dict
+    /// entries. Each argument is either a bare name or a List/Dict element
+    /// target (`l[i]` / `d.key`); see [`UnletArg`].
+    Unlet(Vec<UnletArg>),
     /// A `:map`-family command (`nmap`, `inoremap`, `vunmap`, `mapclear`, …):
     /// the whole raw command line, re-parsed by the mapping runtime.
     Map(String),

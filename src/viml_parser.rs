@@ -14,7 +14,7 @@
 //! ```
 //! ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-use crate::viml_ast::{ArithOp, Expr, ForVars, LetTarget, Stmt, UnaryOp};
+use crate::viml_ast::{ArithOp, Expr, ForVars, LetTarget, Stmt, UnaryOp, UnletArg};
 use crate::viml_lexer::{lex, CaseFlag, CmpOp, Tok, Token, VimlError};
 
 /// The small set of names Phase 3 recognizes as builtin function calls. The
@@ -54,11 +54,15 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
         }
         "source" | "so" => Ok(Stmt::Source(rest.trim().to_string())),
         "unlet" | "unl" => {
-            // `:unlet[!] x y …` — the optional `!` suppresses the missing-var error.
-            let names = rest.trim_start_matches('!').trim();
-            Ok(Stmt::Unlet(
-                names.split_whitespace().map(str::to_string).collect(),
-            ))
+            // `:unlet[!] x y …` — the optional `!` suppresses the missing-var
+            // error. Each argument is a bare name or a List/Dict element target
+            // (`l[i]` / `d.key`), matching `do_unlet_var()` (csrc/eval/vars.c).
+            let args = rest.trim_start_matches('!').trim();
+            split_unlet_args(args)
+                .into_iter()
+                .map(parse_unlet_arg)
+                .collect::<Result<Vec<_>, _>>()
+                .map(Stmt::Unlet)
         }
         "let" => parse_let(rest),
         // `:const {name} = {expr}` assigns like `:let`. RUST-PORT NOTE: Vim also
@@ -662,6 +666,94 @@ fn parse_let(rest: &str) -> Result<Stmt, VimlError> {
         }
     };
     Ok(Stmt::Let { target, expr })
+}
+
+/// Split a `:unlet` argument list on top-level whitespace, keeping `[…]`
+/// subscripts and quoted strings (e.g. `d['a b']`) intact. A plain
+/// `split_whitespace()` would wrongly break `unlet d['a b']` in two.
+fn split_unlet_args(s: &str) -> Vec<&str> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut quote: Option<u8> = None;
+    let mut start: Option<usize> = None;
+    for (i, &c) in bytes.iter().enumerate() {
+        match quote {
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                }
+            }
+            None => match c {
+                b'\'' | b'"' => quote = Some(c),
+                b'[' | b'(' => depth += 1,
+                b']' | b')' => depth -= 1,
+                _ if c.is_ascii_whitespace() && depth == 0 => {
+                    if let Some(st) = start.take() {
+                        out.push(&s[st..i]);
+                    }
+                    continue;
+                }
+                _ => {}
+            },
+        }
+        if start.is_none() {
+            start = Some(i);
+        }
+    }
+    if let Some(st) = start {
+        out.push(&s[st..]);
+    }
+    out
+}
+
+/// Parse one `:unlet` argument into a bare name or a List/Dict element target.
+/// Reuses the same `l[i]` / `d.key` shapes as `:let`'s `LetTarget::Index`; the
+/// removal itself happens at runtime (mirroring `do_unlet_var()`).
+fn parse_unlet_arg(arg: &str) -> Result<UnletArg, VimlError> {
+    let arg = arg.trim();
+    // `base[index]` — find the matching `[` for the trailing `]`.
+    if arg.ends_with(']') && arg.contains('[') {
+        let bytes = arg.as_bytes();
+        let mut depth = 0i32;
+        let mut open = 0;
+        for i in (0..arg.len()).rev() {
+            match bytes[i] {
+                b']' => depth += 1,
+                b'[' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        open = i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let base_src = arg[..open].trim();
+        let index_src = &arg[open + 1..arg.len() - 1];
+        // A range subscript (`unlet l[i:j]`) is not yet supported; fall through
+        // to treat the whole thing as a name so the runtime reports E108/E116.
+        if split_top_colon(index_src).is_none() {
+            return Ok(UnletArg::Item {
+                base: Box::new(parse_expr(base_src)?),
+                index: Box::new(parse_expr(index_src)?),
+            });
+        }
+    } else if !arg.contains('[')
+        && arg.contains('.')
+        && arg.rsplit_once('.').is_some_and(|(_, k)| {
+            !k.is_empty() && k.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        })
+    {
+        // `base.key` — split at the last `.` (nested `d.a.b` → base `d.a`).
+        let (base, key) = arg.rsplit_once('.').unwrap();
+        return Ok(UnletArg::Item {
+            base: Box::new(parse_expr(base)?),
+            index: Box::new(Expr::Str(key.to_string())),
+        });
+    }
+    Ok(UnletArg::Name(arg.to_string()))
 }
 
 /// Split a subscript on its top-level `:` (the list-range separator). Returns
