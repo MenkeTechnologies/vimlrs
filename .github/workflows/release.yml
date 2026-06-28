@@ -171,7 +171,7 @@ jobs:
           linux_blocks=$( { emit on_intel x86_64-unknown-linux-gnu "$SHA_X86_LINUX"; emit on_arm aarch64-unknown-linux-gnu "$SHA_ARM_LINUX"; } )
           {
             printf 'class Vimlrs < Formula\n'
-            printf '  desc "Faithful Rust port of the Vimscript (VimL) interpreter, from the Neovim C eval engine"\n'
+            printf '  desc "Vimscript (VimL) interpreter in Rust, ported from Neovim'\''s C eval engine"\n'
             printf '  homepage "https://github.com/MenkeTechnologies/vimlrs"\n'
             printf '  license "MIT"\n'
             printf '  version "%s"\n\n' "$V"
