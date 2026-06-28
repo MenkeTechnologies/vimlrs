@@ -11,6 +11,8 @@ pub mod charset;
 pub mod eval;
 /// Port of `src/nvim/eval.h` (header types: `exprtype_T`, `OK`/`FAIL`).
 pub mod eval_h;
+/// Port of `src/nvim/ex_eval.c` (abort/exception state predicates).
+pub mod ex_eval;
 /// Port of `src/nvim/message.c` (extern: `emsg`/`did_emsg`).
 pub mod message;
 /// Port of `src/nvim/ops.c` (subset: the yank-register store for `getreg`/`setreg`).

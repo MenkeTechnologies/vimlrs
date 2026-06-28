@@ -114,6 +114,23 @@ pub fn set_var(name: &str, _name_len: usize, tv: typval_T, _copy: bool) {
 /// at script level). Returns the value (the C out-param + dictitem form is
 /// restored in the later phase).
 pub fn eval_variable(name: &str) -> Option<typval_T> {
+    // A `VAR_DICT` snapshot of a scope dict, for a bare scope reference used as a
+    // Dict (`keys(g:)`, `get(b:, …)`). Vim exposes the live scope dict; this is a
+    // read snapshot (covers introspection, not mutation-through-the-dict).
+    let scope_snapshot = |d: &dict_T| -> typval_T {
+        let nd = crate::ported::eval::typval::tv_dict_alloc();
+        {
+            let mut b = nd.borrow_mut();
+            for (k, v) in d.dv_hashtab.iter() {
+                b.dv_hashtab.insert(k.clone(), v.clone());
+            }
+        }
+        typval_T {
+            v_type: VAR_DICT,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_dict(Some(nd)),
+        }
+    };
     // c: v: predefined constants live in vimvardict (eval_init, eval.c:204).
     match name {
         "v:true" => {
@@ -140,32 +157,75 @@ pub fn eval_variable(name: &str) -> Option<typval_T> {
         _ => {}
     }
     if let Some(key) = name.strip_prefix("g:") {
-        return globvardict.with(|d| tv_dict_find(&d.borrow(), key).cloned());
+        return globvardict.with(|d| {
+            let d = d.borrow();
+            if key.is_empty() {
+                Some(scope_snapshot(&d))
+            } else {
+                tv_dict_find(&d, key).cloned()
+            }
+        });
     }
     if let Some(key) = name.strip_prefix("s:") {
-        return script_vars.with(|d| tv_dict_find(&d.borrow(), key).cloned());
+        return script_vars.with(|d| {
+            let d = d.borrow();
+            if key.is_empty() {
+                Some(scope_snapshot(&d))
+            } else {
+                tv_dict_find(&d, key).cloned()
+            }
+        });
     }
     if let Some(key) = name.strip_prefix("b:") {
-        return buffer_vars.with(|d| tv_dict_find(&d.borrow(), key).cloned());
+        return buffer_vars.with(|d| {
+            let d = d.borrow();
+            if key.is_empty() {
+                Some(scope_snapshot(&d))
+            } else {
+                tv_dict_find(&d, key).cloned()
+            }
+        });
     }
     if let Some(key) = name.strip_prefix("w:") {
-        return window_vars.with(|d| tv_dict_find(&d.borrow(), key).cloned());
+        return window_vars.with(|d| {
+            let d = d.borrow();
+            if key.is_empty() {
+                Some(scope_snapshot(&d))
+            } else {
+                tv_dict_find(&d, key).cloned()
+            }
+        });
     }
     if let Some(key) = name.strip_prefix("t:") {
-        return tabpage_vars.with(|d| tv_dict_find(&d.borrow(), key).cloned());
+        return tabpage_vars.with(|d| {
+            let d = d.borrow();
+            if key.is_empty() {
+                Some(scope_snapshot(&d))
+            } else {
+                tv_dict_find(&d, key).cloned()
+            }
+        });
     }
     if let Some(key) = name.strip_prefix("a:") {
         return funccal_stack.with(|s| {
-            s.borrow()
-                .last()
-                .and_then(|f| tv_dict_find(&f.fc_l_avars, key).cloned())
+            let s = s.borrow();
+            let f = s.last()?;
+            if key.is_empty() {
+                Some(scope_snapshot(&f.fc_l_avars))
+            } else {
+                tv_dict_find(&f.fc_l_avars, key).cloned()
+            }
         });
     }
     if let Some(key) = name.strip_prefix("l:") {
         return funccal_stack.with(|s| {
-            s.borrow()
-                .last()
-                .and_then(|f| tv_dict_find(&f.fc_l_vars, key).cloned())
+            let s = s.borrow();
+            let f = s.last()?;
+            if key.is_empty() {
+                Some(scope_snapshot(&f.fc_l_vars))
+            } else {
+                tv_dict_find(&f.fc_l_vars, key).cloned()
+            }
         });
     }
     // c: v: variables live in `vimvardict` — consult the vimvars store. Returns
@@ -788,3 +848,215 @@ pub fn set_vim_var_dict(idx: VimVarIndex, val: Option<Rc<RefCell<dict_T>>>) {
 pub fn set_vim_var_partial(idx: VimVarIndex, val: Option<Rc<partial_T>>) {
     vimvars.with(|s| s.borrow_mut()[idx].vv_tv.vval = v_partial(val));
 }
+
+// ── Misc eval/vars.c helpers (GC is a no-op under Rc; providers absent) ──
+
+/// Port of `set_internal_string_var()` from `Src/eval/vars.c` — set a global
+/// variable `name` to the String `value`.
+pub fn set_internal_string_var(name: &str, value: &str) {
+    set_var(
+        name,
+        name.len(),
+        typval_T {
+            v_type: VAR_STRING,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_string(value.to_string()),
+        },
+        true,
+    );
+}
+
+/// Port of `prepare_vimvar()` from `Src/eval/vars.c` — save and return the
+/// current value of `v:`-variable `idx` (so a temporary value can be set around
+/// an evaluation). Pair with [`restore_vimvar`].
+pub fn prepare_vimvar(idx: VimVarIndex) -> typval_T {
+    get_vim_var_tv(idx)
+}
+
+/// Port of `restore_vimvar()` from `Src/eval/vars.c` — restore the value saved
+/// by [`prepare_vimvar`].
+pub fn restore_vimvar(idx: VimVarIndex, save_tv: typval_T) {
+    set_vim_var_tv(idx, save_tv);
+}
+
+/// Port of `garbage_collect_globvars()` — the value layer is reference-counted
+/// (`Rc`), so there is no mark-and-sweep pass; nothing is freed → 0.
+pub fn garbage_collect_globvars(_copy_id: i32) -> i32 {
+    0
+}
+/// Port of `garbage_collect_vimvars()` — no GC pass needed (Rc) → false.
+pub fn garbage_collect_vimvars(_copy_id: i32) -> bool {
+    false
+}
+/// Port of `garbage_collect_scriptvars()` — no GC pass needed (Rc) → false.
+pub fn garbage_collect_scriptvars(_copy_id: i32) -> bool {
+    false
+}
+
+/// Port of `eval_charconvert()` — no `'charconvert'` expression standalone, so
+/// the conversion cannot run → FAIL.
+pub fn eval_charconvert(_from: &str, _to: &str, _fname_from: &str, _fname_to: &str) -> i32 {
+    crate::ported::eval_h::FAIL
+}
+/// Port of `eval_diff()` — no `'diffexpr'` standalone → no-op.
+pub fn eval_diff(_orig: &str, _new: &str, _out: &str) {}
+/// Port of `eval_patch()` — no `'patchexpr'` standalone → no-op.
+pub fn eval_patch(_orig: &str, _diff: &str, _out: &str) {}
+/// Port of `eval_spell_expr()` — no `'spellsuggest'` expression standalone, so
+/// there are no suggestions → NULL list.
+pub fn eval_spell_expr(_badword: &str, _expr: &str) -> Option<Rc<RefCell<list_T>>> {
+    None
+}
+/// Port of `list_vim_vars()` — interactive `:let` listing; no-op standalone.
+pub fn list_vim_vars(_first: &mut i32) {}
+/// Port of `list_script_vars()` — interactive `:let` listing; no-op standalone.
+pub fn list_script_vars(_first: &mut i32) {}
+
+#[cfg(test)]
+mod misc_helper_tests {
+    use super::*;
+    use crate::ported::eval::typval::tv_get_string;
+
+    #[test]
+    fn internal_string_var_and_vimvar_save_restore() {
+        // set_internal_string_var writes a global readable via eval_variable.
+        set_internal_string_var("g:port_test", "hello");
+        assert_eq!(
+            tv_get_string(&eval_variable("g:port_test").unwrap()),
+            "hello"
+        );
+
+        // prepare_vimvar saves, then restore_vimvar puts the value back.
+        set_vim_var_string(vv::VV_VAL, "original");
+        let saved = prepare_vimvar(vv::VV_VAL);
+        set_vim_var_string(vv::VV_VAL, "temporary");
+        assert_eq!(get_vim_var_str(vv::VV_VAL), "temporary");
+        restore_vimvar(vv::VV_VAL, saved);
+        assert_eq!(get_vim_var_str(vv::VV_VAL), "original");
+        set_internal_string_var("g:unlet_me", "x");
+        assert!(eval_variable("g:unlet_me").is_some());
+        assert_eq!(do_unlet("g:unlet_me", 0, false), crate::ported::eval_h::OK);
+        assert!(eval_variable("g:unlet_me").is_none());
+        assert!(var_wrong_func_name("lowercase", false));
+        assert!(!var_wrong_func_name("Capital", false));
+
+        // GC is a no-op under Rc.
+        assert_eq!(garbage_collect_globvars(0), 0);
+        assert!(!garbage_collect_vimvars(0));
+    }
+}
+
+// ── more vars.c helpers (unlet, funcref-name check, reg var, clears) ──
+
+/// Port of `do_unlet()` from `Src/eval/vars.c` — delete variable `name` from its
+/// scope. Returns OK if removed (or `forceit`), FAIL if it did not exist.
+pub fn do_unlet(name: &str, _name_len: usize, forceit: bool) -> i32 {
+    let ok = crate::ported::eval_h::OK;
+    let fail = crate::ported::eval_h::FAIL;
+    let rm = |store: &'static std::thread::LocalKey<RefCell<dict_T>>, key: &str| -> i32 {
+        store.with(|d| {
+            if d.borrow_mut().dv_hashtab.shift_remove(key).is_some() || forceit {
+                ok
+            } else {
+                fail
+            }
+        })
+    };
+    if let Some(k) = name.strip_prefix("g:") {
+        return rm(&globvardict, k);
+    }
+    if let Some(k) = name.strip_prefix("s:") {
+        return rm(&script_vars, k);
+    }
+    if let Some(k) = name.strip_prefix("b:") {
+        return rm(&buffer_vars, k);
+    }
+    if let Some(k) = name.strip_prefix("w:") {
+        return rm(&window_vars, k);
+    }
+    if let Some(k) = name.strip_prefix("t:") {
+        return rm(&tabpage_vars, k);
+    }
+    // Bare name: current function-local scope, else global.
+    let in_func = funccal_stack.with(|s| {
+        s.borrow_mut()
+            .last_mut()
+            .map(|top| top.fc_l_vars.dv_hashtab.shift_remove(name).is_some())
+    });
+    match in_func {
+        Some(true) => ok,
+        Some(false) => {
+            if forceit {
+                ok
+            } else {
+                fail
+            }
+        }
+        None => rm(&globvardict, name),
+    }
+}
+
+/// Port of `var_wrong_func_name()` from `Src/eval/vars.c` — true (with E704) when
+/// `name` is an invalid Funcref variable name: it must start with a capital, or
+/// be a `w:`/`b:`/`s:`/`t:` scope or an autoload (`#`) name.
+pub fn var_wrong_func_name(name: &str, _new_var: bool) -> bool {
+    let b = name.as_bytes();
+    let scoped = b.first().is_some_and(|c| b"wbst".contains(c)) && b.get(1) == Some(&b':');
+    let lead = if b.first().is_some_and(|&c| c != 0) && b.get(1) == Some(&b':') {
+        b.get(2).copied().unwrap_or(0)
+    } else {
+        b.first().copied().unwrap_or(0)
+    };
+    if !scoped && !lead.is_ascii_uppercase() && !name.contains('#') {
+        crate::ported::message::semsg(&format!(
+            "E704: Funcref variable name must start with a capital: {name}"
+        ));
+        return true;
+    }
+    false
+}
+
+/// Port of `set_reg_var()` from `Src/eval/vars.c` — set `v:register` to char `c`.
+pub fn set_reg_var(c: u8) {
+    set_vim_var_string(vv::VV_REG, &(c as char).to_string());
+}
+
+/// Port of `evalvars_clear()` from `Src/eval/vars.c` — teardown of the variable
+/// stores; `Rc`/`Drop`-managed, no-op.
+pub fn evalvars_clear() {}
+
+/// Port of `del_menutrans_vars()` from `Src/eval/vars.c` — remove `v:` menu
+/// translation vars; not used standalone, no-op.
+pub fn del_menutrans_vars() {}
+
+/// Port of `check_vars()` from `Src/eval/vars.c` — curly-brace name expansion
+/// check; the subset has no `{}` names to expand, no-op.
+pub fn check_vars(_name: &str, _len: usize) {}
+
+// ── vars.c listing (interactive :let, no-op) + set delegations ──
+
+/// Port of `set_var_const()` from `Src/eval/vars.c` — the `:const`-aware setter.
+/// The subset does not track const locks, so it delegates to [`set_var`].
+pub fn set_var_const(name: &str, name_len: usize, tv: typval_T, copy: bool, _is_const: bool) {
+    set_var(name, name_len, tv, copy);
+}
+
+/// Port of `before_set_vvar()` from `Src/eval/vars.c` — hook before a `v:`
+/// variable is set; nothing vetoes the set in the subset → allow (false = no
+/// special handling consumed it).
+pub fn before_set_vvar(_varname: &str) -> bool {
+    false
+}
+
+/// Port of `list_glob_vars()` from `Src/eval/vars.c` — `:let` listing of `g:`
+/// variables; no interactive listing standalone, no-op.
+pub fn list_glob_vars(_first: &mut i32) {}
+/// Port of `list_buf_vars()` from `Src/eval/vars.c` — no-op.
+pub fn list_buf_vars(_first: &mut i32) {}
+/// Port of `list_win_vars()` from `Src/eval/vars.c` — no-op.
+pub fn list_win_vars(_first: &mut i32) {}
+/// Port of `list_tab_vars()` from `Src/eval/vars.c` — no-op.
+pub fn list_tab_vars(_first: &mut i32) {}
+/// Port of `list_one_var_a()` from `Src/eval/vars.c` — print one variable; no
+/// interactive output standalone, no-op.
+pub fn list_one_var_a(_prefix: &str, _name: &str, _name_len: isize) {}

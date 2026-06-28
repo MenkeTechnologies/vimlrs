@@ -33,6 +33,10 @@ call assert_equal([3, 4, 5], nums[2:4])
 call assert_equal(['langs', 'name'], sort(keys(user)))
 call assert_true(has_key(user, 'langs'))
 call assert_equal(3, len(user['langs']))
+call assert_equal('ada', user.name)
+call assert_equal('viml', user.langs[0])
+" #{...} literal-key dict — bare-word keys, no quotes.
+call assert_equal({'id': 1, 'tag': 'x'}, #{id: 1, tag: 'x'})
 call assert_equal({'vim': 3, 'rust': 2, 'c': 1}, freq)
 call assert_equal(3, freq['vim'])
 

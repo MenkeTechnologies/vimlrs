@@ -3436,3 +3436,27 @@ pub fn _nothing_conv_empty_dict(dict: &mut dict_T) {
 /// Port of `_nothing_conv_dict_end()` — end of a dict in the "nothing" encoder;
 /// no output is produced (no-op).
 pub fn _nothing_conv_dict_end() {}
+
+// ── "nothing" encoder callbacks + list watchers (no-ops in this model) ──
+//
+// The `encode_vim_to_nothing` walk frees a structure without producing output;
+// under `Rc`/`Drop` there is nothing to free, so the per-node callbacks are
+// no-ops. List watchers (`tv_list_watch_*`) are not modeled (no script-visible
+// list-watch API), so registering/fixing them is also a no-op.
+
+/// Port of `_nothing_conv_func_start()` (typval.c) — no-op (Rc/Drop frees funcs).
+pub fn _nothing_conv_func_start() {}
+/// Port of `_nothing_conv_func_end()` (typval.c) — no-op.
+pub fn _nothing_conv_func_end() {}
+/// Port of `_nothing_conv_real_list_after_start()` (typval.c) — no-op.
+pub fn _nothing_conv_real_list_after_start() {}
+/// Port of `_nothing_conv_list_end()` (typval.c) — no-op.
+pub fn _nothing_conv_list_end() {}
+/// Port of `_nothing_conv_real_dict_after_start()` (typval.c) — no-op.
+pub fn _nothing_conv_real_dict_after_start() {}
+/// Port of `tv_list_watch_add()` (typval.c) — list watchers are not modeled → no-op.
+pub fn tv_list_watch_add(_l: &mut list_T) {}
+/// Port of `tv_list_watch_remove()` (typval.c) — no-op.
+pub fn tv_list_watch_remove(_l: &mut list_T) {}
+/// Port of `tv_list_watch_fix()` (typval.c) — no-op.
+pub fn tv_list_watch_fix(_l: &mut list_T) {}

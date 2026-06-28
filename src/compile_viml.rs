@@ -38,6 +38,98 @@ pub struct CompiledProgram {
     pub funcs: Vec<UserFuncDef>,
 }
 
+thread_local! {
+    /// Anonymous functions generated from `{args -> body}` lambdas during the
+    /// current compile. Accumulated as expressions compile (including inside
+    /// `:function` bodies), then folded into [`CompiledProgram::funcs`].
+    static LAMBDA_FUNCS: std::cell::RefCell<Vec<UserFuncDef>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    /// Counter for unique `<lambda>N` names within a compile.
+    static LAMBDA_COUNTER: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Collect the bare (unscoped) free variable names referenced in `e` that are
+/// not in `bound` — used to capture a lambda's enclosing-scope variables. A
+/// nested lambda's own params extend `bound` for its body. Function-call names
+/// are not variables and are not collected.
+fn collect_free_vars(
+    e: &Expr,
+    bound: &mut Vec<String>,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    match e {
+        Expr::Var(n) => {
+            if !n.contains(':') && !bound.contains(n) {
+                out.insert(n.clone());
+            }
+        }
+        Expr::Lambda { params, body } => {
+            let base = bound.len();
+            bound.extend(params.iter().cloned());
+            collect_free_vars(body, bound, out);
+            bound.truncate(base);
+        }
+        Expr::List(xs) => xs.iter().for_each(|x| collect_free_vars(x, bound, out)),
+        Expr::Dict(ps) => ps.iter().for_each(|(k, v)| {
+            collect_free_vars(k, bound, out);
+            collect_free_vars(v, bound, out);
+        }),
+        Expr::Unary { expr, .. } => collect_free_vars(expr, bound, out),
+        Expr::Arith { lhs, rhs, .. } | Expr::Compare { lhs, rhs, .. } => {
+            collect_free_vars(lhs, bound, out);
+            collect_free_vars(rhs, bound, out);
+        }
+        Expr::And(a, b) | Expr::Or(a, b) | Expr::Coalesce(a, b) => {
+            collect_free_vars(a, bound, out);
+            collect_free_vars(b, bound, out);
+        }
+        Expr::Ternary {
+            cond,
+            then,
+            otherwise,
+        } => {
+            collect_free_vars(cond, bound, out);
+            collect_free_vars(then, bound, out);
+            collect_free_vars(otherwise, bound, out);
+        }
+        Expr::Index { base, index } => {
+            collect_free_vars(base, bound, out);
+            collect_free_vars(index, bound, out);
+        }
+        Expr::Slice { base, from, to } => {
+            collect_free_vars(base, bound, out);
+            if let Some(f) = from {
+                collect_free_vars(f, bound, out);
+            }
+            if let Some(t) = to {
+                collect_free_vars(t, bound, out);
+            }
+        }
+        Expr::Member { base, .. } => collect_free_vars(base, bound, out),
+        Expr::Call { args, .. } => args.iter().for_each(|a| collect_free_vars(a, bound, out)),
+        Expr::Method { base, args, .. } => {
+            collect_free_vars(base, bound, out);
+            args.iter().for_each(|a| collect_free_vars(a, bound, out));
+        }
+        // Literals and sigil-scoped refs capture nothing.
+        Expr::Number(_)
+        | Expr::Float(_)
+        | Expr::Str(_)
+        | Expr::Option(_)
+        | Expr::Env(_)
+        | Expr::Register(_) => {}
+    }
+}
+
+/// A fresh unique anonymous-function name, `<lambda>N`.
+fn next_lambda_name() -> String {
+    LAMBDA_COUNTER.with(|c| {
+        let n = c.get();
+        c.set(n + 1);
+        format!("<lambda>{n}")
+    })
+}
+
 /// Compile a program: top-level statements into `main`, `:function` definitions
 /// into `funcs`.
 pub fn compile_program(stmts: &[Stmt]) -> Result<CompiledProgram, VimlError> {
@@ -45,6 +137,8 @@ pub fn compile_program(stmts: &[Stmt]) -> Result<CompiledProgram, VimlError> {
     // compilation unit emits unwind checks (so a throw can propagate through a
     // function call into a caller's `:try`).
     let exc = uses_exceptions(stmts);
+    LAMBDA_FUNCS.with(|f| f.borrow_mut().clear());
+    LAMBDA_COUNTER.with(|c| c.set(0));
     let mut funcs = Vec::new();
     let mut top = Vec::new();
     for s in stmts {
@@ -85,6 +179,9 @@ pub fn compile_program(stmts: &[Stmt]) -> Result<CompiledProgram, VimlError> {
         c.emit(Op::CallBuiltin(h::VIML_REPORT_UNCAUGHT, 0));
         c.emit(Op::Pop);
     }
+    // Fold in any anonymous functions generated from lambdas (top-level and
+    // inside function bodies).
+    funcs.extend(LAMBDA_FUNCS.with(|f| std::mem::take(&mut *f.borrow_mut())));
     Ok(CompiledProgram {
         main: c.b.build(),
         funcs,
@@ -656,6 +753,20 @@ impl Compiler {
                 self.load_str(args);
                 self.emit(Op::CallBuiltin(h::VIML_SET, 1));
                 self.emit(Op::Pop);
+                Ok(())
+            }
+            Stmt::Source(path) => {
+                self.load_str(path);
+                self.emit(Op::CallBuiltin(h::VIML_SOURCE, 1));
+                self.emit(Op::Pop);
+                Ok(())
+            }
+            Stmt::Unlet(names) => {
+                for name in names {
+                    self.load_str(name);
+                    self.emit(Op::CallBuiltin(h::VIML_UNLET, 1));
+                    self.emit(Op::Pop);
+                }
                 Ok(())
             }
             Stmt::Break => {
@@ -1325,6 +1436,50 @@ impl Compiler {
                 let n = Self::argc(pairs.len() * 2)?;
                 self.emit(Op::CallBuiltin(h::VIML_MAKE_DICT, n));
             }
+            Expr::Lambda { params, body } => {
+                // Desugar to an anonymous function `<lambda>N(captures…, params…)`
+                // whose body binds each into the local scope (so each is referenced
+                // by bare name, as lambdas allow) and returns the body expression.
+                // Free variables of the body are captured BY VALUE here: the lambda
+                // value is a Partial that pre-binds their current values.
+                let name = next_lambda_name();
+                let mut bound = params.clone();
+                let mut free = std::collections::BTreeSet::new();
+                collect_free_vars(body, &mut bound, &mut free);
+                let captures: Vec<String> = free.into_iter().collect();
+
+                let all_params: Vec<String> =
+                    captures.iter().chain(params.iter()).cloned().collect();
+                let mut stmts: Vec<Stmt> = all_params
+                    .iter()
+                    .map(|p| Stmt::Let {
+                        target: LetTarget::Var(p.clone()),
+                        expr: Expr::Var(format!("a:{p}")),
+                    })
+                    .collect();
+                stmts.push(Stmt::Return(Some((**body).clone())));
+                let chunk = compile_function_body(&stmts, self.exc)?;
+                LAMBDA_FUNCS.with(|f| {
+                    f.borrow_mut().push(UserFuncDef {
+                        name: name.clone(),
+                        params: all_params,
+                        bang: true,
+                        chunk,
+                    })
+                });
+                // Value: `function('<lambda>N')`, or a capturing Partial
+                // `function('<lambda>N', [cap0, cap1, …])` when there are free vars.
+                let mut fn_args = vec![Expr::Str(name)];
+                if !captures.is_empty() {
+                    fn_args.push(Expr::List(
+                        captures.iter().map(|c| Expr::Var(c.clone())).collect(),
+                    ));
+                }
+                self.expr(&Expr::Call {
+                    name: "function".to_string(),
+                    args: fn_args,
+                })?;
+            }
             Expr::Unary { op, expr } => {
                 // Native numeric negation → `Op::Negate` (Int wrapping-negates,
                 // Float negates — exactly VimL), so `-x` keeps a loop JIT-able.
@@ -1603,7 +1758,7 @@ fn bitwise_native_op(name: &str, argc: usize) -> Option<Op> {
     }
 }
 
-fn builtin_fn_id(name: &str) -> Option<u16> {
+pub(crate) fn builtin_fn_id(name: &str) -> Option<u16> {
     Some(match name {
         "len" => h::VIML_FN_LEN,
         "type" => h::VIML_FN_TYPE,
@@ -1644,6 +1799,7 @@ fn builtin_fn_id(name: &str) -> Option<u16> {
         "sort" => h::VIML_FN_SORT,
         "call" => h::VIML_FN_CALL,
         "function" => h::VIML_FN_FUNCTION,
+        "submatch" => h::VIML_FN_SUBMATCH,
         "json_encode" => h::VIML_FN_JSON_ENCODE,
         "json_decode" => h::VIML_FN_JSON_DECODE,
         "strgetchar" => h::VIML_FN_STRGETCHAR,

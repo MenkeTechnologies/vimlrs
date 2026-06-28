@@ -169,12 +169,6 @@ pub fn dummy_timer_close_cb() {
     unimplemented!("STUB dummy_timer_close_cb — csrc/eval/funcs.c:2579")
 }
 
-/// Port of `has_wsl()` — `csrc/eval/funcs.c:2879`. STUB: not yet ported.
-/// C: `static bool has_wsl(void)`
-pub fn has_wsl() {
-    unimplemented!("STUB has_wsl — csrc/eval/funcs.c:2879")
-}
-
 /// Port of `f_hlID()` — `csrc/eval/funcs.c:2894`. STUB: not yet ported.
 pub fn f_hlID(
     _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
@@ -229,12 +223,6 @@ pub fn get_matches_in_str() {
 /// C: `static void may_add_state_char(garray_T *gap, const char *include, uint8_t c)`
 pub fn may_add_state_char() {
     unimplemented!("STUB may_add_state_char — csrc/eval/funcs.c:4589")
-}
-
-/// Port of `emsg_mpack_error()` — `csrc/eval/funcs.c:4666`. STUB: not yet ported.
-/// C: `static void emsg_mpack_error(int status)`
-pub fn emsg_mpack_error() {
-    unimplemented!("STUB emsg_mpack_error — csrc/eval/funcs.c:4666")
 }
 
 /// Port of `msgpackparse_unpack_list()` — `csrc/eval/funcs.c:4686`. STUB: not yet ported.
@@ -295,12 +283,6 @@ pub fn screenchar_adjust() {
 /// C: `static int searchpair_cmn(typval_T *argvars, pos_T *match_pos)`
 pub fn searchpair_cmn() {
     unimplemented!("STUB searchpair_cmn — csrc/eval/funcs.c:6064")
-}
-
-/// Port of `do_searchpair()` — `csrc/eval/funcs.c:6173`. STUB: not yet ported.
-/// C: `int do_searchpair(const char *spat, const char *mpat, const char *epat, int dir,`
-pub fn do_searchpair() {
-    unimplemented!("STUB do_searchpair — csrc/eval/funcs.c:6173")
 }
 
 /// Port of `set_position()` — `csrc/eval/funcs.c:6442`. STUB: not yet ported.

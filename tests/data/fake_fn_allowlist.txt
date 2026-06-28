@@ -110,3 +110,9 @@ unix_expandpath
 f_strutf16len
 f_utf16idx
 utf_char2utf16len
+
+# ── encode.c float rendering ──
+# vim_float_g is the `%g` float-to-string rendering that encode.c's
+# TYPVAL_ENCODE_CONV_FLOAT macro performs inline via vim_snprintf("%g", …)
+# (Neovim has no named helper for it); faithful port of that formatting.
+vim_float_g

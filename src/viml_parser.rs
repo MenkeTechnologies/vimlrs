@@ -50,6 +50,14 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
         "echomsg" | "echom" => Ok(Stmt::Echo(parse_expr_list(rest)?)),
         "execute" | "exe" => Ok(Stmt::Execute(parse_expr_list(rest)?)),
         "set" | "se" => Ok(Stmt::Set(rest.to_string())),
+        "source" | "so" => Ok(Stmt::Source(rest.trim().to_string())),
+        "unlet" | "unl" => {
+            // `:unlet[!] x y …` — the optional `!` suppresses the missing-var error.
+            let names = rest.trim_start_matches('!').trim();
+            Ok(Stmt::Unlet(
+                names.split_whitespace().map(str::to_string).collect(),
+            ))
+        }
         "let" => parse_let(rest),
         "call" => Ok(Stmt::Call(parse_expr(rest)?)),
         "eval" => Ok(Stmt::Expr(parse_expr(rest)?)),
@@ -112,7 +120,7 @@ pub fn parse_program_lines(src: &str) -> Result<Vec<(u32, Stmt)>, VimlError> {
     loop {
         cur.skip_blanks();
         let Some(line) = cur.peek() else { break };
-        let (cmd, _) = cmd_word(line);
+        let (cmd, _) = cmd_word(&line);
         if is_block_terminator(cmd) {
             return Err(VimlError::msg(format!(
                 "E580: `:{cmd}` without matching block opener"
@@ -126,24 +134,61 @@ pub fn parse_program_lines(src: &str) -> Result<Vec<(u32, Stmt)>, VimlError> {
     Ok(out)
 }
 
-/// Cursor over the physical lines of a source block. `i` is the 0-based index of
-/// the next line; `line_no()` is its 1-based source line.
-struct Lines<'a> {
-    lines: Vec<&'a str>,
+/// Cursor over the LOGICAL lines of a source block. Physical lines whose first
+/// non-blank char is `\` are joined onto the previous logical line (Vim's
+/// line-continuation), so each entry carries its joined text plus the 1-based
+/// source line where it began. `i` is the 0-based index of the next line.
+struct Lines {
+    lines: Vec<(u32, String)>,
     i: usize,
 }
 
-impl<'a> Lines<'a> {
-    fn new(src: &'a str) -> Self {
-        Lines {
-            lines: src.lines().collect(),
-            i: 0,
+impl Lines {
+    /// Build the logical-line list: first fold `\` continuation lines into the
+    /// previous one (text after the `\` appended verbatim, as Vim does), then
+    /// expand a one-line block (`if c | … | endif`) — a block-opener line with
+    /// top-level `|` bars — into separate logical lines so the block parser
+    /// handles it normally. Both keep the original 1-based source line number.
+    fn new(src: &str) -> Self {
+        // Pass 1: continuation join.
+        let mut joined: Vec<(u32, String)> = Vec::new();
+        for (idx, raw) in src.lines().enumerate() {
+            let lineno = (idx + 1) as u32;
+            if let Some(rest) = raw.trim_start().strip_prefix('\\') {
+                if let Some(last) = joined.last_mut() {
+                    last.1.push_str(rest);
+                    continue;
+                }
+            }
+            joined.push((lineno, raw.to_string()));
         }
+        // Pass 2: split `|`-separated commands into one logical line each, so a
+        // block opener anywhere on the line (`let x=1 | if x | … | endif`) is
+        // parsed as its own line. Blank/comment lines are kept whole.
+        let mut lines: Vec<(u32, String)> = Vec::new();
+        for (lineno, text) in joined {
+            let trimmed = text.trim();
+            if trimmed.is_empty() || trimmed.starts_with('"') {
+                lines.push((lineno, text));
+                continue;
+            }
+            let segs = split_commands(&text);
+            if segs.len() > 1 {
+                for seg in segs {
+                    if !seg.trim().is_empty() {
+                        lines.push((lineno, seg.to_string()));
+                    }
+                }
+            } else {
+                lines.push((lineno, text));
+            }
+        }
+        Lines { lines, i: 0 }
     }
 
     /// Advance past blank lines and full-line `"` comments.
     fn skip_blanks(&mut self) {
-        while let Some(l) = self.lines.get(self.i) {
+        while let Some((_, l)) = self.lines.get(self.i) {
             let t = l.trim();
             if t.is_empty() || t.starts_with('"') {
                 self.i += 1;
@@ -153,8 +198,8 @@ impl<'a> Lines<'a> {
         }
     }
 
-    fn peek(&self) -> Option<&'a str> {
-        self.lines.get(self.i).copied()
+    fn peek(&self) -> Option<String> {
+        self.lines.get(self.i).map(|(_, s)| s.clone())
     }
 
     fn bump(&mut self) {
@@ -162,7 +207,7 @@ impl<'a> Lines<'a> {
     }
 
     fn line_no(&self) -> u32 {
-        self.i as u32 + 1
+        self.lines.get(self.i).map(|(n, _)| *n).unwrap_or(0)
     }
 }
 
@@ -171,7 +216,7 @@ impl<'a> Lines<'a> {
 /// `do_one_cmd` bar split), so `let l = [1] | echo l` is two statements.
 fn parse_one(cur: &mut Lines) -> Result<Vec<Stmt>, VimlError> {
     let line = cur.peek().expect("parse_one called at EOF");
-    let (cmd, rest) = cmd_word(line);
+    let (cmd, rest) = cmd_word(&line);
     match cmd {
         "if" => {
             cur.bump();
@@ -196,7 +241,7 @@ fn parse_one(cur: &mut Lines) -> Result<Vec<Stmt>, VimlError> {
         _ => {
             cur.bump();
             let mut out = Vec::new();
-            for seg in split_commands(line) {
+            for seg in split_commands(&line) {
                 if seg.trim().is_empty() {
                     continue;
                 }
@@ -290,7 +335,7 @@ fn parse_block(
         let Some(line) = cur.peek() else {
             return Ok((stmts, None));
         };
-        let (cmd, rest) = cmd_word(line);
+        let (cmd, rest) = cmd_word(&line);
         if terms.contains(&cmd) {
             cur.bump();
             return Ok((stmts, Some((cmd.to_string(), rest.to_string()))));
@@ -815,6 +860,14 @@ impl Parser {
         match self.advance() {
             Tok::Number(n) => Ok(Expr::Number(n)),
             Tok::Float(f) => Ok(Expr::Float(f)),
+            // Blob literal `0z…` desugars to `list2blob([byte, …])`, reusing the
+            // ported list2blob builtin to build the Blob value.
+            Tok::Blob(bytes) => Ok(Expr::Call {
+                name: "list2blob".to_string(),
+                args: vec![Expr::List(
+                    bytes.into_iter().map(|b| Expr::Number(b as i64)).collect(),
+                )],
+            }),
             Tok::Str(s) => Ok(Expr::Str(s)),
             Tok::Option(o) => Ok(Expr::Option(o)),
             Tok::Env(e) => Ok(Expr::Env(e)),
@@ -825,7 +878,14 @@ impl Parser {
                 Ok(e)
             }
             Tok::LBracket => self.list_literal(),
-            Tok::LBrace => self.dict_literal(),
+            Tok::LBrace => {
+                if self.at_lambda() {
+                    self.lambda()
+                } else {
+                    self.dict_literal()
+                }
+            }
+            Tok::HashBrace => self.literal_dict(),
             Tok::Ident(name) => {
                 if matches!(self.peek(), Tok::LParen) {
                     self.advance();
@@ -841,10 +901,42 @@ impl Parser {
         }
     }
 
-    /// Postfix subscripts: `[index]`, `[from:to]`, `->method()`. (`.name` dict
-    /// member access is deferred — in Phase 3 `.` is concat; use `d['key']`.)
+    /// True when the `Tok::Dot` at the current position is a dict member access
+    /// `d.key` rather than the `..`-style concat operator: it must directly abut
+    /// the base (no space before) and be immediately followed by a bare name (no
+    /// space after). `a . b` (spaced) stays concatenation.
+    fn at_member_dot(&self) -> bool {
+        let i = self.i;
+        if i == 0 || i + 1 >= self.toks.len() {
+            return false;
+        }
+        let dot = &self.toks[i];
+        if dot.kind != Tok::Dot {
+            return false;
+        }
+        let prev = &self.toks[i - 1];
+        let next = &self.toks[i + 1];
+        matches!(next.kind, Tok::Ident(_))
+            && dot.span == prev.end // no space before the dot
+            && next.span == dot.end // no space after the dot
+    }
+
+    /// Postfix subscripts: `[index]`, `[from:to]`, `.name` dict member access,
+    /// and `->method()`. A no-space `d.key` is a member read (a string subscript);
+    /// a spaced `a . b` is left to `eval6` as concatenation.
     fn postfix(&mut self, mut base: Expr) -> Result<Expr, VimlError> {
         loop {
+            // `d.key` member read — but not on a numeric literal (`1.foo` is concat).
+            if self.at_member_dot() && !matches!(base, Expr::Number(_) | Expr::Float(_)) {
+                self.advance(); // consume the dot
+                if let Tok::Ident(key) = self.advance() {
+                    base = Expr::Index {
+                        base: Box::new(base),
+                        index: Box::new(Expr::Str(key)),
+                    };
+                    continue;
+                }
+            }
             match self.peek() {
                 Tok::LBracket => {
                     self.advance();
@@ -914,6 +1006,110 @@ impl Parser {
 
     fn list_literal(&mut self) -> Result<Expr, VimlError> {
         Ok(Expr::List(self.arg_list(&Tok::RBracket)?))
+    }
+
+    /// Lookahead (just past the opening `{`) deciding lambda vs dict: a lambda
+    /// is `{ -> …}` or `{ ident (, ident)* -> …}` — a top-level `->` reached
+    /// through only bare names and commas. Anything else (a `:` key, a string
+    /// key, `}`) is a dict.
+    fn at_lambda(&self) -> bool {
+        let mut j = self.i;
+        if matches!(self.toks.get(j).map(|t| &t.kind), Some(Tok::Arrow)) {
+            return true; // {-> body}
+        }
+        loop {
+            if !matches!(self.toks.get(j).map(|t| &t.kind), Some(Tok::Ident(_))) {
+                return false;
+            }
+            j += 1;
+            match self.toks.get(j).map(|t| &t.kind) {
+                Some(Tok::Arrow) => return true,
+                Some(Tok::Comma) => j += 1,
+                _ => return false,
+            }
+        }
+    }
+
+    /// Parse a lambda `{params -> body}` (the opening `{` already consumed).
+    fn lambda(&mut self) -> Result<Expr, VimlError> {
+        let mut params = Vec::new();
+        if !matches!(self.peek(), Tok::Arrow) {
+            loop {
+                match self.advance() {
+                    Tok::Ident(n) => params.push(n),
+                    other => {
+                        return Err(VimlError::msg(format!(
+                            "E15: expected lambda parameter, found {other:?}"
+                        )))
+                    }
+                }
+                match self.peek() {
+                    Tok::Comma => {
+                        self.advance();
+                    }
+                    Tok::Arrow => break,
+                    other => {
+                        return Err(VimlError::msg(format!(
+                            "E15: expected ',' or '->' in lambda, found {other:?}"
+                        )))
+                    }
+                }
+            }
+        }
+        self.eat(&Tok::Arrow)?;
+        let body = self.eval1()?;
+        self.eat(&Tok::RBrace)?;
+        Ok(Expr::Lambda {
+            params,
+            body: Box::new(body),
+        })
+    }
+
+    /// Parse a literal-key Dict `#{key: val, …}` (the opening `#{` consumed):
+    /// each key is a bare word (or number) used as a String. Because a single
+    /// scope-like char absorbs its `:` in the lexer (`a:`), a key Ident ending
+    /// in `:` already includes the separator; otherwise a `:` token follows.
+    fn literal_dict(&mut self) -> Result<Expr, VimlError> {
+        let mut pairs = Vec::new();
+        if matches!(self.peek(), Tok::RBrace) {
+            self.advance();
+            return Ok(Expr::Dict(pairs));
+        }
+        loop {
+            let raw = match self.advance() {
+                Tok::Ident(s) => s,
+                Tok::Number(n) => n.to_string(),
+                Tok::Str(s) => s,
+                other => {
+                    return Err(VimlError::msg(format!(
+                        "E15: expected literal Dict key, found {other:?}"
+                    )))
+                }
+            };
+            let key = if let Some(stripped) = raw.strip_suffix(':') {
+                stripped.to_string()
+            } else {
+                self.eat(&Tok::Colon)?;
+                raw
+            };
+            let val = self.eval1()?;
+            pairs.push((Expr::Str(key), val));
+            match self.advance() {
+                Tok::Comma => {
+                    if matches!(self.peek(), Tok::RBrace) {
+                        self.advance();
+                        break;
+                    }
+                }
+                Tok::RBrace => break,
+                other => {
+                    return Err(VimlError::msg(format!(
+                        "E15: expected ',' or '}}' in #{{}}, found {other:?}"
+                    )))
+                }
+            }
+        }
+        Ok(Expr::Dict(pairs))
     }
 
     fn dict_literal(&mut self) -> Result<Expr, VimlError> {
@@ -992,6 +1188,118 @@ mod tests {
             )),
             e => panic!("bad tree: {e:?}"),
         }
+    }
+
+    #[test]
+    fn dict_member_dot_vs_concat() {
+        // `d.key` (no spaces) → a string subscript (member read).
+        match parse_expr("d.key").unwrap() {
+            Expr::Index { index, .. } => {
+                assert!(matches!(*index, Expr::Str(ref s) if s == "key"))
+            }
+            e => panic!("expected member Index, got {e:?}"),
+        }
+        // Nested `d.a.b` → chained subscripts.
+        assert!(matches!(parse_expr("d.a.b").unwrap(), Expr::Index { .. }));
+        // `a . b` (spaced) stays concatenation.
+        assert!(matches!(
+            parse_expr("a . b").unwrap(),
+            Expr::Arith {
+                op: ArithOp::Concat,
+                ..
+            }
+        ));
+        // `'x' .. 'y'` stays concatenation.
+        assert!(matches!(
+            parse_expr("'x' .. 'y'").unwrap(),
+            Expr::Arith {
+                op: ArithOp::Concat,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn literal_key_dict() {
+        // `#{a: 1}` is a Dict with the bare word as a String key.
+        match parse_expr("#{a: 1, name: 'x'}").unwrap() {
+            Expr::Dict(pairs) => {
+                assert_eq!(pairs.len(), 2);
+                assert!(matches!(&pairs[0].0, Expr::Str(s) if s == "a"));
+                assert!(matches!(&pairs[1].0, Expr::Str(s) if s == "name"));
+            }
+            e => panic!("expected Dict, got {e:?}"),
+        }
+        assert!(matches!(parse_expr("#{}").unwrap(), Expr::Dict(_)));
+    }
+
+    #[test]
+    fn one_line_blocks() {
+        // `if … | … | endif` on one line parses as a full If block.
+        assert!(matches!(
+            parse_program("if 1 | echo 'y' | endif").unwrap().as_slice(),
+            [Stmt::If { .. }]
+        ));
+        // A leaf command then a one-line block: two statements.
+        match parse_program("let x = 5 | if x > 3 | echo 'big' | endif")
+            .unwrap()
+            .as_slice()
+        {
+            [Stmt::Let { .. }, Stmt::If { .. }] => {}
+            s => panic!("expected [Let, If], got {s:?}"),
+        }
+        // A `for` one-liner.
+        assert!(matches!(
+            parse_program("for i in [1] | echo i | endfor")
+                .unwrap()
+                .as_slice(),
+            [Stmt::For { .. }]
+        ));
+        // A plain bar line (no block) is still two leaf statements.
+        assert_eq!(parse_program("let a = 1 | echo a").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn line_continuation() {
+        // A `\` continuation line joins onto the previous logical line.
+        let prog = parse_program("let x = [1,\n      \\ 2,\n      \\ 3]").unwrap();
+        match &prog[0] {
+            Stmt::Let {
+                expr: Expr::List(items),
+                ..
+            } => assert_eq!(items.len(), 3),
+            s => panic!("expected 3-item list, got {s:?}"),
+        }
+        // Line numbers: the statement after a 2-physical-line logical line keeps
+        // its real physical number.
+        let lines = parse_program_lines("let a = 1\nlet b = [10,\n  \\ 20]\nlet c = 3").unwrap();
+        assert_eq!(lines[0].0, 1);
+        assert_eq!(lines[1].0, 2); // the [10, 20] let starts on physical line 2
+        assert_eq!(lines[2].0, 4); // `let c` is on physical line 4
+    }
+
+    #[test]
+    fn lambda_vs_dict() {
+        // `{x -> …}` and `{-> …}` are lambdas.
+        assert!(matches!(
+            parse_expr("{x -> x + 1}").unwrap(),
+            Expr::Lambda { .. }
+        ));
+        assert!(matches!(
+            parse_expr("{-> 42}").unwrap(),
+            Expr::Lambda { .. }
+        ));
+        match parse_expr("{a, b -> a - b}").unwrap() {
+            Expr::Lambda { params, .. } => assert_eq!(params, vec!["a", "b"]),
+            e => panic!("expected lambda, got {e:?}"),
+        }
+        // `{...}` with string keys and `{}` are dicts (not lambdas).
+        assert!(matches!(parse_expr("{'a': 1}").unwrap(), Expr::Dict(_)));
+        assert!(matches!(
+            parse_expr("{'k': v, 'j': w}").unwrap(),
+            Expr::Dict(_)
+        ));
+        assert!(matches!(parse_expr("{}").unwrap(), Expr::Dict(_)));
     }
 
     #[test]

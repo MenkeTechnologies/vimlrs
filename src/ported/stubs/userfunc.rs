@@ -1,12 +1,6 @@
 //! STUB surface for `csrc/eval/userfunc.c` — generated, do not edit.
 #![allow(dead_code, unused_variables, non_snake_case, clippy::all)]
 
-/// Port of `func_init()` — `csrc/eval/userfunc.c:95`. STUB: not yet ported.
-/// C: `void func_init(void)`
-pub fn func_init() {
-    unimplemented!("STUB func_init — csrc/eval/userfunc.c:95")
-}
-
 /// Port of `func_tbl_get()` — `csrc/eval/userfunc.c:101`. STUB: not yet ported.
 /// C: `hashtab_T *func_tbl_get(void)`
 pub fn func_tbl_get() {
@@ -55,12 +49,6 @@ pub fn deref_func_name() {
     unimplemented!("STUB deref_func_name — csrc/eval/userfunc.c:445")
 }
 
-/// Port of `emsg_funcname()` — `csrc/eval/userfunc.c:492`. STUB: not yet ported.
-/// C: `void emsg_funcname(const char *errmsg, const char *name)`
-pub fn emsg_funcname() {
-    unimplemented!("STUB emsg_funcname — csrc/eval/userfunc.c:492")
-}
-
 /// Port of `get_func_arguments()` — `csrc/eval/userfunc.c:510`. STUB: not yet ported.
 /// C: `static int get_func_arguments(char **arg, evalarg_T *const evalarg, int partial_argc,`
 pub fn get_func_arguments() {
@@ -71,18 +59,6 @@ pub fn get_func_arguments() {
 /// C: `int get_func_tv(const char *name, int len, typval_T *rettv, char **arg, evalarg_T *const evalarg,`
 pub fn get_func_tv() {
     unimplemented!("STUB get_func_tv — csrc/eval/userfunc.c:551")
-}
-
-/// Port of `eval_fname_sid()` — `csrc/eval/userfunc.c:610`. STUB: not yet ported.
-/// C: `static inline bool eval_fname_sid(const char *const name)`
-pub fn eval_fname_sid() {
-    unimplemented!("STUB eval_fname_sid — csrc/eval/userfunc.c:610")
-}
-
-/// Port of `fname_trans_sid()` — `csrc/eval/userfunc.c:633`. STUB: not yet ported.
-/// C: `static char *fname_trans_sid(const char *const name, char *const fname_buf, char **const tofree,`
-pub fn fname_trans_sid() {
-    unimplemented!("STUB fname_trans_sid — csrc/eval/userfunc.c:633")
 }
 
 /// Port of `get_func_arity()` — `csrc/eval/userfunc.c:671`. STUB: not yet ported.
@@ -187,12 +163,6 @@ pub fn call_user_func() {
     unimplemented!("STUB call_user_func — csrc/eval/userfunc.c:994")
 }
 
-/// Port of `func_name_refcount()` — `csrc/eval/userfunc.c:1383`. STUB: not yet ported.
-/// C: `static bool func_name_refcount(const char *name)`
-pub fn func_name_refcount() {
-    unimplemented!("STUB func_name_refcount — csrc/eval/userfunc.c:1383")
-}
-
 /// Port of `check_user_func_argcount()` — `csrc/eval/userfunc.c:1391`. STUB: not yet ported.
 /// C: `static int check_user_func_argcount(ufunc_T *fp, int argcount)`
 pub fn check_user_func_argcount() {
@@ -229,18 +199,6 @@ pub fn set_current_funccal() {
     unimplemented!("STUB set_current_funccal — csrc/eval/userfunc.c:1458")
 }
 
-/// Port of `free_all_functions()` — `csrc/eval/userfunc.c:1464`. STUB: not yet ported.
-/// C: `void free_all_functions(void)`
-pub fn free_all_functions() {
-    unimplemented!("STUB free_all_functions — csrc/eval/userfunc.c:1464")
-}
-
-/// Port of `builtin_function()` — `csrc/eval/userfunc.c:1541`. STUB: not yet ported.
-/// C: `static bool builtin_function(const char *name, int len)`
-pub fn builtin_function() {
-    unimplemented!("STUB builtin_function — csrc/eval/userfunc.c:1541")
-}
-
 /// Port of `func_call()` — `csrc/eval/userfunc.c:1554`. STUB: not yet ported.
 /// C: `int func_call(char *name, typval_T *args, partial_T *partial, dict_T *selfdict, typval_T *rettv)`
 pub fn func_call() {
@@ -251,12 +209,6 @@ pub fn func_call() {
 /// C: `varnumber_T callback_call_retnr(Callback *callback, int argcount, typval_T *argvars)`
 pub fn callback_call_retnr() {
     unimplemented!("STUB callback_call_retnr — csrc/eval/userfunc.c:1593")
-}
-
-/// Port of `user_func_error()` — `csrc/eval/userfunc.c:1607`. STUB: not yet ported.
-/// C: `static void user_func_error(int error, const char *name, bool found_var)`
-pub fn user_func_error() {
-    unimplemented!("STUB user_func_error — csrc/eval/userfunc.c:1607")
 }
 
 /// Port of `argv_add_base()` — `csrc/eval/userfunc.c:1641`. STUB: not yet ported.
@@ -271,28 +223,10 @@ pub fn call_func() {
     unimplemented!("STUB call_func — csrc/eval/userfunc.c:1667")
 }
 
-/// Port of `call_simple_luafunc()` — `csrc/eval/userfunc.c:1822`. STUB: not yet ported.
-/// C: `int call_simple_luafunc(const char *funcname, size_t len, typval_T *rettv)`
-pub fn call_simple_luafunc() {
-    unimplemented!("STUB call_simple_luafunc — csrc/eval/userfunc.c:1822")
-}
-
-/// Port of `call_simple_func()` — `csrc/eval/userfunc.c:1842`. STUB: not yet ported.
-/// C: `int call_simple_func(const char *funcname, size_t len, typval_T *rettv)`
-pub fn call_simple_func() {
-    unimplemented!("STUB call_simple_func — csrc/eval/userfunc.c:1842")
-}
-
 /// Port of `printable_func_name()` — `csrc/eval/userfunc.c:1886`. STUB: not yet ported.
 /// C: `char *printable_func_name(ufunc_T *fp)`
 pub fn printable_func_name() {
     unimplemented!("STUB printable_func_name — csrc/eval/userfunc.c:1886")
-}
-
-/// Port of `function_list_modified()` — `csrc/eval/userfunc.c:1893`. STUB: not yet ported.
-/// C: `static int function_list_modified(const int prev_ht_changed)`
-pub fn function_list_modified() {
-    unimplemented!("STUB function_list_modified — csrc/eval/userfunc.c:1893")
 }
 
 /// Port of `list_func_head()` — `csrc/eval/userfunc.c:1907`. STUB: not yet ported.
@@ -307,22 +241,10 @@ pub fn trans_function_name() {
     unimplemented!("STUB trans_function_name — csrc/eval/userfunc.c:1981")
 }
 
-/// Port of `get_scriptlocal_funcname()` — `csrc/eval/userfunc.c:2184`. STUB: not yet ported.
-/// C: `char *get_scriptlocal_funcname(char *funcname)`
-pub fn get_scriptlocal_funcname() {
-    unimplemented!("STUB get_scriptlocal_funcname — csrc/eval/userfunc.c:2184")
-}
-
 /// Port of `save_function_name()` — `csrc/eval/userfunc.c:2215`. STUB: not yet ported.
 /// C: `char *save_function_name(char **name, bool skip, int flags, funcdict_T *fudi)`
 pub fn save_function_name() {
     unimplemented!("STUB save_function_name — csrc/eval/userfunc.c:2215")
-}
-
-/// Port of `list_functions()` — `csrc/eval/userfunc.c:2238`. STUB: not yet ported.
-/// C: `static void list_functions(regmatch_T *regmatch)`
-pub fn list_functions() {
-    unimplemented!("STUB list_functions — csrc/eval/userfunc.c:2238")
 }
 
 /// Port of `list_functions_matching_pat()` — `csrc/eval/userfunc.c:2266`. STUB: not yet ported.
@@ -349,12 +271,6 @@ pub fn ex_function() {
     unimplemented!("STUB ex_function — csrc/eval/userfunc.c:2637")
 }
 
-/// Port of `eval_fname_script()` — `csrc/eval/userfunc.c:3023`. STUB: not yet ported.
-/// C: `int eval_fname_script(const char *const p)`
-pub fn eval_fname_script() {
-    unimplemented!("STUB eval_fname_script — csrc/eval/userfunc.c:3023")
-}
-
 /// Port of `translated_function_exists()` — `csrc/eval/userfunc.c:3038`. STUB: not yet ported.
 /// C: `bool translated_function_exists(const char *name)`
 pub fn translated_function_exists() {
@@ -379,22 +295,10 @@ pub fn ex_delfunction() {
     unimplemented!("STUB ex_delfunction — csrc/eval/userfunc.c:3119")
 }
 
-/// Port of `func_unref()` — `csrc/eval/userfunc.c:3200`. STUB: not yet ported.
-/// C: `void func_unref(char *name)`
-pub fn func_unref() {
-    unimplemented!("STUB func_unref — csrc/eval/userfunc.c:3200")
-}
-
 /// Port of `func_ptr_unref()` — `csrc/eval/userfunc.c:3228`. STUB: not yet ported.
 /// C: `void func_ptr_unref(ufunc_T *fp)`
 pub fn func_ptr_unref() {
     unimplemented!("STUB func_ptr_unref — csrc/eval/userfunc.c:3228")
-}
-
-/// Port of `func_ref()` — `csrc/eval/userfunc.c:3240`. STUB: not yet ported.
-/// C: `void func_ref(char *name)`
-pub fn func_ref() {
-    unimplemented!("STUB func_ref — csrc/eval/userfunc.c:3240")
 }
 
 /// Port of `func_ptr_ref()` — `csrc/eval/userfunc.c:3256`. STUB: not yet ported.
@@ -431,18 +335,6 @@ pub fn ex_call_inner() {
 /// C: `static int ex_defer_inner(char *name, char **arg, const partial_T *const partial,`
 pub fn ex_defer_inner() {
     unimplemented!("STUB ex_defer_inner — csrc/eval/userfunc.c:3397")
-}
-
-/// Port of `can_add_defer()` — `csrc/eval/userfunc.c:3457`. STUB: not yet ported.
-/// C: `bool can_add_defer(void)`
-pub fn can_add_defer() {
-    unimplemented!("STUB can_add_defer — csrc/eval/userfunc.c:3457")
-}
-
-/// Port of `add_defer()` — `csrc/eval/userfunc.c:3469`. STUB: not yet ported.
-/// C: `void add_defer(char *name, int argcount_arg, typval_T *argvars)`
-pub fn add_defer() {
-    unimplemented!("STUB add_defer — csrc/eval/userfunc.c:3469")
 }
 
 /// Port of `handle_defer_one()` — `csrc/eval/userfunc.c:3487`. STUB: not yet ported.

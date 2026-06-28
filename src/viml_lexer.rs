@@ -32,6 +32,9 @@ pub struct Token {
     pub kind: Tok,
     /// Byte offset of the token start in the source line.
     pub span: usize,
+    /// Byte offset just past the token end (for adjacency checks like `d.key`
+    /// member access vs `a . b` concatenation).
+    pub end: usize,
 }
 
 /// Token kinds recognized in a Vimscript expression.
@@ -41,6 +44,8 @@ pub enum Tok {
     Number(i64),
     /// Float literal.
     Float(f64),
+    /// Blob literal `0z00112233` — the decoded bytes.
+    Blob(Vec<u8>),
     /// String literal, already unescaped.
     Str(String),
     /// Bare identifier or scoped name (`x`, `g:foo`, `v:true`).
@@ -92,6 +97,8 @@ pub enum Tok {
     RBracket,
     /// `{`
     LBrace,
+    /// `#{` — opens a literal-key Dict (`#{a: 1}`, bare-word keys).
+    HashBrace,
     /// `}`
     RBrace,
     /// `,`
@@ -177,11 +184,16 @@ impl<'a> Lexer<'a> {
                 out.push(Token {
                     kind: Tok::Eof,
                     span,
+                    end: span,
                 });
                 return Ok(out);
             }
             let kind = self.next_token()?;
-            out.push(Token { kind, span });
+            out.push(Token {
+                kind,
+                span,
+                end: self.pos,
+            });
         }
     }
 
@@ -198,6 +210,11 @@ impl<'a> Lexer<'a> {
             b'\'' => self.lex_single_string(),
             b'"' => self.lex_double_string(),
             b'a'..=b'z' | b'A'..=b'Z' | b'_' => Ok(self.lex_ident()),
+            // `#{` opens a literal-key Dict.
+            b'#' if self.peek2() == b'{' => {
+                self.pos += 2;
+                Ok(Tok::HashBrace)
+            }
             // `&&` is the logical-AND operator; only a lone `&` is an option sigil.
             b'&' if self.peek2() == b'&' => self.lex_operator(),
             b'&' => Ok(self.lex_sigil_name(Tok::Option as fn(String) -> Tok)),
@@ -221,6 +238,7 @@ impl<'a> Lexer<'a> {
                 b'x' | b'X' => return self.lex_radix(16),
                 b'b' | b'B' => return self.lex_radix(2),
                 b'o' | b'O' => return self.lex_radix(8),
+                b'z' | b'Z' => return self.lex_blob(),
                 _ => {}
             }
         }
@@ -252,10 +270,45 @@ impl<'a> Lexer<'a> {
         }
         let text = &self.s[start..self.pos];
         if is_float {
-            Tok::Float(text.parse::<f64>().unwrap_or(0.0))
-        } else {
-            Tok::Number(text.parse::<i64>().unwrap_or(0))
+            return Tok::Float(text.parse::<f64>().unwrap_or(0.0));
         }
+        // Vim octal literal: a leading `0` followed only by octal digits (`010`
+        // == 8). A `8`/`9` anywhere (`08`, `0129`) keeps it decimal, matching
+        // vim_str2nr's STR2NR_OCT detection in eval_number() (Src/eval.c).
+        if text.len() > 1
+            && text.starts_with('0')
+            && text.bytes().all(|b| (b'0'..=b'7').contains(&b))
+        {
+            return Tok::Number(i64::from_str_radix(text, 8).unwrap_or(0));
+        }
+        Tok::Number(text.parse::<i64>().unwrap_or(0))
+    }
+
+    /// Lex a Blob literal `0z` followed by an even number of hex digits (Vim
+    /// also allows a `.` separating byte groups, e.g. `0z00.11`). Port of the
+    /// `0z` branch of `eval_number()` (`Src/eval.c`).
+    fn lex_blob(&mut self) -> Tok {
+        self.pos += 2; // skip "0z"
+        let mut bytes = Vec::new();
+        loop {
+            let hi = self.peek();
+            if hi == b'.' {
+                self.pos += 1;
+                continue;
+            }
+            if !(hi as char).is_ascii_hexdigit() {
+                break;
+            }
+            let lo = self.peek2();
+            if !(lo as char).is_ascii_hexdigit() {
+                // odd trailing nibble — stop (Vim requires pairs)
+                break;
+            }
+            let s = std::str::from_utf8(&self.s.as_bytes()[self.pos..self.pos + 2]).unwrap_or("00");
+            bytes.push(u8::from_str_radix(s, 16).unwrap_or(0));
+            self.pos += 2;
+        }
+        Tok::Blob(bytes)
     }
 
     fn lex_radix(&mut self, radix: u32) -> Tok {
@@ -530,6 +583,20 @@ mod tests {
     }
 
     #[test]
+    fn blob_literals() {
+        assert_eq!(
+            kinds("0z00112233"),
+            vec![Tok::Blob(vec![0, 17, 34, 51]), Tok::Eof]
+        );
+        assert_eq!(
+            kinds("0zDEADBEEF"),
+            vec![Tok::Blob(vec![0xde, 0xad, 0xbe, 0xef]), Tok::Eof]
+        );
+        assert_eq!(kinds("0z00.11"), vec![Tok::Blob(vec![0, 17]), Tok::Eof]);
+        assert_eq!(kinds("0z"), vec![Tok::Blob(vec![]), Tok::Eof]);
+    }
+
+    #[test]
     fn numbers_and_floats() {
         assert_eq!(kinds("0xff"), vec![Tok::Number(255), Tok::Eof]);
         assert_eq!(kinds("3.14"), vec![Tok::Float(3.14), Tok::Eof]);
@@ -537,6 +604,19 @@ mod tests {
             kinds("1 . 2"),
             vec![Tok::Number(1), Tok::Dot, Tok::Number(2), Tok::Eof]
         );
+    }
+
+    #[test]
+    fn octal_literals() {
+        // Leading 0 + only octal digits → octal (Vim semantics).
+        assert_eq!(kinds("010"), vec![Tok::Number(8), Tok::Eof]);
+        assert_eq!(kinds("0777"), vec![Tok::Number(511), Tok::Eof]);
+        assert_eq!(kinds("017"), vec![Tok::Number(15), Tok::Eof]);
+        // A 8/9 digit makes it decimal; bare 0 stays 0; floats untouched.
+        assert_eq!(kinds("08"), vec![Tok::Number(8), Tok::Eof]);
+        assert_eq!(kinds("0129"), vec![Tok::Number(129), Tok::Eof]);
+        assert_eq!(kinds("0"), vec![Tok::Number(0), Tok::Eof]);
+        assert_eq!(kinds("0.5"), vec![Tok::Float(0.5), Tok::Eof]);
     }
 
     #[test]

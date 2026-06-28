@@ -59,10 +59,9 @@ pub fn f_len(argvars: &[typval_T], rettv: &mut typval_T) {
     let arg = &argvars[0];
     // c: switch (argvars[0].v_type) { ... rettv->vval.v_number = ...; }
     rettv.vval = match (arg.v_type, &arg.vval) {
-        (VAR_STRING, v_string(s)) => v_number(s.chars().count() as varnumber_T),
-        (VAR_NUMBER, _) | (VAR_FLOAT, _) => {
-            v_number(tv_get_string(arg).chars().count() as varnumber_T)
-        }
+        // c: VAR_STRING/VAR_NUMBER → strlen(tv_get_string(...)) — byte length.
+        (VAR_STRING, v_string(s)) => v_number(s.len() as varnumber_T),
+        (VAR_NUMBER, _) | (VAR_FLOAT, _) => v_number(tv_get_string(arg).len() as varnumber_T),
         (VAR_LIST, v_list(Some(l))) => v_number(tv_list_len(&l.borrow()) as varnumber_T),
         (VAR_DICT, v_dict(Some(d))) => v_number(tv_dict_len(&d.borrow()) as varnumber_T),
         (VAR_BLOB, v_blob(Some(b))) => v_number(tv_blob_len(&b.borrow()) as varnumber_T),
@@ -138,9 +137,21 @@ pub fn f_abs(argvars: &[typval_T], rettv: &mut typval_T) {
 ///
 /// "str2float()" function — parse a float from a string.
 pub fn f_str2float(argvars: &[typval_T], rettv: &mut typval_T) {
+    // c: p = skipwhite(...); strip a leading sign before string2float (which
+    // parses the magnitude, strtod-style, ignoring trailing garbage).
     let s = tv_get_string(&argvars[0]);
+    let p = s.trim_start();
+    let (isneg, p) = match p.strip_prefix(['+', '-']) {
+        Some(rest) if p.starts_with('-') => (true, rest.trim_start()),
+        Some(rest) => (false, rest.trim_start()),
+        None => (false, p),
+    };
+    let (mut val, _) = crate::ported::eval::string2float(p);
+    if isneg {
+        val *= -1.0;
+    }
     rettv.v_type = VAR_FLOAT;
-    rettv.vval = v_float(s.trim().parse::<f64>().unwrap_or(0.0));
+    rettv.vval = v_float(val);
 }
 
 /// Port of `f_float2nr()` from `Src/eval/funcs.c`.
@@ -407,22 +418,25 @@ pub fn f_min(argvars: &[typval_T], rettv: &mut typval_T) {
     max_min(argvars, rettv, false);
 }
 
-/// Port of `max_min()` from `Src/eval/funcs.c` (List subset) — the shared
-/// `max`/`min` body; `domax` picks the direction. Empty → 0.
+/// Port of `max_min()` from `Src/eval/funcs.c` — the shared `max`/`min` body
+/// over a List's items or a Dict's values; `domax` picks the direction. Empty
+/// (or a non-collection) → 0.
 fn max_min(argvars: &[typval_T], rettv: &mut typval_T, domax: bool) {
+    let pick = |acc: varnumber_T, v: varnumber_T| if domax { acc.max(v) } else { acc.min(v) };
     let n = match (argvars[0].v_type, &argvars[0].vval) {
         (VAR_LIST, v_list(Some(l))) => {
             let l = l.borrow();
-            let mut it = l.lv_items.iter();
+            let mut it = l.lv_items.iter().map(|x| tv_get_number_chk(&x.li_tv, None));
             match it.next() {
-                Some(first) => it.fold(tv_get_number_chk(&first.li_tv, None), |acc, x| {
-                    let v = tv_get_number_chk(&x.li_tv, None);
-                    if domax {
-                        acc.max(v)
-                    } else {
-                        acc.min(v)
-                    }
-                }),
+                Some(first) => it.fold(first, pick),
+                None => 0,
+            }
+        }
+        (VAR_DICT, v_dict(Some(d))) => {
+            let d = d.borrow();
+            let mut it = d.dv_hashtab.values().map(|v| tv_get_number_chk(v, None));
+            match it.next() {
+                Some(first) => it.fold(first, pick),
                 None => 0,
             }
         }
@@ -487,10 +501,14 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
                 // Flags.
         let mut left = false;
         let mut zero = false;
+        let mut plus = false;
+        let mut space = false;
         while i < bytes.len() && matches!(bytes[i], '-' | '0' | '+' | ' ' | '#') {
             match bytes[i] {
                 '-' => left = true,
                 '0' => zero = true,
+                '+' => plus = true,
+                ' ' => space = true,
                 _ => {}
             }
             i += 1;
@@ -534,6 +552,46 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
             'f' => format!("{:.*}", prec.unwrap_or(6), cur.map_or(0.0, tv_get_float)),
             'x' => format!("{:x}", cur.map_or(0, |t| tv_get_number_chk(t, None))),
             'X' => format!("{:X}", cur.map_or(0, |t| tv_get_number_chk(t, None))),
+            'o' => format!("{:o}", cur.map_or(0, |t| tv_get_number_chk(t, None))),
+            'b' | 'B' => format!("{:b}", cur.map_or(0, |t| tv_get_number_chk(t, None))),
+            'u' => (cur.map_or(0, |t| tv_get_number_chk(t, None)) as u64).to_string(),
+            'c' => char::from_u32(cur.map_or(0, |t| tv_get_number_chk(t, None)) as u32)
+                .unwrap_or('\u{0}')
+                .to_string(),
+            'g' | 'G' => {
+                // C `%g`: `prec` significant digits (default 6), trailing zeros
+                // stripped, `%e`/`%f` chosen by exponent.
+                let v = cur.map_or(0.0, tv_get_float);
+                let s = if v.is_infinite() {
+                    if v < 0.0 { "-inf" } else { "inf" }.to_string()
+                } else if v.is_nan() {
+                    "nan".to_string()
+                } else {
+                    crate::ported::eval::encode::vim_float_g(v, prec.unwrap_or(6) as i32)
+                };
+                if conv == 'G' {
+                    s.to_uppercase()
+                } else {
+                    s
+                }
+            }
+            'e' | 'E' => {
+                let s = format!("{:.*e}", prec.unwrap_or(6), cur.map_or(0.0, tv_get_float));
+                // Rust emits "1e2"; C/Vim emit "1.000000e+02" — add sign + 2-digit exp.
+                let s = if let Some(ep) = s.find('e') {
+                    let (m, ex) = s.split_at(ep);
+                    let en: i32 = ex[1..].parse().unwrap_or(0);
+                    format!(
+                        "{m}{}{}{:02}",
+                        conv,
+                        if en < 0 { '-' } else { '+' },
+                        en.abs()
+                    )
+                } else {
+                    s
+                };
+                s
+            }
             other => {
                 out.push('%');
                 out.push(other);
@@ -541,19 +599,41 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
             }
         };
         arg += 1;
-        // Pad to width.
-        if core.chars().count() >= width {
+        // For signed numeric conversions the `+`/space flag forces a sign on
+        // non-negative values; split it off `core` so zero-padding lands between
+        // the sign and the digits (`%+05d` of 7 → `+0007`).
+        let signed = matches!(conv, 'd' | 'i' | 'f' | 'F' | 'e' | 'E' | 'g' | 'G');
+        let (sign, core) = if signed {
+            if let Some(rest) = core.strip_prefix('-') {
+                ("-", rest.to_string())
+            } else if plus {
+                ("+", core)
+            } else if space {
+                (" ", core)
+            } else {
+                ("", core)
+            }
+        } else {
+            ("", core)
+        };
+        // Pad to width (width counts the sign).
+        let len = sign.len() + core.chars().count();
+        if len >= width {
+            out.push_str(sign);
             out.push_str(&core);
         } else {
-            let pad = width - core.chars().count();
+            let pad = width - len;
             if left {
+                out.push_str(sign);
                 out.push_str(&core);
                 out.extend(std::iter::repeat(' ').take(pad));
             } else if zero && conv != 's' {
+                out.push_str(sign);
                 out.extend(std::iter::repeat('0').take(pad));
                 out.push_str(&core);
             } else {
                 out.extend(std::iter::repeat(' ').take(pad));
+                out.push_str(sign);
                 out.push_str(&core);
             }
         }
@@ -3191,10 +3271,21 @@ pub fn f_stdioopen(_argvars: &[typval_T], rettv: &mut typval_T) {
 /// Port of `f_submatch()` (funcs.c) — no active `:substitute` → "" (the List
 /// form, `{list}` truthy, yields an empty List).
 pub fn f_submatch(argvars: &[typval_T], rettv: &mut typval_T) {
+    // c: reg_submatch(no) — text of group `no` of the match a `:s//\=…/` /
+    // substitute(…, '\=…') expression is currently replacing.
+    let no = tv_get_number_chk(&argvars[0], None).max(0) as usize;
     if argvars.len() >= 2 && argvars[1].v_type != VAR_UNKNOWN && tv_get_bool(&argvars[1]) != 0 {
-        tv_list_alloc_ret(rettv, 0);
+        // {list} form: the match text split into lines. With no active match
+        // (called outside a `\=` expression) this is an empty List.
+        let l = tv_list_alloc_ret(rettv, 0);
+        if crate::viml_regex::has_submatch_context() {
+            let mut lb = l.borrow_mut();
+            for line in crate::viml_regex::current_submatch(no).split('\n') {
+                tv_list_append_string(&mut lb, line);
+            }
+        }
     } else {
-        *rettv = typval_T::from(String::new());
+        *rettv = typval_T::from(crate::viml_regex::current_submatch(no));
     }
 }
 /// Port of `f_prompt_appendbuf()` (buffer.c) — no prompt buffer → no-op (0).
@@ -3287,5 +3378,36 @@ pub fn f_rubyeval(_argvars: &[typval_T], rettv: &mut typval_T) {
 }
 /// Port of `f_termopen()` (deprecated.c) — no terminal/event loop → -1.
 pub fn f_termopen(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(-1 as varnumber_T);
+}
+
+/// Port of `f_do_searchpair()`/`do_searchpair()` helper (funcs.c) — searching
+/// for a matching pair needs a buffer; standalone has none → not found (0).
+pub fn do_searchpair() -> varnumber_T {
+    0
+}
+
+/// Port of `has_wsl()` (funcs.c) — true under Windows Subsystem for Linux,
+/// detected from the kernel release string (`microsoft`).
+pub fn has_wsl() -> bool {
+    std::fs::read_to_string("/proc/sys/kernel/osrelease")
+        .map(|s| s.to_lowercase().contains("microsoft"))
+        .unwrap_or(false)
+}
+
+/// Port of `emsg_mpack_error()` (funcs.c) — report a msgpack decode error.
+pub fn emsg_mpack_error(status: i32) {
+    if status != 0 {
+        emsg("E5004: Error while dumping or parsing msgpack");
+    }
+}
+
+/// Port of `find_win_for_curbuf()` (buffer.c) — find a window showing the
+/// current buffer; no windows standalone → no-op.
+pub fn find_win_for_curbuf() {}
+
+/// Port of `buf_win_common()` (buffer.c) — the shared body of `bufwinnr()`/
+/// `bufwinid()`: no window shows the buffer → -1.
+pub fn buf_win_common(_argvars: &[typval_T], rettv: &mut typval_T, _get_nr: bool) {
     *rettv = typval_T::from(-1 as varnumber_T);
 }

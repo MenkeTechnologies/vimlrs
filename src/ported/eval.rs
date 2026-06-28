@@ -26,8 +26,12 @@ pub mod list;
 pub mod typval;
 /// Port of `eval/typval_defs.h`.
 pub mod typval_defs_h;
+/// Port of `eval/userfunc.c` (function-name classification helpers).
+pub mod userfunc;
 /// Port of `eval/vars.c`.
 pub mod vars;
+/// Port of `eval/window.c` (window-lookup helper layer).
+pub mod window;
 
 use std::rc::Rc;
 
@@ -64,6 +68,61 @@ pub fn num_divide(n1: varnumber_T, n2: varnumber_T) -> varnumber_T {
         result = n1 / n2;
     }
     result
+}
+
+/// Port of `string2float()` from `Src/eval.c:4575`.
+///
+/// Convert the leading numeric prefix of `text` to a float, the way C `strtod`
+/// does (with explicit `inf`/`-inf`/`nan` handling). Returns the parsed value
+/// and the number of bytes consumed (0 if no number leads `text`).
+pub fn string2float(text: &str) -> (f64, usize) {
+    // c: MS-Windows does not deal with "inf"/"nan" properly — handle explicitly.
+    let starts = |kw: &str| text.len() >= kw.len() && text[..kw.len()].eq_ignore_ascii_case(kw);
+    if starts("-inf") {
+        return (f64::NEG_INFINITY, 4);
+    }
+    if starts("inf") {
+        return (f64::INFINITY, 3);
+    }
+    if starts("nan") {
+        return (f64::NAN, 3);
+    }
+    // c: *ret_value = strtod(text, &s); return s - text;
+    // Scan the longest prefix that is a valid C float literal.
+    let b = text.as_bytes();
+    let mut i = 0;
+    if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
+        i += 1;
+    }
+    let mut saw_digit = false;
+    while i < b.len() && b[i].is_ascii_digit() {
+        i += 1;
+        saw_digit = true;
+    }
+    if i < b.len() && b[i] == b'.' {
+        i += 1;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+            saw_digit = true;
+        }
+    }
+    if !saw_digit {
+        return (0.0, 0);
+    }
+    // Optional exponent, but only when it is well-formed (else strtod stops).
+    if i < b.len() && (b[i] == b'e' || b[i] == b'E') {
+        let mut j = i + 1;
+        if j < b.len() && (b[j] == b'+' || b[j] == b'-') {
+            j += 1;
+        }
+        if j < b.len() && b[j].is_ascii_digit() {
+            while j < b.len() && b[j].is_ascii_digit() {
+                j += 1;
+            }
+            i = j;
+        }
+    }
+    (text[..i].parse::<f64>().unwrap_or(0.0), i)
 }
 
 /// Port of `num_modulus()` from `Src/eval.c:196`.
@@ -371,4 +430,230 @@ pub fn func_equal(tv1: &typval_T, tv2: &typval_T, ic: bool) -> bool {
         return false;
     }
     a1.iter().zip(a2.iter()).all(|(x, y)| tv_equal(x, y, ic))
+}
+
+// ── eval.c misc helpers (init/clear are no-ops; renderers + arg validation) ──
+
+/// Port of `eval_init()` from `Src/eval.c` — global eval state is initialised
+/// lazily by the value/var layers, so there is nothing to do here.
+pub fn eval_init() {}
+
+/// Port of `eval_clear()` from `Src/eval.c` — teardown of eval globals; the
+/// `Rc`-managed value layer needs no explicit clear.
+pub fn eval_clear() {}
+
+/// Port of `eval_expr_valid_arg()` from `Src/eval.c` — true when `tv` is usable
+/// as an expression argument (to `map()`/`sort()`/…): not Unknown, and not an
+/// empty/NULL String.
+pub fn eval_expr_valid_arg(tv: &typval_T) -> bool {
+    tv.v_type != VAR_UNKNOWN
+        && (tv.v_type != VAR_STRING || matches!(&tv.vval, v_string(s) if !s.is_empty()))
+}
+
+/// Port of `typval2string()` from `Src/eval.c` — render `tv` to a String: a List
+/// is newline-joined (with a trailing newline) when `join_list`, a List/Dict
+/// otherwise uses `string()`, and a scalar uses its string value.
+pub fn typval2string(tv: &typval_T, join_list: bool) -> String {
+    use crate::ported::eval::encode::encode_tv2string;
+    use crate::ported::eval::typval::tv_list_join;
+    if join_list && tv.v_type == VAR_LIST {
+        let mut out = String::new();
+        if let v_list(Some(l)) = &tv.vval {
+            let lb = l.borrow();
+            tv_list_join(&mut out, &lb, "\n");
+            if lb.lv_len > 0 {
+                out.push('\n');
+            }
+        }
+        out
+    } else if tv.v_type == VAR_LIST || tv.v_type == VAR_DICT {
+        encode_tv2string(tv)
+    } else {
+        tv_get_string(tv)
+    }
+}
+
+/// Port of `restore_v_event()` from `Src/eval.c` — restore the saved `v:event`
+/// dict; `v:event` is not populated standalone, so this is a no-op.
+pub fn restore_v_event() {}
+
+/// Port of `get_copyID()` from `Src/eval.c` — the GC mark-and-sweep copy-id
+/// counter. The `Rc`-managed value layer needs no copy-id pass → 0.
+pub fn get_copyID() -> i32 {
+    0
+}
+
+/// Port of `get_callback_depth()` from `Src/eval.c` — current callback nesting
+/// depth; not separately tracked → 0.
+pub fn get_callback_depth() -> i32 {
+    0
+}
+
+// ── eval.c name scanners + leaf no-ops ──
+
+/// True for an identifier byte (`vim_isIDc`): ASCII alphanumeric or `_`.
+fn vim_isIDc(c: u8) -> bool {
+    c == b'_' || c.is_ascii_alphanumeric()
+}
+
+/// Port of `get_env_len()` from `Src/eval.c` — the length of the environment
+/// variable name at the start of `s` (run of identifier chars), or 0.
+pub fn get_env_len(s: &str) -> i32 {
+    s.bytes().take_while(|&c| vim_isIDc(c)).count() as i32
+}
+
+/// Port of `get_id_len()` from `Src/eval.c` — the length of the variable name at
+/// the start of `s`, honouring that a single namespace char before `:` (e.g.
+/// `s:`) is part of the name but other `xx:` is not.
+pub fn get_id_len(s: &str) -> i32 {
+    let b = s.as_bytes();
+    let mut p = 0;
+    while p < b.len() && eval_isnamec(b[p]) {
+        if b[p] == b':' {
+            let len = p;
+            let is_ns = len == 1 && b"abglstvw".contains(&b[0]);
+            if len > 1 || !is_ns {
+                break;
+            }
+        }
+        p += 1;
+    }
+    p as i32
+}
+
+/// Port of `skip_luafunc_name()` from `Src/eval.c` — index past a `v:lua`
+/// function name (`A-Za-z0-9_.'`).
+pub fn skip_luafunc_name(s: &str) -> usize {
+    s.bytes()
+        .take_while(|&c| c.is_ascii_alphanumeric() || c == b'_' || c == b'.' || c == b'\'')
+        .count()
+}
+
+/// Port of `check_luafunc_name()` from `Src/eval.c` — the length of a valid
+/// `v:lua` function name in `str` when terminated by `(` (if `paren`) or end of
+/// string, else 0.
+pub fn check_luafunc_name(str: &str, paren: bool) -> i32 {
+    let end = skip_luafunc_name(str);
+    let term_ok = if paren {
+        str.as_bytes().get(end) == Some(&b'(')
+    } else {
+        end == str.len()
+    };
+    if term_ok {
+        end as i32
+    } else {
+        0
+    }
+}
+
+/// Port of `get_echo_hl_id()` from `Src/eval.c` — the highlight id for `:echohl`;
+/// no highlight groups standalone → 0.
+pub fn get_echo_hl_id() -> i32 {
+    0
+}
+
+/// Port of `may_call_simple_func()` from `Src/eval.c` — the fast path for a bare
+/// function call; unused here (the bridge calls), so → FAIL (use the normal path).
+pub fn may_call_simple_func() -> i32 {
+    FAIL
+}
+
+/// Port of `free_for_info()` from `Src/eval.c` — free a `:for` loop iterator;
+/// `Rc`-managed, no-op.
+pub fn free_for_info() {}
+
+/// Port of `timer_stop_all()` from `Src/eval.c` — stop all timers; none exist
+/// standalone (no event loop), no-op.
+pub fn timer_stop_all() {}
+
+/// Port of `timer_teardown()` from `Src/eval.c` — timer-subsystem teardown; no-op.
+pub fn timer_teardown() {}
+
+/// Port of `set_argv_var()` from `Src/eval.c` — set `v:argv` from the process
+/// arguments. The standalone interpreter exposes its CLI args here.
+pub fn set_argv_var(argv: &[String]) {
+    use crate::ported::eval::typval::{tv_list_alloc, tv_list_append_string};
+    let l = tv_list_alloc(argv.len() as isize);
+    {
+        let mut lb = l.borrow_mut();
+        for a in argv {
+            tv_list_append_string(&mut lb, a);
+        }
+    }
+    crate::ported::eval::vars::set_vim_var_list(crate::ported::eval::vars::vv::VV_ARGV, Some(l));
+}
+
+/// Port of `get_name_len()` from `Src/eval.c` — the length of the variable/
+/// function name at the start of `s` (subset: no curly-brace expansion).
+pub fn get_name_len(s: &str) -> i32 {
+    get_id_len(s)
+}
+
+/// Port of `eval_clear`-adjacent `garbage_collect()` from `Src/eval.c` — the
+/// mark-and-sweep pass; the `Rc` value layer frees eagerly, so → false (nothing
+/// freed).
+pub fn garbage_collect(_testing: bool) -> bool {
+    false
+}
+
+/// Port of `free_unref_items()` from `Src/eval.c` — free items unreferenced
+/// after a GC mark pass; the `Rc` layer frees eagerly → nothing freed (0).
+pub fn free_unref_items(_copy_id: i32) -> i32 {
+    0
+}
+
+/// Port of `set_ref_in_list_items()`/GC marker (`Src/eval.c`) — mark a list
+/// reachable during GC; no mark pass under `Rc`, no-op returning false.
+pub fn set_ref_in_list_items() -> bool {
+    false
+}
+
+/// Port of `set_ref_in_item()` (`Src/eval.c`) — GC marker; no-op (false).
+pub fn set_ref_in_item() -> bool {
+    false
+}
+
+/// Port of `set_ref_in_ht()` (`Src/eval.c`) — GC marker over a hashtab; no-op.
+pub fn set_ref_in_ht() -> bool {
+    false
+}
+
+/// Port of `eval_has_provider()` from `Src/eval.c` — whether a `has('python3')`-
+/// style provider feature is available; no providers standalone → false.
+pub fn eval_has_provider(_feat: &str, _throw_if_fast: bool) -> bool {
+    false
+}
+
+/// Port of `invoke_prompt_interrupt()` from `Src/eval.c` — fire a prompt
+/// buffer's interrupt callback; no prompt buffer standalone → false.
+pub fn invoke_prompt_interrupt() -> bool {
+    false
+}
+
+/// Port of `next_for_item()` from `Src/eval.c` — advance a `:for` iterator; the
+/// bridge drives `:for`, so this path is unused → false (stop).
+pub fn next_for_item() -> bool {
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::string2float;
+
+    #[test]
+    fn string2float_leading_prefix() {
+        assert_eq!(string2float("3.14"), (3.14, 4));
+        assert_eq!(string2float("3.14abc"), (3.14, 4));
+        assert_eq!(string2float("2.5e3xyz"), (2500.0, 5));
+        assert_eq!(string2float(".5"), (0.5, 2));
+        assert_eq!(string2float("42"), (42.0, 2));
+        // No leading number consumes nothing.
+        assert_eq!(string2float("abc"), (0.0, 0));
+        // inf/nan keywords.
+        assert_eq!(string2float("inf"), (f64::INFINITY, 3));
+        assert_eq!(string2float("-inf"), (f64::NEG_INFINITY, 4));
+        assert!(string2float("nan").0.is_nan());
+        // A bare exponent marker is not consumed (strtod stops before "e").
+        assert_eq!(string2float("5e"), (5.0, 1));
+    }
 }

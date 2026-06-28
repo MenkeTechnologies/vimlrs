@@ -78,7 +78,11 @@ Early / in development.
 | Unit-testing framework — `assert_equal`/`assert_notequal`/`assert_true`/`assert_false`/`assert_match`/`assert_notmatch`/`assert_report`/`assert_inrange`/`assert_exception` → `v:errors`, plus `assert_fails` (run a command, require it to error/match a code) — message wording per `eval.lua` | Working — every `examples/*.vim` is a self-test, run in CI via `tests/examples.rs` |
 | `eval()` / `execute()` (run-string metaprogramming) | Working |
 | Regex engine — Vim magic dialect, backing `=~`/`matchstr`/`match`/`substitute`/`split`/`:catch` | Working |
-| autoload (`foo#bar`), one-line block bars (`if … \| … \| endif`), `:source`/`:command`/`:autocmd` | Planned |
+| `:source {file}` (functions/globals persist) + autoload (`foo#bar()` sources `autoload/foo.vim` on demand) | Working |
+| Lambdas `{args -> body}` (with closure capture), funcref-variable calls `F(args)`, Blob literals `0z…`, `d.key` member read, `#{key: val}` literal-key Dicts, `\` line continuation | Working |
+| one-line block bars — `if … \| … \| endif` (and `for`/`while`), incl. after a leaf command (`let x=1 \| if x \| … \| endif`) | Working |
+| variadic functions (`...` -> `a:000`/`a:0`), `:unlet`, `:source`, autoload | Working |
+| `:command`/`:autocmd` | Planned |
 
 The full interpreter C surface is scaffolded: `scripts/gen_port_stubs.sh`
 generates one stub per not-yet-ported Neovim C function (real name +

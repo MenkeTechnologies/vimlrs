@@ -14,6 +14,38 @@ use crate::ported::eval::typval_defs_h::{
     typval_T, typval_vval_union::*, BoolVarValue::*, VarType::*,
 };
 
+/// Render a finite float the way Vim does: C `printf("%g", f)` with `prec`
+/// significant digits (default 6, trailing zeros stripped), choosing `%f` vs
+/// `%e` form by the decimal exponent. The caller appends `.0` when there is no
+/// `.`/`e`, so `1.0` prints as `1.0` and `0.1 + 0.2` prints as `0.3`.
+pub(crate) fn vim_float_g(f: f64, prec: i32) -> String {
+    if f == 0.0 {
+        return "0".to_string();
+    }
+    let p = prec.max(1);
+    let strip = |s: &str| -> String {
+        if s.contains('.') {
+            s.trim_end_matches('0').trim_end_matches('.').to_string()
+        } else {
+            s.to_string()
+        }
+    };
+    // True base-10 exponent from %e form (before rounding).
+    let e_str = format!("{f:e}");
+    let exp: i32 = e_str[e_str.find('e').unwrap() + 1..].parse().unwrap_or(0);
+    if exp < -4 || exp >= p {
+        // %e form: P-1 fractional digits, C-style "e±NN" exponent.
+        let m = format!("{:.*e}", (p - 1) as usize, f);
+        let epos = m.find('e').unwrap();
+        let mant = strip(&m[..epos]);
+        let exn: i32 = m[epos + 1..].parse().unwrap_or(0);
+        format!("{mant}e{}{:02}", if exn < 0 { '-' } else { '+' }, exn.abs())
+    } else {
+        let dec = (p - 1 - exp).max(0) as usize;
+        strip(&format!("{f:.dec$}"))
+    }
+}
+
 /// Port of `encode_tv2string()` from `Src/eval/encode.c:869`.
 ///
 /// String representation of a value with quotes around strings (parseable back
@@ -51,7 +83,7 @@ pub fn encode_vim_to_string(tv: &typval_T) -> String {
             } else if f.is_nan() {
                 "nan".to_string()
             } else {
-                let s = format!("{f}");
+                let s = vim_float_g(*f, 6);
                 if s.contains(['.', 'e', 'E']) {
                     s
                 } else {
@@ -175,7 +207,7 @@ pub fn encode_vim_to_json(tv: &typval_T) -> String {
         (VAR_NUMBER, v_number(n)) => n.to_string(),
         (VAR_FLOAT, v_float(f)) => {
             if f.is_finite() {
-                let s = format!("{f}");
+                let s = vim_float_g(*f, 6);
                 if s.contains(['.', 'e', 'E']) {
                     s
                 } else {

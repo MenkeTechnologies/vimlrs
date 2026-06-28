@@ -18,6 +18,14 @@ pub enum Expr {
     Str(String),
     /// List literal `[a, b, …]`.
     List(Vec<Expr>),
+    /// Lambda `{args -> body}` — desugars to an anonymous function returning
+    /// `body`. (No closure capture of the enclosing scope yet.)
+    Lambda {
+        /// Parameter names (without `a:`).
+        params: Vec<String>,
+        /// The single body expression.
+        body: Box<Expr>,
+    },
     /// Dict literal `{k: v, …}`.
     Dict(Vec<(Expr, Expr)>),
     /// Variable reference (possibly scoped).
@@ -264,4 +272,9 @@ pub enum Stmt {
     Execute(Vec<Expr>),
     /// `:set {args}` — set options (the raw argument text).
     Set(String),
+    /// `:source {file}` — read and run another `.vim` file in the current scope
+    /// (its functions and globals persist). The raw (unquoted) filename.
+    Source(String),
+    /// `:unlet[!] {name}…` — delete one or more variables by name.
+    Unlet(Vec<String>),
 }

@@ -160,7 +160,10 @@ pub const VIML_UPLUS: u16 = 3017;
 pub const VIML_NOT: u16 = 3018;
 /// comparison id base; per-operator offset via [`cmp_id`].
 pub const VIML_CMP_BASE: u16 = 3020;
-const VIML_CMP_IC_OFFSET: u16 = 0x20;
+// Ignore-case comparison ids = base + op + this offset. Must clear ALL other
+// allocated VIML_* ids (the `0x20` it used to be put the ic range at 3052+,
+// colliding with VIML_INDEX/SLICE/SETINDEX/ECHO — so `==?` actually indexed).
+const VIML_CMP_IC_OFFSET: u16 = 0x200;
 /// list constructor (argc = element count).
 pub const VIML_MAKE_LIST: u16 = 3050;
 /// dict constructor (argc = 2 × pairs).
@@ -360,6 +363,10 @@ pub const VIML_FN_LOG10: u16 = 3183;
 pub const VIML_EXEC_STMT: u16 = 3184;
 /// `:set` statement: pop the argument string, apply via `option::do_set`.
 pub const VIML_SET: u16 = 3185;
+/// `:source {file}`: pop the filename, read and run it in the current scope.
+pub const VIML_SOURCE: u16 = 3500;
+/// `:unlet {name}`: pop the name, delete the variable.
+pub const VIML_UNLET: u16 = 3501;
 /// `json_encode()`
 pub const VIML_FN_JSON_ENCODE: u16 = 3186;
 /// `json_decode()`
@@ -1498,10 +1505,70 @@ fn b_exec_stmt(vm: &mut VM, argc: u8) -> Value {
     Value::Undef
 }
 
+/// `:source {file}` — read the file and run it in the current (shared) scope,
+/// so functions and globals it defines persist. `~`/`$VAR` in the path expand.
+fn b_source(vm: &mut VM, _: u8) -> Value {
+    let path = tv_get_string(&pop_tv(vm));
+    let expanded = if let Some(rest) = path.strip_prefix("~/") {
+        match std::env::var("HOME") {
+            Ok(h) => format!("{h}/{rest}"),
+            Err(_) => path.clone(),
+        }
+    } else {
+        path.clone()
+    };
+    match std::fs::read_to_string(&expanded) {
+        Ok(src) => {
+            let _ = run_source_nested(&src);
+        }
+        Err(_) => message::semsg(&format!("E484: Can't open file {path}")),
+    }
+    Value::Undef
+}
+
+/// `:unlet {name}` — delete a variable (forceit: missing is not an error here).
+fn b_unlet(vm: &mut VM, _: u8) -> Value {
+    let name = tv_get_string(&pop_tv(vm));
+    crate::ported::eval::vars::do_unlet(&name, name.len(), true);
+    Value::Undef
+}
+
 fn b_set_lineno(vm: &mut VM, _: u8) -> Value {
     let line = tv_get_number_chk(&pop_tv(vm), None);
     crate::dap::check_line(line as u32);
     Value::Undef
+}
+
+thread_local! {
+    /// Autoload files already sourced this run (by resolved path), so a missing
+    /// `pkg#func` is not re-sourced on every call.
+    static AUTOLOADED: RefCell<std::collections::HashSet<String>> =
+        RefCell::new(std::collections::HashSet::new());
+}
+
+/// Try to autoload the package for `name` (`pkg#func`, `a#b#func` → `a/b`):
+/// source `autoload/{path}.vim` (relative to the cwd) once. Returns true if a
+/// file was sourced (so the call should be retried). Port of `script_autoload`.
+fn try_autoload(name: &str) -> bool {
+    let parts: Vec<&str> = name.split('#').collect();
+    if parts.len() < 2 {
+        return false;
+    }
+    let rel = format!("autoload/{}.vim", parts[..parts.len() - 1].join("/"));
+    let already = AUTOLOADED.with(|s| s.borrow().contains(&rel));
+    if already {
+        return false;
+    }
+    AUTOLOADED.with(|s| {
+        s.borrow_mut().insert(rel.clone());
+    });
+    match std::fs::read_to_string(&rel) {
+        Ok(src) => {
+            let _ = run_source_nested(&src);
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 fn b_call_user(vm: &mut VM, argc: u8) -> Value {
@@ -1512,13 +1579,31 @@ fn b_call_user(vm: &mut VM, argc: u8) -> Value {
     }
     args.reverse();
     let name = tv_get_string(&pop_tv(vm));
-    match call_user_function(&name, args) {
-        Some(rettv) => tv_to_value(rettv),
-        None => {
-            message::semsg(&format!("E117: Unknown function: {name}"));
-            Value::Undef
+    if let Some(rettv) = call_user_function(&name, args.clone()) {
+        return tv_to_value(rettv);
+    }
+    // Autoload: an undefined `pkg#func` sources `autoload/pkg.vim` (which should
+    // define it), then the call is retried once.
+    if name.contains('#') && try_autoload(&name) {
+        if let Some(rettv) = call_user_function(&name, args.clone()) {
+            return tv_to_value(rettv);
         }
     }
+    // Fallback: `F(args)` where `F` is a variable holding a Funcref/Partial
+    // (e.g. a lambda stored in a variable). Call through the funcref value.
+    if let Some(v) = eval_variable(&name) {
+        if matches!(v.v_type, VAR_FUNC | VAR_PARTIAL) {
+            return match call_funcref(&v, args) {
+                Some(rettv) => tv_to_value(rettv),
+                None => {
+                    message::semsg(&format!("E117: Unknown function: {name}"));
+                    Value::Undef
+                }
+            };
+        }
+    }
+    message::semsg(&format!("E117: Unknown function: {name}"));
+    Value::Undef
 }
 
 fn b_set_return(vm: &mut VM, _: u8) -> Value {
@@ -1536,14 +1621,21 @@ fn b_set_return(vm: &mut VM, _: u8) -> Value {
 fn call_user_function(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
     let func = FUNCTIONS.with(|f| f.borrow().get(name).cloned())?;
 
-    // Bind named parameters into the a: scope; extras into a:0 / a:000.
+    // Bind named parameters into the a: scope; extras into a:0 / a:000. A `...`
+    // entry marks the varargs boundary: params before it are named, every arg
+    // from that position on goes to a:000 (so `F(...)` collects all args).
     let mut avars = crate::ported::eval::typval_defs_h::dict_T::default();
-    for (i, p) in func.params.iter().enumerate() {
+    let nfixed = func
+        .params
+        .iter()
+        .position(|p| p == "...")
+        .unwrap_or(func.params.len());
+    for (i, p) in func.params.iter().take(nfixed).enumerate() {
         let v = args.get(i).cloned().unwrap_or_else(tv_special);
         crate::ported::eval::typval::tv_dict_add_tv(&mut avars, p, v);
     }
-    let extra: Vec<typval_T> = if args.len() > func.params.len() {
-        args[func.params.len()..].to_vec()
+    let extra: Vec<typval_T> = if args.len() > nfixed {
+        args[nfixed..].to_vec()
     } else {
         Vec::new()
     };
@@ -1626,6 +1718,17 @@ fn b_eval(vm: &mut VM, _: u8) -> Value {
             message::semsg(&format!("{e}"));
             Value::Undef
         }
+    }
+}
+
+/// The `\=` substitute-expression evaluator (installed into the regex engine's
+/// `SUBST_EXPR_HOOK`): compile + run the expression, return its string value.
+fn subst_expr_eval(expr: &str) -> String {
+    match compile_expr_chunk(expr) {
+        Ok(chunk) => run_chunk_capture(chunk)
+            .map(|tv| tv_get_string(&tv))
+            .unwrap_or_default(),
+        Err(_) => String::new(),
     }
 }
 
@@ -1813,9 +1916,47 @@ fn call_funcref(funcref: &typval_T, extra: Vec<typval_T>) -> Option<typval_T> {
         (VAR_PARTIAL, v_partial(Some(p))) => {
             let mut args = p.pt_argv.clone();
             args.extend(extra);
-            call_user_function(&p.pt_name, args)
+            call_named(&p.pt_name, args)
         }
-        _ => call_user_function(&tv_get_string(funcref), extra),
+        _ => call_named(&tv_get_string(funcref), extra),
+    }
+}
+
+/// Resolve a function name to either a user `:function` or a ported builtin and
+/// call it. Vim's `call()`/funcrefs accept builtin names (`call('printf', […])`,
+/// `function('substitute')`), not just user functions — a user function takes
+/// precedence when both exist.
+fn call_named(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
+    if FUNCTIONS.with(|f| f.borrow().contains_key(name)) {
+        return call_user_function(name, args);
+    }
+    if crate::compile_viml::builtin_fn_id(name).is_some() {
+        return call_builtin_by_name(name, args);
+    }
+    // Neither yet — fall back to the user-function path (handles autoload-loaded
+    // names registered after the initial check).
+    call_user_function(name, args)
+}
+
+/// Invoke a ported builtin by name with already-evaluated argument typvals.
+/// Builds a one-instruction `CallBuiltin` chunk, pushes the args onto a fresh
+/// VM, and runs it — reusing every registered handler. The REFPOOL is a shared
+/// thread_local, so converting compound args across the nested VM is safe.
+fn call_builtin_by_name(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
+    let id = crate::compile_viml::builtin_fn_id(name)?;
+    let argc = args.len() as u8;
+    let mut b = fusevm::ChunkBuilder::new();
+    b.emit(fusevm::Op::CallBuiltin(id, argc), 0);
+    let mut vm = VM::new(b.build());
+    install(&mut vm);
+    for a in args {
+        vm.push(tv_to_value(a));
+    }
+    // `run()` returns the top-of-stack as its result (it does not leave it on the
+    // stack), so read the builtin's value from there.
+    match vm.run() {
+        fusevm::VMResult::Ok(v) => Some(value_to_tv(&v)),
+        _ => None,
     }
 }
 
@@ -2295,6 +2436,7 @@ pub fn install(vm: &mut VM) {
     CALL_FUNC_HOOK.with(|h| *h.borrow_mut() = Some(call_func_hook));
     vm.register_builtin(VIML_FN_REDUCE, |vm, n| call_func(vm, n, f_reduce));
     vm.register_builtin(VIML_FN_EVAL, b_eval);
+    crate::viml_regex::SUBST_EXPR_HOOK.with(|h| *h.borrow_mut() = Some(subst_expr_eval));
     vm.register_builtin(VIML_FN_EXECUTE, b_execute);
     vm.register_builtin(VIML_FN_DEEPCOPY, |vm, n| call_func(vm, n, f_deepcopy));
     vm.register_builtin(VIML_FN_FMOD, |vm, n| call_func(vm, n, f_fmod));
@@ -2308,6 +2450,8 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FN_TANH, |vm, n| call_float_op(vm, n, f64::tanh));
     vm.register_builtin(VIML_FN_LOG10, |vm, n| call_float_op(vm, n, f64::log10));
     vm.register_builtin(VIML_EXEC_STMT, b_exec_stmt);
+    vm.register_builtin(VIML_SOURCE, b_source);
+    vm.register_builtin(VIML_UNLET, b_unlet);
     vm.register_builtin(VIML_SET, b_set);
     vm.register_builtin(VIML_FN_JSON_ENCODE, |vm, n| call_func(vm, n, f_json_encode));
     vm.register_builtin(VIML_FN_JSON_DECODE, |vm, n| call_func(vm, n, f_json_decode));
@@ -4448,10 +4592,60 @@ mod tests {
     }
 
     #[test]
+    fn call_resolves_builtins() {
+        // call() / funcrefs accept builtin names, not just user functions.
+        assert_eq!(run("echo call('printf', ['%d-%d', 3, 4])"), "3-4\n");
+        assert_eq!(run("echo call('abs', [-5])"), "5\n");
+        assert_eq!(run("echo call('len', [[1, 2, 3]])"), "3\n");
+        assert_eq!(run("let F = function('toupper') | echo F('hi')"), "HI\n");
+        // A Partial over a builtin binds leading args.
+        assert_eq!(
+            run("let G = function('substitute', ['axa']) | echo G('a', 'Z', 'g')"),
+            "ZxZ\n"
+        );
+    }
+
+    #[test]
+    fn printf_sign_flags_and_byte_len() {
+        assert_eq!(run("echo printf('%+d % d', 7, 7)"), "+7  7\n");
+        assert_eq!(run("echo printf('%+05d', 7)"), "+0007\n");
+        // len() of a String is its byte length.
+        assert_eq!(run("echo len('héllo')"), "6\n");
+    }
+
+    #[test]
+    fn trim_dir_and_scope_dicts() {
+        assert_eq!(run("echo trim('  x  ', ' ', 1)"), "x  \n");
+        assert_eq!(run("echo trim('  x  ', ' ', 2)"), "  x\n");
+        // A bare scope sigil is a Dict of that scope.
+        assert_eq!(run("let g:zz = 9 | echo get(g:, 'zz', -1)"), "9\n");
+        assert_eq!(run("echo type(g:)"), "4\n");
+        assert_eq!(run("let g:q = 1 | echo has_key(g:, 'q')"), "1\n");
+    }
+
+    #[test]
+    fn printf_g_and_substitute_expr() {
+        assert_eq!(
+            run("echo printf('%g %g %g', 0.1, 1000000.0, 0.0001)"),
+            "0.1 1e+06 0.0001\n"
+        );
+        assert_eq!(run("echo printf('%.3g', 3.14159)"), "3.14\n");
+        // \= replacement expression with submatch().
+        assert_eq!(
+            run("echo substitute('abcABC', '[a-z]', '\\=toupper(submatch(0))', 'g')"),
+            "ABCABC\n"
+        );
+        assert_eq!(
+            run("echo substitute('x1y2', '\\d', '\\=submatch(0)+10', 'g')"),
+            "x11y12\n"
+        );
+    }
+
+    #[test]
     fn batch4_builtins() {
         assert_eq!(
             run("echo matchlist('a-b', '\\(\\w\\)-\\(\\w\\)')"),
-            "['a-b', 'a', 'b']\n"
+            "['a-b', 'a', 'b', '', '', '', '', '', '', '']\n"
         );
         assert_eq!(run("echo matchend('abc123', '\\d\\+')"), "6\n");
         assert_eq!(run("echo strridx('a/b/c', '/')"), "3\n");

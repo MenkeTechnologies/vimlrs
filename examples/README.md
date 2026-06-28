@@ -22,7 +22,13 @@ cargo build
 | [`slicing.vim`](slicing.vim) | `slice()` (exclusive-end List/String/Blob slice), `strcharlen()` (folds composing marks), `strtrans()` |
 | [`width.vim`](width.vim) | display width: `strwidth()` (wide CJK/emoji = 2 cells), `strdisplaywidth()` (Tab expansion), `charclass()` |
 | [`glob.vim`](glob.vim) | `glob()` — list files by wildcard (`*`/`?`), `$VAR`/`~` expansion, String vs List form |
+| [`lambdas.vim`](lambdas.vim) | `{args -> body}` lambdas in `map`/`filter`/`sort`/`reduce` |
 | [`buffers.vim`](buffers.vim) | editor-absent buffer/window/tab builtins (`bufnr`/`winnr`/`tabpagenr`…), `strutf16len`/`utf16idx`, `globpath` |
+| [`sourcing.vim`](sourcing.vim) | `:source` another `.vim` file — its functions / globals persist (`lib/mathlib.vim`) |
+| [`autoload.vim`](autoload.vim) | autoload: an undefined `pkg#func()` sources `autoload/pkg.vim` on demand |
+| [`oneline.vim`](oneline.vim) | one-line block bars: `if c \| … \| endif`, `for`/`while` on one line |
+| [`varargs.vim`](varargs.vim) | variadic functions (`...`/`a:000`/`a:0`), `:unlet` |
+| [`compare.vim`](compare.vim) | comparison operators incl. case suffixes (`==?`/`==#`/`=~?`), `is`/`isnot` |
 
 Run any script with `VIMLRS_JIT_STATS=1` to see JIT activity, or `VIMLRS_NO_JIT=1`
 to force the interpreter baseline.
@@ -56,12 +62,16 @@ The interactive example is fed canned answers from `tests/fixtures/interactive.i
 
 ### Notes on the current language surface
 
-These scripts stick to what the parser supports today. Two idioms common in
-modern Vimscript are not yet wired and are avoided here:
+These idioms — common in modern Vimscript — are now all supported:
 
-- **`{ x -> ... }` lambdas** — use a string-expression body (`'v:val * v:val'`)
-  for `map()`/`filter()`, and a named function via `function('Name')` for
-  `reduce()`/`sort()` comparators.
-- **`d.key` member *read*** — use bracket access `d['key']` (dot-form is parsed
-  as string concatenation in expression position for now).
-- **`\` line continuation** — keep each statement on one line.
+- **`{ x -> … }` lambdas** — supported (desugar to anonymous functions); use
+  them directly in `map()`/`filter()`/`sort()`/`reduce()`. They **capture
+  enclosing-scope variables** (by value at creation, including nested closures),
+  and a lambda/Funcref stored in a variable is callable both directly —
+  `F(args)` — and via `call(F, [args])`.
+- **`d.key` member *read*** — now supported (a no-space `d.key` is a dict member
+  read; a spaced `a . b` stays concatenation). Bracket access `d['key']` also
+  works and is needed for non-literal keys.
+- **`\` line continuation** — now supported: a line whose first non-blank char
+  is `\` joins onto the previous one, so multi-line list/dict literals work (see
+  `json.vim`).

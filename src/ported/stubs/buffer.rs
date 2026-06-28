@@ -7,12 +7,6 @@ pub fn find_buffer() {
     unimplemented!("STUB find_buffer — csrc/eval/buffer.c:47")
 }
 
-/// Port of `find_win_for_curbuf()` — `csrc/eval/buffer.c:72`. STUB: not yet ported.
-/// C: `static void find_win_for_curbuf(void)`
-pub fn find_win_for_curbuf() {
-    unimplemented!("STUB find_win_for_curbuf — csrc/eval/buffer.c:72")
-}
-
 /// Port of `change_other_buffer_prepare()` — `csrc/eval/buffer.c:92`. STUB: not yet ported.
 /// C: `static void change_other_buffer_prepare(cob_T *cob, buf_T *buf)`
 pub fn change_other_buffer_prepare() {
@@ -35,12 +29,6 @@ pub fn set_buffer_lines() {
 /// C: `static void buf_set_append_line(typval_T *argvars, typval_T *rettv, bool append)`
 pub fn buf_set_append_line() {
     unimplemented!("STUB buf_set_append_line — csrc/eval/buffer.c:257")
-}
-
-/// Port of `buf_win_common()` — `csrc/eval/buffer.c:462`. STUB: not yet ported.
-/// C: `static void buf_win_common(typval_T *argvars, typval_T *rettv, bool get_nr)`
-pub fn buf_win_common() {
-    unimplemented!("STUB buf_win_common — csrc/eval/buffer.c:462")
 }
 
 /// Port of `get_buffer_info()` — `csrc/eval/buffer.c:573`. STUB: not yet ported.

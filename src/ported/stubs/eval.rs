@@ -7,24 +7,6 @@ pub fn get_v_event() {
     unimplemented!("STUB get_v_event — csrc/eval.c:145")
 }
 
-/// Port of `restore_v_event()` — `csrc/eval.c:160`. STUB: not yet ported.
-/// C: `void restore_v_event(dict_T *v_event, save_v_event_T *sve)`
-pub fn restore_v_event() {
-    unimplemented!("STUB restore_v_event — csrc/eval.c:160")
-}
-
-/// Port of `eval_init()` — `csrc/eval.c:204`. STUB: not yet ported.
-/// C: `void eval_init(void)`
-pub fn eval_init() {
-    unimplemented!("STUB eval_init — csrc/eval.c:204")
-}
-
-/// Port of `eval_clear()` — `csrc/eval.c:211`. STUB: not yet ported.
-/// C: `void eval_clear(void)`
-pub fn eval_clear() {
-    unimplemented!("STUB eval_clear — csrc/eval.c:211")
-}
-
 /// Port of `fill_evalarg_from_eap()` — `csrc/eval.c:229`. STUB: not yet ported.
 /// C: `void fill_evalarg_from_eap(evalarg_T *evalarg, exarg_T *eap, bool skip)`
 pub fn fill_evalarg_from_eap() {
@@ -41,12 +23,6 @@ pub fn eval_to_bool() {
 /// C: `static int eval1_emsg(char **arg, typval_T *rettv, exarg_T *eap)`
 pub fn eval1_emsg() {
     unimplemented!("STUB eval1_emsg — csrc/eval.c:281")
-}
-
-/// Port of `eval_expr_valid_arg()` — `csrc/eval.c:309`. STUB: not yet ported.
-/// C: `bool eval_expr_valid_arg(const typval_T *const tv)`
-pub fn eval_expr_valid_arg() {
-    unimplemented!("STUB eval_expr_valid_arg — csrc/eval.c:309")
 }
 
 /// Port of `eval_expr_partial()` — `csrc/eval.c:319`. STUB: not yet ported.
@@ -89,12 +65,6 @@ pub fn eval_to_string_skip() {
 /// C: `int skip_expr(char **pp, evalarg_T *const evalarg)`
 pub fn skip_expr() {
     unimplemented!("STUB skip_expr — csrc/eval.c:461")
-}
-
-/// Port of `typval2string()` — `csrc/eval.c:486`. STUB: not yet ported.
-/// C: `static char *typval2string(typval_T *tv, bool join_list)`
-pub fn typval2string() {
-    unimplemented!("STUB typval2string — csrc/eval.c:486")
 }
 
 /// Port of `eval_to_string_eap()` — `csrc/eval.c:510`. STUB: not yet ported.
@@ -217,18 +187,6 @@ pub fn eval_for_line() {
     unimplemented!("STUB eval_for_line — csrc/eval.c:1435")
 }
 
-/// Port of `next_for_item()` — `csrc/eval.c:1511`. STUB: not yet ported.
-/// C: `bool next_for_item(void *fi_void, char *arg)`
-pub fn next_for_item() {
-    unimplemented!("STUB next_for_item — csrc/eval.c:1511")
-}
-
-/// Port of `free_for_info()` — `csrc/eval.c:1553`. STUB: not yet ported.
-/// C: `void free_for_info(void *fi_void)`
-pub fn free_for_info() {
-    unimplemented!("STUB free_for_info — csrc/eval.c:1553")
-}
-
 /// Port of `set_context_for_expression()` — `csrc/eval.c:1571`. STUB: not yet ported.
 /// C: `void set_context_for_expression(expand_T *xp, char *arg, cmdidx_T cmdidx)`
 pub fn set_context_for_expression() {
@@ -251,12 +209,6 @@ pub fn clear_evalarg() {
 /// C: `int eval0(char *arg, typval_T *rettv, exarg_T *eap, evalarg_T *const evalarg)`
 pub fn eval0() {
     unimplemented!("STUB eval0 — csrc/eval.c:1787")
-}
-
-/// Port of `may_call_simple_func()` — `csrc/eval.c:1838`. STUB: not yet ported.
-/// C: `int may_call_simple_func(const char *arg, typval_T *rettv)`
-pub fn may_call_simple_func() {
-    unimplemented!("STUB may_call_simple_func — csrc/eval.c:1838")
 }
 
 /// Port of `eval0_simple_funccal()` — `csrc/eval.c:1862`. STUB: not yet ported.
@@ -433,36 +385,6 @@ pub fn eval_list() {
     unimplemented!("STUB eval_list — csrc/eval.c:3857")
 }
 
-/// Port of `get_copyID()` — `csrc/eval.c:3960`. STUB: not yet ported.
-/// C: `int get_copyID(void)`
-pub fn get_copyID() {
-    unimplemented!("STUB get_copyID — csrc/eval.c:3960")
-}
-
-/// Port of `garbage_collect()` — `csrc/eval.c:3995`. STUB: not yet ported.
-/// C: `bool garbage_collect(bool testing)`
-pub fn garbage_collect() {
-    unimplemented!("STUB garbage_collect — csrc/eval.c:3995")
-}
-
-/// Port of `free_unref_items()` — `csrc/eval.c:4162`. STUB: not yet ported.
-/// C: `static int free_unref_items(int copyID)`
-pub fn free_unref_items() {
-    unimplemented!("STUB free_unref_items — csrc/eval.c:4162")
-}
-
-/// Port of `set_ref_in_ht()` — `csrc/eval.c:4231`. STUB: not yet ported.
-/// C: `bool set_ref_in_ht(hashtab_T *ht, int copyID, list_stack_T **list_stack)`
-pub fn set_ref_in_ht() {
-    unimplemented!("STUB set_ref_in_ht — csrc/eval.c:4231")
-}
-
-/// Port of `set_ref_in_list_items()` — `csrc/eval.c:4269`. STUB: not yet ported.
-/// C: `bool set_ref_in_list_items(list_T *l, int copyID, ht_stack_T **ht_stack)`
-pub fn set_ref_in_list_items() {
-    unimplemented!("STUB set_ref_in_list_items — csrc/eval.c:4269")
-}
-
 /// Port of `set_ref_in_item_dict()` — `csrc/eval.c:4304`. STUB: not yet ported.
 /// C: `static bool set_ref_in_item_dict(dict_T *dd, int copyID, ht_stack_T **ht_stack,`
 pub fn set_ref_in_item_dict() {
@@ -481,12 +403,6 @@ pub fn set_ref_in_item_partial() {
     unimplemented!("STUB set_ref_in_item_partial — csrc/eval.c:4357")
 }
 
-/// Port of `set_ref_in_item()` — `csrc/eval.c:4392`. STUB: not yet ported.
-/// C: `bool set_ref_in_item(typval_T *tv, int copyID, ht_stack_T **ht_stack, list_stack_T **list_stack)`
-pub fn set_ref_in_item() {
-    unimplemented!("STUB set_ref_in_item — csrc/eval.c:4392")
-}
-
 /// Port of `get_literal_key()` — `csrc/eval.c:4422`. STUB: not yet ported.
 /// C: `static int get_literal_key(char **arg, typval_T *tv)`
 pub fn get_literal_key() {
@@ -503,12 +419,6 @@ pub fn eval_dict() {
 /// C: `static int eval_lit_dict(char **arg, typval_T *rettv, evalarg_T *const evalarg)`
 pub fn eval_lit_dict() {
     unimplemented!("STUB eval_lit_dict — csrc/eval.c:4552")
-}
-
-/// Port of `string2float()` — `csrc/eval.c:4575`. STUB: not yet ported.
-/// C: `size_t string2float(const char *const text, float_T *const ret_value)`
-pub fn string2float() {
-    unimplemented!("STUB string2float — csrc/eval.c:4575")
 }
 
 /// Port of `eval_env_var()` — `csrc/eval.c:4603`. STUB: not yet ported.
@@ -533,12 +443,6 @@ pub fn string_to_list() {
 /// C: `static void get_system_output_as_rettv(typval_T *argvars, typval_T *rettv, bool retlist)`
 pub fn get_system_output_as_rettv() {
     unimplemented!("STUB get_system_output_as_rettv — csrc/eval.c:4714")
-}
-
-/// Port of `get_callback_depth()` — `csrc/eval.c:4882`. STUB: not yet ported.
-/// C: `int get_callback_depth(void)`
-pub fn get_callback_depth() {
-    unimplemented!("STUB get_callback_depth — csrc/eval.c:4882")
 }
 
 /// Port of `callback_call()` — `csrc/eval.c:4888`. STUB: not yet ported.
@@ -607,18 +511,6 @@ pub fn timer_decref() {
     unimplemented!("STUB timer_decref — csrc/eval.c:5113")
 }
 
-/// Port of `timer_stop_all()` — `csrc/eval.c:5120`. STUB: not yet ported.
-/// C: `void timer_stop_all(void)`
-pub fn timer_stop_all() {
-    unimplemented!("STUB timer_stop_all — csrc/eval.c:5120")
-}
-
-/// Port of `timer_teardown()` — `csrc/eval.c:5128`. STUB: not yet ported.
-/// C: `void timer_teardown(void)`
-pub fn timer_teardown() {
-    unimplemented!("STUB timer_teardown — csrc/eval.c:5128")
-}
-
 /// Port of `save_tv_as_string()` — `csrc/eval.c:5143`. STUB: not yet ported.
 /// C: `char *save_tv_as_string(typval_T *tv, ptrdiff_t *const len, bool endnl, bool crlf)`
 pub fn save_tv_as_string() {
@@ -649,24 +541,6 @@ pub fn list2fpos() {
     unimplemented!("STUB list2fpos — csrc/eval.c:5440")
 }
 
-/// Port of `get_env_len()` — `csrc/eval.c:5508`. STUB: not yet ported.
-/// C: `int get_env_len(const char **arg)`
-pub fn get_env_len() {
-    unimplemented!("STUB get_env_len — csrc/eval.c:5508")
-}
-
-/// Port of `get_id_len()` — `csrc/eval.c:5526`. STUB: not yet ported.
-/// C: `int get_id_len(const char **const arg)`
-pub fn get_id_len() {
-    unimplemented!("STUB get_id_len — csrc/eval.c:5526")
-}
-
-/// Port of `get_name_len()` — `csrc/eval.c:5562`. STUB: not yet ported.
-/// C: `int get_name_len(const char **const arg, char **alias, bool evaluate, bool verbose)`
-pub fn get_name_len() {
-    unimplemented!("STUB get_name_len — csrc/eval.c:5562")
-}
-
 /// Port of `find_name_end()` — `csrc/eval.c:5620`. STUB: not yet ported.
 /// C: `const char *find_name_end(const char *arg, const char **expr_start, const char **expr_end,`
 pub fn find_name_end() {
@@ -679,12 +553,6 @@ pub fn make_expanded_name() {
     unimplemented!("STUB make_expanded_name — csrc/eval.c:5708")
 }
 
-/// Port of `set_argv_var()` — `csrc/eval.c:5774`. STUB: not yet ported.
-/// C: `void set_argv_var(char **argv, int argc)`
-pub fn set_argv_var() {
-    unimplemented!("STUB set_argv_var — csrc/eval.c:5774")
-}
-
 /// Port of `is_luafunc()` — `csrc/eval.c:5787`. STUB: not yet ported.
 /// C: `bool is_luafunc(partial_T *partial)`
 pub fn is_luafunc() {
@@ -695,18 +563,6 @@ pub fn is_luafunc() {
 /// C: `static bool tv_is_luafunc(typval_T *tv)`
 pub fn tv_is_luafunc() {
     unimplemented!("STUB tv_is_luafunc — csrc/eval.c:5794")
-}
-
-/// Port of `skip_luafunc_name()` — `csrc/eval.c:5802`. STUB: not yet ported.
-/// C: `const char *skip_luafunc_name(const char *p)`
-pub fn skip_luafunc_name() {
-    unimplemented!("STUB skip_luafunc_name — csrc/eval.c:5802")
-}
-
-/// Port of `check_luafunc_name()` — `csrc/eval.c:5812`. STUB: not yet ported.
-/// C: `int check_luafunc_name(const char *const str, const bool paren)`
-pub fn check_luafunc_name() {
-    unimplemented!("STUB check_luafunc_name — csrc/eval.c:5812")
 }
 
 /// Port of `char_from_string()` — `csrc/eval.c:5825`. STUB: not yet ported.
@@ -749,12 +605,6 @@ pub fn ex_echo() {
 /// C: `void ex_echohl(exarg_T *eap)`
 pub fn ex_echohl() {
     unimplemented!("STUB ex_echohl — csrc/eval.c:6207")
-}
-
-/// Port of `get_echo_hl_id()` — `csrc/eval.c:6213`. STUB: not yet ported.
-/// C: `int get_echo_hl_id(void)`
-pub fn get_echo_hl_id() {
-    unimplemented!("STUB get_echo_hl_id — csrc/eval.c:6213")
 }
 
 /// Port of `ex_execute()` — `csrc/eval.c:6223`. STUB: not yet ported.
@@ -817,12 +667,6 @@ pub fn eval_call_provider() {
     unimplemented!("STUB eval_call_provider — csrc/eval.c:6537")
 }
 
-/// Port of `eval_has_provider()` — `csrc/eval.c:6597`. STUB: not yet ported.
-/// C: `bool eval_has_provider(const char *feat, bool throw_if_fast)`
-pub fn eval_has_provider() {
-    unimplemented!("STUB eval_has_provider — csrc/eval.c:6597")
-}
-
 /// Port of `eval_fmt_source_name_line()` — `csrc/eval.c:6659`. STUB: not yet ported.
 /// C: `void eval_fmt_source_name_line(char *buf, size_t bufsize)`
 pub fn eval_fmt_source_name_line() {
@@ -845,12 +689,6 @@ pub fn prompt_trim_scrollback() {
 /// C: `void prompt_invoke_callback(void)`
 pub fn prompt_invoke_callback() {
     unimplemented!("STUB prompt_invoke_callback — csrc/eval.c:6727")
-}
-
-/// Port of `invoke_prompt_interrupt()` — `csrc/eval.c:6771`. STUB: not yet ported.
-/// C: `bool invoke_prompt_interrupt(void)`
-pub fn invoke_prompt_interrupt() {
-    unimplemented!("STUB invoke_prompt_interrupt — csrc/eval.c:6771")
 }
 
 /// Port of `typval_tostring()` — `csrc/eval.c:7001`. STUB: not yet ported.

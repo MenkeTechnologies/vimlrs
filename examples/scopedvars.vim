@@ -7,6 +7,20 @@
 "
 "   vimlrs examples/scopedvars.vim
 
+" ── a bare scope sigil (g:, b:, a:) is a Dict of that scope's variables ──
+let g:alpha = 10
+let g:beta = 20
+call assert_equal(4, type(g:))
+call assert_equal(10, get(g:, 'alpha', -1))
+call assert_equal(-1, get(g:, 'absent', -1))
+call assert_true(has_key(g:, 'beta'))
+call assert_false(has_key(g:, 'absent'))
+" a: inside a function is the Dict of arguments
+function! ArgKeys(one, two)
+  return sort(keys(a:))
+endfunction
+call assert_equal(['0', '000', 'one', 'two'], ArgKeys(1, 2))
+
 " ── scoped-var getters: return the {def} argument, else '' ──
 call assert_equal('DEF', getbufvar(1, 'missing', 'DEF'))
 call assert_equal('', getbufvar(1, 'missing'))

@@ -6,7 +6,12 @@
 "
 "   vimlrs examples/json.vim
 
-let config = {'name': 'vimlrs', 'version': [0, 1, 0], 'features': ['jit', 'lsp', 'dap'], 'standalone': v:true}
+let config = {
+      \ 'name': 'vimlrs',
+      \ 'version': [0, 1, 0],
+      \ 'features': ['jit', 'lsp', 'dap'],
+      \ 'standalone': v:true,
+      \ }
 
 let encoded = json_encode(config)
 let decoded = json_decode(encoded)

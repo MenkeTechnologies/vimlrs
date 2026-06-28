@@ -18,6 +18,9 @@ pub const STR2NR_HEX: i32 = 0x04;
 pub const STR2NR_OOCT: i32 = 0x08;
 /// `STR2NR_ALL` — recognize all of the above prefixes.
 pub const STR2NR_ALL: i32 = STR2NR_BIN | STR2NR_OCT | STR2NR_HEX | STR2NR_OOCT;
+/// `STR2NR_FORCE` — force the base selected by the radix bits in `what`
+/// regardless of any prefix (set by `str2nr({expr}, {base})`). (charset.h)
+pub const STR2NR_FORCE: i32 = 0x80;
 
 /// Port of `vim_str2nr()` from `Src/nvim/charset.c`.
 ///
@@ -57,7 +60,29 @@ pub fn vim_str2nr(
     // c: detect the base from the prefix
     let mut pre = 0u8; // c: int pre = 0;  // default decimal
     let mut base: u64 = 10;
-    if ptr < cap && bytes[ptr] == b'0' && ptr + 1 < cap {
+    if (what & STR2NR_FORCE) != 0 {
+        // c: STR2NR_FORCE — the radix bit in `what` dictates the base; a matching
+        // prefix is consumed if present, but is not required.
+        base = if what & STR2NR_HEX != 0 {
+            16
+        } else if what & (STR2NR_OCT | STR2NR_OOCT) != 0 {
+            8
+        } else if what & STR2NR_BIN != 0 {
+            2
+        } else {
+            10
+        };
+        if ptr + 1 < cap && bytes[ptr] == b'0' {
+            let c = bytes[ptr + 1];
+            let pfx = (base == 16 && (c == b'x' || c == b'X'))
+                || (base == 2 && (c == b'b' || c == b'B'))
+                || (base == 8 && (c == b'o' || c == b'O'));
+            if pfx {
+                pre = c;
+                ptr += 2;
+            }
+        }
+    } else if ptr < cap && bytes[ptr] == b'0' && ptr + 1 < cap {
         match bytes[ptr + 1] {
             b'x' | b'X' if (what & STR2NR_HEX) != 0 => {
                 pre = bytes[ptr + 1];

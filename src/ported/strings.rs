@@ -7,7 +7,9 @@
 //! vendored) until `strings.c` itself is vendored.
 #![allow(non_snake_case)]
 
-use crate::ported::charset::{vim_str2nr, STR2NR_ALL};
+use crate::ported::charset::{
+    vim_str2nr, STR2NR_BIN, STR2NR_FORCE, STR2NR_HEX, STR2NR_OCT, STR2NR_OOCT,
+};
 use crate::ported::eval::encode::encode_tv2string;
 use crate::ported::eval::typval::{
     tv_blob_alloc_ret, tv_get_number_chk, tv_get_string, tv_list_alloc_ret, tv_list_append_number,
@@ -23,22 +25,37 @@ pub fn f_string(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.vval = v_string(encode_tv2string(&argvars[0]));
 }
 
-/// "str2nr()" function — parse the leading number in a string.
+/// "str2nr()" function — parse the leading number in a string in the given
+/// `{base}` (2, 8, 10 or 16; default 10). Port of `f_str2nr()` from
+/// `Src/eval/funcs.c`: the base forces the radix (`STR2NR_FORCE`), an optional
+/// `{quote}` arg permits `'` digit separators, and a leading sign is honored.
 pub fn f_str2nr(argvars: &[typval_T], rettv: &mut typval_T) {
+    // c: base = argvars[1] (default 10); error on anything but 2/8/10/16.
+    let base = argvars
+        .get(1)
+        .map(|t| tv_get_number_chk(t, None))
+        .unwrap_or(10);
+    if !matches!(base, 2 | 8 | 10 | 16) {
+        return; // c: emsg(e_invarg); leaves rettv at 0
+    }
+    // c: switch(base) { case 2: STR2NR_BIN|FORCE; case 8: STR2NR_OCT|OOCT|FORCE;
+    //     case 16: STR2NR_HEX|FORCE; } (base 10 stays plain decimal, what == 0)
+    let what = match base {
+        2 => STR2NR_BIN | STR2NR_FORCE,
+        8 => STR2NR_OCT | STR2NR_OOCT | STR2NR_FORCE,
+        16 => STR2NR_HEX | STR2NR_FORCE,
+        _ => 0,
+    };
+    // c: p = skipwhite(...); handle the leading sign before vim_str2nr.
     let s = tv_get_string(&argvars[0]);
+    let p = s.trim_start();
+    let (neg, p) = match p.strip_prefix('-') {
+        Some(rest) => (true, rest.trim_start()),
+        None => (false, p.strip_prefix('+').map(str::trim_start).unwrap_or(p)),
+    };
     let mut n: varnumber_T = 0;
-    vim_str2nr(
-        &s,
-        None,
-        None,
-        STR2NR_ALL,
-        Some(&mut n),
-        None,
-        0,
-        false,
-        None,
-    );
-    rettv.vval = v_number(n);
+    vim_str2nr(p, None, None, what, Some(&mut n), None, 0, false, None);
+    rettv.vval = v_number(if neg { -n } else { n });
 }
 
 /// Port of `f_strlen()` from `Src/strings.c` — byte length of a string.
@@ -106,14 +123,25 @@ pub fn f_stridx(argvars: &[typval_T], rettv: &mut typval_T) {
 pub fn f_trim(argvars: &[typval_T], rettv: &mut typval_T) {
     let s = tv_get_string(&argvars[0]);
     rettv.v_type = VAR_STRING;
-    let trimmed = if argvars.len() >= 2 {
-        let mask = tv_get_string(&argvars[1]);
-        let m: Vec<char> = mask.chars().collect();
-        s.trim_matches(|c| m.contains(&c)).to_string()
+    // c: {mask} (default = isspace() set); an explicit empty mask trims nothing.
+    let has_mask = argvars.len() >= 2 && argvars[1].v_type != VAR_UNKNOWN;
+    let mask: Vec<char> = if has_mask {
+        tv_get_string(&argvars[1]).chars().collect()
     } else {
-        s.trim().to_string()
+        vec![' ', '\t', '\r', '\n', '\u{0b}', '\u{0c}']
     };
-    rettv.vval = v_string(trimmed);
+    let pred = |c: char| mask.contains(&c);
+    // c: {dir} — 0 = both ends (default), 1 = leading only, 2 = trailing only.
+    let dir = argvars
+        .get(2)
+        .filter(|t| t.v_type != VAR_UNKNOWN)
+        .map_or(0, |t| tv_get_number_chk(t, None));
+    let trimmed = match dir {
+        1 => s.trim_start_matches(pred),
+        2 => s.trim_end_matches(pred),
+        _ => s.trim_matches(pred),
+    };
+    rettv.vval = v_string(trimmed.to_string());
 }
 
 /// Port of `f_strridx()` from `Src/strings.c` — byte index of the LAST

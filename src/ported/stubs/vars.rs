@@ -1,88 +1,10 @@
 //! STUB surface for `csrc/eval/vars.c` — generated, do not edit.
 #![allow(dead_code, unused_variables, non_snake_case, clippy::all)]
 
-/// Port of `evalvars_clear()` — `csrc/eval/vars.c:361`. STUB: not yet ported.
-/// C: `void evalvars_clear(void)`
-pub fn evalvars_clear() {
-    unimplemented!("STUB evalvars_clear — csrc/eval/vars.c:361")
-}
-
-/// Port of `garbage_collect_globvars()` — `csrc/eval/vars.c:392`. STUB: not yet ported.
-/// C: `int garbage_collect_globvars(int copyID)`
-pub fn garbage_collect_globvars() {
-    unimplemented!("STUB garbage_collect_globvars — csrc/eval/vars.c:392")
-}
-
-/// Port of `garbage_collect_vimvars()` — `csrc/eval/vars.c:397`. STUB: not yet ported.
-/// C: `bool garbage_collect_vimvars(int copyID)`
-pub fn garbage_collect_vimvars() {
-    unimplemented!("STUB garbage_collect_vimvars — csrc/eval/vars.c:397")
-}
-
-/// Port of `garbage_collect_scriptvars()` — `csrc/eval/vars.c:402`. STUB: not yet ported.
-/// C: `bool garbage_collect_scriptvars(int copyID)`
-pub fn garbage_collect_scriptvars() {
-    unimplemented!("STUB garbage_collect_scriptvars — csrc/eval/vars.c:402")
-}
-
-/// Port of `set_internal_string_var()` — `csrc/eval/vars.c:415`. STUB: not yet ported.
-/// C: `void set_internal_string_var(const char *name, char *value)  // NOLINT(readability-non-const-parameter)`
-pub fn set_internal_string_var() {
-    unimplemented!("STUB set_internal_string_var — csrc/eval/vars.c:415")
-}
-
-/// Port of `eval_charconvert()` — `csrc/eval/vars.c:426`. STUB: not yet ported.
-/// C: `int eval_charconvert(const char *const enc_from, const char *const enc_to,`
-pub fn eval_charconvert() {
-    unimplemented!("STUB eval_charconvert — csrc/eval/vars.c:426")
-}
-
-/// Port of `eval_diff()` — `csrc/eval/vars.c:457`. STUB: not yet ported.
-/// C: `void eval_diff(const char *const origfile, const char *const newfile, const char *const outfile)`
-pub fn eval_diff() {
-    unimplemented!("STUB eval_diff — csrc/eval/vars.c:457")
-}
-
-/// Port of `eval_patch()` — `csrc/eval/vars.c:479`. STUB: not yet ported.
-/// C: `void eval_patch(const char *const origfile, const char *const difffile, const char *const outfile)`
-pub fn eval_patch() {
-    unimplemented!("STUB eval_patch — csrc/eval/vars.c:479")
-}
-
-/// Port of `eval_spell_expr()` — `csrc/eval/vars.c:505`. STUB: not yet ported.
-/// C: `list_T *eval_spell_expr(char *badword, char *expr)`
-pub fn eval_spell_expr() {
-    unimplemented!("STUB eval_spell_expr — csrc/eval/vars.c:505")
-}
-
 /// Port of `get_spellword()` — `csrc/eval/vars.c:559`. STUB: not yet ported.
 /// C: `int get_spellword(list_T *const list, const char **ret_word)`
 pub fn get_spellword() {
     unimplemented!("STUB get_spellword — csrc/eval/vars.c:559")
-}
-
-/// Port of `prepare_vimvar()` — `csrc/eval/vars.c:576`. STUB: not yet ported.
-/// C: `void prepare_vimvar(int idx, typval_T *save_tv)`
-pub fn prepare_vimvar() {
-    unimplemented!("STUB prepare_vimvar — csrc/eval/vars.c:576")
-}
-
-/// Port of `restore_vimvar()` — `csrc/eval/vars.c:588`. STUB: not yet ported.
-/// C: `void restore_vimvar(int idx, typval_T *save_tv)`
-pub fn restore_vimvar() {
-    unimplemented!("STUB restore_vimvar — csrc/eval/vars.c:588")
-}
-
-/// Port of `list_vim_vars()` — `csrc/eval/vars.c:604`. STUB: not yet ported.
-/// C: `static void list_vim_vars(int *first)`
-pub fn list_vim_vars() {
-    unimplemented!("STUB list_vim_vars — csrc/eval/vars.c:604")
-}
-
-/// Port of `list_script_vars()` — `csrc/eval/vars.c:610`. STUB: not yet ported.
-/// C: `static void list_script_vars(int *first)`
-pub fn list_script_vars() {
-    unimplemented!("STUB list_script_vars — csrc/eval/vars.c:610")
 }
 
 /// Port of `eval_one_expr_in_str()` — `csrc/eval/vars.c:621`. STUB: not yet ported.
@@ -131,30 +53,6 @@ pub fn skip_var_one() {
 /// C: `void list_hashtable_vars(hashtab_T *ht, const char *prefix, int empty, int *first)`
 pub fn list_hashtable_vars() {
     unimplemented!("STUB list_hashtable_vars — csrc/eval/vars.c:1157")
-}
-
-/// Port of `list_glob_vars()` — `csrc/eval/vars.c:1186`. STUB: not yet ported.
-/// C: `static void list_glob_vars(int *first)`
-pub fn list_glob_vars() {
-    unimplemented!("STUB list_glob_vars — csrc/eval/vars.c:1186")
-}
-
-/// Port of `list_buf_vars()` — `csrc/eval/vars.c:1192`. STUB: not yet ported.
-/// C: `static void list_buf_vars(int *first)`
-pub fn list_buf_vars() {
-    unimplemented!("STUB list_buf_vars — csrc/eval/vars.c:1192")
-}
-
-/// Port of `list_win_vars()` — `csrc/eval/vars.c:1198`. STUB: not yet ported.
-/// C: `static void list_win_vars(int *first)`
-pub fn list_win_vars() {
-    unimplemented!("STUB list_win_vars — csrc/eval/vars.c:1198")
-}
-
-/// Port of `list_tab_vars()` — `csrc/eval/vars.c:1204`. STUB: not yet ported.
-/// C: `static void list_tab_vars(int *first)`
-pub fn list_tab_vars() {
-    unimplemented!("STUB list_tab_vars — csrc/eval/vars.c:1204")
 }
 
 /// Port of `list_arg_vars()` — `csrc/eval/vars.c:1210`. STUB: not yet ported.
@@ -217,22 +115,10 @@ pub fn tv_list_unlet_range() {
     unimplemented!("STUB tv_list_unlet_range — csrc/eval/vars.c:1688")
 }
 
-/// Port of `do_unlet()` — `csrc/eval/vars.c:1713`. STUB: not yet ported.
-/// C: `int do_unlet(const char *const name, const size_t name_len, const bool forceit)`
-pub fn do_unlet() {
-    unimplemented!("STUB do_unlet — csrc/eval/vars.c:1713")
-}
-
 /// Port of `do_lock_var()` — `csrc/eval/vars.c:1786`. STUB: not yet ported.
 /// C: `static int do_lock_var(lval_T *lp, char *name_end FUNC_ATTR_UNUSED, exarg_T *eap, int deep)`
 pub fn do_lock_var() {
     unimplemented!("STUB do_lock_var — csrc/eval/vars.c:1786")
-}
-
-/// Port of `del_menutrans_vars()` — `csrc/eval/vars.c:1843`. STUB: not yet ported.
-/// C: `void del_menutrans_vars(void)`
-pub fn del_menutrans_vars() {
-    unimplemented!("STUB del_menutrans_vars — csrc/eval/vars.c:1843")
 }
 
 /// Port of `get_globvar_dict()` — `csrc/eval/vars.c:1855`. STUB: not yet ported.
@@ -265,12 +151,6 @@ pub fn get_user_var_name() {
     unimplemented!("STUB get_user_var_name — csrc/eval/vars.c:1964")
 }
 
-/// Port of `set_reg_var()` — `csrc/eval/vars.c:2168`. STUB: not yet ported.
-/// C: `void set_reg_var(int c)`
-pub fn set_reg_var() {
-    unimplemented!("STUB set_reg_var — csrc/eval/vars.c:2168")
-}
-
 /// Port of `v_exception()` — `csrc/eval/vars.c:2189`. STUB: not yet ported.
 /// C: `char *v_exception(char *oldval)`
 pub fn v_exception() {
@@ -293,12 +173,6 @@ pub fn v_throwpoint() {
 /// C: `void set_vcount(int64_t count, int64_t count1, bool set_prevcount)`
 pub fn set_vcount() {
     unimplemented!("STUB set_vcount — csrc/eval/vars.c:2336")
-}
-
-/// Port of `check_vars()` — `csrc/eval/vars.c:2382`. STUB: not yet ported.
-/// C: `void check_vars(const char *name, size_t len)`
-pub fn check_vars() {
-    unimplemented!("STUB check_vars — csrc/eval/vars.c:2382")
 }
 
 /// Port of `find_var()` — `csrc/eval/vars.c:2404`. STUB: not yet ported.
@@ -373,24 +247,6 @@ pub fn list_one_var() {
     unimplemented!("STUB list_one_var — csrc/eval/vars.c:2682")
 }
 
-/// Port of `list_one_var_a()` — `csrc/eval/vars.c:2693`. STUB: not yet ported.
-/// C: `static void list_one_var_a(const char *prefix, const char *name, const ptrdiff_t name_len,`
-pub fn list_one_var_a() {
-    unimplemented!("STUB list_one_var_a — csrc/eval/vars.c:2693")
-}
-
-/// Port of `before_set_vvar()` — `csrc/eval/vars.c:2744`. STUB: not yet ported.
-/// C: `bool before_set_vvar(const char *const varname, dictitem_T *const di, typval_T *const tv,`
-pub fn before_set_vvar() {
-    unimplemented!("STUB before_set_vvar — csrc/eval/vars.c:2744")
-}
-
-/// Port of `set_var_const()` — `csrc/eval/vars.c:2821`. STUB: not yet ported.
-/// C: `void set_var_const(const char *name, const size_t name_len, typval_T *const tv, const bool copy,`
-pub fn set_var_const() {
-    unimplemented!("STUB set_var_const — csrc/eval/vars.c:2821")
-}
-
 /// Port of `var_check_ro()` — `csrc/eval/vars.c:2947`. STUB: not yet ported.
 /// C: `bool var_check_ro(const int flags, const char *name, size_t name_len)`
 pub fn var_check_ro() {
@@ -407,12 +263,6 @@ pub fn var_check_lock() {
 /// C: `bool var_check_fixed(const int flags, const char *name, size_t name_len)`
 pub fn var_check_fixed() {
     unimplemented!("STUB var_check_fixed — csrc/eval/vars.c:3010")
-}
-
-/// Port of `var_wrong_func_name()` — `csrc/eval/vars.c:3033`. STUB: not yet ported.
-/// C: `bool var_wrong_func_name(const char *const name, const bool new_var)`
-pub fn var_wrong_func_name() {
-    unimplemented!("STUB var_wrong_func_name — csrc/eval/vars.c:3033")
 }
 
 /// Port of `valid_varname()` — `csrc/eval/vars.c:3060`. STUB: not yet ported.

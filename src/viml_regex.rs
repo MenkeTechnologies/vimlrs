@@ -15,6 +15,33 @@
 //! ignore-case flag. Backreferences (`\1`) are not yet handled.
 //! ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+use std::cell::RefCell;
+
+thread_local! {
+    /// Hook (installed by the bridge) that evaluates a `\=`-prefixed substitute
+    /// replacement *expression* to its string result. `submatch()` reads
+    /// [`SUBMATCHES`] while this runs. `None` when no evaluator is wired (then a
+    /// `\=` replacement falls back to literal text).
+    pub static SUBST_EXPR_HOOK: RefCell<Option<fn(&str) -> String>> =
+        const { RefCell::new(None) };
+    /// Groups of the match currently being replaced (index 0 = whole match),
+    /// exposed to a `\=` expression through `submatch()`.
+    static SUBMATCHES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+/// `submatch({n})` — the text of group `n` of the match a `substitute(…, '\=…')`
+/// expression is currently replacing (`""` when out of range).
+pub fn current_submatch(n: usize) -> String {
+    SUBMATCHES.with(|s| s.borrow().get(n).cloned().unwrap_or_default())
+}
+
+/// Whether a `\=` substitute expression is currently being evaluated (so
+/// `submatch()` has a real match context). Outside one, `submatch(n, 1)` yields
+/// an empty list rather than a one-empty-line list.
+pub fn has_submatch_context() -> bool {
+    SUBMATCHES.with(|s| !s.borrow().is_empty())
+}
+
 /// A character class: `[...]`/`[^...]` or a `\d`-style atom.
 #[derive(Debug, Clone)]
 struct Class {
@@ -596,14 +623,20 @@ pub fn regex_matchstrpos(pat: &str, subject: &str, ic: bool) -> (String, i64, i6
 pub fn regex_matchlist(pat: &str, subject: &str, ic: bool) -> Vec<String> {
     let chars: Vec<char> = subject.chars().collect();
     match Regex::compile(pat).find(&chars, ic) {
-        Some(caps) => caps
-            .groups
-            .iter()
-            .map(|g| match g {
-                Some((s, e)) => chars[*s..*e].iter().collect(),
-                None => String::new(),
-            })
-            .collect(),
+        Some(caps) => {
+            // Vim's matchlist() always returns the whole match plus the nine
+            // `\1`..`\9` submatch slots (NSUBEXP == 10), trailing empties kept.
+            let mut out: Vec<String> = caps
+                .groups
+                .iter()
+                .map(|g| match g {
+                    Some((s, e)) => chars[*s..*e].iter().collect(),
+                    None => String::new(),
+                })
+                .collect();
+            out.resize(10, String::new());
+            out
+        }
         None => Vec::new(),
     }
 }
@@ -615,6 +648,9 @@ pub fn regex_substitute(subject: &str, pat: &str, sub: &str, flags: &str) -> Str
     let re = Regex::compile(pat);
     let global = flags.contains('g');
     let ic = flags.contains('i');
+    // A `\=`-prefixed replacement is a Vim expression evaluated per match (with
+    // `submatch()` available), not literal text.
+    let sub_expr = sub.strip_prefix("\\=");
     let mut out = String::new();
     let mut pos = 0usize;
     loop {
@@ -638,7 +674,24 @@ pub fn regex_substitute(subject: &str, pat: &str, sub: &str, flags: &str) -> Str
             break;
         };
         out.extend(&chars[pos..s]);
-        out.push_str(&expand_sub(sub, &chars, &groups));
+        if let Some(expr) = sub_expr {
+            // Populate submatch() context, then evaluate the replacement expr.
+            let subs: Vec<String> = groups
+                .iter()
+                .map(|g| match g {
+                    Some((a, b)) => chars[*a..*b].iter().collect(),
+                    None => String::new(),
+                })
+                .collect();
+            SUBMATCHES.with(|m| *m.borrow_mut() = subs);
+            // Copy the fn pointer out before calling it — the evaluator re-enters
+            // install(), which borrows SUBST_EXPR_HOOK mutably.
+            let hook = SUBST_EXPR_HOOK.with(|h| *h.borrow());
+            let rep = hook.map(|f| f(expr)).unwrap_or_default();
+            out.push_str(&rep);
+        } else {
+            out.push_str(&expand_sub(sub, &chars, &groups));
+        }
         // Advance; guard zero-width matches by emitting one char.
         if e > s {
             pos = e;
@@ -656,17 +709,44 @@ pub fn regex_substitute(subject: &str, pat: &str, sub: &str, flags: &str) -> Str
     out
 }
 
+/// Case-folding state for substitute replacements: `\u`/`\l` upper/lower the
+/// next output char only; `\U`/`\L` hold until `\e`/`\E`.
+#[derive(Default)]
+struct SubCase {
+    one_shot: Option<bool>, // Some(true)=upper, Some(false)=lower — next char only
+    sustained: Option<bool>,
+}
+
+impl SubCase {
+    /// Push one logical char through the active case transform.
+    fn push(&mut self, out: &mut String, c: char) {
+        let upper = self.one_shot.take().or(self.sustained);
+        match upper {
+            Some(true) => out.extend(c.to_uppercase()),
+            Some(false) => out.extend(c.to_lowercase()),
+            None => out.push(c),
+        }
+    }
+    fn push_str(&mut self, out: &mut String, s: impl IntoIterator<Item = char>) {
+        for c in s {
+            self.push(out, c);
+        }
+    }
+}
+
 /// Expand a substitute replacement: `\0`/`&` → whole match, `\1`..`\9` → group,
-/// `\\` → `\`, `\n`/`\t`/`\r` → control chars.
+/// `\\` → `\`, `\n`/`\t`/`\r` → control chars, `\u`/`\l`/`\U`/`\L`/`\e`/`\E` →
+/// case folding (matching Vim's `vim_regsub` behaviour).
 fn expand_sub(sub: &str, chars: &[char], groups: &[Option<(usize, usize)>]) -> String {
     let s: Vec<char> = sub.chars().collect();
     let mut out = String::new();
+    let mut cs = SubCase::default();
     let mut i = 0;
     while i < s.len() {
         match s[i] {
             '&' => {
                 if let Some((a, b)) = groups.first().copied().flatten() {
-                    out.extend(&chars[a..b]);
+                    cs.push_str(&mut out, chars[a..b].iter().copied());
                 }
                 i += 1;
             }
@@ -676,20 +756,28 @@ fn expand_sub(sub: &str, chars: &[char], groups: &[Option<(usize, usize)>]) -> S
                     '0'..='9' => {
                         let g = n as usize - '0' as usize;
                         if let Some(Some((a, b))) = groups.get(g) {
-                            out.extend(&chars[*a..*b]);
+                            cs.push_str(&mut out, chars[*a..*b].iter().copied());
                         }
                     }
                     'n' => out.push('\n'),
                     't' => out.push('\t'),
                     'r' => out.push('\r'),
-                    '\\' => out.push('\\'),
-                    '&' => out.push('&'),
-                    other => out.push(other),
+                    '\\' => cs.push(&mut out, '\\'),
+                    '&' => cs.push(&mut out, '&'),
+                    'u' => cs.one_shot = Some(true),
+                    'l' => cs.one_shot = Some(false),
+                    'U' => cs.sustained = Some(true),
+                    'L' => cs.sustained = Some(false),
+                    'e' | 'E' => {
+                        cs.sustained = None;
+                        cs.one_shot = None;
+                    }
+                    other => cs.push(&mut out, other),
                 }
                 i += 2;
             }
             c => {
-                out.push(c);
+                cs.push(&mut out, c);
                 i += 1;
             }
         }
@@ -697,32 +785,38 @@ fn expand_sub(sub: &str, chars: &[char], groups: &[Option<(usize, usize)>]) -> S
     out
 }
 
-/// Split `subject` on matches of `pat` (pattern `split()`), dropping empty
-/// pieces unless `keepempty`.
+/// Split `subject` on matches of `pat` (pattern `split()`). Internal empty
+/// pieces (from adjacent separators) are kept, matching Vim — only a leading or
+/// trailing empty item is dropped, and only when `keepempty` is false.
 pub fn regex_split(subject: &str, pat: &str, ic: bool, keepempty: bool) -> Vec<String> {
     let chars: Vec<char> = subject.chars().collect();
     let re = Regex::compile(pat);
     let eic = re.effective_ic(ic);
-    let mut out = Vec::new();
+    let mut out: Vec<String> = Vec::new();
     let mut pos = 0usize;
     let mut last = 0usize;
     while pos <= chars.len() {
         let mut groups = vec![None; re.ngroups + 1];
         match re.match_alt(&re.branches, &chars, pos, &mut groups, eic) {
+            // Only a non-zero-width separator splits; the piece before it is
+            // kept even when empty (internal empties survive).
             Some(end) if end > pos => {
-                let piece: String = chars[last..pos].iter().collect();
-                if keepempty || !piece.is_empty() {
-                    out.push(piece);
-                }
+                out.push(chars[last..pos].iter().collect());
                 pos = end;
                 last = end;
             }
             _ => pos += 1,
         }
     }
-    let piece: String = chars[last..].iter().collect();
-    if keepempty || !piece.is_empty() {
-        out.push(piece);
+    out.push(chars[last..].iter().collect());
+    if !keepempty {
+        // "When the first or last item is empty it is omitted."
+        if out.first().is_some_and(|s| s.is_empty()) {
+            out.remove(0);
+        }
+        if out.last().is_some_and(|s| s.is_empty()) {
+            out.pop();
+        }
     }
     out
 }
