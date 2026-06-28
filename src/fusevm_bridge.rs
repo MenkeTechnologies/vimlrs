@@ -1256,6 +1256,21 @@ fn tv_to_value(tv: typval_T) -> Value {
         (VAR_BOOL, v_bool(b)) => {
             Value::Bool(b == crate::ported::eval::typval_defs_h::BoolVarValue::kBoolVarTrue)
         }
+        // `v:none` is rare and must stay distinct from `v:null` (it renders
+        // differently), so stash it in the REFPOOL like a compound value rather
+        // than collapse it to the shared `Undef` null.
+        (VAR_SPECIAL, v_special(kSpecialVarNone)) => {
+            let idx = REFPOOL.with(|p| {
+                let mut p = p.borrow_mut();
+                p.push(typval_T {
+                    v_type: VAR_SPECIAL,
+                    v_lock: VAR_UNLOCKED,
+                    vval: v_special(kSpecialVarNone),
+                });
+                p.len() - 1
+            });
+            Value::Ref(Box::new(Value::Int(idx as i64)))
+        }
         (VAR_SPECIAL, _) | (VAR_UNKNOWN, _) => Value::Undef,
         // Compound: stash the whole typval (keeps v_type) and tag with the index.
         (vt, vv) => {

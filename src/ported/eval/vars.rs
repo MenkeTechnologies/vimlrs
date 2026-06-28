@@ -147,11 +147,18 @@ pub fn eval_variable(name: &str) -> Option<typval_T> {
                 vval: v_bool(kBoolVarFalse),
             })
         }
-        "v:null" | "v:none" => {
+        "v:null" => {
             return Some(typval_T {
                 v_type: VAR_SPECIAL,
                 v_lock: VarLockStatus::VAR_UNLOCKED,
                 vval: v_special(kSpecialVarNull),
+            })
+        }
+        "v:none" => {
+            return Some(typval_T {
+                v_type: VAR_SPECIAL,
+                v_lock: VarLockStatus::VAR_UNLOCKED,
+                vval: v_special(SpecialVarValue::kSpecialVarNone),
             })
         }
         _ => {}

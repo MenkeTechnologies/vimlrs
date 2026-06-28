@@ -220,7 +220,10 @@ the bridge installs. Covered by `examples/printf_exists.vim`.
 - `exists("*substitute")` → Vim `1`, vimlrs `0`. The `*` (callable-exists) form is
   unimplemented; reports every function as absent.
 
-### R2-12. `string(v:none)` returns `v:null`
+### R2-12. `string(v:none)` returns `v:null` — ✅ FIXED
+Added a distinct `kSpecialVarNone` (lexer `v:none`, encode → `v:none`). It
+survives the VM `Value` round-trip by being stashed in the REFPOOL (the shared
+`Value::Undef` is reserved for `v:null`). Covered by `examples/special_none.vim`.
 - `string(v:none)` → Vim `v:none`, vimlrs `v:null` (`v:none`/`v:null` conflated;
   `string(v:null)` alone is correct).
 

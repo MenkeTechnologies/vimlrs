@@ -46,6 +46,8 @@ pub enum BoolVarValue {
 pub enum SpecialVarValue {
     /// `v:null`.
     kSpecialVarNull,
+    /// `v:none` (an "absent" value, distinct from `v:null` only in rendering).
+    kSpecialVarNone,
 }
 
 /// Variable lock status for `typval_T.v_lock`. (c:99)

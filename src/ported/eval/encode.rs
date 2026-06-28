@@ -11,7 +11,7 @@
 #![allow(non_snake_case)]
 
 use crate::ported::eval::typval_defs_h::{
-    typval_T, typval_vval_union::*, BoolVarValue::*, VarType::*,
+    typval_T, typval_vval_union::*, BoolVarValue::*, SpecialVarValue::*, VarType::*,
 };
 
 /// Render a finite float the way Vim does: C `printf("%g", f)` with `prec`
@@ -111,6 +111,7 @@ pub fn encode_vim_to_string(tv: &typval_T) -> String {
             "v:false"
         }
         .to_string(),
+        (VAR_SPECIAL, v_special(kSpecialVarNone)) => "v:none".to_string(),
         (VAR_SPECIAL, _) => "v:null".to_string(),
         // TYPVAL_ENCODE_CONV_LIST_START / _BETWEEN_ITEMS / _END
         (VAR_LIST, v_list(l)) => match l {
