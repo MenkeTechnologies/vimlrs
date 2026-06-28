@@ -288,3 +288,13 @@ map_add
 getmaparg
 get_map_mode
 do_map
+
+# ── round 7: user-defined commands (usercmd.c) ──
+# `:command Name {repl}` stores a command; invoking `:Name args` expands and
+# runs the replacement. Home file usercmd.c, outside the vendored eval tree.
+uc_add_command
+find_ucmd
+uc_check_code
+do_ucmd
+ex_command
+ex_delcommand

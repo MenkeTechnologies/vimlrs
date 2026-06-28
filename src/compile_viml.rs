@@ -407,6 +407,9 @@ fn slot_plan(stmts: &[Stmt], in_function: bool) -> SlotPlan {
                 | Stmt::Execute(_)
                 | Stmt::Set(_)
                 | Stmt::Map(_)
+                | Stmt::CommandDef(_)
+                | Stmt::CommandDel(_)
+                | Stmt::UserCmd(_)
                 | Stmt::Try { .. } => *cx.bail = true,
                 // `for VAR in range(...)` keeps its var slottable (range yields
                 // Numbers) — bare or, in a function, `l:`-scoped; recurse the body.
@@ -760,6 +763,24 @@ impl Compiler {
             Stmt::Map(line) => {
                 self.load_str(line);
                 self.emit(Op::CallBuiltin(h::VIML_MAP, 1));
+                self.emit(Op::Pop);
+                Ok(())
+            }
+            Stmt::CommandDef(args) => {
+                self.load_str(args);
+                self.emit(Op::CallBuiltin(h::VIML_COMMAND, 1));
+                self.emit(Op::Pop);
+                Ok(())
+            }
+            Stmt::CommandDel(name) => {
+                self.load_str(name);
+                self.emit(Op::CallBuiltin(h::VIML_DELCOMMAND, 1));
+                self.emit(Op::Pop);
+                Ok(())
+            }
+            Stmt::UserCmd(line) => {
+                self.load_str(line);
+                self.emit(Op::CallBuiltin(h::VIML_USERCMD, 1));
                 self.emit(Op::Pop);
                 Ok(())
             }

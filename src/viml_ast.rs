@@ -280,4 +280,11 @@ pub enum Stmt {
     /// A `:map`-family command (`nmap`, `inoremap`, `vunmap`, `mapclear`, …):
     /// the whole raw command line, re-parsed by the mapping runtime.
     Map(String),
+    /// `:command[!] [-attrs] Name {repl}` — define a user command (raw args).
+    CommandDef(String),
+    /// `:delcommand {name}` — delete a user command.
+    CommandDel(String),
+    /// Invocation of a user command (`:Name args`): the whole raw line,
+    /// resolved against the user-command table at run time.
+    UserCmd(String),
 }

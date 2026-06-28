@@ -382,6 +382,12 @@ pub const VIML_EXEC_STMT: u16 = 3184;
 pub const VIML_SET: u16 = 3185;
 /// `:map`-family statement: pop the raw command line, apply via `do_map`.
 pub const VIML_MAP: u16 = 3562;
+/// `:command` statement: pop the args, define a user command via `ex_command`.
+pub const VIML_COMMAND: u16 = 3563;
+/// `:delcommand` statement: pop the name, delete via `ex_delcommand`.
+pub const VIML_DELCOMMAND: u16 = 3564;
+/// User-command invocation: pop the raw line, expand + run the replacement.
+pub const VIML_USERCMD: u16 = 3565;
 /// `:source {file}`: pop the filename, read and run it in the current scope.
 pub const VIML_SOURCE: u16 = 3500;
 /// `:unlet {name}`: pop the name, delete the variable.
@@ -2279,6 +2285,41 @@ fn b_map(vm: &mut VM, _: u8) -> Value {
     }
     Value::Undef
 }
+
+/// `:command` statement: pop the argument text, define a user command.
+fn b_command(vm: &mut VM, _: u8) -> Value {
+    let args = tv_get_string(&pop_tv(vm));
+    crate::ported::eval::funcs::ex_command(&args);
+    Value::Undef
+}
+
+/// `:delcommand` statement: pop the name, delete the user command.
+fn b_delcommand(vm: &mut VM, _: u8) -> Value {
+    let name = tv_get_string(&pop_tv(vm));
+    crate::ported::eval::funcs::ex_delcommand(&name);
+    Value::Undef
+}
+
+/// User-command invocation: pop the raw line (`Name[!] args`), expand the
+/// command's replacement and run it; error E492 if there is no such command.
+fn b_usercmd(vm: &mut VM, _: u8) -> Value {
+    let line = tv_get_string(&pop_tv(vm));
+    let line = line.trim();
+    let alpha_end = line
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .unwrap_or(line.len());
+    let bang = line[alpha_end..].starts_with('!');
+    let name = &line[..alpha_end];
+    let args_start = alpha_end + if bang { 1 } else { 0 };
+    let args = line[args_start..].trim();
+    match crate::ported::eval::funcs::do_ucmd(name, args, bang) {
+        Some(expanded) => {
+            let _ = run_source_nested(&expanded);
+        }
+        None => message::semsg(&format!("E492: Not an editor command: {name}")),
+    }
+    Value::Undef
+}
 fn b_getreg(_: &mut VM, _: u8) -> Value {
     Value::str("")
 }
@@ -2730,6 +2771,9 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_UNLET, b_unlet);
     vm.register_builtin(VIML_SET, b_set);
     vm.register_builtin(VIML_MAP, b_map);
+    vm.register_builtin(VIML_COMMAND, b_command);
+    vm.register_builtin(VIML_DELCOMMAND, b_delcommand);
+    vm.register_builtin(VIML_USERCMD, b_usercmd);
     vm.register_builtin(VIML_FN_JSON_ENCODE, |vm, n| call_func(vm, n, f_json_encode));
     vm.register_builtin(VIML_FN_JSON_DECODE, |vm, n| call_func(vm, n, f_json_decode));
     vm.register_builtin(VIML_FN_STRGETCHAR, |vm, n| call_func(vm, n, f_strgetchar));

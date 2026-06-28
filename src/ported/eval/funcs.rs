@@ -4707,6 +4707,141 @@ pub fn do_map(arg: &str, mode: i32, unmap: bool, clear: bool, noremap: bool) {
     });
 }
 
+// ── User-defined commands (Neovim usercmd.c). `:command Name {repl}` stores a
+//    command; invoking `:Name args` runs the replacement with `<args>`/
+//    `<q-args>`/`<f-args>`/`<bang>`/`<lt>` substituted. Self-contained — no
+//    editor needed. ──
+
+/// A user command (`ucmd_T` in usercmd.c), reduced to the fields needed to
+/// store and expand it. Keeps the C struct name.
+#[allow(non_camel_case_types)]
+#[derive(Clone)]
+pub struct ucmd_T {
+    pub rep: String,
+    pub nargs: char,
+    pub bang: bool,
+}
+
+thread_local! {
+    /// The user-command table (`ucmds` in usercmd.c), keyed by command name.
+    static USER_COMMANDS: std::cell::RefCell<std::collections::BTreeMap<String, ucmd_T>> =
+        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+}
+
+/// Port of `uc_add_command()` (Neovim usercmd.c) — register user command
+/// `name` with replacement `rep`.
+fn uc_add_command(name: &str, rep: &str, nargs: char, bang: bool) {
+    USER_COMMANDS.with(|c| {
+        c.borrow_mut().insert(
+            name.to_string(),
+            ucmd_T {
+                rep: rep.to_string(),
+                nargs,
+                bang,
+            },
+        );
+    });
+}
+
+/// Port of `find_ucmd()` (Neovim usercmd.c) — resolve `name` to a user command:
+/// an exact match, else a unique prefix match.
+fn find_ucmd(name: &str) -> Option<ucmd_T> {
+    USER_COMMANDS.with(|c| {
+        let c = c.borrow();
+        if let Some(uc) = c.get(name) {
+            return Some(uc.clone());
+        }
+        let mut hits = c.iter().filter(|(k, _)| k.starts_with(name));
+        match (hits.next(), hits.next()) {
+            (Some((_, uc)), None) => Some(uc.clone()),
+            _ => None,
+        }
+    })
+}
+
+/// Port of `uc_check_code()` (Neovim usercmd.c) — substitute the `<...>` codes
+/// in a user command's replacement: `<args>` (verbatim), `<q-args>` (one quoted
+/// String), `<f-args>` (comma-separated quoted args), `<bang>` (`!`/nothing),
+/// `<lt>` (`<`). Unknown codes are copied through.
+fn uc_check_code(rep: &str, args: &str, bang: bool) -> String {
+    let quote = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    let chars: Vec<char> = rep.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '<' {
+            if let Some(off) = chars[i..].iter().position(|&c| c == '>') {
+                let code: String = chars[i + 1..i + off].iter().collect();
+                let repl = match code.to_ascii_lowercase().as_str() {
+                    "args" => Some(args.to_string()),
+                    "q-args" => Some(quote(args)),
+                    "f-args" => Some(
+                        args.split_whitespace()
+                            .map(quote)
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    ),
+                    "bang" => Some(if bang { "!".to_string() } else { String::new() }),
+                    "lt" => Some("<".to_string()),
+                    _ => None,
+                };
+                if let Some(r) = repl {
+                    out.push_str(&r);
+                    i += off + 1;
+                    continue;
+                }
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+/// Port of `do_ucmd()` (Neovim usercmd.c) — expand user command `name`'s
+/// replacement with `args`/`bang`, ready to run. `None` if no such command.
+pub fn do_ucmd(name: &str, args: &str, bang: bool) -> Option<String> {
+    let uc = find_ucmd(name)?;
+    Some(uc_check_code(&uc.rep, args, bang && uc.bang))
+}
+
+/// Port of `ex_command()` (Neovim usercmd.c) — define a user command from a
+/// `:command` argument: `[!] [-attrs] Name {replacement}`.
+pub fn ex_command(arg: &str) {
+    let mut s = arg.trim();
+    // A leading `!` means `:command!` (redefine); we always overwrite anyway.
+    s = s.strip_prefix('!').unwrap_or(s).trim_start();
+    let mut nargs = '0';
+    let mut bang = false;
+    // c: parse the leading `-attr[=val]` command attributes.
+    while let Some(r) = s.strip_prefix('-') {
+        let end = r.find(char::is_whitespace).unwrap_or(r.len());
+        let attr = r[..end].to_ascii_lowercase();
+        if let Some(v) = attr.strip_prefix("nargs=") {
+            nargs = v.chars().next().unwrap_or('0');
+        } else if attr == "bang" {
+            bang = true;
+        }
+        // -range/-count/-complete=/-buffer/… are accepted and ignored.
+        s = r[end..].trim_start();
+    }
+    let end = s.find(char::is_whitespace).unwrap_or(s.len());
+    let name = &s[..end];
+    let rep = s[end..].trim_start();
+    if name.is_empty() {
+        return;
+    }
+    uc_add_command(name, rep, nargs, bang);
+}
+
+/// Port of `ex_delcommand()` (Neovim usercmd.c) — delete user command `name`.
+pub fn ex_delcommand(arg: &str) {
+    let name = arg.trim();
+    USER_COMMANDS.with(|c| {
+        c.borrow_mut().remove(name);
+    });
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // Round-3 builtin expansion. Command-line state (ex_getln.c), sign placement
 // (sign.c), and a set of editor-feature queries whose answer is well-defined

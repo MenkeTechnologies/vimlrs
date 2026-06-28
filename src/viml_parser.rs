@@ -69,11 +69,27 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
             Stmt::Return(Some(parse_expr(rest)?))
         }),
         "throw" => Ok(Stmt::Throw(parse_expr(rest)?)),
+        // `:command[!] …` defines a user command; `:delcommand` removes one.
+        // (`command(`/`delcommand(` are not builtins, but guard anyway.)
+        "command" | "comm" | "com" if !line[cmd.len()..].starts_with('(') => {
+            Ok(Stmt::CommandDef(line[cmd.len()..].trim_start().to_string()))
+        }
+        "delcommand" | "delc" if !line[cmd.len()..].starts_with('(') => {
+            Ok(Stmt::CommandDel(rest.to_string()))
+        }
         // `:map`-family commands (`nmap`/`inoremap`/`vunmap`/`mapclear`/`map!`).
         // The bare `map`/`unmap`/… forms collide with the `map()`/`filter()`
         // builtins, so a name immediately followed by `(` stays an expression.
         _ if is_map_command(cmd) && !line[cmd.len()..].starts_with('(') => {
             Ok(Stmt::Map(line.to_string()))
+        }
+        // A command word starting with an uppercase letter is a user-command
+        // invocation (`:Foo args`), resolved at run time. A name immediately
+        // followed by `(` is a funcref call expression, not a command.
+        _ if cmd.starts_with(|c: char| c.is_ascii_uppercase())
+            && !line[cmd.len()..].starts_with('(') =>
+        {
+            Ok(Stmt::UserCmd(line.to_string()))
         }
         _ => Ok(Stmt::Expr(parse_expr(line)?)),
     }
