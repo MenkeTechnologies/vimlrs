@@ -66,9 +66,31 @@ jobs:
       # lint. Hard doc errors still fail the build; cosmetic warnings do not.
       - run: cargo doc --no-deps --locked
 
+  examples:
+    name: Example scripts
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked
+      # Run every examples/*.vim through the real binary. Each example is a
+      # self-test: it asserts its results with the built-in assert_* framework
+      # and `throw`s (non-zero exit) on a failed assertion, so a behaviour
+      # regression in a ported builtin fails this job. The interactive example
+      # gets its canned stdin from tests/fixtures/interactive.in.
+      - name: Run example scripts
+        run: sh scripts/run_examples.sh
+        env:
+          VIMLRS: ${{ github.workspace }}/target/release/vimlrs
+
   release-build:
     name: Release Build
-    needs: [check, test, doc]
+    needs: [check, test, doc, examples]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:

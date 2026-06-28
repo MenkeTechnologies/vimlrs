@@ -8,8 +8,8 @@
 use std::path::Path;
 
 use crate::ported::eval::typval::{
-    tv_check_for_nonempty_string_arg, tv_check_for_string_arg, tv_get_number, tv_get_string,
-    tv_get_string_chk, tv_list_alloc_ret, tv_list_append_string,
+    tv_check_for_nonempty_string_arg, tv_check_for_string_arg, tv_get_bool, tv_get_number,
+    tv_get_string, tv_get_string_chk, tv_list_alloc_ret, tv_list_append_string,
 };
 use crate::ported::eval::typval_defs_h::{typval_T, typval_vval_union::*, varnumber_T, VarType::*};
 use crate::ported::eval_h::FAIL;
@@ -946,5 +946,144 @@ mod tests {
             assert_eq!(perm_string!(0o755u32), "rwxr-xr-x");
             assert_eq!(perm_string!(0o000u32), "---------");
         }
+    }
+}
+
+/// Expand a leading `~`/`~/` to `$HOME` and `$VAR`/`${VAR}` references in a
+/// path (`expand_env` subset — enough for glob/expand patterns standalone).
+fn expand_env(s: &str) -> String {
+    let s = if let Some(rest) = s.strip_prefix("~/") {
+        match std::env::var("HOME") {
+            Ok(h) => format!("{h}/{rest}"),
+            Err(_) => s.to_string(),
+        }
+    } else if s == "~" {
+        std::env::var("HOME").unwrap_or_else(|_| s.to_string())
+    } else {
+        s.to_string()
+    };
+
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '$' {
+            out.push(c);
+            continue;
+        }
+        let braced = chars.peek() == Some(&'{');
+        if braced {
+            chars.next();
+        }
+        let mut name = String::new();
+        while let Some(&nc) = chars.peek() {
+            if (braced && nc == '}') || !(nc == '_' || nc.is_ascii_alphanumeric()) {
+                break;
+            }
+            name.push(nc);
+            chars.next();
+        }
+        if braced && chars.peek() == Some(&'}') {
+            chars.next();
+        }
+        if name.is_empty() {
+            out.push('$');
+        } else {
+            out.push_str(&std::env::var(&name).unwrap_or_default());
+        }
+    }
+    out
+}
+
+/// Resolve a single glob `{pattern}` to the matching paths (sorted). Wildcards
+/// (`*` `?` `[...]`) are honoured in the last path component; earlier components
+/// must be literal. A pattern with no wildcard yields itself iff it exists.
+fn unix_expandpath(pattern: &str) -> Vec<String> {
+    let has_wild = |s: &str| s.contains(['*', '?', '[']);
+
+    // Split into the directory to scan and the (possibly wild) last component.
+    let (dir, comp, prefix) = match pattern.rfind('/') {
+        None => (".".to_string(), pattern.to_string(), String::new()),
+        Some(0) => ("/".to_string(), pattern[1..].to_string(), "/".to_string()),
+        Some(i) => (
+            pattern[..i].to_string(),
+            pattern[i + 1..].to_string(),
+            format!("{}/", &pattern[..i]),
+        ),
+    };
+
+    if !has_wild(&comp) {
+        // Literal path: present iff it exists on disk.
+        return if Path::new(pattern).exists() {
+            vec![pattern.to_string()]
+        } else {
+            Vec::new()
+        };
+    }
+
+    let re = file_pat_to_reg_pat(&comp);
+    let want_hidden = comp.starts_with('.');
+    let mut out: Vec<String> = match std::fs::read_dir(&dir) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+            .filter(|name| want_hidden || !name.starts_with('.'))
+            .filter(|name| crate::viml_regex::regex_match(&re, name, false))
+            .map(|name| format!("{prefix}{name}"))
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    out.sort();
+    out
+}
+
+/// Port of `f_glob()` from `Src/eval/funcs.c` — expand the file wildcard
+/// `{pattern}` (after `~`/`$VAR` expansion). With `{list}` (arg 3) truthy the
+/// matches are returned as a List; otherwise as a newline-joined String. The
+/// editor-only `'wildignore'`/`'suffixes'` filtering is not applied.
+pub fn f_glob(argvars: &[typval_T], rettv: &mut typval_T) {
+    let pattern = expand_env(&tv_get_string(&argvars[0]));
+    let want_list =
+        argvars.len() >= 3 && argvars[2].v_type != VAR_UNKNOWN && tv_get_bool(&argvars[2]) != 0;
+    let matches = unix_expandpath(&pattern);
+    if want_list {
+        let l = tv_list_alloc_ret(rettv, matches.len() as isize);
+        let mut lb = l.borrow_mut();
+        for m in &matches {
+            tv_list_append_string(&mut lb, m);
+        }
+    } else {
+        rettv.v_type = VAR_STRING;
+        rettv.vval = v_string(matches.join("\n"));
+    }
+}
+
+/// Port of `f_globpath()` from `Src/eval/fs.c` — apply `glob()` to `{pattern}`
+/// in each comma-separated directory of `{path}`, concatenating the results.
+/// `{list}` (arg 4) truthy returns a List, else a newline-joined String.
+pub fn f_globpath(argvars: &[typval_T], rettv: &mut typval_T) {
+    let path = tv_get_string(&argvars[0]);
+    let pattern = tv_get_string(&argvars[1]);
+    let want_list =
+        argvars.len() >= 4 && argvars[3].v_type != VAR_UNKNOWN && tv_get_bool(&argvars[3]) != 0;
+    let mut matches: Vec<String> = Vec::new();
+    for dir in path.split(',') {
+        if dir.is_empty() {
+            continue;
+        }
+        let joined = if dir.ends_with('/') {
+            format!("{dir}{pattern}")
+        } else {
+            format!("{dir}/{pattern}")
+        };
+        matches.extend(unix_expandpath(&expand_env(&joined)));
+    }
+    if want_list {
+        let l = tv_list_alloc_ret(rettv, matches.len() as isize);
+        let mut lb = l.borrow_mut();
+        for m in &matches {
+            tv_list_append_string(&mut lb, m);
+        }
+    } else {
+        rettv.v_type = VAR_STRING;
+        rettv.vval = v_string(matches.join("\n"));
     }
 }

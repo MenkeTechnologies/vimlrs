@@ -31,26 +31,10 @@ pub fn set_buffer_lines() {
     unimplemented!("STUB set_buffer_lines — csrc/eval/buffer.c:126")
 }
 
-/// Port of `f_append()` — `csrc/eval/buffer.c:247`. STUB: not yet ported.
-pub fn f_append(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_append — csrc/eval/buffer.c:247")
-}
-
 /// Port of `buf_set_append_line()` — `csrc/eval/buffer.c:257`. STUB: not yet ported.
 /// C: `static void buf_set_append_line(typval_T *argvars, typval_T *rettv, bool append)`
 pub fn buf_set_append_line() {
     unimplemented!("STUB buf_set_append_line — csrc/eval/buffer.c:257")
-}
-
-/// Port of `f_appendbufline()` — `csrc/eval/buffer.c:272`. STUB: not yet ported.
-pub fn f_appendbufline(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_appendbufline — csrc/eval/buffer.c:272")
 }
 
 /// Port of `f_prompt_appendbuf()` — `csrc/eval/buffer.c:278`. STUB: not yet ported.
@@ -69,22 +53,6 @@ pub fn f_bufadd(
     unimplemented!("STUB f_bufadd — csrc/eval/buffer.c:364")
 }
 
-/// Port of `f_bufexists()` — `csrc/eval/buffer.c:372`. STUB: not yet ported.
-pub fn f_bufexists(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_bufexists — csrc/eval/buffer.c:372")
-}
-
-/// Port of `f_buflisted()` — `csrc/eval/buffer.c:378`. STUB: not yet ported.
-pub fn f_buflisted(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_buflisted — csrc/eval/buffer.c:378")
-}
-
 /// Port of `f_bufload()` — `csrc/eval/buffer.c:387`. STUB: not yet ported.
 pub fn f_bufload(
     _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
@@ -93,72 +61,16 @@ pub fn f_bufload(
     unimplemented!("STUB f_bufload — csrc/eval/buffer.c:387")
 }
 
-/// Port of `f_bufloaded()` — `csrc/eval/buffer.c:400`. STUB: not yet ported.
-pub fn f_bufloaded(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_bufloaded — csrc/eval/buffer.c:400")
-}
-
-/// Port of `f_bufname()` — `csrc/eval/buffer.c:409`. STUB: not yet ported.
-pub fn f_bufname(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_bufname — csrc/eval/buffer.c:409")
-}
-
-/// Port of `f_bufnr()` — `csrc/eval/buffer.c:425`. STUB: not yet ported.
-pub fn f_bufnr(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_bufnr — csrc/eval/buffer.c:425")
-}
-
 /// Port of `buf_win_common()` — `csrc/eval/buffer.c:462`. STUB: not yet ported.
 /// C: `static void buf_win_common(typval_T *argvars, typval_T *rettv, bool get_nr)`
 pub fn buf_win_common() {
     unimplemented!("STUB buf_win_common — csrc/eval/buffer.c:462")
 }
 
-/// Port of `f_bufwinid()` — `csrc/eval/buffer.c:485`. STUB: not yet ported.
-pub fn f_bufwinid(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_bufwinid — csrc/eval/buffer.c:485")
-}
-
-/// Port of `f_bufwinnr()` — `csrc/eval/buffer.c:491`. STUB: not yet ported.
-pub fn f_bufwinnr(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_bufwinnr — csrc/eval/buffer.c:491")
-}
-
-/// Port of `f_deletebufline()` — `csrc/eval/buffer.c:497`. STUB: not yet ported.
-pub fn f_deletebufline(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_deletebufline — csrc/eval/buffer.c:497")
-}
-
 /// Port of `get_buffer_info()` — `csrc/eval/buffer.c:573`. STUB: not yet ported.
 /// C: `static dict_T *get_buffer_info(buf_T *buf)`
 pub fn get_buffer_info() {
     unimplemented!("STUB get_buffer_info — csrc/eval/buffer.c:573")
-}
-
-/// Port of `f_getbufinfo()` — `csrc/eval/buffer.c:612`. STUB: not yet ported.
-pub fn f_getbufinfo(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_getbufinfo — csrc/eval/buffer.c:612")
 }
 
 /// Port of `get_buffer_lines()` — `csrc/eval/buffer.c:678`. STUB: not yet ported.
@@ -171,46 +83,6 @@ pub fn get_buffer_lines() {
 /// C: `static void getbufline(typval_T *argvars, typval_T *rettv, bool retlist)`
 pub fn getbufline() {
     unimplemented!("STUB getbufline — csrc/eval/buffer.c:715")
-}
-
-/// Port of `f_getbufline()` — `csrc/eval/buffer.c:735`. STUB: not yet ported.
-pub fn f_getbufline(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_getbufline — csrc/eval/buffer.c:735")
-}
-
-/// Port of `f_getbufoneline()` — `csrc/eval/buffer.c:741`. STUB: not yet ported.
-pub fn f_getbufoneline(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_getbufoneline — csrc/eval/buffer.c:741")
-}
-
-/// Port of `f_getline()` — `csrc/eval/buffer.c:747`. STUB: not yet ported.
-pub fn f_getline(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_getline — csrc/eval/buffer.c:747")
-}
-
-/// Port of `f_setbufline()` — `csrc/eval/buffer.c:765`. STUB: not yet ported.
-pub fn f_setbufline(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_setbufline — csrc/eval/buffer.c:765")
-}
-
-/// Port of `f_setline()` — `csrc/eval/buffer.c:771`. STUB: not yet ported.
-pub fn f_setline(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_setline — csrc/eval/buffer.c:771")
 }
 
 /// Port of `switch_buffer()` — `csrc/eval/buffer.c:784`. STUB: not yet ported.

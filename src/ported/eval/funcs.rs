@@ -2759,3 +2759,177 @@ pub fn f_environ(_argvars: &[typval_T], rettv: &mut typval_T) {
         tv_dict_add_str(&mut db, &k.to_string_lossy(), &v.to_string_lossy());
     }
 }
+
+// ── Buffer / window / tabpage builtins (no buffers or windows standalone) ──
+//
+// A standalone interpreter has no buffer list, windows, or tab pages, so these
+// reduce to the value their C bodies (csrc/eval/buffer.c, window.c) return when
+// the looked-up buffer/window is absent: a missing buffer is -1 / 0 / "", a
+// window measurement is -1, and there is one implicit window and tab page.
+
+/// Port of `f_bufnr()` (buffer.c) — no such buffer → -1.
+pub fn f_bufnr(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(-1 as varnumber_T);
+}
+/// Port of `f_bufexists()` (buffer.c) — no buffers → 0.
+pub fn f_bufexists(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_buflisted()` (buffer.c) — no buffers → 0.
+pub fn f_buflisted(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_bufloaded()` (buffer.c) — no buffers → 0.
+pub fn f_bufloaded(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_bufname()` (buffer.c) — no buffer → "" (the C NULL string).
+pub fn f_bufname(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(String::new());
+}
+/// Port of `f_bufwinnr()`/`buf_win_common()` (buffer.c) — no window → -1.
+pub fn f_bufwinnr(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(-1 as varnumber_T);
+}
+/// Port of `f_bufwinid()`/`buf_win_common()` (buffer.c) — no window → -1.
+pub fn f_bufwinid(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(-1 as varnumber_T);
+}
+/// Port of `f_winnr()` (window.c) — the single implicit window → 1.
+pub fn f_winnr(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(1 as varnumber_T);
+}
+/// Port of `f_winbufnr()` (window.c) — no buffer in the window → -1.
+pub fn f_winbufnr(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(-1 as varnumber_T);
+}
+/// Port of `f_winwidth()` (window.c) — no measurable window → -1.
+pub fn f_winwidth(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(-1 as varnumber_T);
+}
+/// Port of `f_winheight()` (window.c) — no measurable window → -1.
+pub fn f_winheight(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(-1 as varnumber_T);
+}
+/// Port of `f_winlayout()` (window.c) — no window tree → empty List.
+pub fn f_winlayout(_argvars: &[typval_T], rettv: &mut typval_T) {
+    tv_list_alloc_ret(rettv, 0);
+}
+/// Port of `f_winline()` (window.c) — no screen → cursor window row 0.
+pub fn f_winline(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_wincol()` (window.c) — no screen → cursor window column 0.
+pub fn f_wincol(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_winrestcmd()` (window.c) — no windows to restore → "".
+pub fn f_winrestcmd(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(String::new());
+}
+/// Port of `f_tabpagenr()` (window.c) — the single implicit tab page → 1.
+pub fn f_tabpagenr(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(1 as varnumber_T);
+}
+/// Port of `f_tabpagewinnr()` (window.c) — one window in the tab page → 1.
+pub fn f_tabpagewinnr(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(1 as varnumber_T);
+}
+
+// ── More buffer/window builtins (no buffer lines or real windows standalone) ──
+//
+// Faithful to the C "absent" returns (csrc/eval/buffer.c, window.c): reading a
+// buffer line yields "" / []; a line-changing command FAILs with 1; window
+// queries yield no id (0) / -1 / [] / [0,0]; GUI position is [-1,-1].
+
+/// Port of `f_getline()` (buffer.c) — no buffer: "" for a single line,
+/// `[]` for the two-arg (range) List form.
+pub fn f_getline(argvars: &[typval_T], rettv: &mut typval_T) {
+    if argvars.len() >= 2 && argvars[1].v_type != VAR_UNKNOWN {
+        tv_list_alloc_ret(rettv, 0);
+    } else {
+        *rettv = typval_T::from(String::new());
+    }
+}
+/// Port of `f_getbufline()`/`getbufline()` (buffer.c) — always a List → empty.
+pub fn f_getbufline(_argvars: &[typval_T], rettv: &mut typval_T) {
+    tv_list_alloc_ret(rettv, 0);
+}
+/// Port of `f_getbufoneline()` (buffer.c) — no buffer line → "".
+pub fn f_getbufoneline(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(String::new());
+}
+/// Port of `f_getbufinfo()` (buffer.c) — no buffers → empty List.
+pub fn f_getbufinfo(_argvars: &[typval_T], rettv: &mut typval_T) {
+    tv_list_alloc_ret(rettv, 0);
+}
+/// Port of `f_setline()`/`set_buffer_lines()` (buffer.c) — no buffer → 1 (FAIL).
+pub fn f_setline(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(1 as varnumber_T);
+}
+/// Port of `f_setbufline()` (buffer.c) — no buffer → 1 (FAIL).
+pub fn f_setbufline(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(1 as varnumber_T);
+}
+/// Port of `f_append()` (buffer.c) — no buffer → 1 (FAIL).
+pub fn f_append(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(1 as varnumber_T);
+}
+/// Port of `f_appendbufline()` (buffer.c) — no buffer → 1 (FAIL).
+pub fn f_appendbufline(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(1 as varnumber_T);
+}
+/// Port of `f_deletebufline()` (buffer.c) — no buffer → 1 (FAIL default).
+pub fn f_deletebufline(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(1 as varnumber_T);
+}
+/// Port of `f_getwininfo()` (window.c) — no windows → empty List.
+pub fn f_getwininfo(_argvars: &[typval_T], rettv: &mut typval_T) {
+    tv_list_alloc_ret(rettv, 0);
+}
+/// Port of `f_gettabinfo()` (window.c) — no tab pages → empty List.
+pub fn f_gettabinfo(_argvars: &[typval_T], rettv: &mut typval_T) {
+    tv_list_alloc_ret(rettv, 0);
+}
+/// Port of `f_getwinpos()` (window.c) — no GUI → `[-1, -1]`.
+pub fn f_getwinpos(_argvars: &[typval_T], rettv: &mut typval_T) {
+    let l = tv_list_alloc_ret(rettv, 2);
+    let mut lb = l.borrow_mut();
+    tv_list_append_number(&mut lb, -1);
+    tv_list_append_number(&mut lb, -1);
+}
+/// Port of `f_getwinposx()` (window.c) — no GUI → -1.
+pub fn f_getwinposx(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(-1 as varnumber_T);
+}
+/// Port of `f_getwinposy()` (window.c) — no GUI → -1.
+pub fn f_getwinposy(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(-1 as varnumber_T);
+}
+/// Port of `f_win_getid()` (window.c) — no window → 0.
+pub fn f_win_getid(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_win_id2win()` (window.c) — id not found → 0.
+pub fn f_win_id2win(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_win_findbuf()` (window.c) — no windows → empty List.
+pub fn f_win_findbuf(_argvars: &[typval_T], rettv: &mut typval_T) {
+    tv_list_alloc_ret(rettv, 0);
+}
+/// Port of `f_win_gotoid()` (window.c) — no window to go to → 0 (FAIL).
+pub fn f_win_gotoid(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(0 as varnumber_T);
+}
+/// Port of `f_win_gettype()` (window.c) — id invalid (no window) → "unknown".
+pub fn f_win_gettype(_argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from("unknown".to_string());
+}
+/// Port of `f_win_screenpos()` (window.c) — no window → `[0, 0]`.
+pub fn f_win_screenpos(_argvars: &[typval_T], rettv: &mut typval_T) {
+    let l = tv_list_alloc_ret(rettv, 2);
+    let mut lb = l.borrow_mut();
+    tv_list_append_number(&mut lb, 0);
+    tv_list_append_number(&mut lb, 0);
+}

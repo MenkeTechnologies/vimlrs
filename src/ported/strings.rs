@@ -10,9 +10,11 @@
 use crate::ported::charset::{vim_str2nr, STR2NR_ALL};
 use crate::ported::eval::encode::encode_tv2string;
 use crate::ported::eval::typval::{
-    tv_get_number_chk, tv_get_string, tv_list_alloc_ret, tv_list_append_number,
+    tv_blob_alloc_ret, tv_get_number_chk, tv_get_string, tv_list_alloc_ret, tv_list_append_number,
+    tv_list_append_tv,
 };
 use crate::ported::eval::typval_defs_h::{typval_T, typval_vval_union::*, varnumber_T, VarType::*};
+use crate::ported::option::get_option_value;
 
 /// "string(expr)" function — the `string()` rendering of `expr`.
 pub fn f_string(argvars: &[typval_T], rettv: &mut typval_T) {
@@ -219,4 +221,242 @@ pub fn f_charidx(argvars: &[typval_T], rettv: &mut typval_T) {
 /// composing characters separately, so each character is one index either way.
 pub fn f_byteidxcomp(argvars: &[typval_T], rettv: &mut typval_T) {
     f_byteidx(argvars, rettv);
+}
+
+/// True for the common Unicode combining-mark ranges (`utf_iscomposing`), used
+/// by `strcharlen()` to fold composing characters into their base character.
+fn utf_iscomposing(c: char) -> bool {
+    let u = c as u32;
+    matches!(u,
+        0x0300..=0x036F | 0x0483..=0x0489 | 0x0591..=0x05BD | 0x05BF
+        | 0x0610..=0x061A | 0x064B..=0x065F | 0x0670 | 0x06D6..=0x06DC
+        | 0x06DF..=0x06E4 | 0x0711 | 0x0730..=0x074A | 0x07A6..=0x07B0
+        | 0x0816..=0x0823 | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF
+        | 0x20D0..=0x20FF | 0xFE20..=0xFE2F)
+}
+
+/// Port of `f_strcharlen()` from `Src/strings.c` — the number of characters in
+/// `{string}`, ignoring composing characters (each base+composing run counts
+/// once). 0 on empty input.
+pub fn f_strcharlen(argvars: &[typval_T], rettv: &mut typval_T) {
+    let n = tv_get_string(&argvars[0])
+        .chars()
+        .filter(|c| !utf_iscomposing(*c))
+        .count();
+    rettv.vval = v_number(n as varnumber_T);
+}
+
+/// Port of `f_strtrans()` from `Src/strings.c` — translate unprintable
+/// characters to their displayed form: control chars `0x00..0x1F` become `^@`…
+/// `^_` (char + 0x40) and `0x7F` becomes `^?`; printable (incl. multibyte) is
+/// kept. Matches `transchar` for the common case.
+pub fn f_strtrans(argvars: &[typval_T], rettv: &mut typval_T) {
+    let s = tv_get_string(&argvars[0]);
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        let u = c as u32;
+        if u < 0x20 {
+            out.push('^');
+            out.push((u as u8 + 0x40) as char);
+        } else if u == 0x7F {
+            out.push_str("^?");
+        } else {
+            out.push(c);
+        }
+    }
+    rettv.v_type = VAR_STRING;
+    rettv.vval = v_string(out);
+}
+
+/// Port of `f_slice()` from `Src/strings.c` — `slice({expr}, {start} [, {end}])`,
+/// like `expr[start : end]` but with an *exclusive* `{end}` and, for a String,
+/// character (not byte) indices. Negative indices count from the end; `{end}` of
+/// -1 omits the last item; an omitted `{end}` runs to the end. Returns an empty
+/// value of the same type for an empty/invalid range.
+pub fn f_slice(argvars: &[typval_T], rettv: &mut typval_T) {
+    // Length of the sliced value, by type.
+    let len: varnumber_T = match (argvars[0].v_type, &argvars[0].vval) {
+        (VAR_LIST, v_list(Some(l))) => l.borrow().lv_items.len() as varnumber_T,
+        (VAR_BLOB, v_blob(Some(b))) => b.borrow().bv_ga.len() as varnumber_T,
+        (VAR_LIST, _) | (VAR_BLOB, _) => 0,
+        _ => tv_get_string(&argvars[0]).chars().count() as varnumber_T,
+    };
+
+    let clamp = |mut i: varnumber_T| -> varnumber_T {
+        if i < 0 {
+            i += len;
+        }
+        i.clamp(0, len)
+    };
+    let s = clamp(tv_get_number_chk(&argvars[1], None));
+    let has_end = argvars.len() >= 3 && argvars[2].v_type != VAR_UNKNOWN;
+    let mut e = if has_end {
+        clamp(tv_get_number_chk(&argvars[2], None))
+    } else {
+        len
+    };
+    if e < s {
+        e = s;
+    }
+    let (s, e) = (s as usize, e as usize);
+
+    match (argvars[0].v_type, &argvars[0].vval) {
+        (VAR_LIST, v_list(l)) => {
+            let out = tv_list_alloc_ret(rettv, 0);
+            if let Some(l) = l {
+                let lb = l.borrow();
+                let mut ob = out.borrow_mut();
+                for it in &lb.lv_items[s..e] {
+                    tv_list_append_tv(&mut ob, it.li_tv.clone());
+                }
+            }
+        }
+        (VAR_BLOB, v_blob(b)) => {
+            let out = tv_blob_alloc_ret(rettv);
+            if let Some(b) = b {
+                out.borrow_mut()
+                    .bv_ga
+                    .extend_from_slice(&b.borrow().bv_ga[s..e]);
+            }
+        }
+        _ => {
+            let chars: Vec<char> = tv_get_string(&argvars[0]).chars().collect();
+            rettv.v_type = VAR_STRING;
+            rettv.vval = v_string(chars[s..e].iter().collect());
+        }
+    }
+}
+
+/// Port of `utf_char2cells()` (Neovim mbyte.c) — the display width of a single
+/// character: 0 for a composing mark, 2 for an East-Asian-wide / emoji
+/// character (the standard wide ranges), otherwise 1.
+fn utf_char2cells(c: char) -> usize {
+    if utf_iscomposing(c) {
+        return 0;
+    }
+    let u = c as u32;
+    let wide = matches!(u,
+        0x1100..=0x115F | 0x2329 | 0x232A | 0x2E80..=0x303E | 0x3041..=0x33FF
+        | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xA000..=0xA4CF | 0xAC00..=0xD7A3
+        | 0xF900..=0xFAFF | 0xFE30..=0xFE4F | 0xFF00..=0xFF60 | 0xFFE0..=0xFFE6
+        | 0x1F300..=0x1FAFF | 0x20000..=0x3FFFD);
+    if wide {
+        2
+    } else {
+        1
+    }
+}
+
+/// Port of `f_strwidth()` from `Src/strings.c` — the number of display cells
+/// `{string}` occupies (composing marks add 0, wide characters add 2).
+pub fn f_strwidth(argvars: &[typval_T], rettv: &mut typval_T) {
+    let w: usize = tv_get_string(&argvars[0]).chars().map(utf_char2cells).sum();
+    rettv.vval = v_number(w as varnumber_T);
+}
+
+/// Port of `f_strdisplaywidth()` from `Src/strings.c` — like `strwidth()` but a
+/// Tab advances to the next `'tabstop'` boundary. The optional `{col}` is the
+/// starting screen column (so leading text affects Tab stops).
+pub fn f_strdisplaywidth(argvars: &[typval_T], rettv: &mut typval_T) {
+    let s = tv_get_string(&argvars[0]);
+    let col0 = if argvars.len() >= 2 {
+        tv_get_number_chk(&argvars[1], None).max(0) as usize
+    } else {
+        0
+    };
+    let ts = {
+        let t = tv_get_number_chk(&get_option_value("tabstop"), None);
+        if t > 0 {
+            t as usize
+        } else {
+            8
+        }
+    };
+    let mut col = col0;
+    for c in s.chars() {
+        if c == '\t' {
+            col += ts - (col % ts);
+        } else {
+            col += utf_char2cells(c);
+        }
+    }
+    rettv.vval = v_number((col - col0) as varnumber_T);
+}
+
+/// Port of `f_charclass()` from `Src/strings.c` — the character class of the
+/// first character of `{string}`: 0 blank, 1 punctuation, 2 word character, 3
+/// emoji. 0 for an empty String.
+pub fn f_charclass(argvars: &[typval_T], rettv: &mut typval_T) {
+    let class = match tv_get_string(&argvars[0]).chars().next() {
+        None => 0,
+        Some(c) if c == ' ' || c == '\t' || c == '\0' => 0,
+        Some(c) if matches!(c as u32, 0x1F300..=0x1FAFF | 0x2600..=0x27BF) => 3,
+        Some(c) if c == '_' || c.is_alphanumeric() => 2,
+        Some(_) => 1,
+    };
+    rettv.vval = v_number(class as varnumber_T);
+}
+
+/// UTF-16 code-unit length of a single character: 2 for an astral character
+/// (a surrogate pair), else 1.
+fn utf_char2utf16len(c: char) -> varnumber_T {
+    if c as u32 > 0xFFFF {
+        2
+    } else {
+        1
+    }
+}
+
+/// Port of `f_strutf16len()` from `Src/strings.c` — the number of UTF-16 code
+/// units in `{string}`. With `{countcc}` (arg 2) truthy composing marks are
+/// counted; otherwise they are ignored.
+pub fn f_strutf16len(argvars: &[typval_T], rettv: &mut typval_T) {
+    let countcc = argvars.len() >= 2
+        && argvars[1].v_type != VAR_UNKNOWN
+        && tv_get_number_chk(&argvars[1], None) != 0;
+    let n: varnumber_T = tv_get_string(&argvars[0])
+        .chars()
+        .filter(|c| countcc || !utf_iscomposing(*c))
+        .map(utf_char2utf16len)
+        .sum();
+    rettv.vval = v_number(n);
+}
+
+/// Port of `f_utf16idx()` from `Src/strings.c` — the UTF-16 code-unit index of
+/// the byte at `{idx}` in `{string}` (or the character at `{idx}` when
+/// `{charidx}` (arg 4) is truthy). Composing marks are ignored unless
+/// `{countcc}` (arg 3) is truthy. -1 if `{idx}` is past the end.
+pub fn f_utf16idx(argvars: &[typval_T], rettv: &mut typval_T) {
+    let s = tv_get_string(&argvars[0]);
+    let idx = tv_get_number_chk(&argvars[1], None);
+    if idx < 0 {
+        rettv.vval = v_number(-1);
+        return;
+    }
+    let countcc = argvars.len() >= 3
+        && argvars[2].v_type != VAR_UNKNOWN
+        && tv_get_number_chk(&argvars[2], None) != 0;
+    let charidx = argvars.len() >= 4
+        && argvars[3].v_type != VAR_UNKNOWN
+        && tv_get_number_chk(&argvars[3], None) != 0;
+    let target = idx as usize;
+
+    let mut byte_pos = 0usize;
+    let mut char_pos = 0usize;
+    let mut u16_pos: varnumber_T = 0;
+    for c in s.chars() {
+        let pos = if charidx { char_pos } else { byte_pos };
+        if pos >= target {
+            rettv.vval = v_number(u16_pos);
+            return;
+        }
+        if countcc || !utf_iscomposing(c) {
+            u16_pos += utf_char2utf16len(c);
+            char_pos += 1;
+        }
+        byte_pos += c.len_utf8();
+    }
+    // idx exactly at the end → the total length; past the end → -1.
+    let end = if charidx { char_pos } else { byte_pos };
+    rettv.vval = v_number(if target == end { u16_pos } else { -1 });
 }

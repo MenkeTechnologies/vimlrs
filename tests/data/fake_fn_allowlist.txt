@@ -34,6 +34,14 @@ f_tr
 f_trim
 f_str2nr
 f_str2list
+f_slice
+f_strcharlen
+f_strtrans
+f_strwidth
+f_strdisplaywidth
+f_charclass
+utf_iscomposing
+utf_char2cells
 
 # ── option.c (not vendored) ──
 do_set
@@ -92,3 +100,13 @@ f_system
 f_systemlist
 f_environ
 get_cmd_output
+
+# ── glob() — eval/funcs.c (this subset) + path.c (not vendored) ──
+# f_glob lives in Neovim's eval/funcs.c, which this vendored funcs.c subset does
+# not include; unix_expandpath is the real path.c wildcard walker behind it.
+# expand_env is recognized already (it is called in the vendored eval/fs.c).
+f_glob
+unix_expandpath
+f_strutf16len
+f_utf16idx
+utf_char2utf16len

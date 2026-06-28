@@ -379,14 +379,6 @@ pub fn check_can_index() {
     unimplemented!("STUB check_can_index — csrc/eval.c:3181")
 }
 
-/// Port of `f_slice()` — `csrc/eval.c:3218`. STUB: not yet ported.
-pub fn f_slice(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_slice — csrc/eval.c:3218")
-}
-
 /// Port of `eval_index_inner()` — `csrc/eval.c:3237`. STUB: not yet ported.
 /// C: `static int eval_index_inner(typval_T *rettv, bool is_range, typval_T *var1, typval_T *var2,`
 pub fn eval_index_inner() {

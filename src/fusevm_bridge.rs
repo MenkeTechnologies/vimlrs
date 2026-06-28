@@ -21,35 +21,41 @@ use crate::compile_viml::compile_program;
 use crate::ported::eval::encode::{encode_tv2echo, encode_tv2string};
 use crate::ported::eval::fs::{
     f_chdir, f_delete, f_executable, f_exepath, f_filecopy, f_filereadable, f_filewritable,
-    f_fnamemodify, f_getcwd, f_getfperm, f_getfsize, f_getftime, f_getftype, f_glob2regpat,
-    f_haslocaldir, f_isabsolutepath, f_isdirectory, f_mkdir, f_pathshorten, f_readblob, f_readdir,
-    f_readfile, f_rename, f_resolve, f_setfperm, f_simplify, f_tempname, f_writefile,
+    f_fnamemodify, f_getcwd, f_getfperm, f_getfsize, f_getftime, f_getftype, f_glob, f_glob2regpat,
+    f_globpath, f_haslocaldir, f_isabsolutepath, f_isdirectory, f_mkdir, f_pathshorten, f_readblob,
+    f_readdir, f_readfile, f_rename, f_resolve, f_setfperm, f_simplify, f_tempname, f_writefile,
 };
 use crate::ported::eval::funcs::{
-    f_abs, f_add, f_and, f_assert_equal, f_assert_exception, f_assert_false, f_assert_inrange,
-    f_assert_match, f_assert_notequal, f_assert_notmatch, f_assert_report, f_assert_true, f_atan2,
-    f_byte2line, f_changenr, f_char2nr, f_charcol, f_col, f_confirm, f_copy, f_cursor, f_deepcopy,
-    f_dictwatcheradd, f_dictwatcherdel, f_did_filetype, f_empty, f_environ, f_escape,
-    f_eventhandler, f_exists, f_flatten, f_flattennew, f_float2nr, f_fmod, f_fnameescape,
-    f_foreground, f_funcref, f_function, f_garbagecollect, f_get, f_getchangelist, f_getcharpos,
-    f_getcharsearch, f_getcurpos, f_getcursorcharpos, f_getenv, f_getfontname, f_getjumplist,
-    f_getmarklist, f_getpid, f_getpos, f_getreg, f_getreginfo, f_getregion, f_getregionpos,
-    f_getregtype, f_gettagstack, f_gettext, f_has, f_has_key, f_hlexists, f_id, f_index, f_indexof,
-    f_input, f_inputdialog, f_inputlist, f_inputrestore, f_inputsave, f_inputsecret, f_insert,
-    f_invert, f_isinf, f_isnan, f_items, f_json_decode, f_json_encode, f_keys, f_len, f_line,
-    f_line2byte, f_list2str, f_localtime, f_match, f_matchbufline, f_matchend, f_matchlist,
-    f_matchstr, f_matchstrlist, f_matchstrpos, f_max, f_menu_get, f_min, f_mode, f_nextnonblank,
-    f_nr2char, f_or, f_pow, f_prevnonblank, f_printf, f_prompt_getprompt, f_pum_getpos,
-    f_pumvisible, f_rand, f_range, f_reduce, f_reg_executing, f_reg_recorded, f_reg_recording,
-    f_reltime, f_reltimefloat, f_reltimestr, f_repeat, f_reverse, f_screenattr, f_screenchar,
-    f_screenchars, f_screencol, f_screenrow, f_screenstring, f_search, f_searchdecl, f_searchpair,
-    f_searchpairpos, f_searchpos, f_serverlist, f_setcharpos, f_setcharsearch, f_setcursorcharpos,
-    f_setenv, f_setpos, f_setreg, f_settagstack, f_sha256, f_shellescape, f_shiftwidth,
-    f_soundfold, f_spellbadword, f_spellsuggest, f_split, f_srand, f_state, f_str2float,
-    f_strftime, f_strptime, f_substitute, f_swapfilelist, f_swapname, f_synID, f_synIDattr,
-    f_synIDtrans, f_synconcealed, f_synstack, f_system, f_systemlist, f_tabpagebuflist, f_tagfiles,
-    f_taglist, f_timer_info, f_timer_pause, f_timer_start, f_timer_stop, f_timer_stopall, f_type,
-    f_values, f_virtcol, f_visualmode, f_wildmenumode, f_windowsversion, f_wordcount, f_xor,
+    f_abs, f_add, f_and, f_append, f_appendbufline, f_assert_equal, f_assert_exception,
+    f_assert_false, f_assert_inrange, f_assert_match, f_assert_notequal, f_assert_notmatch,
+    f_assert_report, f_assert_true, f_atan2, f_bufexists, f_buflisted, f_bufloaded, f_bufname,
+    f_bufnr, f_bufwinid, f_bufwinnr, f_byte2line, f_changenr, f_char2nr, f_charcol, f_col,
+    f_confirm, f_copy, f_cursor, f_deepcopy, f_deletebufline, f_dictwatcheradd, f_dictwatcherdel,
+    f_did_filetype, f_empty, f_environ, f_escape, f_eventhandler, f_exists, f_flatten,
+    f_flattennew, f_float2nr, f_fmod, f_fnameescape, f_foreground, f_funcref, f_function,
+    f_garbagecollect, f_get, f_getbufinfo, f_getbufline, f_getbufoneline, f_getchangelist,
+    f_getcharpos, f_getcharsearch, f_getcurpos, f_getcursorcharpos, f_getenv, f_getfontname,
+    f_getjumplist, f_getline, f_getmarklist, f_getpid, f_getpos, f_getreg, f_getreginfo,
+    f_getregion, f_getregionpos, f_getregtype, f_gettabinfo, f_gettagstack, f_gettext,
+    f_getwininfo, f_getwinpos, f_getwinposx, f_getwinposy, f_has, f_has_key, f_hlexists, f_id,
+    f_index, f_indexof, f_input, f_inputdialog, f_inputlist, f_inputrestore, f_inputsave,
+    f_inputsecret, f_insert, f_invert, f_isinf, f_isnan, f_items, f_json_decode, f_json_encode,
+    f_keys, f_len, f_line, f_line2byte, f_list2str, f_localtime, f_match, f_matchbufline,
+    f_matchend, f_matchlist, f_matchstr, f_matchstrlist, f_matchstrpos, f_max, f_menu_get, f_min,
+    f_mode, f_nextnonblank, f_nr2char, f_or, f_pow, f_prevnonblank, f_printf, f_prompt_getprompt,
+    f_pum_getpos, f_pumvisible, f_rand, f_range, f_reduce, f_reg_executing, f_reg_recorded,
+    f_reg_recording, f_reltime, f_reltimefloat, f_reltimestr, f_repeat, f_reverse, f_screenattr,
+    f_screenchar, f_screenchars, f_screencol, f_screenrow, f_screenstring, f_search, f_searchdecl,
+    f_searchpair, f_searchpairpos, f_searchpos, f_serverlist, f_setbufline, f_setcharpos,
+    f_setcharsearch, f_setcursorcharpos, f_setenv, f_setline, f_setpos, f_setreg, f_settagstack,
+    f_sha256, f_shellescape, f_shiftwidth, f_soundfold, f_spellbadword, f_spellsuggest, f_split,
+    f_srand, f_state, f_str2float, f_strftime, f_strptime, f_substitute, f_swapfilelist,
+    f_swapname, f_synID, f_synIDattr, f_synIDtrans, f_synconcealed, f_synstack, f_system,
+    f_systemlist, f_tabpagebuflist, f_tabpagenr, f_tabpagewinnr, f_tagfiles, f_taglist,
+    f_timer_info, f_timer_pause, f_timer_start, f_timer_stop, f_timer_stopall, f_type, f_values,
+    f_virtcol, f_visualmode, f_wildmenumode, f_win_findbuf, f_win_getid, f_win_gettype,
+    f_win_gotoid, f_win_id2win, f_win_screenpos, f_winbufnr, f_wincol, f_windowsversion,
+    f_winheight, f_winlayout, f_winline, f_winnr, f_winrestcmd, f_winwidth, f_wordcount, f_xor,
     float_op_wrapper,
 };
 use crate::ported::eval::list::{
@@ -71,9 +77,10 @@ use crate::ported::eval::vars::{eval_variable, set_var, set_vim_var_string, vv::
 use crate::ported::eval_h::exprtype_T::{self, *};
 use crate::ported::message;
 use crate::ported::strings::{
-    f_byteidx, f_byteidxcomp, f_charidx, f_str2list, f_str2nr, f_strcharpart, f_strchars,
-    f_strgetchar, f_stridx, f_string, f_strlen, f_strpart, f_strridx, f_tolower, f_toupper, f_tr,
-    f_trim,
+    f_byteidx, f_byteidxcomp, f_charclass, f_charidx, f_slice, f_str2list, f_str2nr, f_strcharlen,
+    f_strcharpart, f_strchars, f_strdisplaywidth, f_strgetchar, f_stridx, f_string, f_strlen,
+    f_strpart, f_strridx, f_strtrans, f_strutf16len, f_strwidth, f_tolower, f_toupper, f_tr,
+    f_trim, f_utf16idx,
 };
 use crate::viml_ast::Stmt;
 use crate::viml_lexer::{CaseFlag, CmpOp, VimlError};
@@ -660,6 +667,100 @@ pub const VIML_FN_SYSTEM: u16 = 3349;
 pub const VIML_FN_SYSTEMLIST: u16 = 3350;
 /// `environ()`
 pub const VIML_FN_ENVIRON: u16 = 3351;
+/// `slice()`
+pub const VIML_FN_SLICE: u16 = 3352;
+/// `strcharlen()`
+pub const VIML_FN_STRCHARLEN: u16 = 3353;
+/// `strtrans()`
+pub const VIML_FN_STRTRANS: u16 = 3354;
+/// `strwidth()`
+pub const VIML_FN_STRWIDTH: u16 = 3355;
+/// `strdisplaywidth()`
+pub const VIML_FN_STRDISPLAYWIDTH: u16 = 3356;
+/// `charclass()`
+pub const VIML_FN_CHARCLASS: u16 = 3357;
+/// `glob()`
+pub const VIML_FN_GLOB: u16 = 3358;
+/// `globpath()`
+pub const VIML_FN_GLOBPATH: u16 = 3359;
+/// `strutf16len()`
+pub const VIML_FN_STRUTF16LEN: u16 = 3360;
+/// `utf16idx()`
+pub const VIML_FN_UTF16IDX: u16 = 3361;
+/// `bufnr()`
+pub const VIML_FN_BUFNR: u16 = 3362;
+/// `bufexists()`
+pub const VIML_FN_BUFEXISTS: u16 = 3363;
+/// `buflisted()`
+pub const VIML_FN_BUFLISTED: u16 = 3364;
+/// `bufloaded()`
+pub const VIML_FN_BUFLOADED: u16 = 3365;
+/// `bufname()`
+pub const VIML_FN_BUFNAME: u16 = 3366;
+/// `bufwinnr()`
+pub const VIML_FN_BUFWINNR: u16 = 3367;
+/// `bufwinid()`
+pub const VIML_FN_BUFWINID: u16 = 3368;
+/// `winnr()`
+pub const VIML_FN_WINNR: u16 = 3369;
+/// `winbufnr()`
+pub const VIML_FN_WINBUFNR: u16 = 3370;
+/// `winwidth()`
+pub const VIML_FN_WINWIDTH: u16 = 3371;
+/// `winheight()`
+pub const VIML_FN_WINHEIGHT: u16 = 3372;
+/// `winlayout()`
+pub const VIML_FN_WINLAYOUT: u16 = 3373;
+/// `winline()`
+pub const VIML_FN_WINLINE: u16 = 3374;
+/// `wincol()`
+pub const VIML_FN_WINCOL: u16 = 3375;
+/// `winrestcmd()`
+pub const VIML_FN_WINRESTCMD: u16 = 3376;
+/// `tabpagenr()`
+pub const VIML_FN_TABPAGENR: u16 = 3377;
+/// `tabpagewinnr()`
+pub const VIML_FN_TABPAGEWINNR: u16 = 3378;
+/// `getline()`
+pub const VIML_FN_GETLINE: u16 = 3379;
+/// `getbufline()`
+pub const VIML_FN_GETBUFLINE: u16 = 3380;
+/// `getbufoneline()`
+pub const VIML_FN_GETBUFONELINE: u16 = 3381;
+/// `getbufinfo()`
+pub const VIML_FN_GETBUFINFO: u16 = 3382;
+/// `setline()`
+pub const VIML_FN_SETLINE: u16 = 3383;
+/// `setbufline()`
+pub const VIML_FN_SETBUFLINE: u16 = 3384;
+/// `append()`
+pub const VIML_FN_APPEND: u16 = 3385;
+/// `appendbufline()`
+pub const VIML_FN_APPENDBUFLINE: u16 = 3386;
+/// `deletebufline()`
+pub const VIML_FN_DELETEBUFLINE: u16 = 3387;
+/// `getwininfo()`
+pub const VIML_FN_GETWININFO: u16 = 3388;
+/// `gettabinfo()`
+pub const VIML_FN_GETTABINFO: u16 = 3389;
+/// `getwinpos()`
+pub const VIML_FN_GETWINPOS: u16 = 3390;
+/// `getwinposx()`
+pub const VIML_FN_GETWINPOSX: u16 = 3391;
+/// `getwinposy()`
+pub const VIML_FN_GETWINPOSY: u16 = 3392;
+/// `win_getid()`
+pub const VIML_FN_WIN_GETID: u16 = 3393;
+/// `win_id2win()`
+pub const VIML_FN_WIN_ID2WIN: u16 = 3394;
+/// `win_findbuf()`
+pub const VIML_FN_WIN_FINDBUF: u16 = 3395;
+/// `win_gotoid()`
+pub const VIML_FN_WIN_GOTOID: u16 = 3396;
+/// `win_gettype()`
+pub const VIML_FN_WIN_GETTYPE: u16 = 3397;
+/// `win_screenpos()`
+pub const VIML_FN_WIN_SCREENPOS: u16 = 3398;
 /// `flattennew()`
 pub const VIML_FN_FLATTENNEW: u16 = 3211;
 /// `sha256()`
@@ -2299,6 +2400,65 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FN_SYSTEM, |vm, n| call_func(vm, n, f_system));
     vm.register_builtin(VIML_FN_SYSTEMLIST, |vm, n| call_func(vm, n, f_systemlist));
     vm.register_builtin(VIML_FN_ENVIRON, |vm, n| call_func(vm, n, f_environ));
+    vm.register_builtin(VIML_FN_SLICE, |vm, n| call_func(vm, n, f_slice));
+    vm.register_builtin(VIML_FN_STRCHARLEN, |vm, n| call_func(vm, n, f_strcharlen));
+    vm.register_builtin(VIML_FN_STRTRANS, |vm, n| call_func(vm, n, f_strtrans));
+    vm.register_builtin(VIML_FN_STRWIDTH, |vm, n| call_func(vm, n, f_strwidth));
+    vm.register_builtin(VIML_FN_STRDISPLAYWIDTH, |vm, n| {
+        call_func(vm, n, f_strdisplaywidth)
+    });
+    vm.register_builtin(VIML_FN_CHARCLASS, |vm, n| call_func(vm, n, f_charclass));
+    vm.register_builtin(VIML_FN_GLOB, |vm, n| call_func(vm, n, f_glob));
+    vm.register_builtin(VIML_FN_GLOBPATH, |vm, n| call_func(vm, n, f_globpath));
+    vm.register_builtin(VIML_FN_STRUTF16LEN, |vm, n| call_func(vm, n, f_strutf16len));
+    vm.register_builtin(VIML_FN_UTF16IDX, |vm, n| call_func(vm, n, f_utf16idx));
+    vm.register_builtin(VIML_FN_BUFNR, |vm, n| call_func(vm, n, f_bufnr));
+    vm.register_builtin(VIML_FN_BUFEXISTS, |vm, n| call_func(vm, n, f_bufexists));
+    vm.register_builtin(VIML_FN_BUFLISTED, |vm, n| call_func(vm, n, f_buflisted));
+    vm.register_builtin(VIML_FN_BUFLOADED, |vm, n| call_func(vm, n, f_bufloaded));
+    vm.register_builtin(VIML_FN_BUFNAME, |vm, n| call_func(vm, n, f_bufname));
+    vm.register_builtin(VIML_FN_BUFWINNR, |vm, n| call_func(vm, n, f_bufwinnr));
+    vm.register_builtin(VIML_FN_BUFWINID, |vm, n| call_func(vm, n, f_bufwinid));
+    vm.register_builtin(VIML_FN_WINNR, |vm, n| call_func(vm, n, f_winnr));
+    vm.register_builtin(VIML_FN_WINBUFNR, |vm, n| call_func(vm, n, f_winbufnr));
+    vm.register_builtin(VIML_FN_WINWIDTH, |vm, n| call_func(vm, n, f_winwidth));
+    vm.register_builtin(VIML_FN_WINHEIGHT, |vm, n| call_func(vm, n, f_winheight));
+    vm.register_builtin(VIML_FN_WINLAYOUT, |vm, n| call_func(vm, n, f_winlayout));
+    vm.register_builtin(VIML_FN_WINLINE, |vm, n| call_func(vm, n, f_winline));
+    vm.register_builtin(VIML_FN_WINCOL, |vm, n| call_func(vm, n, f_wincol));
+    vm.register_builtin(VIML_FN_WINRESTCMD, |vm, n| call_func(vm, n, f_winrestcmd));
+    vm.register_builtin(VIML_FN_TABPAGENR, |vm, n| call_func(vm, n, f_tabpagenr));
+    vm.register_builtin(VIML_FN_TABPAGEWINNR, |vm, n| {
+        call_func(vm, n, f_tabpagewinnr)
+    });
+    vm.register_builtin(VIML_FN_GETLINE, |vm, n| call_func(vm, n, f_getline));
+    vm.register_builtin(VIML_FN_GETBUFLINE, |vm, n| call_func(vm, n, f_getbufline));
+    vm.register_builtin(VIML_FN_GETBUFONELINE, |vm, n| {
+        call_func(vm, n, f_getbufoneline)
+    });
+    vm.register_builtin(VIML_FN_GETBUFINFO, |vm, n| call_func(vm, n, f_getbufinfo));
+    vm.register_builtin(VIML_FN_SETLINE, |vm, n| call_func(vm, n, f_setline));
+    vm.register_builtin(VIML_FN_SETBUFLINE, |vm, n| call_func(vm, n, f_setbufline));
+    vm.register_builtin(VIML_FN_APPEND, |vm, n| call_func(vm, n, f_append));
+    vm.register_builtin(VIML_FN_APPENDBUFLINE, |vm, n| {
+        call_func(vm, n, f_appendbufline)
+    });
+    vm.register_builtin(VIML_FN_DELETEBUFLINE, |vm, n| {
+        call_func(vm, n, f_deletebufline)
+    });
+    vm.register_builtin(VIML_FN_GETWININFO, |vm, n| call_func(vm, n, f_getwininfo));
+    vm.register_builtin(VIML_FN_GETTABINFO, |vm, n| call_func(vm, n, f_gettabinfo));
+    vm.register_builtin(VIML_FN_GETWINPOS, |vm, n| call_func(vm, n, f_getwinpos));
+    vm.register_builtin(VIML_FN_GETWINPOSX, |vm, n| call_func(vm, n, f_getwinposx));
+    vm.register_builtin(VIML_FN_GETWINPOSY, |vm, n| call_func(vm, n, f_getwinposy));
+    vm.register_builtin(VIML_FN_WIN_GETID, |vm, n| call_func(vm, n, f_win_getid));
+    vm.register_builtin(VIML_FN_WIN_ID2WIN, |vm, n| call_func(vm, n, f_win_id2win));
+    vm.register_builtin(VIML_FN_WIN_FINDBUF, |vm, n| call_func(vm, n, f_win_findbuf));
+    vm.register_builtin(VIML_FN_WIN_GOTOID, |vm, n| call_func(vm, n, f_win_gotoid));
+    vm.register_builtin(VIML_FN_WIN_GETTYPE, |vm, n| call_func(vm, n, f_win_gettype));
+    vm.register_builtin(VIML_FN_WIN_SCREENPOS, |vm, n| {
+        call_func(vm, n, f_win_screenpos)
+    });
     vm.register_builtin(VIML_FN_FLATTENNEW, |vm, n| call_func(vm, n, f_flattennew));
     vm.register_builtin(VIML_FN_SHA256, |vm, n| call_func(vm, n, f_sha256));
     vm.register_builtin(VIML_FN_BLOB2LIST, |vm, n| call_func(vm, n, f_blob2list));

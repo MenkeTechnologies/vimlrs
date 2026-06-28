@@ -19,6 +19,10 @@ cargo build
 | [`wordfreq.vim`](wordfreq.vim) | text pipeline: `writefile`/`readfile`, `split`, frequency dict, `sort` with a Funcref |
 | [`testing.vim`](testing.vim) | the test framework itself: `assert_fails` (a command must error) and `assert_exception` (inside `:catch`), plus `:try`/`:throw` |
 | [`system.vim`](system.vim) | OS interaction: `system()`/`systemlist()` (shell out, with stdin), `v:shell_error`, `environ()` |
+| [`slicing.vim`](slicing.vim) | `slice()` (exclusive-end List/String/Blob slice), `strcharlen()` (folds composing marks), `strtrans()` |
+| [`width.vim`](width.vim) | display width: `strwidth()` (wide CJK/emoji = 2 cells), `strdisplaywidth()` (Tab expansion), `charclass()` |
+| [`glob.vim`](glob.vim) | `glob()` — list files by wildcard (`*`/`?`), `$VAR`/`~` expansion, String vs List form |
+| [`buffers.vim`](buffers.vim) | editor-absent buffer/window/tab builtins (`bufnr`/`winnr`/`tabpagenr`…), `strutf16len`/`utf16idx`, `globpath` |
 
 Run any script with `VIMLRS_JIT_STATS=1` to see JIT activity, or `VIMLRS_NO_JIT=1`
 to force the interpreter baseline.
@@ -40,10 +44,15 @@ if !empty(v:errors)
 endif
 ```
 
-CI runs them all via `cargo test` — `tests/examples.rs` executes each script
-through the built binary and fails if any exits non-zero. So a behaviour
-regression in a ported builtin turns a green assert red. The interactive example
-is fed canned answers from `tests/fixtures/interactive.in`.
+CI runs them all two ways, so a behaviour regression in a ported builtin turns a
+green assert red:
+
+- a dedicated **`examples` CI job** runs `sh scripts/run_examples.sh`, which
+  executes every script through the release binary and fails if any exits
+  non-zero (run it locally the same way);
+- `tests/examples.rs` does the same under `cargo test` (the `test` job).
+
+The interactive example is fed canned answers from `tests/fixtures/interactive.in`.
 
 ### Notes on the current language surface
 

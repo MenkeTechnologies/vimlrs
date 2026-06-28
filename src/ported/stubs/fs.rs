@@ -23,22 +23,6 @@ pub fn f_findfile(
     unimplemented!("STUB f_findfile — csrc/eval/fs.c:608")
 }
 
-/// Port of `f_glob()` — `csrc/eval/fs.c:853`. STUB: not yet ported.
-pub fn f_glob(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_glob — csrc/eval/fs.c:853")
-}
-
-/// Port of `f_globpath()` — `csrc/eval/fs.c:901`. STUB: not yet ported.
-pub fn f_globpath(
-    _argvars: &[crate::ported::eval::typval_defs_h::typval_T],
-    _rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
-) {
-    unimplemented!("STUB f_globpath — csrc/eval/fs.c:901")
-}
-
 /// Port of `readdir_checkitem()` — `csrc/eval/fs.c:1166`. STUB: not yet ported.
 /// C: `static varnumber_T readdir_checkitem(void *context, const char *name)`
 pub fn readdir_checkitem() {
