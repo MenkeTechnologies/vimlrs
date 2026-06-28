@@ -205,6 +205,8 @@ pub const VIML_GETENV: u16 = 3063;
 pub const VIML_GETOPT: u16 = 3064;
 /// `@reg`
 pub const VIML_GETREG: u16 = 3065;
+/// `:let @reg = …`
+pub const VIML_SETREG: u16 = 3570;
 /// `:let $ENV = …`
 pub const VIML_SETENV: u16 = 3066;
 /// `len()`
@@ -2382,9 +2384,6 @@ fn b_usercmd(vm: &mut VM, _: u8) -> Value {
     }
     Value::Undef
 }
-fn b_getreg(_: &mut VM, _: u8) -> Value {
-    Value::str("")
-}
 
 /// Dispatch a Phase-3 builtin function: pop `argc` args, call the ported
 /// `f_<name>` with a pre-initialized `VAR_NUMBER` rettv, push the result.
@@ -2727,7 +2726,8 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_SET_RESULT, b_set_result);
     vm.register_builtin(VIML_GETENV, b_getenv);
     vm.register_builtin(VIML_GETOPT, b_getopt);
-    vm.register_builtin(VIML_GETREG, b_getreg);
+    vm.register_builtin(VIML_GETREG, |vm, n| call_func(vm, n, f_getreg));
+    vm.register_builtin(VIML_SETREG, |vm, n| call_func(vm, n, f_setreg));
     vm.register_builtin(VIML_FN_LEN, b_fn_len);
     vm.register_builtin(VIML_FN_TYPE, b_fn_type);
     vm.register_builtin(VIML_FN_STRING, b_fn_string);

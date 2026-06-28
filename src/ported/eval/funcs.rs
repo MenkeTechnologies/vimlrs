@@ -2334,13 +2334,53 @@ pub fn f_line(argvars: &[typval_T], rettv: &mut typval_T) {
 /// Port of `f_virtcol()` — no cursor → 0, or `[0,0]` when the second arg
 /// (`list`) is truthy, matching the C `theend:` branch.
 pub fn f_virtcol(argvars: &[typval_T], rettv: &mut typval_T) {
-    if argvars.len() > 1 && tv_get_bool(&argvars[1]) != 0 {
+    let s = tv_get_string(&argvars[0]);
+    let want_list = argvars.len() > 1 && tv_get_bool(&argvars[1]) != 0;
+    let (lnum, ccol) = CURPOS.with(|c| {
+        let c = c.borrow();
+        (c.0, c.1)
+    });
+    let line = get_buffer_lines(lnum, lnum)
+        .into_iter()
+        .next()
+        .unwrap_or_default();
+    let ts = {
+        let t = tv_get_number_chk(&get_option_value("tabstop"), None);
+        if t > 0 {
+            t as varnumber_T
+        } else {
+            8
+        }
+    };
+    // The byte index of the target character (0-based); `$` is one past the end.
+    let dollar = s == "$";
+    let target_byte = if dollar {
+        line.len()
+    } else if s == "." {
+        (ccol as usize).saturating_sub(1)
+    } else if let Some(name) = s.strip_prefix('\'').and_then(|r| r.chars().next()) {
+        (getmark(name).map_or(1, |(_, c)| c) as usize).saturating_sub(1)
+    } else {
+        (ccol as usize).saturating_sub(1)
+    };
+    let mut vcol: varnumber_T = 0;
+    for (bi, c) in line.char_indices() {
+        let w = if c == '\t' { ts - (vcol % ts) } else { 1 };
+        vcol += w;
+        if !dollar && bi >= target_byte {
+            break;
+        }
+    }
+    if dollar {
+        vcol += 1;
+    }
+    if want_list {
         let l = tv_list_alloc_ret(rettv, 2);
         let mut lb = l.borrow_mut();
-        tv_list_append_number(&mut lb, 0);
-        tv_list_append_number(&mut lb, 0);
+        tv_list_append_number(&mut lb, vcol);
+        tv_list_append_number(&mut lb, vcol);
     } else {
-        *rettv = typval_T::from(0 as varnumber_T);
+        *rettv = typval_T::from(vcol);
     }
 }
 /// Port of `f_screenrow()`/`ui_current_row()` — no UI grid → 0.
@@ -2432,18 +2472,39 @@ pub fn f_prevnonblank(argvars: &[typval_T], rettv: &mut typval_T) {
 }
 /// Port of `f_wordcount()`/`cursor_pos_info()` — empty buffer → every count 0.
 pub fn f_wordcount(_argvars: &[typval_T], rettv: &mut typval_T) {
+    let lines = get_buffer_lines(1, curbuf_len());
+    let (clnum, ccol) = CURPOS.with(|c| {
+        let c = c.borrow();
+        (c.0, c.1)
+    });
+    let (mut bytes, mut chars, mut words) = (0i64, 0i64, 0i64);
+    let (mut cbytes, mut cchars, mut cwords) = (0i64, 0i64, 0i64);
+    for (i, line) in lines.iter().enumerate() {
+        let lnum = i as varnumber_T + 1;
+        let lwords = line.split_whitespace().count() as i64;
+        words += lwords;
+        // Up to the cursor: count whole lines before it, then a partial line.
+        if lnum < clnum {
+            cbytes += line.len() as i64 + 1;
+            cchars += line.chars().count() as i64 + 1;
+            cwords += lwords;
+        } else if lnum == clnum {
+            let upto = &line[..((ccol as usize).saturating_sub(1)).min(line.len())];
+            cbytes += upto.len() as i64;
+            cchars += upto.chars().count() as i64;
+            cwords += upto.split_whitespace().count() as i64;
+        }
+        bytes += line.len() as i64 + 1;
+        chars += line.chars().count() as i64 + 1;
+    }
     let d = tv_dict_alloc_ret(rettv);
     let mut db = d.borrow_mut();
-    for key in [
-        "bytes",
-        "chars",
-        "words",
-        "cursor_bytes",
-        "cursor_chars",
-        "cursor_words",
-    ] {
-        tv_dict_add_nr(&mut db, key, 0);
-    }
+    tv_dict_add_nr(&mut db, "bytes", bytes);
+    tv_dict_add_nr(&mut db, "chars", chars);
+    tv_dict_add_nr(&mut db, "words", words);
+    tv_dict_add_nr(&mut db, "cursor_bytes", cbytes);
+    tv_dict_add_nr(&mut db, "cursor_chars", cchars);
+    tv_dict_add_nr(&mut db, "cursor_words", cwords);
 }
 
 /// Port of `f_getjumplist()` — no window → `[[], 0]` (entries, current index).
@@ -3005,8 +3066,58 @@ pub fn f_spellsuggest(_argvars: &[typval_T], rettv: &mut typval_T) {
     tv_list_alloc_ret(rettv, 0);
 }
 /// Port of `f_getregion()` — no buffer/selection → empty List.
-pub fn f_getregion(_argvars: &[typval_T], rettv: &mut typval_T) {
-    tv_list_alloc_ret(rettv, 0);
+pub fn f_getregion(argvars: &[typval_T], rettv: &mut typval_T) {
+    // c: getregion(p1, p2 [, opts]) — text between two [buf, lnum, col, off]
+    // positions. `type` "v" charwise (default), "V" linewise.
+    let pos = |tv: &typval_T| -> (varnumber_T, varnumber_T) {
+        match (tv.v_type, &tv.vval) {
+            (VAR_LIST, v_list(Some(l))) => {
+                let it = &l.borrow().lv_items;
+                (
+                    it.get(1).map_or(0, |x| tv_get_number(&x.li_tv)),
+                    it.get(2).map_or(0, |x| tv_get_number(&x.li_tv)),
+                )
+            }
+            _ => (0, 0),
+        }
+    };
+    let (mut l1, mut c1) = pos(&argvars[0]);
+    let (mut l2, mut c2) = pos(&argvars[1]);
+    if (l1, c1) > (l2, c2) {
+        std::mem::swap(&mut l1, &mut l2);
+        std::mem::swap(&mut c1, &mut c2);
+    }
+    let linewise = argvars
+        .get(2)
+        .and_then(|o| match (o.v_type, &o.vval) {
+            (VAR_DICT, v_dict(Some(d))) => tv_dict_find(&d.borrow(), "type").map(tv_get_string),
+            _ => None,
+        })
+        .is_some_and(|t| t.starts_with('V'));
+    let out = tv_list_alloc_ret(rettv, 0);
+    let mut ob = out.borrow_mut();
+    let lines = get_buffer_lines(l1, l2);
+    for (i, line) in lines.iter().enumerate() {
+        let lnum = l1 + i as varnumber_T;
+        let piece = if linewise {
+            line.clone()
+        } else {
+            let start = if lnum == l1 {
+                (c1 as usize).saturating_sub(1)
+            } else {
+                0
+            };
+            let end = if lnum == l2 {
+                (c2 as usize).min(line.len())
+            } else {
+                line.len()
+            };
+            line.get(start.min(line.len())..end.max(start.min(line.len())))
+                .unwrap_or("")
+                .to_string()
+        };
+        tv_list_append_string(&mut ob, &piece);
+    }
 }
 /// Port of `f_getregionpos()` — no buffer/selection → empty List.
 pub fn f_getregionpos(_argvars: &[typval_T], rettv: &mut typval_T) {

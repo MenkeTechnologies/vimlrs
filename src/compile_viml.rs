@@ -1301,8 +1301,17 @@ impl Compiler {
                 self.emit(Op::Pop);
                 Ok(())
             }
-            LetTarget::Option(_) | LetTarget::Register(_) => Err(VimlError::msg(
-                "E15: :let on options/registers arrives with the option-table port",
+            LetTarget::Register(c) => {
+                // `:let @r = expr` → setreg(r, expr). Push the register name then
+                // the value (the `f_setreg(argvars)` order).
+                self.load_str(&c.to_string());
+                self.expr(expr)?;
+                self.emit(Op::CallBuiltin(h::VIML_SETREG, 2));
+                self.emit(Op::Pop);
+                Ok(())
+            }
+            LetTarget::Option(_) => Err(VimlError::msg(
+                "E15: :let on options arrives with the option-table port",
             )),
         }
     }
