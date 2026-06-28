@@ -4812,30 +4812,64 @@ pub fn f_iconv(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.vval = v_string(out);
 }
 
-// ── argc()/argv()/argidx() — eval/funcs.c (full table). vimlrs runs a single
-//    script with no editor argument list, so the arglist is empty. ──
+// ── argc()/argv()/argidx() — eval/funcs.c (full table). Standalone, vimlrs has
+//    no editor arglist, so the global argument list is the script file(s) named
+//    on the command line — the natural counterpart of Vim's file arglist. The
+//    CLI seeds it via `set_arglist()` before running. ──
 
-/// Port of `f_argc()` (Neovim eval/funcs.c) — the size of the argument list (0,
-/// no editor arglist when standalone).
+thread_local! {
+    /// The global argument list: the file argument(s) vimlrs was invoked with
+    /// (`vimlrs a.vim b.vim` → `["a.vim", "b.vim"]`). Empty for REPL / `-e` /
+    /// `-c`. This is Vim's unnamed, global arglist (`arglistid()` == 0).
+    static ARGLIST: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Seed the global argument list from the command line (called by the CLI before
+/// sourcing). `argv()`/`argc()` read it back from Vimscript.
+pub fn set_arglist(args: &[String]) {
+    ARGLIST.with(|a| *a.borrow_mut() = args.to_vec());
+}
+
+/// Port of `f_argc()` (Neovim eval/funcs.c) — the size of the argument list.
 pub fn f_argc(_argvars: &[typval_T], rettv: &mut typval_T) {
-    rettv.vval = v_number(0);
+    rettv.vval = v_number(ARGLIST.with(|a| a.borrow().len()) as varnumber_T);
 }
 
 /// Port of `f_argidx()` (Neovim eval/funcs.c) — the current index in the
-/// argument list (0 when standalone).
+/// argument list. vimlrs sources every file in order rather than tracking a
+/// "current" buffer, so the index rests at 0 (the first), as in a fresh Vim.
 pub fn f_argidx(_argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.vval = v_number(0);
 }
 
-/// Port of `f_argv()` (Neovim eval/funcs.c) — with no/`-1` index, the whole
-/// (empty) argument list as a List; with an index, that entry as a String ("").
+/// Port of `f_argv()` (Neovim eval/funcs.c) — with no argument or `-1`, the whole
+/// argument list as a List; with an index `N`, that entry as a String ("" when
+/// out of range). The optional trailing window-id argument is accepted and
+/// ignored (there is one global arglist).
 pub fn f_argv(argvars: &[typval_T], rettv: &mut typval_T) {
-    if argvars.is_empty() || tv_get_number(&argvars[0]) == -1 {
-        let _ = tv_list_alloc_ret(rettv, 0);
+    // c: if (argvars[0].v_type != VAR_UNKNOWN) { idx = tv_get_number(...); ... }
+    if !argvars.is_empty() && tv_get_number(&argvars[0]) != -1 {
+        let idx = tv_get_number(&argvars[0]);
+        rettv.v_type = VAR_STRING;
+        let s = ARGLIST.with(|a| {
+            let a = a.borrow();
+            if idx >= 0 && (idx as usize) < a.len() {
+                a[idx as usize].clone()
+            } else {
+                String::new()
+            }
+        });
+        rettv.vval = v_string(s);
         return;
     }
-    rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(String::new());
+    // No index (or -1): the whole list.
+    let l = tv_list_alloc_ret(rettv, ARGLIST.with(|a| a.borrow().len()) as isize);
+    let mut lb = l.borrow_mut();
+    ARGLIST.with(|a| {
+        for s in a.borrow().iter() {
+            tv_list_append_string(&mut lb, s);
+        }
+    });
 }
 
 // ── assert_equalfile() — Neovim testing.c. ──

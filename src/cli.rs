@@ -150,6 +150,14 @@ pub fn run() -> ExitCode {
     }
 
     if !cli.files.is_empty() {
+        // Seed the global argument list (argv()/argc()) with the file args, the
+        // standalone counterpart of Vim's file arglist, before sourcing.
+        let arglist: Vec<String> = cli
+            .files
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        crate::ported::eval::funcs::set_arglist(&arglist);
         // Source each file in order through the bytecode cache.
         for path in &cli.files {
             if let Err(e) = eval_file(path) {

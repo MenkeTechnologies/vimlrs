@@ -222,6 +222,7 @@ f_foldtext
 f_foldtextresult
 f_highlight_exists
 f_diff_filler
+f_diff_hlID
 f_virtcol2col
 f_wildtrigger
 f_searchcount
@@ -362,3 +363,9 @@ getmark
 # is the word-motion character classifier. Home files normal.c / ops.c.
 do_normal
 char_class
+
+# ── round 17: command-line argument list (eval/funcs.c argc/argv/argidx) ──
+# set_arglist seeds the global arglist from the CLI file args (the standalone
+# counterpart of Vim's file arglist); it is the std-only plumbing between the
+# binary and argv()/argc()/argidx(), with no single Neovim C name.
+set_arglist

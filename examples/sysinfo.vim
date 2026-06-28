@@ -27,10 +27,10 @@ call setcellwidths([[0x2600, 0x26ff, 2]])
 call assert_equal(2, strwidth('☀'))
 call setcellwidths([])
 
-" --- no editor argument list standalone: argc()/argv()/argidx()/arglistid()
-call assert_equal(0, argc())
-call assert_equal([], argv())
-call assert_equal('', argv(0))
+" --- the argument list is the script file(s) on the command line; this script
+"     is the sole argument (see arglist.vim for the full behaviour)
+call assert_equal(1, argc())
+call assert_match('sysinfo\.vim$', argv(0))
 call assert_equal(0, argidx())
 call assert_equal(0, arglistid())
 
