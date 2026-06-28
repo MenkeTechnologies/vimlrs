@@ -68,15 +68,19 @@ use crate::ported::eval::funcs::{
     f_winrestcmd, f_winrestview, f_winsaveview, f_winwidth, f_wordcount, f_xor, float_op_wrapper,
 };
 use crate::ported::eval::funcs::{
-    f_argc, f_argidx, f_arglistid, f_argv, f_assert_equalfile, f_clearmatches, f_complete_info,
-    f_diff_filler, f_digraph_get, f_digraph_getlist, f_digraph_set, f_digraph_setlist,
-    f_foldclosed, f_foldclosedend, f_foldlevel, f_foldtext, f_foldtextresult, f_getcmdline,
-    f_getcmdpos, f_getcmdtype, f_getmatches, f_hasmapto, f_highlight_exists, f_histadd, f_histdel,
-    f_histget, f_histnr, f_hostname, f_iconv, f_indent, f_maparg, f_mapcheck, f_maplist,
-    f_matchadd, f_matchaddpos, f_matcharg, f_matchdelete, f_matchfuzzy, f_matchfuzzypos,
-    f_searchcount, f_setcmdline, f_setcmdpos, f_setmatches, f_sign_define, f_sign_getdefined,
+    f_argc, f_argidx, f_arglistid, f_argv, f_assert_equalfile, f_cindent, f_clearmatches,
+    f_cmdcomplete_info, f_complete_add, f_complete_check, f_complete_info, f_diff_filler,
+    f_digraph_get, f_digraph_getlist, f_digraph_set, f_digraph_setlist, f_foldclosed,
+    f_foldclosedend, f_foldlevel, f_foldtext, f_foldtextresult, f_getchar, f_getcharmod,
+    f_getcharstr, f_getcmdcomplpat, f_getcmdcompltype, f_getcmdline, f_getcmdpos, f_getcmdprompt,
+    f_getcmdscreenpos, f_getcmdtype, f_getcompletion, f_getloclist, f_getmatches, f_getqflist,
+    f_hasmapto, f_highlight_exists, f_histadd, f_histdel, f_histget, f_histnr, f_hostname, f_iconv,
+    f_indent, f_lispindent, f_maparg, f_mapcheck, f_maplist, f_matchadd, f_matchaddpos, f_matcharg,
+    f_matchdelete, f_matchfuzzy, f_matchfuzzypos, f_menu_info, f_searchcount, f_setcmdline,
+    f_setcmdpos, f_setloclist, f_setmatches, f_setqflist, f_sign_define, f_sign_getdefined,
     f_sign_getplaced, f_sign_jump, f_sign_place, f_sign_placelist, f_sign_undefine, f_sign_unplace,
-    f_sign_unplacelist, f_virtcol2col, f_wildtrigger,
+    f_sign_unplacelist, f_test_garbagecollect_now, f_test_write_list_log, f_virtcol2col,
+    f_wildtrigger,
 };
 use crate::ported::eval::list::{
     f_count, f_extend, f_extendnew, f_filter, f_foreach, f_map, f_mapnew, f_remove,
@@ -1038,6 +1042,46 @@ pub const VIML_FN_WILDTRIGGER: u16 = 3524;
 pub const VIML_FN_SEARCHCOUNT: u16 = 3525;
 /// `complete_info()`
 pub const VIML_FN_COMPLETE_INFO: u16 = 3526;
+/// `setqflist()`
+pub const VIML_FN_SETQFLIST: u16 = 3527;
+/// `getqflist()`
+pub const VIML_FN_GETQFLIST: u16 = 3528;
+/// `setloclist()`
+pub const VIML_FN_SETLOCLIST: u16 = 3529;
+/// `getloclist()`
+pub const VIML_FN_GETLOCLIST: u16 = 3530;
+/// `getcompletion()`
+pub const VIML_FN_GETCOMPLETION: u16 = 3531;
+/// `getchar()`
+pub const VIML_FN_GETCHAR: u16 = 3532;
+/// `getcharstr()`
+pub const VIML_FN_GETCHARSTR: u16 = 3533;
+/// `getcharmod()`
+pub const VIML_FN_GETCHARMOD: u16 = 3534;
+/// `getcmdprompt()`
+pub const VIML_FN_GETCMDPROMPT: u16 = 3535;
+/// `getcmdscreenpos()`
+pub const VIML_FN_GETCMDSCREENPOS: u16 = 3536;
+/// `getcmdcompltype()`
+pub const VIML_FN_GETCMDCOMPLTYPE: u16 = 3537;
+/// `getcmdcomplpat()`
+pub const VIML_FN_GETCMDCOMPLPAT: u16 = 3538;
+/// `cindent()`
+pub const VIML_FN_CINDENT: u16 = 3539;
+/// `lispindent()`
+pub const VIML_FN_LISPINDENT: u16 = 3540;
+/// `complete_add()`
+pub const VIML_FN_COMPLETE_ADD: u16 = 3541;
+/// `complete_check()`
+pub const VIML_FN_COMPLETE_CHECK: u16 = 3542;
+/// `cmdcomplete_info()`
+pub const VIML_FN_CMDCOMPLETE_INFO: u16 = 3543;
+/// `menu_info()`
+pub const VIML_FN_MENU_INFO: u16 = 3544;
+/// `test_garbagecollect_now()`
+pub const VIML_FN_TEST_GARBAGECOLLECT_NOW: u16 = 3545;
+/// `test_write_list_log()`
+pub const VIML_FN_TEST_WRITE_LIST_LOG: u16 = 3546;
 /// `flattennew()`
 pub const VIML_FN_FLATTENNEW: u16 = 3211;
 /// `sha256()`
@@ -3063,6 +3107,46 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FN_SEARCHCOUNT, |vm, n| call_func(vm, n, f_searchcount));
     vm.register_builtin(VIML_FN_COMPLETE_INFO, |vm, n| {
         call_func(vm, n, f_complete_info)
+    });
+    vm.register_builtin(VIML_FN_SETQFLIST, |vm, n| call_func(vm, n, f_setqflist));
+    vm.register_builtin(VIML_FN_GETQFLIST, |vm, n| call_func(vm, n, f_getqflist));
+    vm.register_builtin(VIML_FN_SETLOCLIST, |vm, n| call_func(vm, n, f_setloclist));
+    vm.register_builtin(VIML_FN_GETLOCLIST, |vm, n| call_func(vm, n, f_getloclist));
+    vm.register_builtin(VIML_FN_GETCOMPLETION, |vm, n| {
+        call_func(vm, n, f_getcompletion)
+    });
+    vm.register_builtin(VIML_FN_GETCHAR, |vm, n| call_func(vm, n, f_getchar));
+    vm.register_builtin(VIML_FN_GETCHARSTR, |vm, n| call_func(vm, n, f_getcharstr));
+    vm.register_builtin(VIML_FN_GETCHARMOD, |vm, n| call_func(vm, n, f_getcharmod));
+    vm.register_builtin(VIML_FN_GETCMDPROMPT, |vm, n| {
+        call_func(vm, n, f_getcmdprompt)
+    });
+    vm.register_builtin(VIML_FN_GETCMDSCREENPOS, |vm, n| {
+        call_func(vm, n, f_getcmdscreenpos)
+    });
+    vm.register_builtin(VIML_FN_GETCMDCOMPLTYPE, |vm, n| {
+        call_func(vm, n, f_getcmdcompltype)
+    });
+    vm.register_builtin(VIML_FN_GETCMDCOMPLPAT, |vm, n| {
+        call_func(vm, n, f_getcmdcomplpat)
+    });
+    vm.register_builtin(VIML_FN_CINDENT, |vm, n| call_func(vm, n, f_cindent));
+    vm.register_builtin(VIML_FN_LISPINDENT, |vm, n| call_func(vm, n, f_lispindent));
+    vm.register_builtin(VIML_FN_COMPLETE_ADD, |vm, n| {
+        call_func(vm, n, f_complete_add)
+    });
+    vm.register_builtin(VIML_FN_COMPLETE_CHECK, |vm, n| {
+        call_func(vm, n, f_complete_check)
+    });
+    vm.register_builtin(VIML_FN_CMDCOMPLETE_INFO, |vm, n| {
+        call_func(vm, n, f_cmdcomplete_info)
+    });
+    vm.register_builtin(VIML_FN_MENU_INFO, |vm, n| call_func(vm, n, f_menu_info));
+    vm.register_builtin(VIML_FN_TEST_GARBAGECOLLECT_NOW, |vm, n| {
+        call_func(vm, n, f_test_garbagecollect_now)
+    });
+    vm.register_builtin(VIML_FN_TEST_WRITE_LIST_LOG, |vm, n| {
+        call_func(vm, n, f_test_write_list_log)
     });
     vm.register_builtin(VIML_SET_LINENO, b_set_lineno);
     vm.register_builtin(VIML_CALL_USER, b_call_user);

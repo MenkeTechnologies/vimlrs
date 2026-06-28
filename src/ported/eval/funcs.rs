@@ -4810,3 +4810,330 @@ pub fn f_complete_info(_argvars: &[typval_T], rettv: &mut typval_T) {
     );
     tv_dict_add_nr(&mut db, "selected", -1);
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// Round-4 builtin expansion. The quickfix/location lists (quickfix.c) are real
+// in-memory error lists standalone; getcompletion() does real environment/file
+// completion; the remaining input/indent/completion/menu queries return their
+// documented "no editor" values. All outside the vendored csrc/eval/ tree.
+// ════════════════════════════════════════════════════════════════════════════
+
+// ── getqflist()/setqflist()/getloclist()/setloclist() — Neovim quickfix.c. ──
+
+thread_local! {
+    /// The quickfix list (`qf_list` in quickfix.c): `(entries, title)`.
+    static QFLIST: std::cell::RefCell<(Vec<typval_T>, String)> =
+        const { std::cell::RefCell::new((Vec::new(), String::new())) };
+    /// The location list (one window standalone): `(entries, title)`.
+    static LOCLIST: std::cell::RefCell<(Vec<typval_T>, String)> =
+        const { std::cell::RefCell::new((Vec::new(), String::new())) };
+}
+
+/// Build a normalized quickfix entry Dict from a user item (Neovim
+/// `qf_add_entry` field population): the full `{bufnr, module, lnum, end_lnum,
+/// col, end_col, vcol, nr, pattern, text, type, valid}` schema with defaults.
+fn qf_add_entry(item: &typval_T) -> typval_T {
+    let d = tv_dict_alloc();
+    let bufnr = sign_dict_nr(item, "bufnr", 0);
+    let lnum = sign_dict_nr(item, "lnum", 0);
+    {
+        let mut db = d.borrow_mut();
+        tv_dict_add_nr(&mut db, "bufnr", bufnr);
+        tv_dict_add_str(&mut db, "module", &sign_dict_str(item, "module", ""));
+        tv_dict_add_nr(&mut db, "lnum", lnum);
+        tv_dict_add_nr(&mut db, "end_lnum", sign_dict_nr(item, "end_lnum", 0));
+        tv_dict_add_nr(&mut db, "col", sign_dict_nr(item, "col", 0));
+        tv_dict_add_nr(&mut db, "end_col", sign_dict_nr(item, "end_col", 0));
+        tv_dict_add_nr(&mut db, "vcol", sign_dict_nr(item, "vcol", 0));
+        tv_dict_add_nr(&mut db, "nr", sign_dict_nr(item, "nr", 0));
+        tv_dict_add_str(&mut db, "pattern", &sign_dict_str(item, "pattern", ""));
+        tv_dict_add_str(&mut db, "text", &sign_dict_str(item, "text", ""));
+        tv_dict_add_str(&mut db, "type", &sign_dict_str(item, "type", ""));
+        // c: an entry is valid when it has a real buffer or line number.
+        let valid = if bufnr > 0 || lnum > 0 { 1 } else { 0 };
+        tv_dict_add_nr(&mut db, "valid", valid);
+    }
+    match_dict_val(d)
+}
+
+/// Apply a `setqflist()`/`setloclist()` operation to one stored list.
+fn qf_set_list(
+    store: &std::cell::RefCell<(Vec<typval_T>, String)>,
+    list: &typval_T,
+    action: &str,
+    what: Option<&typval_T>,
+) -> varnumber_T {
+    let mut s = store.borrow_mut();
+    if action == "f" {
+        s.0.clear();
+        s.1.clear();
+        return 0;
+    }
+    let entries: Vec<typval_T> = match (list.v_type, &list.vval) {
+        (VAR_LIST, v_list(Some(l))) => l
+            .borrow()
+            .lv_items
+            .iter()
+            .filter(|it| it.li_tv.v_type == VAR_DICT)
+            .map(|it| qf_add_entry(&it.li_tv))
+            .collect(),
+        _ => {
+            emsg("E714: List required");
+            return -1;
+        }
+    };
+    if action == "a" {
+        s.0.extend(entries);
+    } else {
+        // c: ' ' (create) and 'r' (replace) both make this the list contents.
+        s.0 = entries;
+    }
+    if let Some(w) = what {
+        if let (VAR_DICT, v_dict(Some(wd))) = (w.v_type, &w.vval) {
+            if let Some(t) = tv_dict_find(&wd.borrow(), "title") {
+                s.1 = tv_get_string(t);
+            }
+        }
+    }
+    0
+}
+
+/// Read a stored quickfix/location list either as the entry List, or — when a
+/// `{what}` Dict is given — as a Dict of the requested properties.
+fn qf_get_list(
+    store: &std::cell::RefCell<(Vec<typval_T>, String)>,
+    what: Option<&typval_T>,
+    rettv: &mut typval_T,
+) {
+    let s = store.borrow();
+    match what {
+        Some(w) if w.v_type == VAR_DICT => {
+            let keys: Vec<String> = match &w.vval {
+                v_dict(Some(wd)) => wd.borrow().dv_hashtab.keys().cloned().collect(),
+                _ => Vec::new(),
+            };
+            let d = tv_dict_alloc_ret(rettv);
+            let mut db = d.borrow_mut();
+            for k in keys {
+                match k.as_str() {
+                    "title" => {
+                        tv_dict_add_str(&mut db, "title", &s.1);
+                    }
+                    "nr" => {
+                        tv_dict_add_nr(&mut db, "nr", 0);
+                    }
+                    "size" => {
+                        tv_dict_add_nr(&mut db, "size", s.0.len() as varnumber_T);
+                    }
+                    "winid" => {
+                        tv_dict_add_nr(&mut db, "winid", 0);
+                    }
+                    "items" => {
+                        let l = tv_list_alloc(s.0.len() as isize);
+                        {
+                            let mut lb = l.borrow_mut();
+                            for e in &s.0 {
+                                tv_list_append_tv(&mut lb, e.clone());
+                            }
+                        }
+                        tv_dict_add_tv(
+                            &mut db,
+                            "items",
+                            typval_T {
+                                v_type: VAR_LIST,
+                                v_lock: VarLockStatus::VAR_UNLOCKED,
+                                vval: v_list(Some(l)),
+                            },
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {
+            let l = tv_list_alloc_ret(rettv, s.0.len() as isize);
+            let mut lb = l.borrow_mut();
+            for e in &s.0 {
+                tv_list_append_tv(&mut lb, e.clone());
+            }
+        }
+    }
+}
+
+/// Port of `f_setqflist()` (Neovim quickfix.c) — set the quickfix list from a
+/// List of entry Dicts. `{action}` ' '/'r' replace, 'a' append, 'f' free.
+/// Returns 0 on success, -1 on error.
+pub fn f_setqflist(argvars: &[typval_T], rettv: &mut typval_T) {
+    let action = if argvars.len() >= 2 {
+        tv_get_string(&argvars[1])
+    } else {
+        String::new()
+    };
+    rettv.vval = v_number(QFLIST.with(|q| qf_set_list(q, &argvars[0], &action, argvars.get(2))));
+}
+
+/// Port of `f_getqflist()` (Neovim quickfix.c) — the quickfix list as a List of
+/// entry Dicts, or a properties Dict when a `{what}` argument is given.
+pub fn f_getqflist(argvars: &[typval_T], rettv: &mut typval_T) {
+    QFLIST.with(|q| qf_get_list(q, argvars.first(), rettv));
+}
+
+/// Port of `f_setloclist()` (Neovim quickfix.c) — like `setqflist()` for the
+/// location list of window `{nr}` (one window standalone). Returns 0 / -1.
+pub fn f_setloclist(argvars: &[typval_T], rettv: &mut typval_T) {
+    let action = if argvars.len() >= 3 {
+        tv_get_string(&argvars[2])
+    } else {
+        String::new()
+    };
+    rettv.vval = v_number(LOCLIST.with(|q| qf_set_list(q, &argvars[1], &action, argvars.get(3))));
+}
+
+/// Port of `f_getloclist()` (Neovim quickfix.c) — the location list of window
+/// `{nr}` as a List of entry Dicts, or a `{what}` properties Dict.
+pub fn f_getloclist(argvars: &[typval_T], rettv: &mut typval_T) {
+    LOCLIST.with(|q| qf_get_list(q, argvars.get(1), rettv));
+}
+
+// ── getcompletion() — Neovim cmdexpand.c. Real environment/file completion. ──
+
+/// Port of `f_getcompletion()` (Neovim cmdexpand.c) — completion candidates for
+/// `{pat}` of `{type}`. `environment` matches env var names; `file`/`dir` walk
+/// the filesystem; unsupported types yield an empty List.
+pub fn f_getcompletion(argvars: &[typval_T], rettv: &mut typval_T) {
+    let pat = tv_get_string(&argvars[0]);
+    let typ = tv_get_string(&argvars[1]);
+    let mut results: Vec<String> = match typ.as_str() {
+        "environment" => std::env::vars()
+            .map(|(k, _)| k)
+            .filter(|k| k.starts_with(&pat))
+            .collect(),
+        "dir" | "file" | "file_in_path" | "buffer" => {
+            // Split the pattern into a directory prefix and a leaf prefix.
+            let (dir, leaf) = match pat.rfind('/') {
+                Some(i) => (&pat[..=i], &pat[i + 1..]),
+                None => ("", pat.as_str()),
+            };
+            let readdir = if dir.is_empty() { "." } else { dir };
+            let mut out = Vec::new();
+            if let Ok(rd) = std::fs::read_dir(readdir) {
+                for e in rd.flatten() {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    if !name.starts_with(leaf) {
+                        continue;
+                    }
+                    let is_dir = e.path().is_dir();
+                    if typ == "dir" && !is_dir {
+                        continue;
+                    }
+                    let mut full = format!("{dir}{name}");
+                    if is_dir {
+                        full.push('/');
+                    }
+                    out.push(full);
+                }
+            }
+            out
+        }
+        _ => Vec::new(),
+    };
+    results.sort();
+    let l = tv_list_alloc_ret(rettv, results.len() as isize);
+    let mut lb = l.borrow_mut();
+    for r in results {
+        tv_list_append_string(&mut lb, &r);
+    }
+}
+
+// ── input / indent / completion / menu queries with a defined standalone
+//    answer (getchar.c / indent.c / insexpand.c / cmdexpand.c / menu.c). ──
+
+/// Port of `f_getchar()` (Neovim getchar.c) — get a typed character. No input
+/// standalone → 0 (also the non-blocking "nothing available" result).
+pub fn f_getchar(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.vval = v_number(0);
+}
+
+/// Port of `f_getcharstr()` (Neovim getchar.c) — like `getchar()` but a String;
+/// no input standalone → "".
+pub fn f_getcharstr(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.v_type = VAR_STRING;
+    rettv.vval = v_string(String::new());
+}
+
+/// Port of `f_getcharmod()` (Neovim getchar.c) — the modifier bitmask of the
+/// last typed character. No input standalone → 0.
+pub fn f_getcharmod(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.vval = v_number(0);
+}
+
+/// Port of `f_getcmdprompt()` (Neovim ex_getln.c) — the `input()`/`:` prompt
+/// text. None active standalone → "".
+pub fn f_getcmdprompt(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.v_type = VAR_STRING;
+    rettv.vval = v_string(String::new());
+}
+
+/// Port of `f_getcmdscreenpos()` (Neovim ex_getln.c) — the screen position of
+/// the command-line cursor. No command line active standalone → 0.
+pub fn f_getcmdscreenpos(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.vval = v_number(0);
+}
+
+/// Port of `f_getcmdcompltype()` (Neovim cmdexpand.c) — the completion type of
+/// the current command line. None active standalone → "".
+pub fn f_getcmdcompltype(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.v_type = VAR_STRING;
+    rettv.vval = v_string(String::new());
+}
+
+/// Port of `f_getcmdcomplpat()` (Neovim cmdexpand.c) — the completion pattern of
+/// the current command line. None active standalone → "".
+pub fn f_getcmdcomplpat(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.v_type = VAR_STRING;
+    rettv.vval = v_string(String::new());
+}
+
+/// Port of `f_cindent()` (Neovim indent.c) — the C-indent for line `{lnum}`. No
+/// buffer standalone → -1.
+pub fn f_cindent(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.vval = v_number(-1);
+}
+
+/// Port of `f_lispindent()` (Neovim indent.c) — the Lisp-indent for line
+/// `{lnum}`. No buffer standalone → -1.
+pub fn f_lispindent(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.vval = v_number(-1);
+}
+
+/// Port of `f_complete_add()` (Neovim insexpand.c) — add a match during insert
+/// completion. Not in insert mode standalone → 0.
+pub fn f_complete_add(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.vval = v_number(0);
+}
+
+/// Port of `f_complete_check()` (Neovim insexpand.c) — whether completion was
+/// interrupted by typed input. None standalone → 0.
+pub fn f_complete_check(_argvars: &[typval_T], rettv: &mut typval_T) {
+    rettv.vval = v_number(0);
+}
+
+/// Port of `f_cmdcomplete_info()` (Neovim cmdexpand.c) — command-line
+/// completion state. None active standalone → an empty Dict.
+pub fn f_cmdcomplete_info(_argvars: &[typval_T], rettv: &mut typval_T) {
+    let _ = tv_dict_alloc_ret(rettv);
+}
+
+/// Port of `f_menu_info()` (Neovim menu.c) — info about menu `{name}`. No menus
+/// standalone → an empty Dict.
+pub fn f_menu_info(_argvars: &[typval_T], rettv: &mut typval_T) {
+    let _ = tv_dict_alloc_ret(rettv);
+}
+
+/// Port of `f_test_garbagecollect_now()` (Neovim eval.c) — force a GC. vimlrs
+/// uses Rust ownership, so there is nothing to collect → no-op.
+pub fn f_test_garbagecollect_now(_argvars: &[typval_T], _rettv: &mut typval_T) {}
+
+/// Port of `f_test_write_list_log()` (Neovim eval.c) — a debug hook that logs
+/// list-allocation activity; no such log standalone → no-op.
+pub fn f_test_write_list_log(_argvars: &[typval_T], _rettv: &mut typval_T) {}

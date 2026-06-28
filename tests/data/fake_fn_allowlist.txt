@@ -226,3 +226,34 @@ f_virtcol2col
 f_wildtrigger
 f_searchcount
 f_complete_info
+
+# ── quickfix.c (not vendored) — quickfix/location lists ──
+# qf_add_entry builds a normalized entry Dict (real Neovim function); qf_set_list
+# / qf_get_list are the shared set/get cores behind set_errorlist/get_errorlist.
+f_setqflist
+f_getqflist
+f_setloclist
+f_getloclist
+qf_add_entry
+qf_set_list
+qf_get_list
+
+# ── cmdexpand.c / getchar.c / indent.c / insexpand.c / menu.c / eval.c ──
+# getcompletion does real environment/file completion; the rest return their
+# documented "no editor" values.
+f_getcompletion
+f_getchar
+f_getcharstr
+f_getcharmod
+f_getcmdprompt
+f_getcmdscreenpos
+f_getcmdcompltype
+f_getcmdcomplpat
+f_cindent
+f_lispindent
+f_complete_add
+f_complete_check
+f_cmdcomplete_info
+f_menu_info
+f_test_garbagecollect_now
+f_test_write_list_log
