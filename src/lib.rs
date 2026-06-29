@@ -26,6 +26,7 @@ pub mod ported;
 
 // Synthesis carve-outs (no `csrc/` counterpart).
 pub mod aot;
+pub mod builtin_docs;
 pub mod cli;
 pub mod compile_viml;
 pub mod dap;

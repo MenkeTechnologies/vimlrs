@@ -32,6 +32,11 @@ crate-type = ["lib", "staticlib"]
 name = "vimlrs"
 path = "src/main.rs"
 
+# Offline generator for docs/reference.html — the full builtin reference page.
+[[bin]]
+name = "gen-docs"
+path = "src/bin/gen_docs.rs"
+
 [dependencies]
 # Language-agnostic bytecode VM + 3-tier Cranelift JIT. VimL has no local
 # vm.rs / jit.rs: lex/parse → AST → lower to fusevm bytecode → fusevm runs it,

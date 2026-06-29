@@ -24,36 +24,8 @@ use lsp_types::{
     TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions, Uri,
 };
 
+use crate::builtin_docs::{hover_markdown, BUILTIN_DOCS, EX_COMMANDS, V_VARS};
 use crate::viml_parser::{parse_stmt, PHASE3_BUILTINS};
-
-/// Ex-command words the Phase-3 statement parser recognizes.
-const EX_COMMANDS: &[&str] = &["echo", "echon", "echomsg", "let", "call", "eval"];
-/// Predefined `v:` constants.
-const V_VARS: &[&str] = &["v:true", "v:false", "v:null"];
-
-/// One-line descriptions for hover / completion docs (Phase-3 builtins).
-const BUILTIN_DOCS: &[(&str, &str)] = &[
-    ("len", "len({expr}) — length of a String/List/Dict/Blob"),
-    ("type", "type({expr}) — the type() code of {expr}"),
-    (
-        "string",
-        "string({expr}) — string() rendering, quoting strings",
-    ),
-    ("empty", "empty({expr}) — 1 if {expr} is empty, else 0"),
-    ("abs", "abs({expr}) — absolute value (Float in → Float out)"),
-    (
-        "str2nr",
-        "str2nr({string}) — leading number parsed from {string}",
-    ),
-    (
-        "str2float",
-        "str2float({string}) — float parsed from {string}",
-    ),
-    (
-        "float2nr",
-        "float2nr({float}) — {float} truncated to a Number",
-    ),
-];
 
 /// Open-document store: uri string → full buffer text (FULL text sync).
 type Docs = HashMap<String, String>;
@@ -227,18 +199,19 @@ fn compute_diagnostics(text: &str) -> Vec<Diagnostic> {
 
 fn completions(_docs: &Docs, _params: CompletionParams) -> CompletionResponse {
     let mut items = Vec::new();
-    for (name, doc) in BUILTIN_DOCS {
+    for (name, sig, doc) in BUILTIN_DOCS {
         items.push(CompletionItem {
             label: format!("{name}()"),
             kind: Some(CompletionItemKind::FUNCTION),
-            detail: Some((*doc).to_string()),
+            detail: Some((*sig).to_string()),
+            documentation: Some(lsp_types::Documentation::String((*doc).to_string())),
             insert_text: Some(format!("{name}(")),
             ..Default::default()
         });
     }
     // Builtins without a doc entry (kept in sync with the parser's table).
     for name in PHASE3_BUILTINS {
-        if !BUILTIN_DOCS.iter().any(|(n, _)| n == name) {
+        if !BUILTIN_DOCS.iter().any(|(n, _, _)| n == name) {
             items.push(CompletionItem {
                 label: format!("{name}()"),
                 kind: Some(CompletionItemKind::FUNCTION),
@@ -246,17 +219,19 @@ fn completions(_docs: &Docs, _params: CompletionParams) -> CompletionResponse {
             });
         }
     }
-    for cmd in EX_COMMANDS {
+    for (cmd, doc) in EX_COMMANDS {
         items.push(CompletionItem {
             label: (*cmd).to_string(),
             kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some((*doc).to_string()),
             ..Default::default()
         });
     }
-    for v in V_VARS {
+    for (v, doc) in V_VARS {
         items.push(CompletionItem {
             label: (*v).to_string(),
             kind: Some(CompletionItemKind::CONSTANT),
+            detail: Some((*doc).to_string()),
             ..Default::default()
         });
     }
@@ -270,14 +245,11 @@ fn hover(docs: &Docs, params: HoverParams) -> Option<Hover> {
     let pos = params.text_document_position_params.position;
     let text = docs.get(uri.as_str())?;
     let word = word_at(text, pos)?;
-    let doc = BUILTIN_DOCS
-        .iter()
-        .find(|(n, _)| *n == word)
-        .map(|(_, d)| *d)?;
+    let value = hover_markdown(&word)?;
     Some(Hover {
         contents: HoverContents::Markup(MarkupContent {
             kind: MarkupKind::Markdown,
-            value: format!("```vim\n{doc}\n```"),
+            value,
         }),
         range: None,
     })
