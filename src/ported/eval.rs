@@ -468,6 +468,29 @@ pub fn typval_tostring(arg: Option<&typval_T>, quotes: bool) -> String {
     }
 }
 
+/// Port of `set_selfdict()` from `Src/eval.c:6014` — bind `selfdict` to the
+/// Funcref/Partial in `rettv` (via [`make_partial`]) unless it is already an
+/// explicitly-bound Partial. RUST-PORT NOTE: self-dict binding is not modeled
+/// (see [`make_partial`]), so this is a no-op.
+pub fn set_selfdict(
+    rettv: &mut typval_T,
+    selfdict: Option<&Rc<std::cell::RefCell<crate::ported::eval::typval_defs_h::dict_T>>>,
+) {
+    make_partial(selfdict, rettv);
+}
+
+/// Port of `make_partial()` from `Src/eval.c:3803` — turn a `dict.Func` access
+/// into a Partial bound to `selfdict`. RUST-PORT NOTE: dict-function (`FC_DICT`)
+/// tracking is not modeled (`UserFuncDef` has no `dict` attribute) and the
+/// bridge's call path ignores a Partial's self dict, so self-dict binding is
+/// absent — this is a no-op, leaving `rettv` as the plain Funcref (matching the
+/// interpreter's behavior, where `dict.Func` is not self-bound).
+pub fn make_partial(
+    _selfdict: Option<&Rc<std::cell::RefCell<crate::ported::eval::typval_defs_h::dict_T>>>,
+    _rettv: &mut typval_T,
+) {
+}
+
 /// Port of `partial_name()` from `Src/eval.c:3810` — the function name a partial
 /// resolves to. RUST-PORT NOTE: `pt_func` (the resolved `ufunc_T`) is not
 /// modeled, so only the `pt_name` branch applies; an empty name yields `""`.
@@ -782,6 +805,118 @@ pub fn eval_call_provider(
     typval_T::from(0)
 }
 
+// ── evalarg_T / lval_T lifecycle (Src/eval.c) ──
+//
+// RUST-PORT NOTE: the C `evalarg_T` (expression-evaluation context) and `lval_T`
+// (parsed assignment target) belong to the C tree-walker, which the fusevm
+// carve-out replaces with its own parser state. These structs are never
+// allocated standalone, so their setup/teardown is a no-op.
+
+/// Port of `fill_evalarg_from_eap()` from `Src/eval.c:229` — populate an
+/// `evalarg_T` from an `:`-command. The carve-out parser owns evaluation
+/// context, so the C struct is unused → no-op.
+pub fn fill_evalarg_from_eap() {}
+
+/// Port of `clear_evalarg()` from `Src/eval.c:1754` — free an `evalarg_T`'s
+/// owned strings; `Drop`-managed / struct unused → no-op.
+pub fn clear_evalarg() {}
+
+/// Port of `clear_lval()` from `Src/eval.c:1279` — free a parsed `lval_T`;
+/// `Drop`-managed / struct unused → no-op.
+pub fn clear_lval() {}
+
+/// Port of `last_set_msg()` from `Src/eval.c:6345` — print where an option or
+/// variable was last set (`:verbose set`). No interactive verbose output
+/// standalone → no-op (mirrors the `list_*_vars` listing ports).
+pub fn last_set_msg() {}
+
+// ── editor-absent hooks (Src/eval.c) ──
+//
+// RUST-PORT NOTE: vimlrs is a standalone evaluator with no windows, fold engine,
+// or interactive command line. These hooks into those subsystems are never
+// reached, so they return the "nothing" value (faithful absence).
+
+/// Port of `eval_foldexpr()` from `Src/eval.c:714` — evaluate a window's
+/// `'foldexpr'` to a fold level. No windows/fold engine standalone → level 0.
+pub fn eval_foldexpr() -> i32 {
+    0
+}
+
+/// Port of `eval_foldtext()` from `Src/eval.c:765` — evaluate `'foldtext'` to the
+/// folded-line display text. No fold engine standalone → empty.
+pub fn eval_foldtext() -> String {
+    String::new()
+}
+
+/// Port of `set_context_for_expression()` from `Src/eval.c:1571` — set the
+/// command-line completion context for an expression. No interactive completion
+/// standalone → no-op.
+pub fn set_context_for_expression() {}
+
+// ── jobs / channels (Src/eval.c) ──
+//
+// RUST-PORT NOTE: vimlrs has no event loop and no job/channel subsystem, so a
+// job lookup never resolves and callback registration does nothing (faithful
+// absence, same basis as the timer ports).
+
+/// Port of `find_job()` from `Src/eval.c:6502` — look up a job/channel by id.
+/// No jobs exist standalone → `None`.
+pub fn find_job() -> Option<u64> {
+    None
+}
+
+/// Port of `common_job_callbacks()` from `Src/eval.c:6478` — wire up a job's
+/// stdout/stderr/exit callbacks. No job subsystem → nothing to register → false.
+pub fn common_job_callbacks() -> bool {
+    false
+}
+
+// ── timers (Src/eval.c) ──
+//
+// RUST-PORT NOTE: vimlrs has no event loop, so timers cannot be scheduled and
+// their libuv callbacks never fire (the same basis as the `f_timer_*` builtins,
+// which already return -1/empty). These are faithful "no event loop" no-ops,
+// the same category as the prompt/provider/redir absence ports.
+
+/// Port of `timer_start()` from `Src/eval.c:5069` — create and schedule a timer.
+/// No event loop → cannot schedule → returns timer id `0` (failure).
+pub fn timer_start(
+    _timeout: i64,
+    _repeat_count: i32,
+    _callback: &crate::ported::eval::typval::Callback,
+) -> u64 {
+    0
+}
+
+/// Port of `timer_stop()` from `Src/eval.c:5091` — stop a timer; none exist, no-op.
+pub fn timer_stop() {}
+
+/// Port of `timer_decref()` from `Src/eval.c:5113` — drop a timer reference;
+/// `Rc`/no-event-loop, no-op.
+pub fn timer_decref() {}
+
+/// Port of `timer_due_cb()` from `Src/eval.c:5019` — the libuv "timer fired"
+/// callback; never fires without an event loop, no-op.
+pub fn timer_due_cb() {}
+
+/// Port of `timer_close_cb()` from `Src/eval.c:5104` — the libuv "timer closed"
+/// callback; never fires, no-op.
+pub fn timer_close_cb() {}
+
+/// Port of `find_timer_by_nr()` from `Src/eval.c:4980` — look up a timer by id.
+/// No timers exist → `None`.
+pub fn find_timer_by_nr() -> Option<u64> {
+    None
+}
+
+/// Port of `add_timer_info()` from `Src/eval.c:4985` — append one timer's info
+/// dict to a List; no timers exist, no-op.
+pub fn add_timer_info() {}
+
+/// Port of `add_timer_info_all()` from `Src/eval.c:5007` — append every timer's
+/// info; no timers exist, so the List stays empty, no-op.
+pub fn add_timer_info_all() {}
+
 /// Port of `prompt_get_input()` from `Src/eval.c:6669` — the current user input
 /// in a prompt buffer. No prompt buffer standalone → `None`.
 pub fn prompt_get_input() -> Option<String> {
@@ -895,6 +1030,212 @@ pub fn string_slice(
         return None;
     }
     Some(str[start_byte..end_byte].to_string())
+}
+
+/// Port of `eval7_leader()` from `Src/eval.c:2794`.
+///
+/// Apply the unary leader prefixes `leaders` (already parsed) to `rettv`, in
+/// reverse order: `!` is logical-not (→ Number 0/1), `-` negates, `+` forces a
+/// Number. With `numeric_only`, a `!` stops processing. Returns [`OK`]/[`FAIL`]
+/// (non-numeric value).
+pub fn eval7_leader(rettv: &mut typval_T, numeric_only: bool, leaders: &str) -> i32 {
+    let is_float = rettv.v_type == VAR_FLOAT;
+    let mut f = if is_float { crate::ported::eval::typval::tv_get_float(rettv) } else { 0.0 };
+    let mut error = false;
+    let mut val = if is_float { 0 } else { tv_get_number_chk(rettv, Some(&mut error)) };
+    if error {
+        return FAIL;
+    }
+    let mut cur_float = is_float;
+    for c in leaders.chars().rev() {
+        match c {
+            '!' => {
+                if numeric_only {
+                    break;
+                }
+                if cur_float {
+                    val = i64::from(f == 0.0);
+                    cur_float = false;
+                } else {
+                    val = i64::from(val == 0);
+                }
+            }
+            '-' => {
+                if cur_float {
+                    f = -f;
+                } else {
+                    val = -val;
+                }
+            }
+            _ => {} // '+' — no-op (forces Number)
+        }
+    }
+    *rettv = if cur_float {
+        typval_T { v_type: VAR_FLOAT, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_float(f) }
+    } else {
+        typval_T::from(val)
+    };
+    OK
+}
+
+// ── binary-operator helpers (Src/eval.c) ──
+//
+// The per-operator semantics behind `eval5`/`eval6` (`+`/`-`/`.`/`*`/`/`),
+// alongside the already-ported `num_divide`/`num_modulus`. Each combines `tv2`
+// into `tv1` in place.
+
+/// Port of `eval_addblob()` from `Src/eval.c:2256` — concatenate Blobs
+/// `tv1 ++ tv2` into `tv1`.
+pub fn eval_addblob(tv1: &mut typval_T, tv2: &typval_T) {
+    let bytes = |tv: &typval_T| -> Vec<u8> {
+        match &tv.vval {
+            v_blob(Some(b)) => b.borrow().bv_ga.clone(),
+            _ => Vec::new(),
+        }
+    };
+    let mut joined = bytes(tv1);
+    joined.extend(bytes(tv2));
+    let nb = crate::ported::eval::typval::tv_blob_alloc();
+    nb.borrow_mut().bv_ga = joined;
+    crate::ported::eval::typval::tv_blob_set_ret(tv1, nb);
+}
+
+/// Port of `eval_addlist()` from `Src/eval.c:2230` — copy List `tv1` and append
+/// List `tv2`, storing the result in `tv1`. Returns [`OK`]/[`FAIL`].
+pub fn eval_addlist(tv1: &mut typval_T, tv2: &typval_T) -> i32 {
+    let l1 = match &tv1.vval {
+        v_list(l) => l.clone(),
+        _ => None,
+    };
+    let l2 = match &tv2.vval {
+        v_list(l) => l.clone(),
+        _ => None,
+    };
+    let mut var3 = typval_T::from(0);
+    if crate::ported::eval::typval::tv_list_concat(l1.as_ref(), l2.as_ref(), &mut var3) == FAIL {
+        return FAIL;
+    }
+    *tv1 = var3;
+    OK
+}
+
+/// Port of `eval_concat_str()` from `Src/eval.c:2288` — concatenate the string
+/// values of `tv1` and `tv2` into `tv1`. Returns [`OK`]/[`FAIL`] (type error).
+pub fn eval_concat_str(tv1: &mut typval_T, tv2: &typval_T) -> i32 {
+    let s2 = match crate::ported::eval::typval::tv_get_string_chk(tv2) {
+        Some(s) => s,
+        None => return FAIL,
+    };
+    if grow_string_tv(tv1, &s2) == OK {
+        return OK;
+    }
+    let s1 = tv_get_string(tv1);
+    *tv1 = typval_T::from(format!("{s1}{s2}"));
+    OK
+}
+
+/// Port of `eval_addsub_number()` from `Src/eval.c:2316` — add (`op == b'+'`) or
+/// subtract `tv2` from `tv1`, as Number or (if either is Float) Float, into
+/// `tv1`. Returns [`OK`]/[`FAIL`] (non-numeric operand).
+pub fn eval_addsub_number(tv1: &mut typval_T, tv2: &typval_T, op: u8) -> i32 {
+    let f = tv1.v_type == VAR_FLOAT || tv2.v_type == VAR_FLOAT;
+    let mut error = false;
+    let n1 = if tv1.v_type == VAR_FLOAT { 0 } else { tv_get_number_chk(tv1, Some(&mut error)) };
+    if error {
+        return FAIL;
+    }
+    let n2 = if tv2.v_type == VAR_FLOAT { 0 } else { tv_get_number_chk(tv2, Some(&mut error)) };
+    if error {
+        return FAIL;
+    }
+    if f {
+        let a = if tv1.v_type == VAR_FLOAT { crate::ported::eval::typval::tv_get_float(tv1) } else { n1 as f64 };
+        let b = if tv2.v_type == VAR_FLOAT { crate::ported::eval::typval::tv_get_float(tv2) } else { n2 as f64 };
+        *tv1 = typval_T {
+            v_type: VAR_FLOAT,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_float(if op == b'+' { a + b } else { a - b }),
+        };
+    } else {
+        *tv1 = typval_T::from(if op == b'+' { n1 + n2 } else { n1 - n2 });
+    }
+    OK
+}
+
+/// Port of `eval_multdiv_number()` from `Src/eval.c:2456` — multiply (`*`),
+/// divide (`/`), or modulo (`%`) `tv1` by `tv2` into `tv1`. Float when either is
+/// Float (`%` on a Float is the error `E804`); Number division/modulo go through
+/// [`num_divide`]/[`num_modulus`]. Returns [`OK`]/[`FAIL`].
+pub fn eval_multdiv_number(tv1: &mut typval_T, tv2: &typval_T, op: u8) -> i32 {
+    let use_float = tv1.v_type == VAR_FLOAT || tv2.v_type == VAR_FLOAT;
+    let mut error = false;
+    let n1 = if tv1.v_type == VAR_FLOAT { 0 } else { tv_get_number_chk(tv1, Some(&mut error)) };
+    if error {
+        return FAIL;
+    }
+    let n2 = if tv2.v_type == VAR_FLOAT { 0 } else { tv_get_number_chk(tv2, Some(&mut error)) };
+    if error {
+        return FAIL;
+    }
+    if use_float {
+        let f1 = if tv1.v_type == VAR_FLOAT { crate::ported::eval::typval::tv_get_float(tv1) } else { n1 as f64 };
+        let f2 = if tv2.v_type == VAR_FLOAT { crate::ported::eval::typval::tv_get_float(tv2) } else { n2 as f64 };
+        let r = match op {
+            b'*' => f1 * f2,
+            b'/' => {
+                if f2 == 0.0 {
+                    if f1 == 0.0 {
+                        f64::NAN
+                    } else if f1 > 0.0 {
+                        f64::INFINITY
+                    } else {
+                        f64::NEG_INFINITY
+                    }
+                } else {
+                    f1 / f2
+                }
+            }
+            _ => {
+                emsg("E804: Cannot use '%' with Float");
+                return FAIL;
+            }
+        };
+        *tv1 = typval_T { v_type: VAR_FLOAT, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_float(r) };
+    } else {
+        let r = match op {
+            b'*' => n1.wrapping_mul(n2),
+            b'/' => num_divide(n1, n2),
+            _ => num_modulus(n1, n2),
+        };
+        *tv1 = typval_T::from(r);
+    }
+    OK
+}
+
+/// Port of `do_string_sub()` from `Src/eval.c:6377`.
+///
+/// Substitute `pat` with `sub` in `str` (the engine behind `substitute()`);
+/// `flags` may contain `g`. A `\=expr` replacement is evaluated via the regex
+/// engine's substitute-expression hook. RUST-PORT NOTE: the C `expr` typval and
+/// `ret_len` out-param are folded into `crate::viml_regex::regex_substitute`.
+pub fn do_string_sub(str: &str, pat: &str, sub: &str, flags: &str) -> String {
+    crate::viml_regex::regex_substitute(str, pat, sub, flags)
+}
+
+/// Port of `make_expanded_name()` from `Src/eval.c:5708`.
+///
+/// Expand the `{expr}` curly braces in a variable/function name: evaluate the
+/// expression between `expr_start` (the `{`) and `expr_end` (the `}`) in `name`,
+/// splice its string value in, then recurse for any further `{…}`. Returns the
+/// fully-expanded name, or `None` if an `{expr}` fails to evaluate.
+pub fn make_expanded_name(name: &str, expr_start: usize, expr_end: usize) -> Option<String> {
+    let val = eval_to_string(&name[expr_start + 1..expr_end])?;
+    let expanded = format!("{}{}{}", &name[..expr_start], val, &name[expr_end + 1..]);
+    // Recurse if the spliced-in result still contains a `{…}` group.
+    match find_name_end(&expanded, 0) {
+        (_, Some(es), Some(ee)) => make_expanded_name(&expanded, es, ee),
+        _ => Some(expanded),
+    }
 }
 
 /// Port of `to_name_end()` from `Src/eval.c:805`.
@@ -1036,6 +1377,206 @@ pub fn get_literal_key(arg: &str) -> Option<(String, &str)> {
     Some((key, rest))
 }
 
+/// Port of `string_to_list()` from `Src/eval.c:4703`.
+///
+/// Split a string into a List of lines (used by `systemlist()`): NL separates
+/// items and embedded NUL maps to NL. With `keepempty` false a single trailing
+/// NL is dropped first, so it does not yield a trailing empty item.
+pub fn string_to_list(
+    s: &str,
+    keepempty: bool,
+) -> Rc<std::cell::RefCell<crate::ported::eval::typval_defs_h::list_T>> {
+    let s = if !keepempty && s.ends_with('\n') {
+        &s[..s.len() - 1]
+    } else {
+        s
+    };
+    let list = crate::ported::eval::typval::tv_list_alloc(-1);
+    crate::ported::eval::encode::encode_list_write(&mut list.borrow_mut(), s);
+    list
+}
+
+/// Port of `save_tv_as_string()` from `Src/eval.c:5143`.
+///
+/// Render `tv` as the byte string `writefile()`/channel-send would emit: a List
+/// of strings is joined by NL (or CRLF when `crlf`), with a trailing separator
+/// when `endnl` and each item's embedded NL mapped to NUL; a scalar is its
+/// string value. Returns `None` for an Unknown value or a Number (the C treats
+/// a Number as a buffer id, but no buffers exist standalone).
+pub fn save_tv_as_string(tv: &typval_T, endnl: bool, crlf: bool) -> Option<String> {
+    match tv.v_type {
+        VAR_UNKNOWN | VAR_NUMBER => None,
+        VAR_LIST => match &tv.vval {
+            v_list(Some(l)) => {
+                let l = l.borrow();
+                let mut out = String::new();
+                let n = l.lv_items.len();
+                for (i, it) in l.lv_items.iter().enumerate() {
+                    out.push_str(&tv_get_string(&it.li_tv).replace('\n', "\0"));
+                    if endnl || i + 1 < n {
+                        if crlf {
+                            out.push('\r');
+                        }
+                        out.push('\n');
+                    }
+                }
+                Some(out)
+            }
+            _ => Some(String::new()),
+        },
+        _ => Some(tv_get_string(tv)),
+    }
+}
+
+/// Port of `eval_index()` from `Src/eval.c:3092`.
+///
+/// Apply one subscript `subscript` (`.name`, `[expr]`, or `[a:b]`) to `rettv`.
+/// Index expressions are evaluated via `EVAL_STRING_HOOK` and applied with
+/// [`eval_index_inner`]. Returns [`OK`]/[`FAIL`]. RUST-PORT NOTE: the C parses
+/// the subscript off the expression; here one isolated subscript is passed in.
+pub fn eval_index(rettv: &mut typval_T, subscript: &str, verbose: bool) -> i32 {
+    if check_can_index(rettv, true, verbose) != OK {
+        return FAIL;
+    }
+    let eval = |e: &str| -> Option<typval_T> {
+        crate::ported::eval::typval::EVAL_STRING_HOOK.with(|h| *h.borrow()).and_then(|f| f(e))
+    };
+    if let Some(key) = subscript.strip_prefix('.') {
+        return eval_index_inner(rettv, false, None, None, false, Some(key), verbose);
+    }
+    let inner = match subscript.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+        Some(i) => i,
+        None => return FAIL,
+    };
+    // Find a top-level ':' (range), balancing brackets and skipping strings.
+    let colon = {
+        let b = inner.as_bytes();
+        let (mut depth, mut i, mut pos) = (0i32, 0usize, None);
+        while i < b.len() {
+            match b[i] {
+                b'\'' => { i += 1; while i < b.len() && b[i] != b'\'' { i += 1; } }
+                b'"' => { i += 1; while i < b.len() && b[i] != b'"' { if b[i] == b'\\' && i + 1 < b.len() { i += 1; } i += 1; } }
+                b'[' | b'(' | b'{' => depth += 1,
+                b']' | b')' | b'}' => depth -= 1,
+                b':' if depth == 0 => { pos = Some(i); break; }
+                _ => {}
+            }
+            i += 1;
+        }
+        pos
+    };
+    let parse_side = |s: &str| -> Result<Option<typval_T>, ()> {
+        let s = s.trim();
+        if s.is_empty() {
+            Ok(None)
+        } else {
+            eval(s).map(Some).ok_or(())
+        }
+    };
+    match colon {
+        None => {
+            let n1 = match eval(inner.trim()) {
+                Some(v) => v,
+                None => return FAIL,
+            };
+            eval_index_inner(rettv, false, Some(&n1), None, false, None, verbose)
+        }
+        Some(c) => {
+            let (Ok(v1), Ok(v2)) = (parse_side(&inner[..c]), parse_side(&inner[c + 1..])) else {
+                return FAIL;
+            };
+            eval_index_inner(rettv, true, v1.as_ref(), v2.as_ref(), false, None, verbose)
+        }
+    }
+}
+
+/// Port of `eval_index_inner()` from `Src/eval.c:3237`.
+///
+/// Apply a subscript (`var1`) or slice (`var1:var2`, `exclusive` for `slice()`)
+/// — or a Dict key — to `rettv`, in place. RUST-PORT NOTE: unlike the C's
+/// byte-indexed String path, the String case is character-indexed (via the
+/// ported `string_slice`/`char_from_string`), matching the interpreter's
+/// char-based string subscripting. Returns [`OK`]/[`FAIL`].
+#[allow(clippy::too_many_arguments)]
+pub fn eval_index_inner(
+    rettv: &mut typval_T,
+    is_range: bool,
+    var1: Option<&typval_T>,
+    var2: Option<&typval_T>,
+    exclusive: bool,
+    key: Option<&str>,
+    verbose: bool,
+) -> i32 {
+    let n1 = if var1.is_some() && rettv.v_type != VAR_DICT {
+        tv_get_number_chk(var1.unwrap(), None)
+    } else {
+        0
+    };
+    let n2 = if is_range {
+        if rettv.v_type == VAR_DICT {
+            if verbose {
+                emsg("E719: Cannot slice a Dictionary");
+            }
+            return FAIL;
+        }
+        var2.map_or(VARNUMBER_MAX, |t| tv_get_number_chk(t, None))
+    } else {
+        0
+    };
+
+    match rettv.v_type {
+        VAR_BOOL | VAR_SPECIAL | VAR_FUNC | VAR_FLOAT | VAR_PARTIAL | VAR_UNKNOWN => OK,
+        VAR_NUMBER | VAR_STRING => {
+            let s = tv_get_string(rettv);
+            let v = if is_range {
+                string_slice(&s, n1, n2, exclusive)
+            } else {
+                char_from_string(&s, n1)
+            };
+            *rettv = typval_T::from(v.unwrap_or_default());
+            OK
+        }
+        VAR_BLOB => {
+            let b = match &rettv.vval {
+                v_blob(Some(b)) => b.clone(),
+                _ => return OK,
+            };
+            let bb = b.borrow();
+            crate::ported::eval::typval::tv_blob_slice_or_index(&bb, is_range, n1, n2, exclusive, rettv)
+        }
+        VAR_LIST => {
+            let l = match &rettv.vval {
+                v_list(Some(l)) => l.clone(),
+                _ => return OK,
+            };
+            crate::ported::eval::typval::tv_list_slice_or_index(&l, is_range, n1, n2, exclusive, rettv, verbose)
+        }
+        VAR_DICT => {
+            let d = match &rettv.vval {
+                v_dict(Some(d)) => d.clone(),
+                _ => return FAIL,
+            };
+            let k = match key.map(String::from).or_else(|| var1.and_then(crate::ported::eval::typval::tv_get_string_chk)) {
+                Some(k) => k,
+                None => return FAIL,
+            };
+            let found = crate::ported::eval::typval::tv_dict_find(&d.borrow(), &k).cloned();
+            match found {
+                Some(v) if !tv_is_luafunc(&v) => {
+                    *rettv = v;
+                    OK
+                }
+                _ => {
+                    if verbose {
+                        emsg(&format!("E716: Key not present in Dictionary: \"{k}\""));
+                    }
+                    FAIL
+                }
+            }
+        }
+    }
+}
+
 /// Port of `check_can_index()` from `Src/eval.c:3181`.
 ///
 /// Whether `rettv` may be subscripted/sliced: Funcref/Partial, Float,
@@ -1116,6 +1657,217 @@ pub fn var_flavour(varname: &str) -> var_flavour_T {
             }
         }
         _ => VAR_FLAVOUR_DEFAULT,
+    }
+}
+
+// ── string-expression evaluation entry points (Src/eval.c) ──
+//
+// RUST-PORT NOTE: the C `eval0`…`eval7` recursive tree-walker is replaced by the
+// fusevm carve-out; these high-level wrappers (which in C drive `eval0`) instead
+// compile-and-run the expression string through the bridge's `EVAL_STRING_HOOK`,
+// producing the same result. `None` on a parse/eval error.
+
+/// Port of `eval_expr_string()` from `Src/eval.c:367` — evaluate the string in
+/// `expr` as an expression, storing the result in `rettv`. Returns
+/// [`OK`]/[`FAIL`].
+pub fn eval_expr_string(expr: &typval_T, rettv: &mut typval_T) -> i32 {
+    let s = tv_get_string(expr);
+    match crate::ported::eval::typval::EVAL_STRING_HOOK.with(|h| *h.borrow()).and_then(|f| f(s.trim_start())) {
+        Some(result) => {
+            *rettv = result;
+            OK
+        }
+        None => FAIL,
+    }
+}
+
+/// Port of `eval_to_string_eap()` from `Src/eval.c:510` — evaluate expression
+/// string `arg` and render the result with [`typval2string`] (`join_list`
+/// controls List rendering). RUST-PORT NOTE: the C `exarg_T` and
+/// `use_simple_function` are not modeled.
+pub fn eval_to_string_eap(arg: &str, join_list: bool) -> Option<String> {
+    crate::ported::eval::typval::EVAL_STRING_HOOK
+        .with(|h| *h.borrow())
+        .and_then(|f| f(arg))
+        .map(|tv| typval2string(&tv, join_list))
+}
+
+/// Port of `eval_to_string()` from `Src/eval.c:531` — evaluate expression string
+/// `arg` and return the result rendered as a String, or `None` on error.
+pub fn eval_to_string(arg: &str) -> Option<String> {
+    eval_to_string_eap(arg, false)
+}
+
+/// Port of `eval_to_string_safe()` from `Src/eval.c:540` — [`eval_to_string`]
+/// without the caller's local variables and under textlock. RUST-PORT NOTE: the
+/// sandbox/textlock/funccal save-restore are not modeled standalone.
+pub fn eval_to_string_safe(arg: &str) -> Option<String> {
+    eval_to_string_eap(arg, false)
+}
+
+/// Port of `eval_to_string_skip()` from `Src/eval.c:433` — evaluate `arg` to a
+/// String, or `None` when `skip` (parse-only, no evaluation).
+pub fn eval_to_string_skip(arg: &str, skip: bool) -> Option<String> {
+    if skip {
+        None
+    } else {
+        eval_to_string_eap(arg, false)
+    }
+}
+
+/// Port of `eval_expr_ext()` from `Src/eval.c:598` — evaluate expression string
+/// `arg`, returning the resulting value or `None`. RUST-PORT NOTE: the C
+/// `exarg_T`/`use_simple_function` are not modeled (same as [`eval_expr`]).
+pub fn eval_expr_ext(arg: &str) -> Option<typval_T> {
+    eval_expr(arg)
+}
+
+/// Port of `eval_to_number()` from `Src/eval.c:563` — evaluate expression string
+/// `arg` and return the result as a Number (`-1` on error).
+pub fn eval_to_number(arg: &str) -> varnumber_T {
+    crate::ported::eval::typval::EVAL_STRING_HOOK
+        .with(|h| *h.borrow())
+        .and_then(|f| f(arg))
+        .map_or(-1, |tv| tv_get_number_chk(&tv, None))
+}
+
+/// Port of `eval_expr()` from `Src/eval.c:593` — evaluate expression string
+/// `arg` and return the resulting value, or `None` on error.
+pub fn eval_expr(arg: &str) -> Option<typval_T> {
+    crate::ported::eval::typval::EVAL_STRING_HOOK
+        .with(|h| *h.borrow())
+        .and_then(|f| f(arg))
+}
+
+/// Port of `eval_expr_typval()` from `Src/eval.c:395` — evaluate `expr` (a
+/// Partial, a Funcref/name when `want_func`, else an expression string) with
+/// `argv`, into `rettv`. Returns [`OK`]/[`FAIL`].
+pub fn eval_expr_typval(expr: &typval_T, want_func: bool, argv: &[typval_T], rettv: &mut typval_T) -> i32 {
+    match expr.v_type {
+        VAR_PARTIAL => eval_expr_partial(expr, argv, rettv),
+        VAR_FUNC => eval_expr_func(expr, argv, rettv),
+        _ if want_func => eval_expr_func(expr, argv, rettv),
+        _ => eval_expr_string(expr, rettv),
+    }
+}
+
+/// Port of `eval_expr_to_bool()` from `Src/eval.c:411` — like [`eval_to_bool`]
+/// but from a typval (string, Funcref, or Partial). `false` on error.
+pub fn eval_expr_to_bool(expr: &typval_T) -> bool {
+    let mut rettv = typval_T::from(0);
+    if eval_expr_typval(expr, false, &[], &mut rettv) == FAIL {
+        return false;
+    }
+    tv_get_number_chk(&rettv, None) != 0
+}
+
+/// Port of `eval_to_bool()` from `Src/eval.c:249` — evaluate expression string
+/// `arg` and return whether the result is non-zero. RUST-PORT NOTE: the C
+/// `skip`/`use_simple_function`/error out-param are not modeled; a parse/eval
+/// error yields `false`.
+pub fn eval_to_bool(arg: &str) -> bool {
+    crate::ported::eval::typval::EVAL_STRING_HOOK
+        .with(|h| *h.borrow())
+        .and_then(|f| f(arg))
+        .is_some_and(|tv| tv_get_number_chk(&tv, None) != 0)
+}
+
+/// Port of `eval1_emsg()` from `Src/eval.c:281` — evaluate one expression string
+/// `arg` into `rettv`, giving an error message on failure. Returns [`OK`]/[`FAIL`].
+pub fn eval1_emsg(arg: &str, rettv: &mut typval_T) -> i32 {
+    match crate::ported::eval::typval::EVAL_STRING_HOOK.with(|h| *h.borrow()).and_then(|f| f(arg)) {
+        Some(result) => {
+            *rettv = result;
+            OK
+        }
+        None => FAIL,
+    }
+}
+
+/// Port of `handle_subscript()` from `Src/eval.c:5931`.
+///
+/// Apply a chain of subscripts to `rettv` in order — `.key`/`[idx]`/`[a:b]`
+/// indexing ([`eval_index`]), `(args)` Funcref calls ([`call_func_rettv`]), and
+/// `->method(args)` method calls ([`eval_method`]). Returns [`OK`]/[`FAIL`].
+/// RUST-PORT NOTE: the C scans the chain off the expression; here the already
+/// split subscript strings are passed in.
+pub fn handle_subscript(rettv: &mut typval_T, subscripts: &[&str], verbose: bool) -> i32 {
+    for sub in subscripts {
+        let r = if let Some(m) = sub.strip_prefix("->") {
+            // `->method(args)` — split the method name from its argument text.
+            match m.find('(') {
+                Some(open) if m.ends_with(')') => {
+                    let base = rettv.clone();
+                    eval_method(&m[..open], &m[open + 1..m.len() - 1], &base, rettv)
+                }
+                _ => FAIL,
+            }
+        } else if let Some(a) = sub.strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
+            call_func_rettv(rettv, a)
+        } else {
+            eval_index(rettv, sub, verbose)
+        };
+        if r == FAIL {
+            return FAIL;
+        }
+    }
+    OK
+}
+
+/// Port of `call_func_rettv()` from `Src/eval.c:2853`.
+///
+/// Call the Funcref/Partial value currently in `rettv` with the argument text
+/// `args`, replacing `rettv` with the result. Returns [`OK`]/[`FAIL`]. RUST-PORT
+/// NOTE: the C parses `(args)` off the expression and threads a self-dict; here
+/// the isolated argument text is passed in and dispatch goes through
+/// [`eval_expr_func`] (which honors a Partial's bound args, not its self dict).
+pub fn call_func_rettv(rettv: &mut typval_T, args: &str) -> i32 {
+    let argvars = match crate::ported::eval::userfunc::get_func_arguments(args) {
+        Some(a) => a,
+        None => return FAIL,
+    };
+    let callee = rettv.clone();
+    eval_expr_func(&callee, &argvars, rettv)
+}
+
+/// Port of `eval_func()` from `Src/eval.c:1698`.
+///
+/// Evaluate a function or method call: with a `basetv` it is a method call
+/// ([`eval_method`]), otherwise a plain call
+/// ([`get_func_tv`](crate::ported::eval::userfunc::get_func_tv)). Returns
+/// [`OK`]/[`FAIL`]. RUST-PORT NOTE: the C resolves the name and parses the call
+/// off the expression; here the name and isolated argument text are passed in.
+pub fn eval_func(name: &str, args: &str, basetv: Option<&typval_T>, rettv: &mut typval_T) -> i32 {
+    match basetv {
+        Some(base) => eval_method(name, args, base, rettv),
+        None => crate::ported::eval::userfunc::get_func_tv(name, args, rettv),
+    }
+}
+
+/// Port of `eval_method()` from `Src/eval.c:2955`.
+///
+/// Dispatch a method call `base->method(args)`: a builtin via
+/// [`call_internal_method`](crate::ported::eval::funcs::call_internal_method)
+/// (which inserts the base at the builtin's method-base position), else a user
+/// function with the base prepended as the first argument. Returns [`OK`]/[`FAIL`].
+/// RUST-PORT NOTE: the C parses `->method(args)` off the expression; here the
+/// method name and isolated argument text are passed in.
+pub fn eval_method(method: &str, args: &str, basetv: &typval_T, rettv: &mut typval_T) -> i32 {
+    use crate::ported::eval::userfunc::fcerr::*;
+    let argvars = match crate::ported::eval::userfunc::get_func_arguments(args) {
+        Some(a) => a,
+        None => return FAIL,
+    };
+    match crate::ported::eval::funcs::call_internal_method(method, &argvars, basetv, rettv) {
+        FCERR_NONE => OK,
+        FCERR_UNKNOWN => {
+            // Not a builtin → user function: the base is the first argument.
+            let mut full = Vec::with_capacity(argvars.len() + 1);
+            full.push(basetv.clone());
+            full.extend(argvars);
+            crate::ported::eval::userfunc::call_func(method, &full, rettv)
+        }
+        _ => FAIL,
     }
 }
 
@@ -1277,6 +2029,84 @@ pub fn tv_is_luafunc(tv: &typval_T) -> bool {
 #[cfg(test)]
 mod tests {
     use super::string2float;
+
+    #[test]
+    fn handle_subscript_chain() {
+        use super::handle_subscript;
+        use crate::ported::eval::typval::EVAL_STRING_HOOK;
+        use crate::ported::eval_h::OK;
+        fn hook(e: &str) -> Option<typval_T> {
+            e.trim().parse::<i64>().ok().map(typval_T::from)
+        }
+        let saved = EVAL_STRING_HOOK.with(|h| *h.borrow());
+        EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = Some(hook));
+        // "abcdef"[1:4][1] → "bcde"[1] → "c"
+        let mut s = typval_T::from("abcdef".to_string());
+        assert_eq!(handle_subscript(&mut s, &["[1:4]", "[1]"], false), OK);
+        assert!(matches!(&s.vval, v_string(t) if t == "c"));
+        EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = saved);
+    }
+
+    #[test]
+    fn eval_index_subscripts() {
+        use super::eval_index;
+        use crate::ported::eval::typval::EVAL_STRING_HOOK;
+        use crate::ported::eval_h::OK;
+        fn hook(e: &str) -> Option<typval_T> {
+            e.trim().parse::<i64>().ok().map(typval_T::from)
+        }
+        let saved = EVAL_STRING_HOOK.with(|h| *h.borrow());
+        EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = Some(hook));
+        // string[1] (char-based)
+        let mut s = typval_T::from("héllo".to_string());
+        assert_eq!(eval_index(&mut s, "[1]", false), OK);
+        assert!(matches!(&s.vval, v_string(t) if t == "é"));
+        // string[1:3] inclusive
+        let mut s2 = typval_T::from("abcdef".to_string());
+        eval_index(&mut s2, "[1:3]", false);
+        assert!(matches!(&s2.vval, v_string(t) if t == "bcd"));
+        // open-ended [2:]
+        let mut s3 = typval_T::from("abcdef".to_string());
+        eval_index(&mut s3, "[2:]", false);
+        assert!(matches!(&s3.vval, v_string(t) if t == "cdef"));
+        EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = saved);
+    }
+
+    #[test]
+    fn eval_index_inner_types() {
+        use super::eval_index_inner;
+        use crate::ported::eval::typval::{tv_dict_add_nr, tv_list_alloc, tv_list_append_number};
+        use crate::ported::eval::typval_defs_h::{dict_T, typval_vval_union::v_dict, VarLockStatus, VarType::VAR_DICT};
+        use crate::ported::eval_h::{FAIL, OK};
+        use std::{cell::RefCell, rc::Rc};
+        // string subscript [1] is char-based
+        let mut s = typval_T::from("héllo".to_string());
+        assert_eq!(eval_index_inner(&mut s, false, Some(&typval_T::from(1)), None, false, None, false), OK);
+        assert!(matches!(&s.vval, v_string(t) if t == "é"));
+        // string slice [1:3] inclusive
+        let mut s2 = typval_T::from("abcdef".to_string());
+        eval_index_inner(&mut s2, true, Some(&typval_T::from(1)), Some(&typval_T::from(3)), false, None, false);
+        assert!(matches!(&s2.vval, v_string(t) if t == "bcd"));
+        // list index [2]
+        let l = tv_list_alloc(-1);
+        for n in [10, 20, 30] { tv_list_append_number(&mut l.borrow_mut(), n); }
+        let mut lv = typval_T { v_type: crate::ported::eval::typval_defs_h::VarType::VAR_LIST, v_lock: VarLockStatus::VAR_UNLOCKED, vval: crate::ported::eval::typval_defs_h::typval_vval_union::v_list(Some(l)) };
+        eval_index_inner(&mut lv, false, Some(&typval_T::from(2)), None, false, None, false);
+        assert!(matches!(lv.vval, v_number(30)));
+        // dict key
+        let mut d = dict_T::default();
+        tv_dict_add_nr(&mut d, "k", 7);
+        let mut dv = typval_T { v_type: VAR_DICT, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_dict(Some(Rc::new(RefCell::new(d)))) };
+        assert_eq!(eval_index_inner(&mut dv, false, None, None, false, Some("k"), false), OK);
+        assert!(matches!(dv.vval, v_number(7)));
+        // missing key → FAIL
+        let mut dv2 = dv.clone();
+        // re-make a dict for the missing-key case
+        let mut d2 = dict_T::default();
+        tv_dict_add_nr(&mut d2, "k", 7);
+        dv2 = typval_T { v_type: VAR_DICT, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_dict(Some(Rc::new(RefCell::new(d2)))) };
+        assert_eq!(eval_index_inner(&mut dv2, false, None, None, false, Some("nope"), false), FAIL);
+    }
     use super::{
         char_from_string, char_idx2byte, find_name_end, get_literal_key, is_luafunc, string_slice,
         to_name_end, tv_is_luafunc, var_flavour, var_flavour_T::*,
@@ -1315,6 +2145,87 @@ mod tests {
     }
 
     #[test]
+    fn eval7_leader_unary() {
+        use super::eval7_leader;
+        let not = |n: i64, l: &str| {
+            let mut tv = typval_T::from(n);
+            eval7_leader(&mut tv, false, l);
+            match tv.vval { v_number(x) => x, _ => -999 }
+        };
+        assert_eq!(not(5, "!"), 0); // truthy → 0
+        assert_eq!(not(0, "!"), 1); // falsy → 1
+        assert_eq!(not(5, "-"), -5); // negate
+        assert_eq!(not(5, "--"), 5); // double negate
+        assert_eq!(not(5, "!-"), 0); // - then ! : -5 truthy → 0
+        // numeric_only stops at '!', leaving the value
+        let mut tv = typval_T::from(5);
+        eval7_leader(&mut tv, true, "!");
+        assert!(matches!(tv.vval, v_number(5)));
+    }
+
+    #[test]
+    fn binary_op_helpers() {
+        use super::{eval_addsub_number, eval_concat_str};
+        use crate::ported::eval_h::OK;
+        let mut a = typval_T::from(3);
+        assert_eq!(eval_addsub_number(&mut a, &typval_T::from(4), b'+'), OK);
+        assert!(matches!(a.vval, v_number(7)));
+        let mut b = typval_T::from(10);
+        eval_addsub_number(&mut b, &typval_T::from(4), b'-');
+        assert!(matches!(b.vval, v_number(6)));
+        // float promotion: 3 + 1.5 = 4.5
+        let mut c = typval_T::from(3);
+        let f = typval_T { v_type: VAR_FLOAT, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_float(1.5) };
+        eval_addsub_number(&mut c, &f, b'+');
+        assert!(matches!(c.vval, v_float(x) if (x - 4.5).abs() < 1e-9));
+        // string concat
+        let mut s = typval_T::from("foo".to_string());
+        assert_eq!(eval_concat_str(&mut s, &typval_T::from("bar".to_string())), OK);
+        assert!(matches!(&s.vval, v_string(t) if t == "foobar"));
+        // multdiv: number * and /
+        use super::eval_multdiv_number;
+        let mut m = typval_T::from(6);
+        eval_multdiv_number(&mut m, &typval_T::from(7), b'*');
+        assert!(matches!(m.vval, v_number(42)));
+        let mut d = typval_T::from(17);
+        eval_multdiv_number(&mut d, &typval_T::from(5), b'/');
+        assert!(matches!(d.vval, v_number(3)));
+        let mut md = typval_T::from(17);
+        eval_multdiv_number(&mut md, &typval_T::from(5), b'%');
+        assert!(matches!(md.vval, v_number(2)));
+    }
+
+    #[test]
+    fn do_string_sub_basic() {
+        use super::do_string_sub;
+        assert_eq!(do_string_sub("hello", "l", "L", "g"), "heLLo");
+        assert_eq!(do_string_sub("hello", "l", "L", ""), "heLlo");
+        assert_eq!(do_string_sub("abc", "x", "y", "g"), "abc");
+    }
+
+    #[test]
+    fn make_expanded_name_curly() {
+        use super::make_expanded_name;
+        use crate::ported::eval::typval::EVAL_STRING_HOOK;
+        fn hook(e: &str) -> Option<typval_T> {
+            match e {
+                "x" => Some(typval_T::from("BAR".to_string())),
+                "1" => Some(typval_T::from("ONE".to_string())),
+                _ => None,
+            }
+        }
+        let saved = EVAL_STRING_HOOK.with(|h| *h.borrow());
+        EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = Some(hook));
+        // foo{x}baz → fooBARbaz
+        assert_eq!(make_expanded_name("foo{x}baz", 3, 5).as_deref(), Some("fooBARbaz"));
+        // two groups expand recursively
+        assert_eq!(make_expanded_name("a{x}b{1}c", 1, 3).as_deref(), Some("aBARbONEc"));
+        // a failing expr → None
+        assert_eq!(make_expanded_name("p{bad}q", 1, 5), None);
+        EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = saved);
+    }
+
+    #[test]
     fn to_name_end_namespace() {
         assert_eq!(to_name_end("foo + 1", true), 3);
         assert_eq!(&"s:var = 1"[..to_name_end("s:var = 1", true)], "s:var");
@@ -1350,6 +2261,47 @@ mod tests {
         assert_eq!(var_flavour("FOO"), VAR_FLAVOUR_SHADA);
         assert_eq!(var_flavour("Foo"), VAR_FLAVOUR_SESSION);
         assert_eq!(var_flavour("foo"), VAR_FLAVOUR_DEFAULT);
+    }
+
+    #[test]
+    fn string_to_list_splits() {
+        use super::string_to_list;
+        use crate::ported::eval::typval_defs_h::typval_vval_union::v_string;
+        let lines = |s: &str, keep: bool| -> Vec<String> {
+            string_to_list(s, keep)
+                .borrow()
+                .lv_items
+                .iter()
+                .map(|it| match &it.li_tv.vval {
+                    v_string(s) => s.clone(),
+                    _ => String::new(),
+                })
+                .collect()
+        };
+        // trailing NL dropped unless keepempty
+        assert_eq!(lines("a\nb\n", false), vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(lines("a\nb\n", true), vec!["a".to_string(), "b".to_string(), String::new()]);
+        assert_eq!(lines("a\nb", false), vec!["a".to_string(), "b".to_string()]);
+        // embedded NUL → NL within an item
+        assert_eq!(lines("x\0y", false), vec!["x\ny".to_string()]);
+    }
+
+    #[test]
+    fn save_tv_as_string_modes() {
+        use super::save_tv_as_string;
+        use crate::ported::eval::typval::{tv_list_alloc, tv_list_append_string};
+        use crate::ported::eval::typval_defs_h::{typval_T, typval_vval_union::v_list, VarLockStatus, VarType::VAR_LIST};
+        // scalar string
+        assert_eq!(save_tv_as_string(&typval_T::from("hi".to_string()), false, false).as_deref(), Some("hi"));
+        // Unknown / Number → None
+        assert_eq!(save_tv_as_string(&typval_T::from(5), false, false), None);
+        // list: items separated by NL, trailing NL only with endnl
+        let l = tv_list_alloc(-1);
+        tv_list_append_string(&mut l.borrow_mut(), "a");
+        tv_list_append_string(&mut l.borrow_mut(), "b");
+        let lv = typval_T { v_type: VAR_LIST, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_list(Some(l)) };
+        assert_eq!(save_tv_as_string(&lv, false, false).as_deref(), Some("a\nb"));
+        assert_eq!(save_tv_as_string(&lv, true, false).as_deref(), Some("a\nb\n"));
     }
 
     #[test]
@@ -1409,6 +2361,29 @@ mod tests {
             vval: v_number(42),
         };
         assert_eq!(typval_tostring(Some(&n), false), "42");
+    }
+
+    #[test]
+    fn eval_string_wrappers_via_hook() {
+        use super::{eval_expr, eval_to_number, eval_to_string};
+        use crate::ported::eval::typval::EVAL_STRING_HOOK;
+        fn hook(expr: &str) -> Option<typval_T> {
+            match expr {
+                "42" => Some(typval_T::from(42)),
+                "str" => Some(typval_T::from("hi".to_string())),
+                _ => None,
+            }
+        }
+        let saved = EVAL_STRING_HOOK.with(|h| *h.borrow());
+        EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = Some(hook));
+        assert_eq!(eval_to_number("42"), 42);
+        assert_eq!(eval_to_string("str").as_deref(), Some("hi"));
+        assert!(eval_expr("42").is_some());
+        // parse/eval error → the C error sentinels
+        assert_eq!(eval_to_number("bad"), -1);
+        assert_eq!(eval_to_string("bad"), None);
+        assert!(eval_expr("bad").is_none());
+        EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = saved);
     }
 
     #[test]

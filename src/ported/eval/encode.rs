@@ -47,6 +47,140 @@ pub(crate) fn vim_float_g(f: f64, prec: i32) -> String {
     }
 }
 
+/// Port of `encode_blob_write()` from `Src/eval/encode.c:48`.
+///
+/// Append the raw bytes `buf` to blob `blob`, returning the number written
+/// (used as the readfile/channel-output sink for Blob mode).
+pub fn encode_blob_write(blob: &mut crate::ported::eval::typval_defs_h::blob_T, buf: &[u8]) -> i32 {
+    blob.bv_ga.extend_from_slice(buf);
+    buf.len() as i32
+}
+
+/// Port of `encode_vim_list_to_buf()` from `Src/eval/encode.c:213`.
+///
+/// Serialize a List of strings to the `writefile()` byte form: items joined by
+/// `NL`, with each item's embedded `NL` mapped to `NUL`. Returns `None` (the C
+/// `false`) if any item is not a String.
+pub fn encode_vim_list_to_buf(
+    list: &crate::ported::eval::typval_defs_h::list_T,
+) -> Option<String> {
+    let mut parts: Vec<String> = Vec::with_capacity(list.lv_items.len());
+    for it in &list.lv_items {
+        if it.li_tv.v_type != VAR_STRING {
+            return None;
+        }
+        match &it.li_tv.vval {
+            v_string(s) => parts.push(s.replace('\n', "\0")),
+            _ => parts.push(String::new()),
+        }
+    }
+    Some(parts.join("\n"))
+}
+
+/// Port of `ListReaderState` (`Src/eval/encode.h:28`) — position state for
+/// reading a List's joined byte stream. RUST-PORT NOTE: the C holds the `list`
+/// and a `listitem_T *li` pointer; here `li` is an item index and the list is
+/// passed to [`encode_read_from_list`].
+#[derive(Debug, Clone, Copy)]
+pub struct ListReaderState {
+    /// Index of the item currently being read.
+    pub li: usize,
+    /// Byte offset inside the current item's string.
+    pub offset: usize,
+    /// Byte length of the current item's string.
+    pub li_length: usize,
+}
+
+/// Port of `encode_init_lrstate()` from `Src/eval/encode.c:1053`.
+///
+/// Initialize a [`ListReaderState`] at the start of `list`.
+pub fn encode_init_lrstate(list: &crate::ported::eval::typval_defs_h::list_T) -> ListReaderState {
+    let li_length = list.lv_items.first().map_or(0, |it| match &it.li_tv.vval {
+        v_string(s) => s.len(),
+        _ => 0,
+    });
+    ListReaderState { li: 0, offset: 0, li_length }
+}
+
+/// Port of `encode_read_from_list()` from `Src/eval/encode.c:257`.
+///
+/// Read up to `buf.len()` bytes of `list`'s joined byte form into `buf` (items
+/// separated by `NL`, embedded `NL` → `NUL`), advancing `state`. Returns
+/// `(status, read_bytes)` where status is [`OK`](crate::ported::eval_h::OK)
+/// (finished), `2` (NOTDONE — more remains), or
+/// [`FAIL`](crate::ported::eval_h::FAIL) (a non-String item).
+pub fn encode_read_from_list(
+    state: &mut ListReaderState,
+    list: &crate::ported::eval::typval_defs_h::list_T,
+    buf: &mut [u8],
+) -> (i32, usize) {
+    use crate::ported::eval_h::{FAIL, OK};
+    const NOTDONE: i32 = 2; // c: Src/macros_defs.h
+    let nbuf = buf.len();
+    let mut p = 0;
+    while p < nbuf {
+        if let Some(bytes) = list.lv_items.get(state.li).and_then(|it| match &it.li_tv.vval {
+            v_string(s) => Some(s.as_bytes()),
+            _ => None,
+        }) {
+            while state.offset < state.li_length && p < nbuf {
+                let ch = bytes[state.offset];
+                state.offset += 1;
+                buf[p] = if ch == b'\n' { 0 } else { ch };
+                p += 1;
+            }
+        }
+        if p < nbuf {
+            state.li += 1;
+            if state.li >= list.lv_items.len() {
+                return (OK, p);
+            }
+            buf[p] = b'\n';
+            p += 1;
+            match list.lv_items.get(state.li).map(|it| &it.li_tv) {
+                Some(tv) if tv.v_type == VAR_STRING => {
+                    state.offset = 0;
+                    state.li_length = match &tv.vval {
+                        v_string(s) => s.len(),
+                        _ => 0,
+                    };
+                }
+                _ => return (FAIL, p),
+            }
+        }
+    }
+    let more = state.offset < state.li_length || state.li + 1 < list.lv_items.len();
+    (if more { NOTDONE } else { OK }, nbuf)
+}
+
+/// Port of `encode_list_write()` from `Src/eval/encode.c:56`.
+///
+/// Append the lines of `buf` to `list`, splitting on `NL` and mapping embedded
+/// `NUL` → `NL` (the `readfile()`/channel-output representation). The first
+/// line continues the list's last item (so streamed chunks join), and a buffer
+/// ending in `NL` yields a trailing empty item. RUST-PORT NOTE: the C's NULL
+/// (never-set) string item is an empty string here.
+pub fn encode_list_write(list: &mut crate::ported::eval::typval_defs_h::list_T, buf: &str) {
+    use crate::ported::eval::typval::tv_list_append_string;
+    use crate::ported::eval::typval_defs_h::typval_vval_union::v_string;
+    if buf.is_empty() {
+        return;
+    }
+    let mut segments = buf.split('\n');
+    // Continue the last existing list item with the first (partial) line.
+    if !list.lv_items.is_empty() {
+        if let Some(first) = segments.next() {
+            let chunk = first.replace('\0', "\n");
+            if let v_string(s) = &mut list.lv_items.last_mut().unwrap().li_tv.vval {
+                s.push_str(&chunk);
+            }
+        }
+    }
+    for seg in segments {
+        tv_list_append_string(list, &seg.replace('\0', "\n"));
+    }
+}
+
 /// Port of `encode_tv2string()` from `Src/eval/encode.c:869`.
 ///
 /// String representation of a value with quotes around strings (parseable back
@@ -255,5 +389,60 @@ pub fn encode_vim_to_json(tv: &typval_T) -> String {
             }
         },
         _ => "null".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod encode_io_tests {
+    use super::{encode_blob_write, encode_vim_list_to_buf};
+    use crate::ported::eval::typval::{tv_list_append_number, tv_list_append_string};
+    use crate::ported::eval::typval_defs_h::{blob_T, list_T};
+
+    #[test]
+    fn blob_write_appends_bytes() {
+        let mut b = blob_T::default();
+        assert_eq!(encode_blob_write(&mut b, &[1, 2, 3]), 3);
+        assert_eq!(encode_blob_write(&mut b, &[4]), 1);
+        assert_eq!(b.bv_ga, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn read_from_list_matches_to_buf() {
+        use super::{encode_init_lrstate, encode_read_from_list, encode_vim_list_to_buf};
+        use crate::ported::eval_h::OK;
+        let mut l = list_T::default();
+        tv_list_append_string(&mut l, "a");
+        tv_list_append_string(&mut l, "x\ny"); // embedded NL
+        tv_list_append_string(&mut l, "b");
+        let expected = encode_vim_list_to_buf(&l).unwrap();
+        // full read into a big buffer reproduces encode_vim_list_to_buf exactly
+        let mut st = encode_init_lrstate(&l);
+        let mut buf = vec![0u8; 64];
+        let (status, n) = encode_read_from_list(&mut st, &l, &mut buf);
+        assert_eq!(status, OK);
+        assert_eq!(&buf[..n], expected.as_bytes());
+        // a too-small buffer reports NOTDONE (2)
+        let mut st2 = encode_init_lrstate(&l);
+        let mut small = vec![0u8; 2];
+        let (status2, n2) = encode_read_from_list(&mut st2, &l, &mut small);
+        assert_eq!(status2, 2);
+        assert_eq!(n2, 2);
+    }
+
+    #[test]
+    fn vim_list_to_buf_joins() {
+        let mut l = list_T::default();
+        tv_list_append_string(&mut l, "a");
+        tv_list_append_string(&mut l, "b");
+        assert_eq!(encode_vim_list_to_buf(&l).as_deref(), Some("a\nb"));
+        // embedded NL within an item → NUL
+        let mut l2 = list_T::default();
+        tv_list_append_string(&mut l2, "x\ny");
+        assert_eq!(encode_vim_list_to_buf(&l2), Some("x\0y".to_string()));
+        // a non-string item → None
+        let mut l3 = list_T::default();
+        tv_list_append_string(&mut l3, "ok");
+        tv_list_append_number(&mut l3, 7);
+        assert_eq!(encode_vim_list_to_buf(&l3), None);
     }
 }

@@ -8,6 +8,12 @@
 
 use crate::ported::eval::typval_defs_h::typval_T;
 
+/// Port of `typval_parser_error_free()` from `Src/eval/decode.c:1016` — free an
+/// mpack parser's pending error state. RUST-PORT NOTE: JSON parsing here is
+/// [`json_decode_string`] (a Rust `Result`, not the C `mpack_parser_t`), so
+/// there is no C parser error struct to free → no-op.
+pub fn typval_parser_error_free() {}
+
 /// Port of `json_decode_string()` from `Src/eval/decode.c:619` — parse a JSON
 /// document into a value. Returns `None` on malformed input (the C path sets an
 /// error and returns FAIL).

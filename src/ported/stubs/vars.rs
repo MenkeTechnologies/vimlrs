@@ -1,14 +1,6 @@
 //! STUB surface for `csrc/eval/vars.c` — generated, do not edit.
 #![allow(dead_code, unused_variables, non_snake_case, clippy::all)]
 
-/// Port of `eval_one_expr_in_str()` — `csrc/eval/vars.c:621`. STUB: not yet ported.
-/// C: `char *eval_one_expr_in_str(char *p, garray_T *gap, bool evaluate)`
-pub fn eval_one_expr_in_str() { unimplemented!("STUB eval_one_expr_in_str — csrc/eval/vars.c:621") }
-
-/// Port of `eval_all_expr_in_str()` — `csrc/eval/vars.c:656`. STUB: not yet ported.
-/// C: `static char *eval_all_expr_in_str(char *str)`
-pub fn eval_all_expr_in_str() { unimplemented!("STUB eval_all_expr_in_str — csrc/eval/vars.c:656") }
-
 /// Port of `heredoc_get()` — `csrc/eval/vars.c:724`. STUB: not yet ported.
 /// C: `list_T *heredoc_get(exarg_T *eap, char *cmd, bool script_get)`
 pub fn heredoc_get() { unimplemented!("STUB heredoc_get — csrc/eval/vars.c:724") }
@@ -57,22 +49,6 @@ pub fn do_unlet_var() { unimplemented!("STUB do_unlet_var — csrc/eval/vars.c:1
 /// C: `static int do_lock_var(lval_T *lp, char *name_end FUNC_ATTR_UNUSED, exarg_T *eap, int deep)`
 pub fn do_lock_var() { unimplemented!("STUB do_lock_var — csrc/eval/vars.c:1786") }
 
-/// Port of `get_globvar_dict()` — `csrc/eval/vars.c:1855`. STUB: not yet ported.
-/// C: `dict_T *get_globvar_dict(void)`
-pub fn get_globvar_dict() { unimplemented!("STUB get_globvar_dict — csrc/eval/vars.c:1855") }
-
-/// Port of `get_globvar_ht()` — `csrc/eval/vars.c:1862`. STUB: not yet ported.
-/// C: `hashtab_T *get_globvar_ht(void)`
-pub fn get_globvar_ht() { unimplemented!("STUB get_globvar_ht — csrc/eval/vars.c:1862") }
-
-/// Port of `get_vimvar_dict()` — `csrc/eval/vars.c:1868`. STUB: not yet ported.
-/// C: `dict_T *get_vimvar_dict(void)`
-pub fn get_vimvar_dict() { unimplemented!("STUB get_vimvar_dict — csrc/eval/vars.c:1868") }
-
-/// Port of `get_user_var_name()` — `csrc/eval/vars.c:1964`. STUB: not yet ported.
-/// C: `char *get_user_var_name(expand_T *xp, int idx)`
-pub fn get_user_var_name() { unimplemented!("STUB get_user_var_name — csrc/eval/vars.c:1964") }
-
 /// Port of `set_cmdarg()` — `csrc/eval/vars.c:2204`. STUB: not yet ported.
 /// C: `char *set_cmdarg(exarg_T *eap, char *oldarg)`
 pub fn set_cmdarg() { unimplemented!("STUB set_cmdarg — csrc/eval/vars.c:2204") }
@@ -104,16 +80,4 @@ pub fn set_option_from_tv() { unimplemented!("STUB set_option_from_tv — csrc/e
 /// Port of `setwinvar()` — `csrc/eval/vars.c:3308`. STUB: not yet ported.
 /// C: `static void setwinvar(typval_T *argvars, int off)`
 pub fn setwinvar() { unimplemented!("STUB setwinvar — csrc/eval/vars.c:3308") }
-
-/// Port of `var_redir_start()` — `csrc/eval/vars.c:3413`. STUB: not yet ported.
-/// C: `int var_redir_start(char *name, bool append)`
-pub fn var_redir_start() { unimplemented!("STUB var_redir_start — csrc/eval/vars.c:3413") }
-
-/// Port of `var_redir_str()` — `csrc/eval/vars.c:3475`. STUB: not yet ported.
-/// C: `void var_redir_str(const char *value, int value_len)`
-pub fn var_redir_str() { unimplemented!("STUB var_redir_str — csrc/eval/vars.c:3475") }
-
-/// Port of `var_redir_stop()` — `csrc/eval/vars.c:3495`. STUB: not yet ported.
-/// C: `void var_redir_stop(void)`
-pub fn var_redir_stop() { unimplemented!("STUB var_redir_stop — csrc/eval/vars.c:3495") }
 

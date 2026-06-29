@@ -2310,6 +2310,11 @@ type CallFuncFn = fn(&typval_T, &[typval_T]) -> Option<typval_T>;
 /// user function. Installed by the bridge (which owns the function registry).
 type FuncExistsFn = fn(&str) -> bool;
 
+/// "Compile and evaluate an expression string → result" hook. The value layer
+/// can't run the parser/VM itself (that lives in the bridge), so this is
+/// installed by the bridge. `None` on a parse/eval error.
+type EvalStringFn = fn(&str) -> Option<typval_T>;
+
 thread_local! {
     /// Bridge-installed funcref comparator for `sort()`/`uniq()` with a `{func}`
     /// argument: `(name, a, b) -> Some(cmp)`, or `None` on a call/type error.
@@ -2327,6 +2332,11 @@ thread_local! {
 
     /// `exists("*name")` hook — true if `name` is a defined builtin/user function.
     pub static FUNC_EXISTS_HOOK: std::cell::RefCell<Option<FuncExistsFn>> =
+        const { std::cell::RefCell::new(None) };
+
+    /// "Evaluate an expression string → result" hook, installed by the bridge.
+    /// Backs the `eval_to_*`/`eval_expr_*` string-expression entry points.
+    pub static EVAL_STRING_HOOK: std::cell::RefCell<Option<EvalStringFn>> =
         const { std::cell::RefCell::new(None) };
 }
 

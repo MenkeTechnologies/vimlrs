@@ -29,6 +29,9 @@ pub struct FuncScope {
     pub fc_l_vars: dict_T,
     /// `dict_T fc_l_avars` — the `a:` argument scope. (typval_defs.h:306)
     pub fc_l_avars: dict_T,
+    /// `ufunc_T *fc_func`'s name (`typval_defs.h:300`) — the called function's
+    /// name, for error messages / `v:throwpoint` (`func_name`).
+    pub fc_name: String,
 }
 
 thread_local! {
@@ -1117,6 +1120,32 @@ pub fn tv_list_unlet_range(l: &mut list_T, first: usize, n1_arg: i32, has_n2: bo
     crate::ported::eval::typval::tv_list_remove_items(l, first, last);
 }
 
+/// Port of `get_globvar_dict()` from `Src/eval/vars.c:1855` — the `g:` scope
+/// dict. RUST-PORT NOTE: the C returns the live `&globvardict`; the per-thread
+/// store can't be borrowed out, so this returns a read-snapshot clone (faithful
+/// for reading/iterating `g:`; mutations go through [`set_var`]).
+pub fn get_globvar_dict() -> dict_T {
+    globvardict.with(|d| d.borrow().clone())
+}
+
+/// Port of `get_globvar_ht()` from `Src/eval/vars.c:1862` — the `g:` scope
+/// hashtable (read-snapshot, see [`get_globvar_dict`]).
+pub fn get_globvar_ht() -> indexmap::IndexMap<String, typval_T> {
+    get_globvar_dict().dv_hashtab
+}
+
+/// Port of `get_vimvar_dict()` from `Src/eval/vars.c:1868` — the `v:` scope dict.
+/// RUST-PORT NOTE: `v:` variables live in the `vimvars[]` table, not a `dict_T`;
+/// this builds a read-snapshot dict (bare name → value) from that table.
+pub fn get_vimvar_dict() -> dict_T {
+    let mut d = dict_T::default();
+    for idx in 0..vv::VV_LEN {
+        d.dv_hashtab
+            .insert(get_vim_var_name(idx).to_string(), get_vim_var_tv(idx));
+    }
+    d
+}
+
 /// Port of `cat_prefix_varname()` from `Src/eval/vars.c:1945`.
 ///
 /// Concatenate a single-character scope `prefix` and `name` into `"<p>:<name>"`
@@ -1223,6 +1252,111 @@ pub fn valid_varname(varname: &str) -> bool {
     true
 }
 
+/// Port of `eval_one_expr_in_str()` from `Src/eval/vars.c:621`.
+///
+/// Evaluate one `{expr}` block at the start of `p` (which begins with `{`),
+/// appending its string result to `gap` when `evaluate`. Returns the number of
+/// bytes consumed (past the closing `}`), or `None` on error. RUST-PORT NOTE:
+/// the C locates the close with `skip_expr`; here an inline brace-balancer finds
+/// the matching `}` (balancing `{}`/`[]`/`()`, skipping quoted strings).
+pub fn eval_one_expr_in_str(p: &str, gap: &mut String, evaluate: bool) -> Option<usize> {
+    let b = p.as_bytes();
+    // Skip the opening '{' and following whitespace.
+    let mut bs = 1;
+    while bs < b.len() && (b[bs] == b' ' || b[bs] == b'\t') {
+        bs += 1;
+    }
+    if bs >= b.len() {
+        crate::ported::message::semsg(&format!("E1278: Missing '}}': {p}"));
+        return None;
+    }
+    // Find the matching '}' from bs.
+    let close = {
+        let mut depth = 0i32;
+        let mut i = bs;
+        let mut found = None;
+        while i < b.len() {
+            match b[i] {
+                b'\'' => {
+                    i += 1;
+                    while i < b.len() && b[i] != b'\'' {
+                        i += 1;
+                    }
+                }
+                b'"' => {
+                    i += 1;
+                    while i < b.len() && b[i] != b'"' {
+                        if b[i] == b'\\' && i + 1 < b.len() {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                }
+                b'{' | b'[' | b'(' => depth += 1,
+                b'}' if depth == 0 => {
+                    found = Some(i);
+                    break;
+                }
+                b'}' | b']' | b')' => depth -= 1,
+                _ => {}
+            }
+            i += 1;
+        }
+        found
+    };
+    let block_end = match close {
+        Some(i) => i,
+        None => {
+            crate::ported::message::semsg(&format!("E1278: Missing '}}': {p}"));
+            return None;
+        }
+    };
+    if evaluate {
+        let expr = p[bs..block_end].trim_end();
+        let val = crate::ported::eval::eval_to_string(expr)?;
+        gap.push_str(&val);
+    }
+    Some(block_end + 1)
+}
+
+/// Port of `eval_all_expr_in_str()` from `Src/eval/vars.c:656`.
+///
+/// Evaluate every `{expr}` in `str`, returning the interpolated string. `{{` and
+/// `}}` are unescaped to `{`/`}`. Returns `None` on error (a stray `}` or a bad
+/// expression). Used for interpolated strings / heredoc assignment.
+pub fn eval_all_expr_in_str(s: &str) -> Option<String> {
+    let b = s.as_bytes();
+    let mut ga = String::new();
+    let mut p = 0;
+    while p < b.len() {
+        let lit_start = p;
+        while p < b.len() && b[p] != b'{' && b[p] != b'}' {
+            p += 1;
+        }
+        let mut escaped_brace = false;
+        if p < b.len() && p + 1 < b.len() && b[p] == b[p + 1] {
+            // "{{" / "}}" → unescape: keep one brace, skip the other.
+            p += 1;
+            escaped_brace = true;
+        } else if p < b.len() && b[p] == b'}' {
+            crate::ported::message::semsg(&format!("E1279: Missing '{{': {s}"));
+            return None;
+        }
+        ga.push_str(&s[lit_start..p]);
+        if p >= b.len() {
+            break;
+        }
+        if escaped_brace {
+            p += 1;
+            continue;
+        }
+        // p is at '{' — evaluate the block.
+        let consumed = eval_one_expr_in_str(&s[p..], &mut ga, true)?;
+        p += consumed;
+    }
+    Some(ga)
+}
+
 /// Port of `get_spellword()` from `Src/eval/vars.c:559`.
 ///
 /// Validate a `'spellsuggest'` result item — a `[word, score]` List of exactly
@@ -1324,6 +1458,37 @@ pub fn vars_clear_ext(d: &mut dict_T, _free_val: bool) {
 pub fn delete_var(d: &mut dict_T, key: &str) {
     d.dv_hashtab.shift_remove(key);
 }
+
+/// Port of `get_user_var_name()` from `Src/eval/vars.c:1964` — the `idx`-th
+/// user variable name (across `g:`/`b:`/`w:`/`v:`) for command-line completion.
+/// No interactive completion standalone → `None`.
+pub fn get_user_var_name(_idx: i32) -> Option<String> {
+    None
+}
+
+// ── :redir => var capture (vars.c) ──
+//
+// RUST-PORT NOTE: `:redir` is not handled by the carve-out command layer, and
+// `var_redir_start` would need the stubbed lvalue machinery (`get_lval`/
+// `set_var_lval`), so the redir-to-variable subsystem is inactive — no redirect
+// is ever active. These two are therefore faithful no-ops.
+
+/// Port of `var_redir_start()` from `Src/eval/vars.c:3414` — begin a `:redir =>`
+/// capture by resolving the target lvalue. RUST-PORT NOTE: the lvalue machinery
+/// (`get_lval`/`set_var_lval`) is stubbed and no command layer drives this, so a
+/// redirect can never be set up → returns `FAIL` (the cluster stays inactive,
+/// keeping [`var_redir_str`]/[`var_redir_stop`] genuine no-ops).
+pub fn var_redir_start(_name: &str, _append: bool) -> i32 {
+    crate::ported::eval_h::FAIL
+}
+
+/// Port of `var_redir_str()` from `Src/eval/vars.c:3475` — append redirected
+/// command output to the capture buffer; no active redirect, no-op.
+pub fn var_redir_str(_value: &str, _value_len: i32) {}
+
+/// Port of `var_redir_stop()` from `Src/eval/vars.c:3495` — finish a `:redir =>`
+/// capture and assign it to the target variable; no active redirect, no-op.
+pub fn var_redir_stop() {}
 
 /// Port of `reset_v_option_vars()` from `Src/eval/vars.c:3349`.
 ///
@@ -1525,6 +1690,19 @@ mod misc_helper_tests {
     }
 
     #[test]
+    fn vimvar_dict_snapshot() {
+        let d = get_vimvar_dict();
+        // Built from the vimvars[] table: bare names, with known v: members.
+        assert!(d.dv_hashtab.contains_key("count"));
+        assert!(d.dv_hashtab.contains_key("errors"));
+        assert!(!d.dv_hashtab.contains_key("v:count"));
+        // g: snapshot reflects a set global.
+        set_internal_string_var("g:gv_snap", "ok");
+        assert!(get_globvar_dict().dv_hashtab.contains_key("gv_snap"));
+        assert!(get_globvar_ht().contains_key("gv_snap"));
+    }
+
+    #[test]
     fn find_var_and_var_exists() {
         set_internal_string_var("g:fv_probe", "yes");
         assert!(var_exists("g:fv_probe"));
@@ -1543,6 +1721,31 @@ mod misc_helper_tests {
         assert!(find_var_in_ht(&d, b'g', "missing", false).is_none());
         // empty varname (scope-self ref) is not modeled → None
         assert!(find_var_in_ht(&d, b'g', "", false).is_none());
+    }
+
+    #[test]
+    fn expr_interpolation_in_str() {
+        use crate::ported::eval::typval::EVAL_STRING_HOOK;
+        use crate::ported::eval::typval_defs_h::typval_T;
+        // Mock the eval hook: "1+2" → 3, "x" → "hi".
+        fn hook(e: &str) -> Option<typval_T> {
+            match e {
+                "1+2" => Some(typval_T::from(3)),
+                "x" => Some(typval_T::from("hi".to_string())),
+                _ => None,
+            }
+        }
+        let saved = EVAL_STRING_HOOK.with(|h| *h.borrow());
+        EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = Some(hook));
+        assert_eq!(eval_all_expr_in_str("a={1+2}b").as_deref(), Some("a=3b"));
+        assert_eq!(eval_all_expr_in_str("{x}!").as_deref(), Some("hi!"));
+        // escaped braces
+        assert_eq!(eval_all_expr_in_str("{{lit}}").as_deref(), Some("{lit}"));
+        // no interpolation
+        assert_eq!(eval_all_expr_in_str("plain").as_deref(), Some("plain"));
+        // stray close brace → error (None)
+        assert_eq!(eval_all_expr_in_str("a}b"), None);
+        EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = saved);
     }
 
     #[test]

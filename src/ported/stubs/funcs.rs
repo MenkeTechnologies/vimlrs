@@ -1,34 +1,6 @@
 //! STUB surface for `csrc/eval/funcs.c` — generated, do not edit.
 #![allow(dead_code, unused_variables, non_snake_case, clippy::all)]
 
-/// Port of `get_function_name()` — `csrc/eval/funcs.c:178`. STUB: not yet ported.
-/// C: `char *get_function_name(expand_T *xp, int idx)`
-pub fn get_function_name() { unimplemented!("STUB get_function_name — csrc/eval/funcs.c:178") }
-
-/// Port of `get_expr_name()` — `csrc/eval/funcs.c:214`. STUB: not yet ported.
-/// C: `char *get_expr_name(expand_T *xp, int idx)`
-pub fn get_expr_name() { unimplemented!("STUB get_expr_name — csrc/eval/funcs.c:214") }
-
-/// Port of `find_internal_func()` — `csrc/eval/funcs.c:235`. STUB: not yet ported.
-/// C: `const EvalFuncDef *find_internal_func(const char *const name)`
-pub fn find_internal_func() { unimplemented!("STUB find_internal_func — csrc/eval/funcs.c:235") }
-
-/// Port of `check_internal_func()` — `csrc/eval/funcs.c:257`. STUB: not yet ported.
-/// C: `int check_internal_func(const EvalFuncDef *const fdef, const int argcount)`
-pub fn check_internal_func() { unimplemented!("STUB check_internal_func — csrc/eval/funcs.c:257") }
-
-/// Port of `call_internal_method()` — `csrc/eval/funcs.c:297`. STUB: not yet ported.
-/// C: `int call_internal_method(const char *const fname, const int argcount, typval_T *const argvars,`
-pub fn call_internal_method() { unimplemented!("STUB call_internal_method — csrc/eval/funcs.c:297") }
-
-/// Port of `api_wrapper()` — `csrc/eval/funcs.c:360`. STUB: not yet ported.
-/// C: `static void api_wrapper(typval_T *argvars, typval_T *rettv, EvalFuncData fptr)`
-pub fn api_wrapper() { unimplemented!("STUB api_wrapper — csrc/eval/funcs.c:360") }
-
-/// Port of `lua_wrapper()` — `csrc/eval/funcs.c:397`. STUB: not yet ported.
-/// C: `static void lua_wrapper(typval_T *argvars, typval_T *rettv, EvalFuncData fptr)`
-pub fn lua_wrapper() { unimplemented!("STUB lua_wrapper — csrc/eval/funcs.c:397") }
-
 /// Port of `tv_get_buf()` — `csrc/eval/funcs.c:471`. STUB: not yet ported.
 /// C: `buf_T *tv_get_buf(typval_T *tv, int curtab_only)`
 pub fn tv_get_buf() { unimplemented!("STUB tv_get_buf — csrc/eval/funcs.c:471") }
@@ -55,10 +27,6 @@ pub fn get_optional_window() { unimplemented!("STUB get_optional_window — csrc
 /// Port of `f_eval()` — `csrc/eval/funcs.c:1233`. STUB: not yet ported.
 pub fn f_eval(_argvars: &[crate::ported::eval::typval_defs_h::typval_T], _rettv: &mut crate::ported::eval::typval_defs_h::typval_T) { unimplemented!("STUB f_eval — csrc/eval/funcs.c:1233") }
 
-/// Port of `get_list_line()` — `csrc/eval/funcs.c:1264`. STUB: not yet ported.
-/// C: `char *get_list_line(int c, void *cookie, int indent, bool do_concat)`
-pub fn get_list_line() { unimplemented!("STUB get_list_line — csrc/eval/funcs.c:1264") }
-
 /// Port of `execute_common()` — `csrc/eval/funcs.c:1278`. STUB: not yet ported.
 /// C: `void execute_common(typval_T *argvars, typval_T *rettv, int arg_off)`
 pub fn execute_common() { unimplemented!("STUB execute_common — csrc/eval/funcs.c:1278") }
@@ -81,14 +49,6 @@ pub fn getregionpos() { unimplemented!("STUB getregionpos — csrc/eval/funcs.c:
 /// Port of `add_regionpos_range()` — `csrc/eval/funcs.c:2355`. STUB: not yet ported.
 /// C: `static void add_regionpos_range(typval_T *rettv, pos_T p1, pos_T p2)`
 pub fn add_regionpos_range() { unimplemented!("STUB add_regionpos_range — csrc/eval/funcs.c:2355") }
-
-/// Port of `dummy_timer_due_cb()` — `csrc/eval/funcs.c:2568`. STUB: not yet ported.
-/// C: `static void dummy_timer_due_cb(TimeWatcher *tw, void *data)`
-pub fn dummy_timer_due_cb() { unimplemented!("STUB dummy_timer_due_cb — csrc/eval/funcs.c:2568") }
-
-/// Port of `dummy_timer_close_cb()` — `csrc/eval/funcs.c:2579`. STUB: not yet ported.
-/// C: `static void dummy_timer_close_cb(TimeWatcher *tw, void *data)`
-pub fn dummy_timer_close_cb() { unimplemented!("STUB dummy_timer_close_cb — csrc/eval/funcs.c:2579") }
 
 /// Port of `create_environment()` — `csrc/eval/funcs.c:3382`. STUB: not yet ported.
 /// C: `dict_T *create_environment(const dictitem_T *job_env, const bool clear_env, const bool pty,`

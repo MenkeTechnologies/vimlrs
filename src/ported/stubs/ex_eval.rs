@@ -1,10 +1,6 @@
 //! STUB surface for `csrc/ex_eval.c` — generated, do not edit.
 #![allow(dead_code, unused_variables, non_snake_case, clippy::all)]
 
-/// Port of `get_exception_string()` — `csrc/ex_eval.c:384`. STUB: not yet ported.
-/// C: `char *get_exception_string(void *value, except_type_T type, char *cmdname, bool *should_free)`
-pub fn get_exception_string() { unimplemented!("STUB get_exception_string — csrc/ex_eval.c:384") }
-
 /// Port of `ex_eval()` — `csrc/ex_eval.c:840`. STUB: not yet ported.
 /// C: `void ex_eval(exarg_T *eap)`
 pub fn ex_eval() { unimplemented!("STUB ex_eval — csrc/ex_eval.c:840") }

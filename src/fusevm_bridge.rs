@@ -1984,6 +1984,7 @@ fn call_user_function(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
         s.borrow_mut().push(crate::ported::eval::vars::FuncScope {
             fc_l_vars: crate::ported::eval::typval_defs_h::dict_T::default(),
             fc_l_avars: crate::ported::eval::typval_defs_h::dict_T::default(),
+            fc_name: name.to_string(),
         })
     });
     let bind_avar = |key: &str, v: typval_T| {
@@ -2311,6 +2312,38 @@ fn eval_callback(
 fn sort_compare_funcref(name: &str, a: &typval_T, b: &typval_T) -> Option<varnumber_T> {
     let r = call_user_function(name, vec![a.clone(), b.clone()])?;
     Some(tv_get_number_chk(&r, None))
+}
+
+/// The "evaluate an expression string" hook (installed into `EVAL_STRING_HOOK`),
+/// used by the ported `eval_to_*`/`eval_expr_*` entry points: compile the
+/// expression on a nested VM and capture its result.
+fn eval_string_hook(expr: &str) -> Option<typval_T> {
+    let chunk = compile_expr_chunk(expr).ok()?;
+    run_chunk_capture(chunk)
+}
+
+/// The user-function lookup hook (installed into `FIND_FUNC_HOOK`): map a
+/// registered `UserFuncDef` to the ported reduced `ufunc_T` (name + arity).
+fn find_func_hook(name: &str) -> Option<crate::ported::eval::userfunc::ufunc_T> {
+    let def = FUNCTIONS.with(|f| f.borrow().get(name).cloned())?;
+    let nfixed = def
+        .params
+        .iter()
+        .position(|p| p == "...")
+        .unwrap_or(def.params.len());
+    Some(crate::ported::eval::userfunc::ufunc_T {
+        uf_name: def.name.clone(),
+        uf_args: def.params[..nfixed].to_vec(),
+        uf_def_args: def.defaults.iter().map(|(i, _)| def.params[*i].clone()).collect(),
+        uf_varargs: def.params.iter().any(|p| p == "..."),
+        ..Default::default()
+    })
+}
+
+/// The user-function removal hook (installed into `REMOVE_FUNC_HOOK`): drop a
+/// function from the registry, reporting whether it was present.
+fn remove_func_hook(name: &str) -> bool {
+    FUNCTIONS.with(|f| f.borrow_mut().remove(name).is_some())
 }
 
 /// The generic "call user function" hook (installed into `CALL_FUNC_HOOK`), used
@@ -3002,6 +3035,12 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FN_FLATTEN, |vm, n| call_func(vm, n, f_flatten));
     CALL_FUNC_HOOK.with(|h| *h.borrow_mut() = Some(call_func_hook));
     FUNC_EXISTS_HOOK.with(|h| *h.borrow_mut() = Some(func_exists_hook));
+    crate::ported::eval::typval::EVAL_STRING_HOOK
+        .with(|h| *h.borrow_mut() = Some(eval_string_hook));
+    crate::ported::eval::userfunc::FIND_FUNC_HOOK
+        .with(|h| *h.borrow_mut() = Some(find_func_hook));
+    crate::ported::eval::userfunc::REMOVE_FUNC_HOOK
+        .with(|h| *h.borrow_mut() = Some(remove_func_hook));
     vm.register_builtin(VIML_FN_REDUCE, |vm, n| call_func(vm, n, f_reduce));
     vm.register_builtin(VIML_FN_EVAL, b_eval);
     crate::viml_regex::SUBST_EXPR_HOOK.with(|h| *h.borrow_mut() = Some(subst_expr_eval));

@@ -17,6 +17,11 @@
 //!   [`fusevm_bridge`]. These mirror zshrs's `compile_zsh.rs`/`fusevm_bridge.rs`
 //!   carve-outs and are clearly headed "EXTENSION — NO csrc/ counterpart".
 
+// The `ported` zone keeps Vim's exact C identifiers (e.g. `ufunc_T`,
+// `except_type_T`, `VAR_FLAVOUR_*`) for 1:1 fidelity, so the non-camel-case
+// lint is intentionally disabled crate-wide.
+#![allow(non_camel_case_types)]
+
 pub mod ported;
 
 // Synthesis carve-outs (no `csrc/` counterpart).

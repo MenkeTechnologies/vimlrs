@@ -370,6 +370,14 @@ pub fn f_matchstr(argvars: &[typval_T], rettv: &mut typval_T) {
     }
 }
 
+/// Port of `get_list_line()` from `Src/eval/funcs.c:1264` — the getline callback
+/// feeding a List of lines (for `execute([list])`) to the source machinery.
+/// RUST-PORT NOTE: the bridge sources such input directly, so this callback is
+/// never driven → `None` (end of input).
+pub fn get_list_line() -> Option<String> {
+    None
+}
+
 /// Port of `find_internal_func_lua()` from `Src/eval/funcs.c:244`.
 ///
 /// The Lua name of a Lua-implemented builtin, or `None` if not found. RUST-PORT
@@ -377,6 +385,111 @@ pub fn f_matchstr(argvars: &[typval_T], rettv: &mut typval_T) {
 /// `None` (mirrors the absent Lua provider elsewhere).
 pub fn find_internal_func_lua(_name: &str) -> Option<String> {
     None
+}
+
+/// Reduced `EvalFuncDef` (`Src/eval/funcs.c`) — a builtin's metadata. RUST-PORT
+/// NOTE: the C also carries a `func` dispatch pointer and Lua data; dispatch
+/// here is by name through `CALL_FUNC_HOOK`, so only the arity/method-base
+/// metadata is modeled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EvalFuncDef {
+    /// Builtin name.
+    pub name: &'static str,
+    /// Minimum argument count.
+    pub min_argc: u8,
+    /// Maximum argument count (`MAX` = varargs).
+    pub max_argc: u8,
+    /// Method-base argument index (`0` = `BASE_NONE`).
+    pub base_arg: u8,
+}
+
+/// Port of `find_internal_func()` from `Src/eval/funcs.c:235` — look up the
+/// (reduced) [`EvalFuncDef`] for builtin `name`, or `None` if not a builtin.
+pub fn find_internal_func(name: &str) -> Option<EvalFuncDef> {
+    use crate::ported::eval::funcs_argc::{BUILTIN_ARGC, BUILTIN_BASE};
+    let i = BUILTIN_ARGC.binary_search_by(|e| e.0.cmp(name)).ok()?;
+    let (n, min_argc, max_argc) = BUILTIN_ARGC[i];
+    let base_arg = BUILTIN_BASE
+        .binary_search_by(|e| e.0.cmp(name))
+        .map_or(0, |j| BUILTIN_BASE[j].1);
+    Some(EvalFuncDef { name: n, min_argc, max_argc, base_arg })
+}
+
+/// Port of `check_internal_func()` from `Src/eval/funcs.c:257`.
+///
+/// Check the argument count for builtin `name` and return its method-base index
+/// (`BASE_NONE` = 0, else the 1-based base position), or `-1` (after an `E118`/
+/// `E119` error) on an arity mismatch.
+pub fn check_internal_func(name: &str, argcount: i32) -> i32 {
+    use crate::ported::eval::funcs_argc::{BUILTIN_ARGC, BUILTIN_BASE, MAX};
+    let Ok(i) = BUILTIN_ARGC.binary_search_by(|e| e.0.cmp(name)) else {
+        return -1;
+    };
+    let (_, min_argc, max_argc) = BUILTIN_ARGC[i];
+    if argcount < min_argc as i32 {
+        emsg(&format!("E119: Not enough arguments for function: {name}"));
+        return -1;
+    }
+    if max_argc != MAX && argcount > max_argc as i32 {
+        emsg(&format!("E118: Too many arguments for function: {name}"));
+        return -1;
+    }
+    BUILTIN_BASE
+        .binary_search_by(|e| e.0.cmp(name))
+        .map_or(0, |j| BUILTIN_BASE[j].1 as i32)
+}
+
+/// Port of `call_internal_method()` from `Src/eval/funcs.c:297`.
+///
+/// Invoke builtin `fname` as a method `base->fname(argvars)`: insert `basetv` at
+/// the builtin's method-base position, validate arity, and dispatch. Returns an
+/// `FCERR_*` code (`FCERR_NONE` on success).
+pub fn call_internal_method(
+    fname: &str,
+    argvars: &[typval_T],
+    basetv: &typval_T,
+    rettv: &mut typval_T,
+) -> i32 {
+    use crate::ported::eval::funcs_argc::{BUILTIN_ARGC, BUILTIN_BASE, MAX};
+    use crate::ported::eval::typval_defs_h::{VarLockStatus, VarType::VAR_FUNC};
+    use crate::ported::eval::userfunc::fcerr::*;
+    let Ok(i) = BUILTIN_ARGC.binary_search_by(|e| e.0.cmp(fname)) else {
+        return FCERR_UNKNOWN;
+    };
+    let (_, min_argc, max_argc) = BUILTIN_ARGC[i];
+    let base = BUILTIN_BASE
+        .binary_search_by(|e| e.0.cmp(fname))
+        .map_or(0u8, |j| BUILTIN_BASE[j].1);
+    if base == 0 {
+        return FCERR_NOTMETHOD;
+    }
+    let argcount = argvars.len() as i32;
+    if argcount + 1 < min_argc as i32 {
+        return FCERR_TOOFEW;
+    }
+    if max_argc != MAX && argcount + 1 > max_argc as i32 {
+        return FCERR_TOOMANY;
+    }
+    let base_index = (base - 1) as usize;
+    if argvars.len() < base_index {
+        return FCERR_TOOFEW;
+    }
+    // Insert `basetv` at the method-base position.
+    let mut argv: Vec<typval_T> = argvars[..base_index].to_vec();
+    argv.push(basetv.clone());
+    argv.extend_from_slice(&argvars[base_index..]);
+    let callee = typval_T {
+        v_type: VAR_FUNC,
+        v_lock: VarLockStatus::VAR_UNLOCKED,
+        vval: v_string(fname.to_string()),
+    };
+    match CALL_FUNC_HOOK.with(|h| *h.borrow()).and_then(|f| f(&callee, &argv)) {
+        Some(result) => {
+            *rettv = result;
+            FCERR_NONE
+        }
+        None => FCERR_UNKNOWN,
+    }
 }
 
 /// Port of `call_internal_func()` from `Src/eval/funcs.c:279`.
@@ -438,6 +551,67 @@ pub fn may_add_state_char(gap: &mut String, include: Option<&str>, c: char) {
         gap.push(c);
     }
 }
+
+/// Port of `get_function_name()` from `Src/eval/funcs.c:178` — the `idx`-th
+/// builtin/user function name for command-line completion. No interactive
+/// completion standalone → `None`.
+pub fn get_function_name(_idx: i32) -> Option<String> {
+    None
+}
+
+/// Port of `get_expr_name()` from `Src/eval/funcs.c:214` — the `idx`-th function
+/// or variable name for expression completion. No completion standalone → `None`.
+pub fn get_expr_name(_idx: i32) -> Option<String> {
+    None
+}
+
+/// Port of `api_wrapper()` from `Src/eval/funcs.c:360` — dispatch wrapper for a
+/// generated `nvim_*` API builtin. No API builtins exist standalone, so this is
+/// never a builtin's dispatch target → no-op.
+pub fn api_wrapper(_argvars: &[typval_T], _rettv: &mut typval_T) {}
+
+/// Port of `lua_wrapper()` from `Src/eval/funcs.c:397` — dispatch wrapper for a
+/// Lua-implemented builtin. No Lua builtins exist standalone → no-op.
+pub fn lua_wrapper(_argvars: &[typval_T], _rettv: &mut typval_T) {}
+
+/// Port of `dummy_timer_due_cb()` from `Src/eval/funcs.c:2568` — the libuv
+/// callback for `wait()`'s internal timeout timer; no event loop fires it, no-op.
+pub fn dummy_timer_due_cb() {}
+
+/// Port of `dummy_timer_close_cb()` from `Src/eval/funcs.c:2579` — the libuv
+/// close callback for `wait()`'s timer; never fires, no-op.
+pub fn dummy_timer_close_cb() {}
+
+/// Port of `find_buffer()` from `Src/eval/buffer.c:47`.
+///
+/// Resolve a buffer reference (`{buf}` number or name) to its buffer number.
+/// RUST-PORT NOTE: no buffers are listed standalone (`f_bufnr` → -1,
+/// `f_bufexists` → 0), so a reference never resolves → `None`.
+pub fn find_buffer(_avar: &typval_T) -> Option<varnumber_T> {
+    None
+}
+
+// ── buffer-switching helpers (Src/eval/buffer.c) ──
+//
+// RUST-PORT NOTE: vimlrs has a single virtual buffer, so there is never another
+// buffer to switch to or restore from — the buffer builtins operate on the one
+// buffer directly. These context-switch helpers are therefore faithful no-ops.
+
+/// Port of `switch_buffer()` from `Src/eval/buffer.c:784` — make another buffer
+/// current, saving the old one. Single buffer standalone → no-op.
+pub fn switch_buffer() {}
+
+/// Port of `restore_buffer()` from `Src/eval/buffer.c:795` — restore the buffer
+/// saved by [`switch_buffer`]. Single buffer standalone → no-op.
+pub fn restore_buffer() {}
+
+/// Port of `change_other_buffer_prepare()` from `Src/eval/buffer.c:92` — set up
+/// to change a non-current buffer. Single buffer standalone → no-op.
+pub fn change_other_buffer_prepare() {}
+
+/// Port of `change_other_buffer_restore()` from `Src/eval/buffer.c:113` — undo
+/// [`change_other_buffer_prepare`]. Single buffer standalone → no-op.
+pub fn change_other_buffer_restore() {}
 
 /// Port of `non_zero_arg()` from `Src/eval/funcs.c:328`.
 ///
@@ -8847,6 +9021,43 @@ pub fn f_fullcommand(argvars: &[typval_T], rettv: &mut typval_T) {
 #[cfg(test)]
 mod helper_tests {
     use super::may_add_state_char;
+
+    #[test]
+    fn find_internal_func_lookup() {
+        use super::find_internal_func;
+        let add = find_internal_func("add").unwrap();
+        assert_eq!((add.min_argc, add.max_argc, add.base_arg), (2, 2, 1));
+        assert_eq!(find_internal_func("argc").unwrap().base_arg, 0); // no method base
+        assert!(find_internal_func("not_a_builtin_xyz").is_none());
+    }
+
+    #[test]
+    fn check_and_call_internal_method() {
+        use super::{call_internal_method, check_internal_func};
+        use crate::ported::eval::typval::CALL_FUNC_HOOK;
+        use crate::ported::eval::typval_defs_h::{typval_T, typval_vval_union::v_number};
+        use crate::ported::eval::userfunc::fcerr::*;
+        // check_internal_func: arity + base index. "add" has base=1, args 2..2.
+        assert_eq!(check_internal_func("add", 2), 1);
+        assert_eq!(check_internal_func("add", 1), -1); // too few (E119)
+        // a non-method builtin (no base) → 0 (BASE_NONE)
+        // call_internal_method inserts base at position (base-1) and dispatches.
+        fn hook(_c: &typval_T, args: &[typval_T]) -> Option<typval_T> {
+            Some(typval_T::from(args.len() as i64))
+        }
+        let saved = CALL_FUNC_HOOK.with(|h| *h.borrow());
+        CALL_FUNC_HOOK.with(|h| *h.borrow_mut() = Some(hook));
+        let mut rv = typval_T::from(0);
+        // add(base, x): base + one arg = 2 args total
+        assert_eq!(
+            call_internal_method("add", &[typval_T::from(9)], &typval_T::from(1), &mut rv),
+            FCERR_NONE
+        );
+        assert!(matches!(rv.vval, v_number(2)));
+        // unknown builtin
+        assert_eq!(call_internal_method("no_such_xyz", &[], &typval_T::from(0), &mut rv), FCERR_UNKNOWN);
+        CALL_FUNC_HOOK.with(|h| *h.borrow_mut() = saved);
+    }
 
     #[test]
     fn call_internal_func_arity_and_dispatch() {

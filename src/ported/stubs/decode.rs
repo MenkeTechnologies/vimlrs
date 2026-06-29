@@ -33,10 +33,6 @@ pub fn positive_integer_to_special_typval() { unimplemented!("STUB positive_inte
 /// C: `static void typval_parse_enter(mpack_parser_t *parser, mpack_node_t *node)`
 pub fn typval_parse_enter() { unimplemented!("STUB typval_parse_enter — csrc/eval/decode.c:911") }
 
-/// Port of `typval_parser_error_free()` — `csrc/eval/decode.c:1016`. STUB: not yet ported.
-/// C: `void typval_parser_error_free(mpack_parser_t *parser)`
-pub fn typval_parser_error_free() { unimplemented!("STUB typval_parser_error_free — csrc/eval/decode.c:1016") }
-
 /// Port of `typval_parse_exit()` — `csrc/eval/decode.c:1033`. STUB: not yet ported.
 /// C: `static void typval_parse_exit(mpack_parser_t *parser, mpack_node_t *node)`
 pub fn typval_parse_exit() { unimplemented!("STUB typval_parse_exit — csrc/eval/decode.c:1033") }

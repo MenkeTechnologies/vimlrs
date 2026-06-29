@@ -223,6 +223,34 @@ pub fn current_func_returned() -> bool {
     false
 }
 
+/// Port of `get_user_func_name()` from `Src/eval/userfunc.c:3075` — the `idx`-th
+/// user-defined function name for command-line completion. No interactive
+/// completion standalone → `None`.
+pub fn get_user_func_name(_idx: i32) -> Option<String> {
+    None
+}
+
+/// Port of `list_func_head()` from `Src/eval/userfunc.c:1907` — print a
+/// function's `name(args)` header for `:function`. No interactive listing
+/// standalone → no-op returning column 0 (mirrors the `list_*_vars` ports).
+pub fn list_func_head() -> i32 {
+    0
+}
+
+/// Port of `list_functions_matching_pat()` from `Src/eval/userfunc.c:2266` —
+/// list user functions matching a `:function /pat` pattern. No interactive
+/// listing standalone → `None`.
+pub fn list_functions_matching_pat() -> Option<String> {
+    None
+}
+
+/// Port of `list_one_function()` from `Src/eval/userfunc.c:2294` — print one
+/// function definition for `:function {name}`. No interactive listing
+/// standalone → `None`.
+pub fn list_one_function() -> Option<()> {
+    None
+}
+
 /// Port of `list_func_vars()` from `Src/eval/userfunc.c` — `:let` listing of the
 /// `l:` scope; no interactive listing standalone, no-op (mirrors the
 /// `list_glob_vars`/`list_buf_vars` ports in `vars.rs`).
@@ -341,6 +369,8 @@ pub mod fcerr {
     pub const FCERR_TOOFEW: i32 = 2;
     /// `FCERR_NONE = 5` — the call succeeded.
     pub const FCERR_NONE: i32 = 5;
+    /// `FCERR_NOTMETHOD = 8` — the function cannot be used as a method.
+    pub const FCERR_NOTMETHOD: i32 = 8;
 }
 
 /// `#define FC_ABORT 0x01` … (`userfunc.h:20`) — `uf_flags` bits.
@@ -374,6 +404,138 @@ pub struct ufunc_T {
     pub uf_flags: i32,
 }
 
+/// "Look up a user function's metadata by name → reduced `ufunc_T`" hook,
+/// installed by the bridge (which owns the function registry). `None` if the
+/// name is not a defined user function.
+pub type FindFuncFn = fn(&str) -> Option<ufunc_T>;
+
+thread_local! {
+    /// Bridge-installed user-function lookup, backing [`find_func`].
+    pub static FIND_FUNC_HOOK: std::cell::RefCell<Option<FindFuncFn>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// "Remove a user function by name → was it present" hook, installed by the
+/// bridge (which owns the function registry).
+pub type RemoveFuncFn = fn(&str) -> bool;
+
+thread_local! {
+    /// Bridge-installed user-function removal, backing [`func_remove`].
+    pub static REMOVE_FUNC_HOOK: std::cell::RefCell<Option<RemoveFuncFn>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Port of `find_var_in_scoped_ht()` from `Src/eval/userfunc.c` — search a
+/// lambda's captured parent scope for a variable. RUST-PORT NOTE: closures
+/// capture the enclosing `a:`/`l:` scope at compile time and resolve through
+/// [`eval_variable`](crate::ported::eval::vars::eval_variable), so this runtime
+/// parent-scope search is unwired → `None`.
+pub fn find_var_in_scoped_ht() -> Option<crate::ported::eval::typval_defs_h::typval_T> {
+    None
+}
+
+/// Port of `get_func_line()` from `Src/eval/userfunc.c` — the getline callback
+/// feeding a function body to the source machinery. RUST-PORT NOTE: the bridge
+/// executes a function from its compiled bytecode, not line-by-line, so this
+/// callback is never driven → `None` (end of input).
+pub fn get_func_line() -> Option<String> {
+    None
+}
+
+/// Port of `set_current_funccal()` from `Src/eval/userfunc.c` — set the active
+/// function-call context. RUST-PORT NOTE: the active scope is the top of the
+/// `funccal_stack` Vec (managed by the bridge's call machinery and
+/// [`save_funccal`]/[`restore_funccal`]); there is no separate settable
+/// `current_funccal` pointer → no-op.
+pub fn set_current_funccal() {}
+
+/// Port of `cleanup_function_call()` from `Src/eval/userfunc.c` — tear down a
+/// finished function call: free its locals, pop it off the call chain, run any
+/// `:defer`, and retain the scope if a closure references it. RUST-PORT NOTE:
+/// the bridge manages the `funccal_stack` push/pop, locals are `Drop`-freed,
+/// closures are compile-time-captured, and `:defer` is not tracked — so every
+/// part is handled elsewhere → no-op.
+pub fn cleanup_function_call() {}
+
+/// Port of `register_closure()` from `Src/eval/userfunc.c` — record the
+/// enclosing function scope on a lambda so it can read outer `a:`/`l:` locals.
+/// RUST-PORT NOTE: the bridge captures the enclosing scope at compile time, so
+/// the C's runtime `uf_scoped` registration is unused → no-op.
+pub fn register_closure() {}
+
+/// Port of `func_remove()` from `Src/eval/userfunc.c` — remove user function
+/// `fp` from the registry, returning whether it was present (`:delfunction` and
+/// redefinition). Goes through the bridge's [`REMOVE_FUNC_HOOK`].
+pub fn func_remove(fp: &ufunc_T) -> bool {
+    REMOVE_FUNC_HOOK
+        .with(|h| *h.borrow())
+        .is_some_and(|f| f(&fp.uf_name))
+}
+
+/// Port of `find_func()` from `Src/eval/userfunc.c:712`.
+///
+/// Look up the user function `name`, returning its (reduced) [`ufunc_T`] or
+/// `None`. RUST-PORT NOTE: the function registry lives in the bridge, which
+/// installs the [`FIND_FUNC_HOOK`]; the C's `<SNR>123_` name translation is not
+/// applied.
+pub fn find_func(name: &str) -> Option<ufunc_T> {
+    FIND_FUNC_HOOK.with(|h| *h.borrow()).and_then(|f| f(name))
+}
+
+/// Port of `alloc_ufunc()` from `Src/eval/userfunc.c:280`.
+///
+/// Allocate a [`ufunc_T`] for a function called `name`. RUST-PORT NOTE: only the
+/// reduced fields are set; the C's `<SNR>` `uf_name_exp` derivation keys off the
+/// K_SPECIAL byte encoding (not modeled — names are plain `String` here), so it
+/// is left unset.
+pub fn alloc_ufunc(name: &str) -> ufunc_T {
+    ufunc_T {
+        uf_name: name.to_string(),
+        ..Default::default()
+    }
+}
+
+/// Port of `call_user_func()` from `Src/eval/userfunc.c:994`.
+///
+/// Call user function `fp` with `argvars`, storing the result in `rettv`.
+/// RUST-PORT NOTE: the call body runs in the bytecode bridge, reached here by
+/// name through `CALL_FUNC_HOOK`; the C `funcexe_T`/scope-setup is owned there.
+pub fn call_user_func(
+    fp: &ufunc_T,
+    argvars: &[crate::ported::eval::typval_defs_h::typval_T],
+    rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
+) {
+    use crate::ported::eval::typval_defs_h::{typval_T, typval_vval_union::v_string, VarLockStatus, VarType::VAR_FUNC};
+    let callee = typval_T {
+        v_type: VAR_FUNC,
+        v_lock: VarLockStatus::VAR_UNLOCKED,
+        vval: v_string(fp.uf_name.clone()),
+    };
+    if let Some(result) = crate::ported::eval::typval::CALL_FUNC_HOOK
+        .with(|h| *h.borrow())
+        .and_then(|f| f(&callee, argvars))
+    {
+        *rettv = result;
+    }
+}
+
+/// Port of `call_user_func_check()` from `Src/eval/userfunc.c:1405`.
+///
+/// Validate the argument count for user function `fp`, then call it. Returns an
+/// `FCERR_*` code (`FCERR_NONE` on success).
+pub fn call_user_func_check(
+    fp: &ufunc_T,
+    argvars: &[crate::ported::eval::typval_defs_h::typval_T],
+    rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
+) -> i32 {
+    let err = check_user_func_argcount(fp, argvars.len() as i32);
+    if err != fcerr::FCERR_UNKNOWN {
+        return err;
+    }
+    call_user_func(fp, argvars, rettv);
+    fcerr::FCERR_NONE
+}
+
 /// Port of `check_user_func_argcount()` from `Src/eval/userfunc.c:1391`.
 ///
 /// `FCERR_UNKNOWN` (OK), `FCERR_TOOFEW`, or `FCERR_TOOMANY` for calling `fp`
@@ -388,6 +550,25 @@ pub fn check_user_func_argcount(fp: &ufunc_T, argcount: i32) -> i32 {
     } else {
         fcerr::FCERR_UNKNOWN
     }
+}
+
+/// Port of `func_is_global()` from `Src/eval/userfunc.c:722`.
+///
+/// Whether `ufunc` is a global (not script-local) function. RUST-PORT NOTE: the
+/// C tests for a leading `K_SPECIAL` byte (the `<SNR>` encoding); the reduced
+/// String-name model carries any script-local name as the literal `<SNR>…`
+/// string, so this checks that prefix instead.
+pub fn func_is_global(ufunc: &ufunc_T) -> bool {
+    !ufunc.uf_name.starts_with("<SNR>")
+}
+
+/// Port of `cat_func_name()` from `Src/eval/userfunc.c:731`.
+///
+/// The displayable name of `fp` for messages/`:function`. RUST-PORT NOTE: the C
+/// rewrites a script-local name's `K_SPECIAL` prefix to `<SNR>`; here the name
+/// is already in display form, so it is returned as-is.
+pub fn cat_func_name(fp: &ufunc_T) -> String {
+    fp.uf_name.clone()
 }
 
 /// Port of `printable_func_name()` from `Src/eval/userfunc.c:1886`.
@@ -428,6 +609,153 @@ pub fn get_lambda_name() -> String {
         n.set(next);
         format!("<lambda>{next}")
     })
+}
+
+/// Port of `get_func_tv()` from `Src/eval/userfunc.c:551`.
+///
+/// Evaluate a function call `name(args)` — parse and evaluate the argument list
+/// `args` ([`get_func_arguments`]), then call `name` ([`call_func`]) into
+/// `rettv`. Returns [`OK`](crate::ported::eval_h::OK)/[`FAIL`](crate::ported::eval_h::FAIL).
+/// RUST-PORT NOTE: the C advances a parse pointer over `name(...)` and threads a
+/// `funcexe_T`; here the already-isolated argument text is passed in.
+pub fn get_func_tv(
+    name: &str,
+    args: &str,
+    rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
+) -> i32 {
+    match get_func_arguments(args) {
+        Some(argvars) => call_func(name, &argvars, rettv),
+        None => crate::ported::eval_h::FAIL,
+    }
+}
+
+/// Port of `get_func_arguments()` from `Src/eval/userfunc.c:510`.
+///
+/// Evaluate the comma-separated call arguments in `args` (the content between a
+/// call's parentheses), returning the resulting values. Returns `None` if any
+/// argument fails to evaluate. RUST-PORT NOTE: the C advances a parse pointer
+/// and tracks a partial-arg offset; here the list is split on top-level commas
+/// (balancing brackets, skipping strings) and each is run via `EVAL_STRING_HOOK`.
+pub fn get_func_arguments(
+    args: &str,
+) -> Option<Vec<crate::ported::eval::typval_defs_h::typval_T>> {
+    let parts = {
+        let b = args.as_bytes();
+        let mut out: Vec<&str> = Vec::new();
+        let (mut start, mut depth, mut i) = (0usize, 0i32, 0usize);
+        while i < b.len() {
+            match b[i] {
+                b'\'' => {
+                    i += 1;
+                    while i < b.len() && b[i] != b'\'' {
+                        i += 1;
+                    }
+                }
+                b'"' => {
+                    i += 1;
+                    while i < b.len() && b[i] != b'"' {
+                        if b[i] == b'\\' && i + 1 < b.len() {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                }
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => depth -= 1,
+                b',' if depth == 0 => {
+                    out.push(&args[start..i]);
+                    start = i + 1;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        out.push(&args[start..]);
+        out
+    };
+    let mut argvars = Vec::new();
+    for part in parts {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let v = crate::ported::eval::typval::EVAL_STRING_HOOK
+            .with(|h| *h.borrow())
+            .and_then(|f| f(part))?;
+        argvars.push(v);
+    }
+    Some(argvars)
+}
+
+/// Port of `get_function_args()` from `Src/eval/userfunc.c:149`.
+///
+/// Parse a `:function`/lambda parameter list `params` (the content between the
+/// parentheses): comma-separated names (validated by [`one_function_arg`]),
+/// optional `name = default` defaults (stored as the default expression source),
+/// and a trailing `...` for varargs. Returns `(names, default_exprs, varargs)`,
+/// or `None` on an invalid parameter. RUST-PORT NOTE: the C threads an advancing
+/// pointer and locates default-expression ends via `eval1`; here the list is
+/// split on top-level commas (balancing `()`/`[]`/`{}`, skipping strings).
+pub fn get_function_args(params: &str) -> Option<(Vec<String>, Vec<String>, bool)> {
+    // Split on commas that are not nested in brackets or inside a string.
+    let parts = {
+        let b = params.as_bytes();
+        let mut out: Vec<&str> = Vec::new();
+        let (mut start, mut depth, mut i) = (0usize, 0i32, 0usize);
+        while i < b.len() {
+            match b[i] {
+                b'\'' => {
+                    i += 1;
+                    while i < b.len() && b[i] != b'\'' {
+                        i += 1;
+                    }
+                }
+                b'"' => {
+                    i += 1;
+                    while i < b.len() && b[i] != b'"' {
+                        if b[i] == b'\\' && i + 1 < b.len() {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                }
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => depth -= 1,
+                b',' if depth == 0 => {
+                    out.push(&params[start..i]);
+                    start = i + 1;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        out.push(&params[start..]);
+        out
+    };
+
+    let mut names: Vec<String> = Vec::new();
+    let mut defaults: Vec<String> = Vec::new();
+    let mut varargs = false;
+    for part in parts {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if part == "..." {
+            varargs = true;
+            continue;
+        }
+        if let Some(eq) = part.find('=') {
+            let name = part[..eq].trim();
+            if one_function_arg(name, Some(&mut names), false) != name.len() {
+                return None;
+            }
+            defaults.push(part[eq + 1..].trim().to_string());
+        } else if one_function_arg(part, Some(&mut names), false) != part.len() {
+            return None;
+        }
+    }
+    Some((names, defaults, varargs))
 }
 
 /// Port of `one_function_arg()` from `Src/eval/userfunc.c:109`.
@@ -478,6 +806,37 @@ pub fn argv_add_base(
             (new_argvars, 1)
         }
         None => (argvars.to_vec(), 0),
+    }
+}
+
+/// Port of `call_func()` from `Src/eval/userfunc.c:1667`.
+///
+/// Call function `funcname` with `argvars`, storing the result in `rettv`;
+/// returns [`OK`](crate::ported::eval_h::OK)/[`FAIL`](crate::ported::eval_h::FAIL).
+/// This is the low-level dispatcher [`func_call`]/`call_vim_function` build on.
+/// RUST-PORT NOTE: dispatch goes through the bridge's `CALL_FUNC_HOOK`; the C
+/// `funcexe_T` (bound partial, self dict, first/last line) is not modeled.
+pub fn call_func(
+    funcname: &str,
+    argvars: &[crate::ported::eval::typval_defs_h::typval_T],
+    rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
+) -> i32 {
+    use crate::ported::eval::typval_defs_h::{typval_T, typval_vval_union::v_string, VarLockStatus, VarType::VAR_FUNC};
+    use crate::ported::eval_h::{FAIL, OK};
+    let callee = typval_T {
+        v_type: VAR_FUNC,
+        v_lock: VarLockStatus::VAR_UNLOCKED,
+        vval: v_string(funcname.to_string()),
+    };
+    match crate::ported::eval::typval::CALL_FUNC_HOOK
+        .with(|h| *h.borrow())
+        .and_then(|f| f(&callee, argvars))
+    {
+        Some(result) => {
+            *rettv = result;
+            OK
+        }
+        None => FAIL,
     }
 }
 
@@ -574,6 +933,86 @@ pub fn get_return_cmd(
         buf.push_str("...");
     }
     buf
+}
+
+// ── current-funccall scope accessors (userfunc.c) ──
+//
+// RUST-PORT NOTE: the C returns a live `dict_T*`/`hashtab_T*` into the current
+// function-call scope (for the GC/listing/debugger to read or mark). The
+// `Vec<FuncScope>` model can't hand out a borrow across the thread-local, so
+// these return a read-snapshot clone of the innermost active scope (`None` when
+// not inside a function). Mutations do not flow back — they are read accessors.
+
+/// Port of `get_funccal_local_var()` from `Src/eval/userfunc.c` — the `l:`
+/// scope's self-variable, i.e. `l:` evaluated as a Dict. RUST-PORT NOTE: the C
+/// returns the scope's self-`dictitem_T` (whose value is the live scope Dict);
+/// this returns that value as a `VAR_DICT` read-snapshot (consistent with
+/// `eval_variable("l:")`), or `None` when not in a function.
+pub fn get_funccal_local_var() -> Option<crate::ported::eval::typval_defs_h::typval_T> {
+    use crate::ported::eval::typval_defs_h::{typval_T, typval_vval_union::v_dict, VarLockStatus, VarType::VAR_DICT};
+    let nd = crate::ported::eval::typval::tv_dict_alloc();
+    nd.borrow_mut().dv_hashtab = get_funccal_local_dict()?.dv_hashtab;
+    Some(typval_T { v_type: VAR_DICT, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_dict(Some(nd)) })
+}
+
+/// Port of `get_funccal_args_var()` from `Src/eval/userfunc.c` — the `a:` scope's
+/// self-variable (`a:` as a Dict read-snapshot), or `None`.
+pub fn get_funccal_args_var() -> Option<crate::ported::eval::typval_defs_h::typval_T> {
+    use crate::ported::eval::typval_defs_h::{typval_T, typval_vval_union::v_dict, VarLockStatus, VarType::VAR_DICT};
+    let nd = crate::ported::eval::typval::tv_dict_alloc();
+    nd.borrow_mut().dv_hashtab = get_funccal_args_dict()?.dv_hashtab;
+    Some(typval_T { v_type: VAR_DICT, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_dict(Some(nd)) })
+}
+
+/// Port of `get_funccal_local_dict()` from `Src/eval/userfunc.c` — the current
+/// `l:` scope dict (read-snapshot), or `None` when not in a function.
+pub fn get_funccal_local_dict() -> Option<crate::ported::eval::typval_defs_h::dict_T> {
+    crate::ported::eval::vars::funccal_stack.with(|s| s.borrow().last().map(|f| f.fc_l_vars.clone()))
+}
+
+/// Port of `get_funccal_args_dict()` from `Src/eval/userfunc.c` — the current
+/// `a:` argument scope dict (read-snapshot), or `None`.
+pub fn get_funccal_args_dict() -> Option<crate::ported::eval::typval_defs_h::dict_T> {
+    crate::ported::eval::vars::funccal_stack.with(|s| s.borrow().last().map(|f| f.fc_l_avars.clone()))
+}
+
+/// Port of `get_funccal_local_ht()` from `Src/eval/userfunc.c` — the hashtable
+/// of the current `l:` scope (read-snapshot), or `None`.
+pub fn get_funccal_local_ht(
+) -> Option<indexmap::IndexMap<String, crate::ported::eval::typval_defs_h::typval_T>> {
+    get_funccal_local_dict().map(|d| d.dv_hashtab)
+}
+
+/// Port of `get_funccal_args_ht()` from `Src/eval/userfunc.c` — the hashtable of
+/// the current `a:` scope (read-snapshot), or `None`.
+pub fn get_funccal_args_ht(
+) -> Option<indexmap::IndexMap<String, crate::ported::eval::typval_defs_h::typval_T>> {
+    get_funccal_args_dict().map(|d| d.dv_hashtab)
+}
+
+/// Port of `func_name()` from `Src/eval/userfunc.c:3875` — the name of the
+/// function a call activation belongs to. RUST-PORT NOTE: the C reads a
+/// `funccall_T` cookie's `fc_func->uf_name`; the reduced model returns the
+/// innermost active [`FuncScope`](crate::ported::eval::vars::FuncScope)'s
+/// `fc_name` (empty when not inside a function).
+pub fn func_name() -> String {
+    crate::ported::eval::vars::funccal_stack
+        .with(|s| s.borrow().last().map(|f| f.fc_name.clone()))
+        .unwrap_or_default()
+}
+
+/// Port of `func_breakpoint()` from `Src/eval/userfunc.c:3881` — the next
+/// debugger breakpoint line for a function call. No debugger standalone (no
+/// breakpoints) → 0. RUST-PORT NOTE: the C returns a mutable `linenr_T*` the
+/// debugger updates; the reduced model returns the (always-absent) value.
+pub fn func_breakpoint() -> i64 {
+    0
+}
+
+/// Port of `func_dbg_tick()` from `Src/eval/userfunc.c:3887` — the debug tick a
+/// function call was entered with. No debugger standalone → 0.
+pub fn func_dbg_tick() -> i32 {
+    0
 }
 
 /// Port of `func_level()` from `Src/eval/userfunc.c` — the function-call nesting
@@ -709,6 +1148,55 @@ mod tests {
     }
 
     #[test]
+    fn call_user_func_check_arity_and_dispatch() {
+        use crate::ported::eval::typval::CALL_FUNC_HOOK;
+        use crate::ported::eval::typval_defs_h::{typval_T, typval_vval_union::v_number};
+        use fcerr::*;
+        // F(a, b): 2 required.
+        let fp = ufunc_T {
+            uf_name: "F".into(),
+            uf_args: vec!["a".into(), "b".into()],
+            ..Default::default()
+        };
+        fn hook(_c: &typval_T, args: &[typval_T]) -> Option<typval_T> {
+            Some(typval_T::from(args.len() as i64))
+        }
+        let saved = CALL_FUNC_HOOK.with(|h| *h.borrow());
+        CALL_FUNC_HOOK.with(|h| *h.borrow_mut() = Some(hook));
+        let mut rv = typval_T::from(0);
+        // too few args → FCERR, no dispatch
+        assert_eq!(call_user_func_check(&fp, &[typval_T::from(1)], &mut rv), FCERR_TOOFEW);
+        // correct arity → dispatch
+        assert_eq!(call_user_func_check(&fp, &[typval_T::from(1), typval_T::from(2)], &mut rv), FCERR_NONE);
+        assert!(matches!(rv.vval, v_number(2)));
+        CALL_FUNC_HOOK.with(|h| *h.borrow_mut() = saved);
+    }
+
+    #[test]
+    fn find_func_via_hook() {
+        use super::{find_func, FIND_FUNC_HOOK};
+        fn hook(name: &str) -> Option<ufunc_T> {
+            (name == "MyFunc").then(|| ufunc_T {
+                uf_name: "MyFunc".into(),
+                uf_args: vec!["a".into(), "b".into()],
+                uf_def_args: vec!["b".into()],
+                uf_varargs: false,
+                ..Default::default()
+            })
+        }
+        let saved = FIND_FUNC_HOOK.with(|h| *h.borrow());
+        FIND_FUNC_HOOK.with(|h| *h.borrow_mut() = None);
+        assert!(find_func("MyFunc").is_none()); // no hook
+        FIND_FUNC_HOOK.with(|h| *h.borrow_mut() = Some(hook));
+        let f = find_func("MyFunc").unwrap();
+        assert_eq!(f.uf_args.len(), 2);
+        // the looked-up ufunc feeds the ported arity helper
+        assert_eq!(get_func_arity("MyFunc", Some(&f)), Some((1, 1, false)));
+        assert!(find_func("nope").is_none());
+        FIND_FUNC_HOOK.with(|h| *h.borrow_mut() = saved);
+    }
+
+    #[test]
     fn user_func_argcount_and_arity() {
         use fcerr::*;
         // F(a, b = 1, ...): 1 required, 1 optional, varargs.
@@ -802,6 +1290,66 @@ mod tests {
     }
 
     #[test]
+    fn get_func_tv_calls() {
+        use crate::ported::eval::typval::{CALL_FUNC_HOOK, EVAL_STRING_HOOK};
+        use crate::ported::eval::typval_defs_h::{typval_T, typval_vval_union::v_number};
+        use crate::ported::eval_h::{FAIL, OK};
+        fn eval_hook(e: &str) -> Option<typval_T> {
+            e.trim().parse::<i64>().ok().map(typval_T::from)
+        }
+        fn call_hook(_c: &typval_T, args: &[typval_T]) -> Option<typval_T> {
+            // return the sum of the (number) args
+            Some(typval_T::from(args.iter().map(|a| match a.vval { v_number(n) => n, _ => 0 }).sum::<i64>()))
+        }
+        let (se, sc) = (EVAL_STRING_HOOK.with(|h| *h.borrow()), CALL_FUNC_HOOK.with(|h| *h.borrow()));
+        EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = Some(eval_hook));
+        CALL_FUNC_HOOK.with(|h| *h.borrow_mut() = Some(call_hook));
+        let mut rv = typval_T::from(-1);
+        assert_eq!(get_func_tv("F", "2, 3, 4", &mut rv), OK);
+        assert!(matches!(rv.vval, v_number(9)));
+        // a bad argument → FAIL
+        assert_eq!(get_func_tv("F", "1, bad", &mut rv), FAIL);
+        EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = se);
+        CALL_FUNC_HOOK.with(|h| *h.borrow_mut() = sc);
+    }
+
+    #[test]
+    fn get_func_arguments_eval() {
+        use crate::ported::eval::typval::EVAL_STRING_HOOK;
+        use crate::ported::eval::typval_defs_h::{typval_T, typval_vval_union::v_number};
+        fn hook(e: &str) -> Option<typval_T> {
+            e.trim().parse::<i64>().ok().map(typval_T::from)
+        }
+        let saved = EVAL_STRING_HOOK.with(|h| *h.borrow());
+        EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = Some(hook));
+        let v = get_func_arguments("1, 2, 3").unwrap();
+        assert_eq!(v.len(), 3);
+        assert!(matches!(v[2].vval, v_number(3)));
+        // empty arg list
+        assert_eq!(get_func_arguments("").unwrap().len(), 0);
+        // a non-evaluable arg → None
+        assert!(get_func_arguments("1, bad").is_none());
+        EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = saved);
+    }
+
+    #[test]
+    fn get_function_args_parsing() {
+        // names, a default, and varargs
+        let (names, defaults, va) = get_function_args("a, b = 1 + 2, ...").unwrap();
+        assert_eq!(names, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(defaults, vec!["1 + 2".to_string()]);
+        assert!(va);
+        // empty list
+        assert_eq!(get_function_args(""), Some((vec![], vec![], false)));
+        // a default expression with a nested comma must not split the list
+        let (n2, d2, _) = get_function_args("x = f(a, b)").unwrap();
+        assert_eq!(n2, vec!["x".to_string()]);
+        assert_eq!(d2, vec!["f(a, b)".to_string()]);
+        // invalid (reserved) name
+        assert_eq!(get_function_args("firstline"), None);
+    }
+
+    #[test]
     fn one_function_arg_parsing() {
         let mut args: Vec<String> = Vec::new();
         // "foo, bar)" — consumes "foo"
@@ -832,6 +1380,39 @@ mod tests {
     }
 
     #[test]
+    fn funccal_scope_accessors() {
+        use crate::ported::eval::typval::tv_dict_add_nr;
+        use crate::ported::eval::vars::{funccal_stack, FuncScope};
+        funccal_stack.with(|s| s.borrow_mut().clear());
+        // No function active → None.
+        assert!(get_funccal_local_dict().is_none());
+        assert!(get_funccal_args_ht().is_none());
+        // Push a frame with one l: and one a: var.
+        let mut frame = FuncScope::default();
+        tv_dict_add_nr(&mut frame.fc_l_vars, "x", 1);
+        tv_dict_add_nr(&mut frame.fc_l_avars, "1", 9);
+        funccal_stack.with(|s| s.borrow_mut().push(frame));
+        assert_eq!(get_funccal_local_ht().unwrap().len(), 1);
+        assert!(get_funccal_local_dict().unwrap().dv_hashtab.contains_key("x"));
+        assert!(get_funccal_args_dict().unwrap().dv_hashtab.contains_key("1"));
+        funccal_stack.with(|s| s.borrow_mut().clear());
+    }
+
+    #[test]
+    fn func_name_reads_active_scope() {
+        use crate::ported::eval::vars::{funccal_stack, FuncScope};
+        funccal_stack.with(|s| s.borrow_mut().clear());
+        // No active function → empty name.
+        assert_eq!(func_name(), "");
+        // Push a frame named "MyFunc".
+        funccal_stack.with(|s| {
+            s.borrow_mut().push(FuncScope { fc_name: "MyFunc".into(), ..Default::default() })
+        });
+        assert_eq!(func_name(), "MyFunc");
+        funccal_stack.with(|s| s.borrow_mut().clear());
+    }
+
+    #[test]
     fn save_restore_and_remove_funccal() {
         use crate::ported::eval::vars::{funccal_stack, FuncScope};
         // Two nested active frames.
@@ -849,6 +1430,16 @@ mod tests {
         remove_funccal();
         assert_eq!(funccal_stack.with(|s| s.borrow().len()), 1);
         funccal_stack.with(|s| s.borrow_mut().clear());
+    }
+
+    #[test]
+    fn func_is_global_and_cat_name() {
+        let g = ufunc_T { uf_name: "MyFunc".into(), ..Default::default() };
+        assert!(func_is_global(&g));
+        assert_eq!(cat_func_name(&g), "MyFunc");
+        let sl = ufunc_T { uf_name: "<SNR>9_Helper".into(), ..Default::default() };
+        assert!(!func_is_global(&sl));
+        assert_eq!(cat_func_name(&sl), "<SNR>9_Helper");
     }
 
     #[test]

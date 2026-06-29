@@ -29,6 +29,34 @@ thread_local! {
     pub static emsg_silent: Cell<i32> = const { Cell::new(0) };
 }
 
+/// `except_type_T` (`Src/ex_eval_defs.h`) — the kind of a pending exception.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum except_type_T {
+    /// A user `:throw` — the value is the thrown string.
+    ET_USER,
+    /// An internal error raised as an exception — prefixed with `Vim:`.
+    ET_ERROR,
+    /// An interrupt (`CTRL-C`) raised as an exception.
+    ET_INTERRUPT,
+}
+
+/// Port of `get_exception_string()` from `Src/ex_eval.c:384`.
+///
+/// Build the `v:exception` string for a raised exception: a user/interrupt
+/// exception passes its `value` through unchanged; an error exception is
+/// prefixed with `Vim(cmdname):` (or `Vim:` when no command). RUST-PORT NOTE:
+/// the C also moves a leading `"filename" ` from an error message into a
+/// trailing ` (filename)`; that reordering is not modeled.
+pub fn get_exception_string(value: &str, type_: except_type_T, cmdname: Option<&str>) -> String {
+    match type_ {
+        except_type_T::ET_ERROR => match cmdname.filter(|c| !c.is_empty()) {
+            Some(cmd) => format!("Vim({cmd}):{value}"),
+            None => format!("Vim:{value}"),
+        },
+        except_type_T::ET_USER | except_type_T::ET_INTERRUPT => value.to_string(),
+    }
+}
+
 /// Port of `aborting()` from `Src/ex_eval.c` — true when execution should be
 /// aborted: a forced-abort error, an interrupt, or an active throw.
 pub fn aborting() -> bool {
@@ -105,6 +133,20 @@ pub fn report_discard_pending() {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exception_string_formatting() {
+        use super::except_type_T::*;
+        // user throw passes through
+        assert_eq!(get_exception_string("boom", ET_USER, None), "boom");
+        assert_eq!(get_exception_string("boom", ET_USER, Some("catch")), "boom");
+        // error exception gets a Vim[(cmd)]: prefix
+        assert_eq!(get_exception_string("E492: msg", ET_ERROR, None), "Vim:E492: msg");
+        assert_eq!(
+            get_exception_string("E492: msg", ET_ERROR, Some("echo")),
+            "Vim(echo):E492: msg"
+        );
+    }
 
     #[test]
     fn abort_state_defaults_and_toggles() {

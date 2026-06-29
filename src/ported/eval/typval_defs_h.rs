@@ -239,7 +239,7 @@ pub struct list_T {
 /// The `dv_hashtab` of `dictitem_T` is stored as an insertion-ordered map
 /// (Vim's hashtab iteration order is unspecified; insertion order is what
 /// users observe and is deterministic for `string()`/`:echo`).
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct dict_T {
     /// `hashtab_T dv_hashtab` contents: key → value. (c:258)
     pub dv_hashtab: indexmap::IndexMap<String, typval_T>,
