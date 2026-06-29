@@ -1,0 +1,144 @@
+.\" Manpage for vimlrs.
+.\" Contact https://github.com/MenkeTechnologies/vimlrs to correct errors or omissions.
+.TH VIMLRS 1 "2026-06-29" "vimlrs 0.1.1" "User Commands"
+.SH NAME
+vimlrs \- VimL (Vimscript) interpreter that runs .vim scripts standalone, outside Vim
+.SH SYNOPSIS
+.B vimlrs
+[\fIOPTIONS\fR] [\fIFILE\fR ...]
+.br
+.B vimlrs
+\fB\-e\fR \fIEXPR\fR
+.br
+.B vimlrs
+\fB\-c\fR \fICMD\fR
+.SH DESCRIPTION
+.B vimlrs
+is the first compiled standalone VimL interpreter: it takes Vim's eval engine
+out of the editor and runs
+.B .vim
+scripts as ordinary programs. The language semantics are ported faithfully from
+Neovim's C
+.I eval/*
+tree \(em the C source is the spec \(em rather than re-invented.
+.PP
+.B vimlrs
+carries no VM or JIT of its own. It lexes and parses VimL to an AST, lowers that
+to
+.B fusevm
+bytecode, and lets the shared engine run it \(em the same engine (with a
+three-tier Cranelift JIT) behind
+.BR zshrs ,
+.BR stryke ,
+.BR awkrs ,
+and
+.BR elisp .
+The pipeline is:
+.PP
+.RS
+.nf
+VimL source \(rh lexer \(rh parser (AST) \(rh lower to fusevm bytecode \(rh fusevm VM + Cranelift JIT
+.fi
+.RE
+.PP
+Hot numeric loops trace-JIT to native machine code at both function and
+top-level scope; dynamic operations fall back to the bytecode interpreter.
+.SH OPTIONS
+.TP
+.I FILE
+Source the VimL script \fIFILE\fR (cached as fusevm bytecode). Multiple files
+are sourced in order; their paths seed the script arglist (\fBargv()\fR /
+\fBargc()\fR).
+.TP
+.BR \-e ", " \-\-expr " " \fIEXPR\fR
+Evaluate a single VimL expression and print its value (as \fB:echo\fR would
+render it).
+.TP
+.BR \-c ", " \-\-cmd " " \fICMD\fR
+Execute a single ex command line, e.g. \fB\-c 'echo 1 + 1'\fR.
+.TP
+.BR \-b ", " \-\-build " " \fIOUT\fR
+AOT build: bake the given script files into a self-contained executable at
+\fIOUT\fR.
+.TP
+.BR \-n ", " \-\-native
+With
+.BR \-\-build ,
+AOT-compile to native machine code (a standalone-linked Cranelift object)
+instead of embedding the source.
+.TP
+.B \-\-clear\-cache
+Delete the rkyv bytecode script cache and exit.
+.TP
+.B \-\-lsp
+Run the Language Server Protocol server on stdio (for editors).
+.TP
+.B \-\-dap
+Run the Debug Adapter Protocol server on stdio (for editors).
+.TP
+.B \-\-disasm
+Print the fusevm bytecode listing before running.
+.TP
+.BR \-V ", " \-\-version
+Print version and exit.
+.TP
+.BR \-h ", " \-\-help
+Print usage and exit.
+.PP
+With no arguments,
+.B vimlrs
+starts a read-eval-print loop on stdin: each line is one statement \(em a bare
+expression prints its value, an \fB:echo\fR/\fB:let\fR runs for effect. Ctrl-D
+exits.
+.SH ENVIRONMENT
+.TP
+.B VIMLRS_JIT_STATS
+When set, report how many loop traces were JIT-compiled.
+.TP
+.B VIMLRS_NO_JIT
+When set, force the bytecode interpreter baseline (disable the Cranelift JIT).
+.SH EXIT STATUS
+.B vimlrs
+exits 0 on success and non-zero if a file cannot be sourced, an expression fails
+to parse/compile, or evaluation raises an error (\fBemsg\fR).
+.SH EXAMPLES
+Evaluate an expression:
+.PP
+.RS
+.nf
+vimlrs \-e 'map(range(5), {_, v -> v * v})'   \(rh [0, 1, 4, 9, 16]
+.fi
+.RE
+.PP
+Run one ex command:
+.PP
+.RS
+.nf
+vimlrs \-c 'echo "hello" . " world"'
+.fi
+.RE
+.PP
+Source a script:
+.PP
+.RS
+.nf
+vimlrs script.vim
+.fi
+.RE
+.PP
+Observe the JIT on a hot loop:
+.PP
+.RS
+.nf
+VIMLRS_JIT_STATS=1 vimlrs loop.vim
+.fi
+.RE
+.SH SEE ALSO
+.BR vimlrsall (1).
+Reference and engineering report: https://menketechnologies.github.io/vimlrs/ .
+.B fusevm:
+https://github.com/MenkeTechnologies/fusevm .
+.SH AUTHOR
+MenkeTechnologies <https://github.com/MenkeTechnologies>.
+.SH LICENSE
+MIT.

@@ -1,0 +1,119 @@
+.\" vimlrsall(1) — comprehensive all-in-one man page for vimlrs
+.\" Modeled after zshall(1): every man page in one document.
+.\" Render with:  man -l man/man1/vimlrsall.1
+.\" Install:      cp man/man1/vimlrsall.1 /usr/local/share/man/man1/
+.TH VIMLRSALL 1 "2026-06-29" "vimlrs 0.1.1" "User Commands"
+.SH NAME
+vimlrsall \- the vimlrs comprehensive reference (invocation, pipeline, JIT,
+value layer, port philosophy, status)
+.SH OVERVIEW
+This is the all-in-one
+.B vimlrs
+reference. For the concise command page see
+.BR vimlrs (1).
+.PP
+.B vimlrs
+is the first compiled standalone VimL (Vimscript) interpreter. Vimscript has
+only ever run embedded inside Vim or Neovim;
+.B vimlrs
+takes the eval engine out of the editor and runs
+.B .vim
+scripts as ordinary programs. It is one of the languages hosted on the
+.B fusevm
+bytecode VM, alongside
+.BR zshrs ", " stryke ", " awkrs ", and " elisp .
+.SH INVOCATION
+.B vimlrs
+[\fIOPTIONS\fR] [\fIFILE\fR ...]
+.PP
+See
+.BR vimlrs (1)
+for the full option list:
+.BR \-e / \-\-expr ,
+.BR \-c / \-\-cmd ,
+.BR \-b / \-\-build ,
+.BR \-n / \-\-native ,
+.BR \-\-clear\-cache ,
+.BR \-\-lsp ,
+.BR \-\-dap ,
+.BR \-\-disasm ,
+.BR \-V / \-\-version ,
+.BR \-h / \-\-help .
+With no arguments a REPL is started (one statement per line; Ctrl-D exits).
+.SH "DESIGN: PORT, DON'T REINVENT"
+The language semantics are ported faithfully from Neovim's C
+.I eval/*
+tree \(em the C source is treated as the specification rather than
+re-implemented from documentation. The value layer (\fBtypval\fR, \fBlist\fR,
+insertion-ordered \fBdict\fR with typed \fBtv_dict_get_*\fR/\fBtv_dict_add_*\fR,
+and \fBblob\fR), the coercions, \fBtypval_compare\fR, \fBnum_divide\fR/\fBnum_modulus\fR,
+and \fB:echo\fR/\fBstring()\fR rendering (\fBencode_tv2string\fR/\fBencode_tv2echo\fR)
+all mirror their C counterparts.
+.SH "EXECUTION PIPELINE"
+.B vimlrs
+carries no VM or JIT of its own:
+.PP
+.RS
+.nf
+VimL source \(rh lexer \(rh parser (AST) \(rh lower to fusevm bytecode \(rh fusevm VM + Cranelift JIT
+.fi
+.RE
+.PP
+It lexes and parses VimL (the \fBeval1\fR...\fBeval7\fR grammar) to an AST,
+lowers that to
+.B fusevm
+bytecode, and lets the shared engine run it \(em the same way
+.B zshrs
+hosts zsh.
+.SH "THE JIT"
+fusevm provides a three-tier Cranelift JIT, and
+.B vimlrs
+is wired to use it:
+.IP \(bu 3
+Integer \fB+\fR/\fB\-\fR/\fB*\fR lower to native \fBOp::Add\fR/\fBSub\fR/\fBMul\fR;
+integer compares to \fBOp::NumLt\fR and friends; native \fB%\fR, bitwise
+\fBand\fR/\fBor\fR/\fBxor\fR/\fBinvert\fR, and numeric negation.
+.IP \(bu 3
+An integer expression block-JIT-compiles to machine code. A function's numeric
+\fBwhile\fR loop (provably-Number locals via \fBOp::GetSlot\fR/\fBSetSlot\fR, the
+loop rotated so the condition is the backedge) trace-JIT-compiles to native code.
+.IP \(bu 3
+Idiomatic \fBfor i in range(N)\fR lowers to a native integer counter loop (no
+list is built) that trace-compiles; the bound may be dynamic.
+.IP \(bu 3
+Numeric loops trace at both function and script (top-level) scope; float
+accumulators, compound short-circuit conditions, nested loops, ternaries, and
+value-position comparisons all stay trace-eligible.
+.PP
+Dynamic operations stay on the \fBCallBuiltin\fR path (the deopt fallback). On a
+20M-iteration loop the JIT runs roughly 15\(en100x faster than the interpreter
+baseline. Set
+.B VIMLRS_JIT_STATS=1
+to count compiled loop traces, or
+.B VIMLRS_NO_JIT=1
+to force the interpreter.
+.SH "SCRIPT CACHE"
+Sourced scripts are compiled to fusevm bytecode and cached on disk (rkyv), so
+re-running a script skips the lex/parse/lower stages.
+.B \-\-clear\-cache
+deletes the cache.
+.SH "AOT BUILD"
+.B \-\-build
+\fIOUT\fR bakes the input scripts into a self-contained executable. With
+.BR \-\-native ,
+the build emits a standalone-linked Cranelift object (native machine code)
+instead of embedding the source.
+.SH STATUS
+Early / in development. The value layer and coercions are ported; the
+lexer/parser, AST lowering, and the JIT paths described above are working. Whole
+function bodies block-compiling via native \fBOp::ReturnValue\fR, and per-loop
+(rather than per-chunk) slot scoping, are in progress.
+.SH "SEE ALSO"
+.BR vimlrs (1).
+Reference and engineering report: https://menketechnologies.github.io/vimlrs/ .
+.B fusevm:
+https://github.com/MenkeTechnologies/fusevm .
+.SH AUTHOR
+MenkeTechnologies <https://github.com/MenkeTechnologies>.
+.SH LICENSE
+MIT.
