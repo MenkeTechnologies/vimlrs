@@ -1024,6 +1024,12 @@ pub fn before_set_vvar(_varname: &str) -> bool {
 /// Port of `list_glob_vars()` from `Src/eval/vars.c` — `:let` listing of `g:`
 /// variables; no interactive listing standalone, no-op.
 pub fn list_glob_vars(_first: &mut i32) {}
+/// Port of `list_arg_vars()` from `Src/eval/vars.c:1210` — `:let` listing of the
+/// `a:` argument scope; no interactive listing standalone, no-op.
+pub fn list_arg_vars(_first: &mut i32) {}
+/// Port of `list_hashtable_vars()` from `Src/eval/vars.c:1157` — `:let` listing
+/// of one scope's hashtable; no interactive listing standalone, no-op.
+pub fn list_hashtable_vars(_first: &mut i32) {}
 /// Port of `list_buf_vars()` from `Src/eval/vars.c` — no-op.
 pub fn list_buf_vars(_first: &mut i32) {}
 /// Port of `list_win_vars()` from `Src/eval/vars.c` — no-op.
@@ -1033,6 +1039,368 @@ pub fn list_tab_vars(_first: &mut i32) {}
 /// Port of `list_one_var_a()` from `Src/eval/vars.c` — print one variable; no
 /// interactive output standalone, no-op.
 pub fn list_one_var_a(_prefix: &str, _name: &str, _name_len: isize) {}
+/// Port of `list_one_var()` from `Src/eval/vars.c:2682` — print one variable
+/// with its scope prefix; no interactive output standalone, no-op (delegates to
+/// [`list_one_var_a`] in C).
+pub fn list_one_var(_first: &mut i32) {}
+
+// ── exception/throwpoint save-restore and counts (vars.c) ──
+
+/// Port of `v_exception()` from `Src/eval/vars.c:2189`.
+///
+/// Save/restore the `v:exception` string. With `None` (C `oldval == NULL`),
+/// returns the current value. With `Some(old)`, restores it and returns `None`.
+/// Always called in pairs by the `:try`/`:catch` machinery.
+pub fn v_exception(oldval: Option<String>) -> Option<String> {
+    match oldval {
+        None => Some(get_vim_var_str(vv::VV_EXCEPTION)),
+        Some(old) => {
+            set_vim_var_string(vv::VV_EXCEPTION, &old);
+            None
+        }
+    }
+}
+
+/// Port of `v_throwpoint()` from `Src/eval/vars.c:2322`.
+///
+/// The `v:throwpoint` counterpart of [`v_exception`].
+pub fn v_throwpoint(oldval: Option<String>) -> Option<String> {
+    match oldval {
+        None => Some(get_vim_var_str(vv::VV_THROWPOINT)),
+        Some(old) => {
+            set_vim_var_string(vv::VV_THROWPOINT, &old);
+            None
+        }
+    }
+}
+
+/// Port of `set_vcount()` from `Src/eval/vars.c:2336`.
+///
+/// Set `v:count`/`v:count1`; if `set_prevcount`, first copy the old `v:count`
+/// into `v:prevcount`.
+pub fn set_vcount(count: varnumber_T, count1: varnumber_T, set_prevcount: bool) {
+    if set_prevcount {
+        set_vim_var_nr(vv::VV_PREVCOUNT, get_vim_var_nr(vv::VV_COUNT));
+    }
+    set_vim_var_nr(vv::VV_COUNT, count);
+    set_vim_var_nr(vv::VV_COUNT1, count1);
+}
+
+/// Port of `get_var_value()` from `Src/eval/vars.c:2587`.
+///
+/// String value of variable `name`, or `None` (C `NULL`) if it does not exist.
+/// RUST-PORT NOTE: the C looks up a `dictitem_T` via `find_var`; the subset
+/// resolves through [`eval_variable`] and stringifies the result.
+pub fn get_var_value(name: &str) -> Option<String> {
+    eval_variable(name).map(|tv| tv_get_string(&tv))
+}
+
+/// Port of `tv_list_unlet_range()` from `Src/eval/vars.c:1688`.
+///
+/// Delete the List range `[first .. last]` for `:unlet l[n1:n2]`, where `first`
+/// is the index of the first item (`n1_arg` its list index), `has_n2`/`n2` give
+/// the optional inclusive end. RUST-PORT NOTE: the C threads `listitem_T`
+/// pointers; the `Vec`-backed `list_T` works in indices and delegates to the
+/// ported [`tv_list_remove_items`].
+pub fn tv_list_unlet_range(l: &mut list_T, first: usize, n1_arg: i32, has_n2: bool, n2: i32) {
+    let len = crate::ported::eval::typval::tv_list_len(l) as usize;
+    let mut last = first;
+    let mut n1 = n1_arg;
+    loop {
+        let next = last + 1;
+        n1 += 1; // n1 is now the index of the candidate `next` item
+        if next >= len || (has_n2 && n2 < n1) {
+            break;
+        }
+        last = next;
+    }
+    crate::ported::eval::typval::tv_list_remove_items(l, first, last);
+}
+
+/// Port of `cat_prefix_varname()` from `Src/eval/vars.c:1945`.
+///
+/// Concatenate a single-character scope `prefix` and `name` into `"<p>:<name>"`
+/// (e.g. `('g', "foo")` → `"g:foo"`). RUST-PORT NOTE: the C reuses a grown
+/// static buffer; the port just returns an owned `String`.
+pub fn cat_prefix_varname(prefix: u8, name: &str) -> String {
+    format!("{}:{}", prefix as char, name)
+}
+
+/// Port of `skip_var_one()` from `Src/eval/vars.c:1145`.
+///
+/// Byte offset past one assignable variable name at `arg`, including the `@r`
+/// register, `$VAR` env, `&option`, and `d.key`/`l[idx]` lvalue forms.
+pub fn skip_var_one(arg: &str) -> usize {
+    let b = arg.as_bytes();
+    // c: "@r" — a register name is exactly two bytes.
+    if b.first() == Some(&b'@') && b.get(1).is_some_and(|&c| c != 0) {
+        return 2;
+    }
+    // c: "$VAR"/"&opt" — skip the sigil, then take the name (offset re-added).
+    let off = usize::from(b.first() == Some(&b'$') || b.first() == Some(&b'&'));
+    let (end, _, _) = crate::ported::eval::find_name_end(
+        &arg[off..],
+        crate::ported::eval::FNE_INCL_BR | crate::ported::eval::FNE_CHECK_START,
+    );
+    off + end
+}
+
+/// Port of `skip_var_list()` from `Src/eval/vars.c:1103`.
+///
+/// Skip an lvalue: either one name or a `[a, b; rest]` unpack list. Returns
+/// `Some((consumed, var_count, semicolon))` — `consumed` is the byte offset
+/// past the lvalue, `var_count` the number of names, and `semicolon` whether a
+/// `;` rest-binding was seen — or `None` (C `NULL`) on a malformed list, after
+/// emitting the matching error unless `silent`.
+pub fn skip_var_list(arg: &str, silent: bool) -> Option<(usize, i32, bool)> {
+    let b = arg.as_bytes();
+    if b.first() != Some(&b'[') {
+        let n = skip_var_one(arg);
+        return Some((n, 1, false));
+    }
+    let skipwhite = |s: &str, mut i: usize| {
+        let sb = s.as_bytes();
+        while i < sb.len() && (sb[i] == b' ' || sb[i] == b'\t') {
+            i += 1;
+        }
+        i
+    };
+    let mut var_count = 0;
+    let mut semicolon = false;
+    let mut p = 0usize; // index into `arg`, starts at '['
+    loop {
+        p = skipwhite(arg, p + 1); // skip whites after '[', ';' or ','
+        let s = p + skip_var_one(&arg[p..]);
+        if s == p {
+            if !silent {
+                crate::ported::message::semsg(&format!("E475: Invalid argument: {}", &arg[p..]));
+            }
+            return None;
+        }
+        var_count += 1;
+        p = skipwhite(arg, s);
+        match b.get(p) {
+            Some(&b']') => break,
+            Some(&b';') => {
+                if semicolon {
+                    if !silent {
+                        crate::ported::message::emsg("E452: Double ; in list of variables");
+                    }
+                    return None;
+                }
+                semicolon = true;
+            }
+            Some(&b',') => {}
+            _ => {
+                if !silent {
+                    crate::ported::message::semsg(&format!(
+                        "E475: Invalid argument: {}",
+                        &arg[p..]
+                    ));
+                }
+                return None;
+            }
+        }
+    }
+    Some((p + 1, var_count, semicolon))
+}
+
+/// Port of `valid_varname()` from `Src/eval/vars.c:3060`.
+///
+/// True when every character of `varname` may appear in a variable name: a name
+/// character, a digit (not first), or the autoload `#`. Emits `E461` otherwise.
+pub fn valid_varname(varname: &str) -> bool {
+    let bytes = varname.as_bytes();
+    for (i, &c) in bytes.iter().enumerate() {
+        if !crate::ported::eval::eval_isnamec1(c)
+            && (i == 0 || !c.is_ascii_digit())
+            && c != crate::ported::eval::AUTOLOAD_CHAR
+        {
+            crate::ported::message::semsg(&format!("E461: Illegal variable name: {varname}"));
+            return false;
+        }
+    }
+    true
+}
+
+/// Port of `get_spellword()` from `Src/eval/vars.c:559`.
+///
+/// Validate a `'spellsuggest'` result item — a `[word, score]` List of exactly
+/// two values — returning `(word, score)` or `None` (the C `-1`) with an error
+/// when the shape is wrong.
+pub fn get_spellword(list: &list_T) -> Option<(String, i32)> {
+    use crate::ported::eval::typval::{tv_list_find_nr, tv_list_find_str, tv_list_len};
+    if tv_list_len(list) != 2 {
+        crate::ported::message::emsg(
+            "E5700: Expression from 'spellsuggest' must yield lists with exactly two values",
+        );
+        return None;
+    }
+    let word = tv_list_find_str(list, 0)?;
+    let score = tv_list_find_nr(list, -1, None) as i32;
+    Some((word, score))
+}
+
+/// Port of `var_set_global()` from `Src/eval/vars.c`.
+///
+/// Set variable `name` in the global scope even when called from inside a
+/// function: suspend the active funccal ([`save_funccal`]), [`set_var`] at
+/// global level, then restore. RUST-PORT NOTE: with the active scope cleared a
+/// bare `name` resolves to `globvardict` (see [`set_var`]).
+pub fn var_set_global(name: &str, vartv: typval_T) {
+    crate::ported::eval::userfunc::save_funccal();
+    set_var(name, name.len(), vartv, false);
+    crate::ported::eval::userfunc::restore_funccal();
+}
+
+/// Port of `unref_var_dict()` from `Src/eval/vars.c:2625` — drop a scope dict's
+/// extra reference and free it when unused. `Rc`/`Drop`-managed, so no-op.
+pub fn unref_var_dict() {}
+
+/// Port of `new_script_vars()` from `Src/eval/vars.c:2600` — allocate the `s:`
+/// scope for a newly sourced script. RUST-PORT NOTE: the standalone has a single
+/// script context ([`script_vars`]), already initialized, so this is a no-op.
+pub fn new_script_vars() {}
+
+/// Port of `init_var_dict()` from `Src/eval/vars.c:2609` — initialize a dict as a
+/// scope and point its scope-variable at it. The `IndexMap`-backed scope dicts
+/// are default-initialized (see [`evalvars_init`]), so this is a no-op.
+pub fn init_var_dict() {}
+
+/// Port of `find_var()` from `Src/eval/vars.c:2404`.
+///
+/// Look up variable `name` across the scope chain (prefix scopes, the active
+/// `l:`/`a:`, and a lambda's captured parent scope). RUST-PORT NOTE: the C
+/// returns a mutable `dictitem_T`; this read-reduced port routes the whole
+/// resolution through [`eval_variable`] (which already covers closures), so it
+/// returns the value. `no_autoload` is moot — no autoload standalone.
+pub fn find_var(name: &str, _no_autoload: bool) -> Option<typval_T> {
+    eval_variable(name)
+}
+
+/// Port of `var_exists()` from `Src/eval/vars.c:3371`.
+///
+/// Whether variable `var` exists. RUST-PORT NOTE: the C also resolves curly-brace
+/// names and trailing `d.key`/`l[idx]` subscripts via `handle_subscript`; this
+/// subset checks the bare name through [`eval_variable`].
+pub fn var_exists(var: &str) -> bool {
+    eval_variable(var).is_some()
+}
+
+/// Port of `find_var_in_ht()` from `Src/eval/vars.c:2439`.
+///
+/// Look up variable `varname` in scope dict `d`, returning its value or `None`.
+/// RUST-PORT NOTE: the C's empty-`varname` case returns the scope's own
+/// self-dictitem (`g:`/`s:`/`l:`/… as a Dict value) — not modeled here, so it
+/// yields `None`. The global-scope autoload retry is also absent standalone.
+pub fn find_var_in_ht<'a>(
+    d: &'a dict_T,
+    _htname: u8,
+    varname: &str,
+    _no_autoload: bool,
+) -> Option<&'a typval_T> {
+    if varname.is_empty() {
+        return None;
+    }
+    d.dv_hashtab.get(varname)
+}
+
+/// Port of `vars_clear()` from `Src/eval/vars.c:2636` — free all variables in a
+/// scope and clear its hashtable.
+pub fn vars_clear(d: &mut dict_T) {
+    vars_clear_ext(d, true);
+}
+
+/// Port of `vars_clear_ext()` from `Src/eval/vars.c:2642` — like [`vars_clear`]
+/// but only freeing values when `free_val`. RUST-PORT NOTE: values are
+/// `Rc`/`Drop`-managed, so clearing the `IndexMap` reclaims them regardless.
+pub fn vars_clear_ext(d: &mut dict_T, _free_val: bool) {
+    d.dv_hashtab.clear();
+}
+
+/// Port of `delete_var()` from `Src/eval/vars.c:2672` — remove one variable from
+/// a scope dict (its value is dropped). RUST-PORT NOTE: the C addresses the item
+/// by `hashitem_T`; the `IndexMap` model removes it by key.
+pub fn delete_var(d: &mut dict_T, key: &str) {
+    d.dv_hashtab.shift_remove(key);
+}
+
+/// Port of `reset_v_option_vars()` from `Src/eval/vars.c:3349`.
+///
+/// Clear the `v:option_*` variables (set by `OptionSet` autocommands) back to
+/// empty strings. RUST-PORT NOTE: the C passes `NULL` (length -1); here an empty
+/// string is the equivalent cleared value.
+pub fn reset_v_option_vars() {
+    for idx in [
+        vv::VV_OPTION_NEW,
+        vv::VV_OPTION_OLD,
+        vv::VV_OPTION_OLDLOCAL,
+        vv::VV_OPTION_OLDGLOBAL,
+        vv::VV_OPTION_COMMAND,
+        vv::VV_OPTION_TYPE,
+    ] {
+        set_vim_var_string(idx, "");
+    }
+}
+
+// ── di_flags variable-protection checks (vars.c) ──
+//
+// RUST-PORT NOTE: the C reads the protection bits from a `dictitem_T.di_flags`;
+// these take the flag word as a plain `int`, so they port without the dictitem
+// model. The `name_len` `TV_TRANSLATE`/`TV_CSTRING` sentinels collapse — the
+// Rust `&str` already carries its length. The `sandbox` nesting counter is not
+// modeled standalone (always 0), so the `DI_FLAGS_RO_SBX` branch never fires.
+
+/// Port of `var_check_ro()` from `Src/eval/vars.c:2947`.
+///
+/// True (and emits an error) when `flags` marks the variable read-only:
+/// `DI_FLAGS_RO` always, or `DI_FLAGS_RO_SBX` while in the sandbox.
+pub fn var_check_ro(flags: i32, name: &str, _name_len: usize) -> bool {
+    use crate::ported::eval::typval_defs_h::{DI_FLAGS_RO, DI_FLAGS_RO_SBX};
+    let error_message = if flags & DI_FLAGS_RO != 0 {
+        Some(format!("E46: Cannot change read-only variable \"{name}\""))
+    } else if flags & DI_FLAGS_RO_SBX != 0 && SANDBOX {
+        Some(format!("E794: Cannot set variable in the sandbox: \"{name}\""))
+    } else {
+        None
+    };
+    match error_message {
+        None => false,
+        Some(msg) => {
+            crate::ported::message::semsg(&msg);
+            true
+        }
+    }
+}
+
+/// Port of `var_check_lock()` from `Src/eval/vars.c:2974`.
+///
+/// True (and emits `E1122`) when `flags` has `DI_FLAGS_LOCK` set.
+pub fn var_check_lock(flags: i32, name: &str, _name_len: usize) -> bool {
+    use crate::ported::eval::typval_defs_h::DI_FLAGS_LOCK;
+    if flags & DI_FLAGS_LOCK == 0 {
+        return false;
+    }
+    crate::ported::message::semsg(&format!("E1122: Variable is locked: {name}"));
+    true
+}
+
+/// Port of `var_check_fixed()` from `Src/eval/vars.c:3010`.
+///
+/// True (and emits `E795`) when `flags` has `DI_FLAGS_FIX` set — the variable
+/// cannot be `:unlet` or `remove()`d.
+pub fn var_check_fixed(flags: i32, name: &str, _name_len: usize) -> bool {
+    use crate::ported::eval::typval_defs_h::DI_FLAGS_FIX;
+    if flags & DI_FLAGS_FIX != 0 {
+        crate::ported::message::semsg(&format!("E795: Cannot delete variable {name}"));
+        return true;
+    }
+    false
+}
+
+/// `int sandbox;` (`Src/ex_docmd.c`) — the sandbox nesting counter. Not modeled
+/// in the standalone interpreter, so it is permanently 0 (false).
+const SANDBOX: bool = false;
 
 #[cfg(test)]
 mod misc_helper_tests {
@@ -1065,5 +1433,158 @@ mod misc_helper_tests {
         // GC is a no-op under Rc.
         assert_eq!(garbage_collect_globvars(0), 0);
         assert!(!garbage_collect_vimvars(0));
+    }
+
+    #[test]
+    fn prefix_and_var_skip_helpers() {
+        assert_eq!(cat_prefix_varname(b'g', "foo"), "g:foo");
+        assert_eq!(cat_prefix_varname(b'b', "count"), "b:count");
+
+        // skip_var_one: a single name / @reg / $env / &opt / l[idx]
+        assert_eq!(skip_var_one("foo = 1"), 3);
+        assert_eq!(skip_var_one("@a more"), 2);
+        assert_eq!(skip_var_one("$PATH = 1"), 5); // '$' + "PATH"
+        assert_eq!(skip_var_one("&ignorecase"), 11); // '&' + name
+        assert_eq!(skip_var_one("d.key rest"), 5);
+
+        // skip_var_list: a single name yields count 1, no semicolon
+        assert_eq!(skip_var_list("x = 1", false), Some((1, 1, false)));
+        // a list unpack: [a, b] -> 2 names, consumed through ']'
+        let (consumed, n, semi) = skip_var_list("[a, b] = pair", false).unwrap();
+        assert_eq!(&"[a, b] = pair"[..consumed], "[a, b]");
+        assert_eq!((n, semi), (2, false));
+        // a rest binding: [head; tail]
+        let (_, n2, semi2) = skip_var_list("[head; tail] = xs", false).unwrap();
+        assert_eq!((n2, semi2), (2, true));
+        // double ';' is rejected
+        assert_eq!(skip_var_list("[a; b; c]", true), None);
+    }
+
+    #[test]
+    fn di_flags_protection_checks() {
+        use crate::ported::eval::typval_defs_h::{
+            DI_FLAGS_FIX, DI_FLAGS_LOCK, DI_FLAGS_RO, DI_FLAGS_RO_SBX,
+        };
+        // read-only fires; unset and sandbox-only (no sandbox) do not.
+        assert!(var_check_ro(DI_FLAGS_RO, "g:v", 3));
+        assert!(!var_check_ro(0, "g:v", 3));
+        assert!(!var_check_ro(DI_FLAGS_RO_SBX, "g:v", 3)); // sandbox not modeled
+        // lock / fixed.
+        assert!(var_check_lock(DI_FLAGS_LOCK, "g:v", 3));
+        assert!(!var_check_lock(0, "g:v", 3));
+        assert!(var_check_fixed(DI_FLAGS_FIX, "g:v", 3));
+        assert!(!var_check_fixed(0, "g:v", 3));
+    }
+
+    #[test]
+    fn list_unlet_range_removes_inclusive() {
+        use crate::ported::eval::typval::tv_list_append_number;
+        use crate::ported::eval::typval_defs_h::{list_T, typval_vval_union::v_number};
+        let vals = |l: &list_T| -> Vec<i64> {
+            l.lv_items
+                .iter()
+                .map(|it| match it.li_tv.vval {
+                    v_number(n) => n,
+                    _ => -1,
+                })
+                .collect()
+        };
+        let mut l = list_T::default();
+        for n in [0, 1, 2, 3, 4] {
+            tv_list_append_number(&mut l, n);
+        }
+        // :unlet l[1:3] — inclusive of index 3
+        tv_list_unlet_range(&mut l, 1, 1, true, 3);
+        assert_eq!(vals(&l), vec![0, 4]);
+
+        // open-ended :unlet l[2:] removes through the end
+        let mut l2 = list_T::default();
+        for n in [0, 1, 2, 3, 4] {
+            tv_list_append_number(&mut l2, n);
+        }
+        tv_list_unlet_range(&mut l2, 2, 2, false, 0);
+        assert_eq!(vals(&l2), vec![0, 1]);
+    }
+
+    #[test]
+    fn vars_clear_and_delete() {
+        use crate::ported::eval::typval::tv_dict_add_nr;
+        use crate::ported::eval::typval_defs_h::dict_T;
+        let mut d = dict_T::default();
+        tv_dict_add_nr(&mut d, "a", 1);
+        tv_dict_add_nr(&mut d, "b", 2);
+        tv_dict_add_nr(&mut d, "c", 3);
+        // delete one
+        delete_var(&mut d, "b");
+        assert_eq!(d.dv_hashtab.len(), 2);
+        assert!(!d.dv_hashtab.contains_key("b"));
+        assert!(d.dv_hashtab.contains_key("a"));
+        // clear all
+        vars_clear(&mut d);
+        assert!(d.dv_hashtab.is_empty());
+    }
+
+    #[test]
+    fn find_var_and_var_exists() {
+        set_internal_string_var("g:fv_probe", "yes");
+        assert!(var_exists("g:fv_probe"));
+        assert!(find_var("g:fv_probe", false).is_some());
+        assert!(!var_exists("g:fv_absent_xyz"));
+        assert!(find_var("g:fv_absent_xyz", false).is_none());
+    }
+
+    #[test]
+    fn find_var_in_ht_lookup() {
+        use crate::ported::eval::typval::tv_dict_add_nr;
+        use crate::ported::eval::typval_defs_h::{dict_T, typval_vval_union::v_number};
+        let mut d = dict_T::default();
+        tv_dict_add_nr(&mut d, "x", 5);
+        assert!(matches!(find_var_in_ht(&d, b'g', "x", false).map(|tv| &tv.vval), Some(v_number(5))));
+        assert!(find_var_in_ht(&d, b'g', "missing", false).is_none());
+        // empty varname (scope-self ref) is not modeled → None
+        assert!(find_var_in_ht(&d, b'g', "", false).is_none());
+    }
+
+    #[test]
+    fn get_spellword_pairs() {
+        use crate::ported::eval::typval::{tv_list_append_number, tv_list_append_string};
+        use crate::ported::eval::typval_defs_h::list_T;
+        // [word, score] → Some(("hello", 42))
+        let mut l = list_T::default();
+        tv_list_append_string(&mut l, "hello");
+        tv_list_append_number(&mut l, 42);
+        assert_eq!(get_spellword(&l), Some(("hello".to_string(), 42)));
+        // wrong arity → None
+        let mut bad = list_T::default();
+        tv_list_append_string(&mut bad, "only");
+        assert_eq!(get_spellword(&bad), None);
+    }
+
+    #[test]
+    fn var_set_global_from_function_scope() {
+        use crate::ported::eval::typval::tv_get_string;
+        // Simulate being inside a function: push an active scope.
+        funccal_stack.with(|s| s.borrow_mut().push(FuncScope::default()));
+        // var_set_global must write to g:, not the active l: scope.
+        var_set_global("vsg_test", typval_T::from("global".to_string()));
+        // The active scope is restored (still one frame, and it has no local).
+        let depth = funccal_stack.with(|s| s.borrow().len());
+        assert_eq!(depth, 1);
+        // Visible as a global, not shadowed by the function frame.
+        assert_eq!(
+            tv_get_string(&eval_variable("g:vsg_test").unwrap()),
+            "global"
+        );
+        // Clean up the simulated frame.
+        funccal_stack.with(|s| s.borrow_mut().pop());
+    }
+
+    #[test]
+    fn reset_v_option_vars_clears() {
+        set_vim_var_string(vv::VV_OPTION_NEW, "newval");
+        set_vim_var_string(vv::VV_OPTION_TYPE, "global");
+        reset_v_option_vars();
+        assert_eq!(get_vim_var_str(vv::VV_OPTION_NEW), "");
+        assert_eq!(get_vim_var_str(vv::VV_OPTION_TYPE), "");
     }
 }

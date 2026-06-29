@@ -32,6 +32,18 @@ pub const VARNUMBER_MAX: varnumber_T = i64::MAX;
 /// `VARNUMBER_MIN` — minimal `varnumber_T`. (c:46)
 pub const VARNUMBER_MIN: varnumber_T = i64::MIN;
 
+/// `enum { DI_FLAGS_RO, … }` — `dictitem_T.di_flags` bits. (typval_defs.h:244)
+/// `DI_FLAGS_RO = 1` — read-only value.
+pub const DI_FLAGS_RO: i32 = 1;
+/// `DI_FLAGS_RO_SBX = 2` — read-only inside the sandbox.
+pub const DI_FLAGS_RO_SBX: i32 = 2;
+/// `DI_FLAGS_FIX = 4` — fixed: cannot be `:unlet`/`remove()`d.
+pub const DI_FLAGS_FIX: i32 = 4;
+/// `DI_FLAGS_LOCK = 8` — locked value.
+pub const DI_FLAGS_LOCK: i32 = 8;
+/// `DI_FLAGS_ALLOC = 16` — separately allocated dictitem.
+pub const DI_FLAGS_ALLOC: i32 = 16;
+
 /// Bool variable values. (c:88 `typedef enum { kBoolVarFalse, kBoolVarTrue }`)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BoolVarValue {

@@ -370,6 +370,88 @@ pub fn f_matchstr(argvars: &[typval_T], rettv: &mut typval_T) {
     }
 }
 
+/// Port of `find_internal_func_lua()` from `Src/eval/funcs.c:244`.
+///
+/// The Lua name of a Lua-implemented builtin, or `None` if not found. RUST-PORT
+/// NOTE: the standalone has no Lua-implemented builtins, so this is always
+/// `None` (mirrors the absent Lua provider elsewhere).
+pub fn find_internal_func_lua(_name: &str) -> Option<String> {
+    None
+}
+
+/// Port of `call_internal_func()` from `Src/eval/funcs.c:279`.
+///
+/// Look up builtin `fname`, validate the argument count against its
+/// `BUILTIN_ARGC` row, and dispatch it, returning an `FCERR_*` code
+/// (`FCERR_UNKNOWN`/`FCERR_TOOFEW`/`FCERR_TOOMANY`, else `FCERR_NONE`).
+/// RUST-PORT NOTE: the C `find_internal_func` returns an `EvalFuncDef` whose
+/// `func` pointer it calls; this routes the call through the bridge's
+/// `CALL_FUNC_HOOK` (which dispatches builtins by name).
+pub fn call_internal_func(fname: &str, argvars: &[typval_T], rettv: &mut typval_T) -> i32 {
+    use crate::ported::eval::funcs_argc::{BUILTIN_ARGC, MAX};
+    use crate::ported::eval::typval_defs_h::{VarLockStatus, VarType::VAR_FUNC};
+    use crate::ported::eval::userfunc::fcerr::*;
+    let Ok(i) = BUILTIN_ARGC.binary_search_by(|e| e.0.cmp(fname)) else {
+        return FCERR_UNKNOWN;
+    };
+    let (_, min_argc, max_argc) = BUILTIN_ARGC[i];
+    let argcount = argvars.len();
+    if argcount < min_argc as usize {
+        return FCERR_TOOFEW;
+    }
+    if max_argc != MAX && argcount > max_argc as usize {
+        return FCERR_TOOMANY;
+    }
+    let callee = typval_T {
+        v_type: VAR_FUNC,
+        v_lock: VarLockStatus::VAR_UNLOCKED,
+        vval: v_string(fname.to_string()),
+    };
+    match CALL_FUNC_HOOK.with(|h| *h.borrow()).and_then(|f| f(&callee, argvars)) {
+        Some(result) => {
+            *rettv = result;
+            FCERR_NONE
+        }
+        None => FCERR_UNKNOWN,
+    }
+}
+
+/// Port of `return_register()` from `Src/eval/funcs.c:5193`.
+///
+/// Set `rettv` to the single-character register name `regname` (an empty string
+/// when `regname` is NUL). Backs `reg_executing()`/`reg_recording()`.
+pub fn return_register(regname: u8, rettv: &mut typval_T) {
+    rettv.v_type = VAR_STRING;
+    rettv.vval = v_string(if regname == 0 {
+        String::new()
+    } else {
+        (regname as char).to_string()
+    });
+}
+
+/// Port of `may_add_state_char()` from `Src/eval/funcs.c:4589`.
+///
+/// Append state character `c` to `gap` when `include` is `None` (collect all)
+/// or names `c` — the per-flag filter behind `state()`.
+pub fn may_add_state_char(gap: &mut String, include: Option<&str>, c: char) {
+    if include.map_or(true, |inc| inc.contains(c)) {
+        gap.push(c);
+    }
+}
+
+/// Port of `non_zero_arg()` from `Src/eval/funcs.c:328`.
+///
+/// True for a non-zero Number, a `v:true` Bool, or a non-empty String —
+/// the "truthy first argument" test several builtins use.
+pub fn non_zero_arg(argvars: &[typval_T]) -> bool {
+    match (&argvars[0].v_type, &argvars[0].vval) {
+        (VAR_NUMBER, v_number(n)) => *n != 0,
+        (VAR_BOOL, v_bool(b)) => *b == kBoolVarTrue,
+        (VAR_STRING, v_string(s)) => !s.is_empty(),
+        _ => false,
+    }
+}
+
 /// Port of `f_match()` from `Src/eval/funcs.c` — the char index of the first
 /// match of `{pat}` in `{expr}`, or -1.
 /// The selected match found by [`find_some_match`].
@@ -8760,4 +8842,64 @@ pub fn f_fullcommand(argvars: &[typval_T], rettv: &mut typval_T) {
             .unwrap_or_default()
     };
     rettv.vval = v_string(result);
+}
+
+#[cfg(test)]
+mod helper_tests {
+    use super::may_add_state_char;
+
+    #[test]
+    fn call_internal_func_arity_and_dispatch() {
+        use super::call_internal_func;
+        use crate::ported::eval::typval::CALL_FUNC_HOOK;
+        use crate::ported::eval::typval_defs_h::typval_T;
+        use crate::ported::eval::userfunc::fcerr::*;
+        fn hook(_c: &typval_T, args: &[typval_T]) -> Option<typval_T> {
+            Some(typval_T::from(args.len() as i64))
+        }
+        let mut rv = typval_T::from(0);
+        // unknown builtin
+        assert_eq!(call_internal_func("no_such_builtin_xyz", &[], &mut rv), FCERR_UNKNOWN);
+        // "add" requires exactly 2 args (arity checked before the hook)
+        assert_eq!(call_internal_func("add", &[typval_T::from(1)], &mut rv), FCERR_TOOFEW);
+        assert_eq!(
+            call_internal_func("add", &[typval_T::from(1), typval_T::from(2), typval_T::from(3)], &mut rv),
+            FCERR_TOOMANY
+        );
+        // correct arity, no hook installed → UNKNOWN; with hook → NONE
+        let saved = CALL_FUNC_HOOK.with(|h| *h.borrow());
+        CALL_FUNC_HOOK.with(|h| *h.borrow_mut() = None);
+        assert_eq!(call_internal_func("add", &[typval_T::from(1), typval_T::from(2)], &mut rv), FCERR_UNKNOWN);
+        CALL_FUNC_HOOK.with(|h| *h.borrow_mut() = Some(hook));
+        assert_eq!(call_internal_func("add", &[typval_T::from(1), typval_T::from(2)], &mut rv), FCERR_NONE);
+        CALL_FUNC_HOOK.with(|h| *h.borrow_mut() = saved);
+    }
+
+    #[test]
+    fn return_register_char_or_empty() {
+        use super::return_register;
+        use crate::ported::eval::typval_defs_h::{typval_T, typval_vval_union::v_string, VarType::VAR_STRING};
+        let mut tv = typval_T::from(0);
+        return_register(b'a', &mut tv);
+        assert!(matches!(&tv.vval, v_string(s) if s == "a"));
+        assert_eq!(tv.v_type, VAR_STRING);
+        return_register(0, &mut tv);
+        assert!(matches!(&tv.vval, v_string(s) if s.is_empty()));
+    }
+
+    #[test]
+    fn may_add_state_char_filters() {
+        // No filter → always appended.
+        let mut all = String::new();
+        for c in ['m', 'o', 'x'] {
+            may_add_state_char(&mut all, None, c);
+        }
+        assert_eq!(all, "mox");
+        // Filter → only included chars kept, in call order.
+        let mut some = String::new();
+        for c in ['m', 'o', 'x'] {
+            may_add_state_char(&mut some, Some("mx"), c);
+        }
+        assert_eq!(some, "mx");
+    }
 }
