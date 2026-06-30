@@ -82,7 +82,7 @@ Early / in development.
 | Lambdas `{args -> body}` (with closure capture), funcref-variable calls `F(args)`, Blob literals `0z…`, `d.key` member read, `#{key: val}` literal-key Dicts, `\` line continuation | Working |
 | one-line block bars — `if … \| … \| endif` (and `for`/`while`), incl. after a leaf command (`let x=1 \| if x \| … \| endif`) | Working |
 | variadic functions (`...` -> `a:000`/`a:0`), `:unlet`, `:source`, autoload | Working |
-| `:command`/`:autocmd` | Planned |
+| `:command`/`:autocmd` (user commands + `:doautocmd` event firing) | Working — `examples/user_commands.vim` / `examples/autocommands.vim` self-test in CI |
 
 The full interpreter C surface is scaffolded: `scripts/gen_port_stubs.sh`
 generates one stub per not-yet-ported Neovim C function (real name +
