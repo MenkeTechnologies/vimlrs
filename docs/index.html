@@ -94,6 +94,7 @@
       padding: 2px 7px; border-radius: 2px; border: 1px solid var(--border);
     }
     .status-ported { color: var(--cyan); border-color: var(--cyan); }
+    .status-implemented { color: var(--green); border-color: var(--green); }
     .status-progress { color: var(--accent-light); }
     .status-planned { color: var(--text-muted); }
   </style>
@@ -166,10 +167,10 @@
             <tr><td>Lexer / parser → AST</td><td><span class="status-pill status-progress">In progress</span></td><td>Ported from the Neovim eval engine.</td></tr>
             <tr><td>AST → fusevm bytecode lowering</td><td><span class="status-pill status-progress">In progress</span></td><td>No local VM; targets the shared fusevm opcode set.</td></tr>
             <tr><td>Builtin function surface</td><td><span class="status-pill status-progress">In progress</span></td><td>Ported incrementally from <code>eval/funcs.c</code>.</td></tr>
-            <tr><td>Standalone <code>vimlrs</code> binary</td><td><span class="status-pill status-planned">Planned</span></td><td>Run <code>.vim</code> scripts from the CLI.</td></tr>
-            <tr><td>rkyv bytecode script cache</td><td><span class="status-pill status-planned">Planned</span></td><td>Wired in <code>Cargo.toml</code>; versioned from day one.</td></tr>
-            <tr><td>DAP debugger (<code>--dap</code>)</td><td><span class="status-pill status-planned">Planned</span></td><td>Breakpoints, stepping, variable inspection.</td></tr>
-            <tr><td>LSP server (<code>--lsp</code>)</td><td><span class="status-pill status-planned">Planned</span></td><td>Diagnostics, hover, completion for <code>.vim</code>.</td></tr>
+            <tr><td>Standalone <code>vimlrs</code> binary</td><td><span class="status-pill status-implemented">Implemented</span></td><td>Run <code>.vim</code> scripts from the CLI (<code>src/main.rs</code>).</td></tr>
+            <tr><td>rkyv bytecode script cache</td><td><span class="status-pill status-implemented">Implemented</span></td><td>Versioned, migration-safe on-disk cache (<code>src/script_cache.rs</code>).</td></tr>
+            <tr><td>DAP debugger (<code>--dap</code>)</td><td><span class="status-pill status-implemented">Implemented</span></td><td>Breakpoints, stepping, variable inspection (<code>src/dap.rs</code>).</td></tr>
+            <tr><td>LSP server (<code>--lsp</code>)</td><td><span class="status-pill status-implemented">Implemented</span></td><td>Diagnostics, hover, completion for <code>.vim</code> (<code>src/lsp.rs</code>).</td></tr>
           </tbody>
         </table>
       </section>
