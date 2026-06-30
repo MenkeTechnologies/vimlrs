@@ -5,12 +5,12 @@
 //! citation, `unimplemented!()` body). As a function is faithfully
 //! ported into the hand-written modules it drops out of this tree on the
 //! next regeneration. Counts here are the remaining work, nothing else.
-pub mod eval;
-pub mod ex_eval;
 pub mod buffer;
 pub mod decode;
 pub mod deprecated;
 pub mod encode;
+pub mod eval;
+pub mod ex_eval;
 pub mod executor;
 pub mod fs;
 pub mod funcs;

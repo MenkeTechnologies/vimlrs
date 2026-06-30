@@ -185,8 +185,8 @@ thread_local! {
 /// global/script level) by stashing it on the save-stack and clearing it.
 /// Pairs with [`restore_funccal`].
 pub fn save_funccal() {
-    let cur = crate::ported::eval::vars::funccal_stack
-        .with(|s| std::mem::take(&mut *s.borrow_mut()));
+    let cur =
+        crate::ported::eval::vars::funccal_stack.with(|s| std::mem::take(&mut *s.borrow_mut()));
     SAVED_FUNCCALS.with(|s| s.borrow_mut().push(cur));
 }
 
@@ -505,7 +505,9 @@ pub fn call_user_func(
     argvars: &[crate::ported::eval::typval_defs_h::typval_T],
     rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
 ) {
-    use crate::ported::eval::typval_defs_h::{typval_T, typval_vval_union::v_string, VarLockStatus, VarType::VAR_FUNC};
+    use crate::ported::eval::typval_defs_h::{
+        typval_T, typval_vval_union::v_string, VarLockStatus, VarType::VAR_FUNC,
+    };
     let callee = typval_T {
         v_type: VAR_FUNC,
         v_lock: VarLockStatus::VAR_UNLOCKED,
@@ -636,9 +638,7 @@ pub fn get_func_tv(
 /// argument fails to evaluate. RUST-PORT NOTE: the C advances a parse pointer
 /// and tracks a partial-arg offset; here the list is split on top-level commas
 /// (balancing brackets, skipping strings) and each is run via `EVAL_STRING_HOOK`.
-pub fn get_func_arguments(
-    args: &str,
-) -> Option<Vec<crate::ported::eval::typval_defs_h::typval_T>> {
+pub fn get_func_arguments(args: &str) -> Option<Vec<crate::ported::eval::typval_defs_h::typval_T>> {
     let parts = {
         let b = args.as_bytes();
         let mut out: Vec<&str> = Vec::new();
@@ -821,7 +821,9 @@ pub fn call_func(
     argvars: &[crate::ported::eval::typval_defs_h::typval_T],
     rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
 ) -> i32 {
-    use crate::ported::eval::typval_defs_h::{typval_T, typval_vval_union::v_string, VarLockStatus, VarType::VAR_FUNC};
+    use crate::ported::eval::typval_defs_h::{
+        typval_T, typval_vval_union::v_string, VarLockStatus, VarType::VAR_FUNC,
+    };
     use crate::ported::eval_h::{FAIL, OK};
     let callee = typval_T {
         v_type: VAR_FUNC,
@@ -859,7 +861,12 @@ pub fn func_call(
     };
     use crate::ported::eval_h::{FAIL, OK};
     let argv: Vec<typval_T> = match &args.vval {
-        v_list(Some(l)) => l.borrow().lv_items.iter().map(|it| it.li_tv.clone()).collect(),
+        v_list(Some(l)) => l
+            .borrow()
+            .lv_items
+            .iter()
+            .map(|it| it.li_tv.clone())
+            .collect(),
         _ => return FAIL,
     };
     let callee = match partial {
@@ -918,9 +925,7 @@ pub fn func_has_abort() -> bool {
 /// Format the debugger's `:return <value>` line for a `:return`ed value (or just
 /// `:return` for none), truncating to the I/O buffer size with a trailing
 /// `...`. Uses the `string()`-style echo encoding.
-pub fn get_return_cmd(
-    rettv: Option<&crate::ported::eval::typval_defs_h::typval_T>,
-) -> String {
+pub fn get_return_cmd(rettv: Option<&crate::ported::eval::typval_defs_h::typval_T>) -> String {
     const IOSIZE: usize = 1024 + 1;
     let s = rettv.map_or(String::new(), crate::ported::eval::encode::encode_tv2echo);
     let mut buf = format!(":return {s}");
@@ -949,31 +954,45 @@ pub fn get_return_cmd(
 /// this returns that value as a `VAR_DICT` read-snapshot (consistent with
 /// `eval_variable("l:")`), or `None` when not in a function.
 pub fn get_funccal_local_var() -> Option<crate::ported::eval::typval_defs_h::typval_T> {
-    use crate::ported::eval::typval_defs_h::{typval_T, typval_vval_union::v_dict, VarLockStatus, VarType::VAR_DICT};
+    use crate::ported::eval::typval_defs_h::{
+        typval_T, typval_vval_union::v_dict, VarLockStatus, VarType::VAR_DICT,
+    };
     let nd = crate::ported::eval::typval::tv_dict_alloc();
     nd.borrow_mut().dv_hashtab = get_funccal_local_dict()?.dv_hashtab;
-    Some(typval_T { v_type: VAR_DICT, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_dict(Some(nd)) })
+    Some(typval_T {
+        v_type: VAR_DICT,
+        v_lock: VarLockStatus::VAR_UNLOCKED,
+        vval: v_dict(Some(nd)),
+    })
 }
 
 /// Port of `get_funccal_args_var()` from `Src/eval/userfunc.c` — the `a:` scope's
 /// self-variable (`a:` as a Dict read-snapshot), or `None`.
 pub fn get_funccal_args_var() -> Option<crate::ported::eval::typval_defs_h::typval_T> {
-    use crate::ported::eval::typval_defs_h::{typval_T, typval_vval_union::v_dict, VarLockStatus, VarType::VAR_DICT};
+    use crate::ported::eval::typval_defs_h::{
+        typval_T, typval_vval_union::v_dict, VarLockStatus, VarType::VAR_DICT,
+    };
     let nd = crate::ported::eval::typval::tv_dict_alloc();
     nd.borrow_mut().dv_hashtab = get_funccal_args_dict()?.dv_hashtab;
-    Some(typval_T { v_type: VAR_DICT, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_dict(Some(nd)) })
+    Some(typval_T {
+        v_type: VAR_DICT,
+        v_lock: VarLockStatus::VAR_UNLOCKED,
+        vval: v_dict(Some(nd)),
+    })
 }
 
 /// Port of `get_funccal_local_dict()` from `Src/eval/userfunc.c` — the current
 /// `l:` scope dict (read-snapshot), or `None` when not in a function.
 pub fn get_funccal_local_dict() -> Option<crate::ported::eval::typval_defs_h::dict_T> {
-    crate::ported::eval::vars::funccal_stack.with(|s| s.borrow().last().map(|f| f.fc_l_vars.clone()))
+    crate::ported::eval::vars::funccal_stack
+        .with(|s| s.borrow().last().map(|f| f.fc_l_vars.clone()))
 }
 
 /// Port of `get_funccal_args_dict()` from `Src/eval/userfunc.c` — the current
 /// `a:` argument scope dict (read-snapshot), or `None`.
 pub fn get_funccal_args_dict() -> Option<crate::ported::eval::typval_defs_h::dict_T> {
-    crate::ported::eval::vars::funccal_stack.with(|s| s.borrow().last().map(|f| f.fc_l_avars.clone()))
+    crate::ported::eval::vars::funccal_stack
+        .with(|s| s.borrow().last().map(|f| f.fc_l_avars.clone()))
 }
 
 /// Port of `get_funccal_local_ht()` from `Src/eval/userfunc.c` — the hashtable
@@ -1097,17 +1116,27 @@ pub struct DerefedFunc {
 pub fn deref_func_name(name: &str, _no_autoload: bool) -> DerefedFunc {
     use crate::ported::eval::typval_defs_h::{typval_vval_union::*, VarType::*};
     match crate::ported::eval::vars::eval_variable(name) {
-        None => DerefedFunc { name: name.to_string(), partial: None, found_var: false },
+        None => DerefedFunc {
+            name: name.to_string(),
+            partial: None,
+            found_var: false,
+        },
         Some(tv) => match (tv.v_type, tv.vval) {
-            (VAR_FUNC, v_string(s)) => {
-                DerefedFunc { name: s, partial: None, found_var: true }
-            }
+            (VAR_FUNC, v_string(s)) => DerefedFunc {
+                name: s,
+                partial: None,
+                found_var: true,
+            },
             (VAR_PARTIAL, v_partial(Some(pt))) => DerefedFunc {
                 name: crate::ported::eval::partial_name(&pt).to_string(),
                 partial: Some(pt),
                 found_var: true,
             },
-            _ => DerefedFunc { name: name.to_string(), partial: None, found_var: true },
+            _ => DerefedFunc {
+                name: name.to_string(),
+                partial: None,
+                found_var: true,
+            },
         },
     }
 }
@@ -1165,9 +1194,15 @@ mod tests {
         CALL_FUNC_HOOK.with(|h| *h.borrow_mut() = Some(hook));
         let mut rv = typval_T::from(0);
         // too few args → FCERR, no dispatch
-        assert_eq!(call_user_func_check(&fp, &[typval_T::from(1)], &mut rv), FCERR_TOOFEW);
+        assert_eq!(
+            call_user_func_check(&fp, &[typval_T::from(1)], &mut rv),
+            FCERR_TOOFEW
+        );
         // correct arity → dispatch
-        assert_eq!(call_user_func_check(&fp, &[typval_T::from(1), typval_T::from(2)], &mut rv), FCERR_NONE);
+        assert_eq!(
+            call_user_func_check(&fp, &[typval_T::from(1), typval_T::from(2)], &mut rv),
+            FCERR_NONE
+        );
         assert!(matches!(rv.vval, v_number(2)));
         CALL_FUNC_HOOK.with(|h| *h.borrow_mut() = saved);
     }
@@ -1230,7 +1265,10 @@ mod tests {
     fn get_return_cmd_formats() {
         use crate::ported::eval::typval_defs_h::typval_T;
         assert_eq!(get_return_cmd(Some(&typval_T::from(42))), ":return 42");
-        assert_eq!(get_return_cmd(Some(&typval_T::from("hi".to_string()))), ":return hi");
+        assert_eq!(
+            get_return_cmd(Some(&typval_T::from("hi".to_string()))),
+            ":return hi"
+        );
         assert_eq!(get_return_cmd(None), ":return ");
     }
 
@@ -1241,14 +1279,20 @@ mod tests {
         let mut d = dict_T::default();
         add_nr_var(&mut d, "lnum", 7);
         add_nr_var(&mut d, "winid", 3);
-        assert!(matches!(tv_dict_find(&d, "lnum").map(|tv| &tv.vval), Some(v_number(7))));
-        assert!(matches!(tv_dict_find(&d, "winid").map(|tv| &tv.vval), Some(v_number(3))));
+        assert!(matches!(
+            tv_dict_find(&d, "lnum").map(|tv| &tv.vval),
+            Some(v_number(7))
+        ));
+        assert!(matches!(
+            tv_dict_find(&d, "winid").map(|tv| &tv.vval),
+            Some(v_number(3))
+        ));
     }
 
     #[test]
     fn func_call_via_hook() {
-        use crate::ported::eval::typval::CALL_FUNC_HOOK;
         use crate::ported::eval::typval::tv_list_append_number;
+        use crate::ported::eval::typval::CALL_FUNC_HOOK;
         use crate::ported::eval::typval_defs_h::{
             list_T, typval_T, typval_vval_union::*, VarLockStatus, VarType::*,
         };
@@ -1272,7 +1316,10 @@ mod tests {
         assert!(matches!(rv.vval, v_number(2)));
         // Non-list args → FAIL.
         let mut rv2 = typval_T::from(-1);
-        assert_eq!(func_call("F", &typval_T::from(0), None, None, &mut rv2), FAIL);
+        assert_eq!(
+            func_call("F", &typval_T::from(0), None, None, &mut rv2),
+            FAIL
+        );
         CALL_FUNC_HOOK.with(|h| *h.borrow_mut() = saved);
     }
 
@@ -1299,9 +1346,19 @@ mod tests {
         }
         fn call_hook(_c: &typval_T, args: &[typval_T]) -> Option<typval_T> {
             // return the sum of the (number) args
-            Some(typval_T::from(args.iter().map(|a| match a.vval { v_number(n) => n, _ => 0 }).sum::<i64>()))
+            Some(typval_T::from(
+                args.iter()
+                    .map(|a| match a.vval {
+                        v_number(n) => n,
+                        _ => 0,
+                    })
+                    .sum::<i64>(),
+            ))
         }
-        let (se, sc) = (EVAL_STRING_HOOK.with(|h| *h.borrow()), CALL_FUNC_HOOK.with(|h| *h.borrow()));
+        let (se, sc) = (
+            EVAL_STRING_HOOK.with(|h| *h.borrow()),
+            CALL_FUNC_HOOK.with(|h| *h.borrow()),
+        );
         EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = Some(eval_hook));
         CALL_FUNC_HOOK.with(|h| *h.borrow_mut() = Some(call_hook));
         let mut rv = typval_T::from(-1);
@@ -1393,8 +1450,14 @@ mod tests {
         tv_dict_add_nr(&mut frame.fc_l_avars, "1", 9);
         funccal_stack.with(|s| s.borrow_mut().push(frame));
         assert_eq!(get_funccal_local_ht().unwrap().len(), 1);
-        assert!(get_funccal_local_dict().unwrap().dv_hashtab.contains_key("x"));
-        assert!(get_funccal_args_dict().unwrap().dv_hashtab.contains_key("1"));
+        assert!(get_funccal_local_dict()
+            .unwrap()
+            .dv_hashtab
+            .contains_key("x"));
+        assert!(get_funccal_args_dict()
+            .unwrap()
+            .dv_hashtab
+            .contains_key("1"));
         funccal_stack.with(|s| s.borrow_mut().clear());
     }
 
@@ -1406,7 +1469,10 @@ mod tests {
         assert_eq!(func_name(), "");
         // Push a frame named "MyFunc".
         funccal_stack.with(|s| {
-            s.borrow_mut().push(FuncScope { fc_name: "MyFunc".into(), ..Default::default() })
+            s.borrow_mut().push(FuncScope {
+                fc_name: "MyFunc".into(),
+                ..Default::default()
+            })
         });
         assert_eq!(func_name(), "MyFunc");
         funccal_stack.with(|s| s.borrow_mut().clear());
@@ -1434,10 +1500,16 @@ mod tests {
 
     #[test]
     fn func_is_global_and_cat_name() {
-        let g = ufunc_T { uf_name: "MyFunc".into(), ..Default::default() };
+        let g = ufunc_T {
+            uf_name: "MyFunc".into(),
+            ..Default::default()
+        };
         assert!(func_is_global(&g));
         assert_eq!(cat_func_name(&g), "MyFunc");
-        let sl = ufunc_T { uf_name: "<SNR>9_Helper".into(), ..Default::default() };
+        let sl = ufunc_T {
+            uf_name: "<SNR>9_Helper".into(),
+            ..Default::default()
+        };
         assert!(!func_is_global(&sl));
         assert_eq!(cat_func_name(&sl), "<SNR>9_Helper");
     }
@@ -1450,7 +1522,10 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(printable_func_name(&f), "<SNR>9_raw");
-        let g = ufunc_T { uf_name: "plain".into(), ..Default::default() };
+        let g = ufunc_T {
+            uf_name: "plain".into(),
+            ..Default::default()
+        };
         assert_eq!(printable_func_name(&g), "plain");
     }
 }

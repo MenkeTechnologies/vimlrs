@@ -1525,7 +1525,9 @@ pub fn var_check_ro(flags: i32, name: &str, _name_len: usize) -> bool {
     let error_message = if flags & DI_FLAGS_RO != 0 {
         Some(format!("E46: Cannot change read-only variable \"{name}\""))
     } else if flags & DI_FLAGS_RO_SBX != 0 && SANDBOX {
-        Some(format!("E794: Cannot set variable in the sandbox: \"{name}\""))
+        Some(format!(
+            "E794: Cannot set variable in the sandbox: \"{name}\""
+        ))
     } else {
         None
     };
@@ -1634,7 +1636,7 @@ mod misc_helper_tests {
         assert!(var_check_ro(DI_FLAGS_RO, "g:v", 3));
         assert!(!var_check_ro(0, "g:v", 3));
         assert!(!var_check_ro(DI_FLAGS_RO_SBX, "g:v", 3)); // sandbox not modeled
-        // lock / fixed.
+                                                           // lock / fixed.
         assert!(var_check_lock(DI_FLAGS_LOCK, "g:v", 3));
         assert!(!var_check_lock(0, "g:v", 3));
         assert!(var_check_fixed(DI_FLAGS_FIX, "g:v", 3));
@@ -1717,7 +1719,10 @@ mod misc_helper_tests {
         use crate::ported::eval::typval_defs_h::{dict_T, typval_vval_union::v_number};
         let mut d = dict_T::default();
         tv_dict_add_nr(&mut d, "x", 5);
-        assert!(matches!(find_var_in_ht(&d, b'g', "x", false).map(|tv| &tv.vval), Some(v_number(5))));
+        assert!(matches!(
+            find_var_in_ht(&d, b'g', "x", false).map(|tv| &tv.vval),
+            Some(v_number(5))
+        ));
         assert!(find_var_in_ht(&d, b'g', "missing", false).is_none());
         // empty varname (scope-self ref) is not modeled → None
         assert!(find_var_in_ht(&d, b'g', "", false).is_none());

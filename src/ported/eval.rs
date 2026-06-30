@@ -1021,7 +1021,9 @@ pub fn string_slice(
     } else {
         match char_idx2byte(str, last) {
             // c: inclusive subscript end → step past that character.
-            Some(b) if !exclusive && b < slen => b + str[b..].chars().next().map_or(0, char::len_utf8),
+            Some(b) if !exclusive && b < slen => {
+                b + str[b..].chars().next().map_or(0, char::len_utf8)
+            }
             Some(b) => b,
             None => return None,
         }
@@ -1040,9 +1042,17 @@ pub fn string_slice(
 /// (non-numeric value).
 pub fn eval7_leader(rettv: &mut typval_T, numeric_only: bool, leaders: &str) -> i32 {
     let is_float = rettv.v_type == VAR_FLOAT;
-    let mut f = if is_float { crate::ported::eval::typval::tv_get_float(rettv) } else { 0.0 };
+    let mut f = if is_float {
+        crate::ported::eval::typval::tv_get_float(rettv)
+    } else {
+        0.0
+    };
     let mut error = false;
-    let mut val = if is_float { 0 } else { tv_get_number_chk(rettv, Some(&mut error)) };
+    let mut val = if is_float {
+        0
+    } else {
+        tv_get_number_chk(rettv, Some(&mut error))
+    };
     if error {
         return FAIL;
     }
@@ -1071,7 +1081,11 @@ pub fn eval7_leader(rettv: &mut typval_T, numeric_only: bool, leaders: &str) -> 
         }
     }
     *rettv = if cur_float {
-        typval_T { v_type: VAR_FLOAT, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_float(f) }
+        typval_T {
+            v_type: VAR_FLOAT,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_float(f),
+        }
     } else {
         typval_T::from(val)
     };
@@ -1140,17 +1154,33 @@ pub fn eval_concat_str(tv1: &mut typval_T, tv2: &typval_T) -> i32 {
 pub fn eval_addsub_number(tv1: &mut typval_T, tv2: &typval_T, op: u8) -> i32 {
     let f = tv1.v_type == VAR_FLOAT || tv2.v_type == VAR_FLOAT;
     let mut error = false;
-    let n1 = if tv1.v_type == VAR_FLOAT { 0 } else { tv_get_number_chk(tv1, Some(&mut error)) };
+    let n1 = if tv1.v_type == VAR_FLOAT {
+        0
+    } else {
+        tv_get_number_chk(tv1, Some(&mut error))
+    };
     if error {
         return FAIL;
     }
-    let n2 = if tv2.v_type == VAR_FLOAT { 0 } else { tv_get_number_chk(tv2, Some(&mut error)) };
+    let n2 = if tv2.v_type == VAR_FLOAT {
+        0
+    } else {
+        tv_get_number_chk(tv2, Some(&mut error))
+    };
     if error {
         return FAIL;
     }
     if f {
-        let a = if tv1.v_type == VAR_FLOAT { crate::ported::eval::typval::tv_get_float(tv1) } else { n1 as f64 };
-        let b = if tv2.v_type == VAR_FLOAT { crate::ported::eval::typval::tv_get_float(tv2) } else { n2 as f64 };
+        let a = if tv1.v_type == VAR_FLOAT {
+            crate::ported::eval::typval::tv_get_float(tv1)
+        } else {
+            n1 as f64
+        };
+        let b = if tv2.v_type == VAR_FLOAT {
+            crate::ported::eval::typval::tv_get_float(tv2)
+        } else {
+            n2 as f64
+        };
         *tv1 = typval_T {
             v_type: VAR_FLOAT,
             v_lock: VarLockStatus::VAR_UNLOCKED,
@@ -1169,17 +1199,33 @@ pub fn eval_addsub_number(tv1: &mut typval_T, tv2: &typval_T, op: u8) -> i32 {
 pub fn eval_multdiv_number(tv1: &mut typval_T, tv2: &typval_T, op: u8) -> i32 {
     let use_float = tv1.v_type == VAR_FLOAT || tv2.v_type == VAR_FLOAT;
     let mut error = false;
-    let n1 = if tv1.v_type == VAR_FLOAT { 0 } else { tv_get_number_chk(tv1, Some(&mut error)) };
+    let n1 = if tv1.v_type == VAR_FLOAT {
+        0
+    } else {
+        tv_get_number_chk(tv1, Some(&mut error))
+    };
     if error {
         return FAIL;
     }
-    let n2 = if tv2.v_type == VAR_FLOAT { 0 } else { tv_get_number_chk(tv2, Some(&mut error)) };
+    let n2 = if tv2.v_type == VAR_FLOAT {
+        0
+    } else {
+        tv_get_number_chk(tv2, Some(&mut error))
+    };
     if error {
         return FAIL;
     }
     if use_float {
-        let f1 = if tv1.v_type == VAR_FLOAT { crate::ported::eval::typval::tv_get_float(tv1) } else { n1 as f64 };
-        let f2 = if tv2.v_type == VAR_FLOAT { crate::ported::eval::typval::tv_get_float(tv2) } else { n2 as f64 };
+        let f1 = if tv1.v_type == VAR_FLOAT {
+            crate::ported::eval::typval::tv_get_float(tv1)
+        } else {
+            n1 as f64
+        };
+        let f2 = if tv2.v_type == VAR_FLOAT {
+            crate::ported::eval::typval::tv_get_float(tv2)
+        } else {
+            n2 as f64
+        };
         let r = match op {
             b'*' => f1 * f2,
             b'/' => {
@@ -1200,7 +1246,11 @@ pub fn eval_multdiv_number(tv1: &mut typval_T, tv2: &typval_T, op: u8) -> i32 {
                 return FAIL;
             }
         };
-        *tv1 = typval_T { v_type: VAR_FLOAT, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_float(r) };
+        *tv1 = typval_T {
+            v_type: VAR_FLOAT,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_float(r),
+        };
     } else {
         let r = match op {
             b'*' => n1.wrapping_mul(n2),
@@ -1251,9 +1301,7 @@ pub fn to_name_end(arg: &str, use_namespace: bool) -> usize {
     }
     let mut p = 1;
     while p < bytes.len() && eval_isnamec(bytes[p]) {
-        if bytes[p] == b':'
-            && (p != 1 || !use_namespace || !b"bgstvw".contains(&bytes[0]))
-        {
+        if bytes[p] == b':' && (p != 1 || !use_namespace || !b"bgstvw".contains(&bytes[0])) {
             break;
         }
         p += 1;
@@ -1327,9 +1375,7 @@ pub fn find_name_end(arg: &str, flags: u32) -> (usize, Option<usize>, Option<usi
         } else if br_nest == 0 && mb_nest == 0 && c == b':' {
             // "s:" starts "s:var", but "n:" does not (used in slice "[n:]").
             let len = p;
-            if (len > 1 && b[p - 1] != b'}')
-                || (len == 1 && !NAMESPACE_CHAR.contains(&b[0]))
-            {
+            if (len > 1 && b[p - 1] != b'}') || (len == 1 && !NAMESPACE_CHAR.contains(&b[0])) {
                 break;
             }
         }
@@ -1439,12 +1485,17 @@ pub fn eval_index(rettv: &mut typval_T, subscript: &str, verbose: bool) -> i32 {
         return FAIL;
     }
     let eval = |e: &str| -> Option<typval_T> {
-        crate::ported::eval::typval::EVAL_STRING_HOOK.with(|h| *h.borrow()).and_then(|f| f(e))
+        crate::ported::eval::typval::EVAL_STRING_HOOK
+            .with(|h| *h.borrow())
+            .and_then(|f| f(e))
     };
     if let Some(key) = subscript.strip_prefix('.') {
         return eval_index_inner(rettv, false, None, None, false, Some(key), verbose);
     }
-    let inner = match subscript.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+    let inner = match subscript
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+    {
         Some(i) => i,
         None => return FAIL,
     };
@@ -1454,11 +1505,27 @@ pub fn eval_index(rettv: &mut typval_T, subscript: &str, verbose: bool) -> i32 {
         let (mut depth, mut i, mut pos) = (0i32, 0usize, None);
         while i < b.len() {
             match b[i] {
-                b'\'' => { i += 1; while i < b.len() && b[i] != b'\'' { i += 1; } }
-                b'"' => { i += 1; while i < b.len() && b[i] != b'"' { if b[i] == b'\\' && i + 1 < b.len() { i += 1; } i += 1; } }
+                b'\'' => {
+                    i += 1;
+                    while i < b.len() && b[i] != b'\'' {
+                        i += 1;
+                    }
+                }
+                b'"' => {
+                    i += 1;
+                    while i < b.len() && b[i] != b'"' {
+                        if b[i] == b'\\' && i + 1 < b.len() {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                }
                 b'[' | b'(' | b'{' => depth += 1,
                 b']' | b')' | b'}' => depth -= 1,
-                b':' if depth == 0 => { pos = Some(i); break; }
+                b':' if depth == 0 => {
+                    pos = Some(i);
+                    break;
+                }
                 _ => {}
             }
             i += 1;
@@ -1507,10 +1574,9 @@ pub fn eval_index_inner(
     key: Option<&str>,
     verbose: bool,
 ) -> i32 {
-    let n1 = if var1.is_some() && rettv.v_type != VAR_DICT {
-        tv_get_number_chk(var1.unwrap(), None)
-    } else {
-        0
+    let n1 = match var1 {
+        Some(v) if rettv.v_type != VAR_DICT => tv_get_number_chk(v, None),
+        _ => 0,
     };
     let n2 = if is_range {
         if rettv.v_type == VAR_DICT {
@@ -1542,21 +1608,28 @@ pub fn eval_index_inner(
                 _ => return OK,
             };
             let bb = b.borrow();
-            crate::ported::eval::typval::tv_blob_slice_or_index(&bb, is_range, n1, n2, exclusive, rettv)
+            crate::ported::eval::typval::tv_blob_slice_or_index(
+                &bb, is_range, n1, n2, exclusive, rettv,
+            )
         }
         VAR_LIST => {
             let l = match &rettv.vval {
                 v_list(Some(l)) => l.clone(),
                 _ => return OK,
             };
-            crate::ported::eval::typval::tv_list_slice_or_index(&l, is_range, n1, n2, exclusive, rettv, verbose)
+            crate::ported::eval::typval::tv_list_slice_or_index(
+                &l, is_range, n1, n2, exclusive, rettv, verbose,
+            )
         }
         VAR_DICT => {
             let d = match &rettv.vval {
                 v_dict(Some(d)) => d.clone(),
                 _ => return FAIL,
             };
-            let k = match key.map(String::from).or_else(|| var1.and_then(crate::ported::eval::typval::tv_get_string_chk)) {
+            let k = match key
+                .map(String::from)
+                .or_else(|| var1.and_then(crate::ported::eval::typval::tv_get_string_chk))
+            {
                 Some(k) => k,
                 None => return FAIL,
             };
@@ -1672,7 +1745,10 @@ pub fn var_flavour(varname: &str) -> var_flavour_T {
 /// [`OK`]/[`FAIL`].
 pub fn eval_expr_string(expr: &typval_T, rettv: &mut typval_T) -> i32 {
     let s = tv_get_string(expr);
-    match crate::ported::eval::typval::EVAL_STRING_HOOK.with(|h| *h.borrow()).and_then(|f| f(s.trim_start())) {
+    match crate::ported::eval::typval::EVAL_STRING_HOOK
+        .with(|h| *h.borrow())
+        .and_then(|f| f(s.trim_start()))
+    {
         Some(result) => {
             *rettv = result;
             OK
@@ -1742,7 +1818,12 @@ pub fn eval_expr(arg: &str) -> Option<typval_T> {
 /// Port of `eval_expr_typval()` from `Src/eval.c:395` — evaluate `expr` (a
 /// Partial, a Funcref/name when `want_func`, else an expression string) with
 /// `argv`, into `rettv`. Returns [`OK`]/[`FAIL`].
-pub fn eval_expr_typval(expr: &typval_T, want_func: bool, argv: &[typval_T], rettv: &mut typval_T) -> i32 {
+pub fn eval_expr_typval(
+    expr: &typval_T,
+    want_func: bool,
+    argv: &[typval_T],
+    rettv: &mut typval_T,
+) -> i32 {
     match expr.v_type {
         VAR_PARTIAL => eval_expr_partial(expr, argv, rettv),
         VAR_FUNC => eval_expr_func(expr, argv, rettv),
@@ -1775,7 +1856,10 @@ pub fn eval_to_bool(arg: &str) -> bool {
 /// Port of `eval1_emsg()` from `Src/eval.c:281` — evaluate one expression string
 /// `arg` into `rettv`, giving an error message on failure. Returns [`OK`]/[`FAIL`].
 pub fn eval1_emsg(arg: &str, rettv: &mut typval_T) -> i32 {
-    match crate::ported::eval::typval::EVAL_STRING_HOOK.with(|h| *h.borrow()).and_then(|f| f(arg)) {
+    match crate::ported::eval::typval::EVAL_STRING_HOOK
+        .with(|h| *h.borrow())
+        .and_then(|f| f(arg))
+    {
         Some(result) => {
             *rettv = result;
             OK
@@ -2076,42 +2160,91 @@ mod tests {
     fn eval_index_inner_types() {
         use super::eval_index_inner;
         use crate::ported::eval::typval::{tv_dict_add_nr, tv_list_alloc, tv_list_append_number};
-        use crate::ported::eval::typval_defs_h::{dict_T, typval_vval_union::v_dict, VarLockStatus, VarType::VAR_DICT};
+        use crate::ported::eval::typval_defs_h::{
+            dict_T, typval_vval_union::v_dict, VarLockStatus, VarType::VAR_DICT,
+        };
         use crate::ported::eval_h::{FAIL, OK};
         use std::{cell::RefCell, rc::Rc};
         // string subscript [1] is char-based
         let mut s = typval_T::from("héllo".to_string());
-        assert_eq!(eval_index_inner(&mut s, false, Some(&typval_T::from(1)), None, false, None, false), OK);
+        assert_eq!(
+            eval_index_inner(
+                &mut s,
+                false,
+                Some(&typval_T::from(1)),
+                None,
+                false,
+                None,
+                false
+            ),
+            OK
+        );
         assert!(matches!(&s.vval, v_string(t) if t == "é"));
         // string slice [1:3] inclusive
         let mut s2 = typval_T::from("abcdef".to_string());
-        eval_index_inner(&mut s2, true, Some(&typval_T::from(1)), Some(&typval_T::from(3)), false, None, false);
+        eval_index_inner(
+            &mut s2,
+            true,
+            Some(&typval_T::from(1)),
+            Some(&typval_T::from(3)),
+            false,
+            None,
+            false,
+        );
         assert!(matches!(&s2.vval, v_string(t) if t == "bcd"));
         // list index [2]
         let l = tv_list_alloc(-1);
-        for n in [10, 20, 30] { tv_list_append_number(&mut l.borrow_mut(), n); }
-        let mut lv = typval_T { v_type: crate::ported::eval::typval_defs_h::VarType::VAR_LIST, v_lock: VarLockStatus::VAR_UNLOCKED, vval: crate::ported::eval::typval_defs_h::typval_vval_union::v_list(Some(l)) };
-        eval_index_inner(&mut lv, false, Some(&typval_T::from(2)), None, false, None, false);
+        for n in [10, 20, 30] {
+            tv_list_append_number(&mut l.borrow_mut(), n);
+        }
+        let mut lv = typval_T {
+            v_type: crate::ported::eval::typval_defs_h::VarType::VAR_LIST,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: crate::ported::eval::typval_defs_h::typval_vval_union::v_list(Some(l)),
+        };
+        eval_index_inner(
+            &mut lv,
+            false,
+            Some(&typval_T::from(2)),
+            None,
+            false,
+            None,
+            false,
+        );
         assert!(matches!(lv.vval, v_number(30)));
         // dict key
         let mut d = dict_T::default();
         tv_dict_add_nr(&mut d, "k", 7);
-        let mut dv = typval_T { v_type: VAR_DICT, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_dict(Some(Rc::new(RefCell::new(d)))) };
-        assert_eq!(eval_index_inner(&mut dv, false, None, None, false, Some("k"), false), OK);
+        let mut dv = typval_T {
+            v_type: VAR_DICT,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_dict(Some(Rc::new(RefCell::new(d)))),
+        };
+        assert_eq!(
+            eval_index_inner(&mut dv, false, None, None, false, Some("k"), false),
+            OK
+        );
         assert!(matches!(dv.vval, v_number(7)));
-        // missing key → FAIL
-        let mut dv2 = dv.clone();
-        // re-make a dict for the missing-key case
+        // missing key → FAIL; re-make a dict for the missing-key case
         let mut d2 = dict_T::default();
         tv_dict_add_nr(&mut d2, "k", 7);
-        dv2 = typval_T { v_type: VAR_DICT, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_dict(Some(Rc::new(RefCell::new(d2)))) };
-        assert_eq!(eval_index_inner(&mut dv2, false, None, None, false, Some("nope"), false), FAIL);
+        let mut dv2 = typval_T {
+            v_type: VAR_DICT,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_dict(Some(Rc::new(RefCell::new(d2)))),
+        };
+        assert_eq!(
+            eval_index_inner(&mut dv2, false, None, None, false, Some("nope"), false),
+            FAIL
+        );
     }
     use super::{
         char_from_string, char_idx2byte, find_name_end, get_literal_key, is_luafunc, string_slice,
         to_name_end, tv_is_luafunc, var_flavour, var_flavour_T::*,
     };
-    use crate::ported::eval::typval_defs_h::{typval_T, typval_vval_union::*, VarLockStatus, VarType::*};
+    use crate::ported::eval::typval_defs_h::{
+        typval_T, typval_vval_union::*, VarLockStatus, VarType::*,
+    };
     use std::rc::Rc;
 
     #[test]
@@ -2139,7 +2272,10 @@ mod tests {
         // slice() is exclusive of the end
         assert_eq!(string_slice("abcdef", 1, 3, true).as_deref(), Some("bc"));
         // [1:] to the end
-        assert_eq!(string_slice("abcdef", 1, -1, false).as_deref(), Some("bcdef"));
+        assert_eq!(
+            string_slice("abcdef", 1, -1, false).as_deref(),
+            Some("bcdef")
+        );
         // empty result
         assert_eq!(string_slice("abc", 2, 1, false), None);
     }
@@ -2150,14 +2286,17 @@ mod tests {
         let not = |n: i64, l: &str| {
             let mut tv = typval_T::from(n);
             eval7_leader(&mut tv, false, l);
-            match tv.vval { v_number(x) => x, _ => -999 }
+            match tv.vval {
+                v_number(x) => x,
+                _ => -999,
+            }
         };
         assert_eq!(not(5, "!"), 0); // truthy → 0
         assert_eq!(not(0, "!"), 1); // falsy → 1
         assert_eq!(not(5, "-"), -5); // negate
         assert_eq!(not(5, "--"), 5); // double negate
         assert_eq!(not(5, "!-"), 0); // - then ! : -5 truthy → 0
-        // numeric_only stops at '!', leaving the value
+                                     // numeric_only stops at '!', leaving the value
         let mut tv = typval_T::from(5);
         eval7_leader(&mut tv, true, "!");
         assert!(matches!(tv.vval, v_number(5)));
@@ -2175,12 +2314,19 @@ mod tests {
         assert!(matches!(b.vval, v_number(6)));
         // float promotion: 3 + 1.5 = 4.5
         let mut c = typval_T::from(3);
-        let f = typval_T { v_type: VAR_FLOAT, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_float(1.5) };
+        let f = typval_T {
+            v_type: VAR_FLOAT,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_float(1.5),
+        };
         eval_addsub_number(&mut c, &f, b'+');
         assert!(matches!(c.vval, v_float(x) if (x - 4.5).abs() < 1e-9));
         // string concat
         let mut s = typval_T::from("foo".to_string());
-        assert_eq!(eval_concat_str(&mut s, &typval_T::from("bar".to_string())), OK);
+        assert_eq!(
+            eval_concat_str(&mut s, &typval_T::from("bar".to_string())),
+            OK
+        );
         assert!(matches!(&s.vval, v_string(t) if t == "foobar"));
         // multdiv: number * and /
         use super::eval_multdiv_number;
@@ -2217,9 +2363,15 @@ mod tests {
         let saved = EVAL_STRING_HOOK.with(|h| *h.borrow());
         EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = Some(hook));
         // foo{x}baz → fooBARbaz
-        assert_eq!(make_expanded_name("foo{x}baz", 3, 5).as_deref(), Some("fooBARbaz"));
+        assert_eq!(
+            make_expanded_name("foo{x}baz", 3, 5).as_deref(),
+            Some("fooBARbaz")
+        );
         // two groups expand recursively
-        assert_eq!(make_expanded_name("a{x}b{1}c", 1, 3).as_deref(), Some("aBARbONEc"));
+        assert_eq!(
+            make_expanded_name("a{x}b{1}c", 1, 3).as_deref(),
+            Some("aBARbONEc")
+        );
         // a failing expr → None
         assert_eq!(make_expanded_name("p{bad}q", 1, 5), None);
         EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = saved);
@@ -2252,7 +2404,10 @@ mod tests {
     #[test]
     fn get_literal_key_basic() {
         assert_eq!(get_literal_key("key: 1").unwrap().0, "key");
-        assert_eq!(get_literal_key("a-b : x").unwrap(), ("a-b".to_string(), ": x"));
+        assert_eq!(
+            get_literal_key("a-b : x").unwrap(),
+            ("a-b".to_string(), ": x")
+        );
         assert!(get_literal_key(":bad").is_none());
     }
 
@@ -2279,8 +2434,14 @@ mod tests {
                 .collect()
         };
         // trailing NL dropped unless keepempty
-        assert_eq!(lines("a\nb\n", false), vec!["a".to_string(), "b".to_string()]);
-        assert_eq!(lines("a\nb\n", true), vec!["a".to_string(), "b".to_string(), String::new()]);
+        assert_eq!(
+            lines("a\nb\n", false),
+            vec!["a".to_string(), "b".to_string()]
+        );
+        assert_eq!(
+            lines("a\nb\n", true),
+            vec!["a".to_string(), "b".to_string(), String::new()]
+        );
         assert_eq!(lines("a\nb", false), vec!["a".to_string(), "b".to_string()]);
         // embedded NUL → NL within an item
         assert_eq!(lines("x\0y", false), vec!["x\ny".to_string()]);
@@ -2290,35 +2451,82 @@ mod tests {
     fn save_tv_as_string_modes() {
         use super::save_tv_as_string;
         use crate::ported::eval::typval::{tv_list_alloc, tv_list_append_string};
-        use crate::ported::eval::typval_defs_h::{typval_T, typval_vval_union::v_list, VarLockStatus, VarType::VAR_LIST};
+        use crate::ported::eval::typval_defs_h::{
+            typval_T, typval_vval_union::v_list, VarLockStatus, VarType::VAR_LIST,
+        };
         // scalar string
-        assert_eq!(save_tv_as_string(&typval_T::from("hi".to_string()), false, false).as_deref(), Some("hi"));
+        assert_eq!(
+            save_tv_as_string(&typval_T::from("hi".to_string()), false, false).as_deref(),
+            Some("hi")
+        );
         // Unknown / Number → None
         assert_eq!(save_tv_as_string(&typval_T::from(5), false, false), None);
         // list: items separated by NL, trailing NL only with endnl
         let l = tv_list_alloc(-1);
         tv_list_append_string(&mut l.borrow_mut(), "a");
         tv_list_append_string(&mut l.borrow_mut(), "b");
-        let lv = typval_T { v_type: VAR_LIST, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_list(Some(l)) };
-        assert_eq!(save_tv_as_string(&lv, false, false).as_deref(), Some("a\nb"));
-        assert_eq!(save_tv_as_string(&lv, true, false).as_deref(), Some("a\nb\n"));
+        let lv = typval_T {
+            v_type: VAR_LIST,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_list(Some(l)),
+        };
+        assert_eq!(
+            save_tv_as_string(&lv, false, false).as_deref(),
+            Some("a\nb")
+        );
+        assert_eq!(
+            save_tv_as_string(&lv, true, false).as_deref(),
+            Some("a\nb\n")
+        );
     }
 
     #[test]
     fn check_can_index_by_type() {
         use super::check_can_index;
         use crate::ported::eval_h::{FAIL, OK};
-        let tv = |t, v| typval_T { v_type: t, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v };
+        let tv = |t, v| typval_T {
+            v_type: t,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v,
+        };
         // indexable
-        assert_eq!(check_can_index(&tv(VAR_STRING, v_string("x".into())), true, false), OK);
-        assert_eq!(check_can_index(&tv(VAR_NUMBER, v_number(1)), true, false), OK);
+        assert_eq!(
+            check_can_index(&tv(VAR_STRING, v_string("x".into())), true, false),
+            OK
+        );
+        assert_eq!(
+            check_can_index(&tv(VAR_NUMBER, v_number(1)), true, false),
+            OK
+        );
         // not indexable
-        assert_eq!(check_can_index(&tv(VAR_FLOAT, v_float(1.0)), true, false), FAIL);
-        assert_eq!(check_can_index(&tv(VAR_BOOL, v_bool(crate::ported::eval::typval_defs_h::BoolVarValue::kBoolVarTrue)), true, false), FAIL);
-        assert_eq!(check_can_index(&tv(VAR_FUNC, v_string("F".into())), true, false), FAIL);
+        assert_eq!(
+            check_can_index(&tv(VAR_FLOAT, v_float(1.0)), true, false),
+            FAIL
+        );
+        assert_eq!(
+            check_can_index(
+                &tv(
+                    VAR_BOOL,
+                    v_bool(crate::ported::eval::typval_defs_h::BoolVarValue::kBoolVarTrue)
+                ),
+                true,
+                false
+            ),
+            FAIL
+        );
+        assert_eq!(
+            check_can_index(&tv(VAR_FUNC, v_string("F".into())), true, false),
+            FAIL
+        );
         // unknown: FAIL only when evaluating
-        assert_eq!(check_can_index(&tv(VAR_UNKNOWN, v_number(0)), true, false), FAIL);
-        assert_eq!(check_can_index(&tv(VAR_UNKNOWN, v_number(0)), false, false), OK);
+        assert_eq!(
+            check_can_index(&tv(VAR_UNKNOWN, v_number(0)), true, false),
+            FAIL
+        );
+        assert_eq!(
+            check_can_index(&tv(VAR_UNKNOWN, v_number(0)), false, false),
+            OK
+        );
     }
 
     #[test]
@@ -2398,12 +2606,20 @@ mod tests {
         let saved = CALL_FUNC_HOOK.with(|h| *h.borrow());
         CALL_FUNC_HOOK.with(|h| *h.borrow_mut() = Some(hook));
         // Funcref by name.
-        let f = typval_T { v_type: VAR_FUNC, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_string("F".into()) };
+        let f = typval_T {
+            v_type: VAR_FUNC,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_string("F".into()),
+        };
         let mut rv = typval_T::from(-1);
         assert_eq!(eval_expr_func(&f, &[typval_T::from(1)], &mut rv), OK);
         assert!(matches!(rv.vval, v_number(1)));
         // Empty name → FAIL.
-        let empty = typval_T { v_type: VAR_FUNC, v_lock: VarLockStatus::VAR_UNLOCKED, vval: v_string(String::new()) };
+        let empty = typval_T {
+            v_type: VAR_FUNC,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_string(String::new()),
+        };
         assert_eq!(eval_expr_func(&empty, &[], &mut rv), FAIL);
         // Partial.
         let p = typval_T {
@@ -2467,7 +2683,10 @@ mod tests {
             &mut rv2
         ));
         assert!(matches!(rv2.vval, v_number(2)));
-        assert_eq!(callback_call_retnr(&Callback::Funcref("F".into()), &[typval_T::from(9)]), 1);
+        assert_eq!(
+            callback_call_retnr(&Callback::Funcref("F".into()), &[typval_T::from(9)]),
+            1
+        );
         CALL_FUNC_HOOK.with(|h| *h.borrow_mut() = saved);
     }
 

@@ -2334,7 +2334,11 @@ fn find_func_hook(name: &str) -> Option<crate::ported::eval::userfunc::ufunc_T> 
     Some(crate::ported::eval::userfunc::ufunc_T {
         uf_name: def.name.clone(),
         uf_args: def.params[..nfixed].to_vec(),
-        uf_def_args: def.defaults.iter().map(|(i, _)| def.params[*i].clone()).collect(),
+        uf_def_args: def
+            .defaults
+            .iter()
+            .map(|(i, _)| def.params[*i].clone())
+            .collect(),
         uf_varargs: def.params.iter().any(|p| p == "..."),
         ..Default::default()
     })
@@ -3037,8 +3041,7 @@ pub fn install(vm: &mut VM) {
     FUNC_EXISTS_HOOK.with(|h| *h.borrow_mut() = Some(func_exists_hook));
     crate::ported::eval::typval::EVAL_STRING_HOOK
         .with(|h| *h.borrow_mut() = Some(eval_string_hook));
-    crate::ported::eval::userfunc::FIND_FUNC_HOOK
-        .with(|h| *h.borrow_mut() = Some(find_func_hook));
+    crate::ported::eval::userfunc::FIND_FUNC_HOOK.with(|h| *h.borrow_mut() = Some(find_func_hook));
     crate::ported::eval::userfunc::REMOVE_FUNC_HOOK
         .with(|h| *h.borrow_mut() = Some(remove_func_hook));
     vm.register_builtin(VIML_FN_REDUCE, |vm, n| call_func(vm, n, f_reduce));
