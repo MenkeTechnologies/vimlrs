@@ -73,6 +73,7 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
         "eval" => Ok(Stmt::Expr(parse_expr(rest)?)),
         "break" => Ok(Stmt::Break),
         "continue" | "cont" => Ok(Stmt::Continue),
+        "finish" | "finis" | "fini" => Ok(Stmt::Finish),
         "return" => Ok(if rest.trim().is_empty() {
             Stmt::Return(None)
         } else {
@@ -421,6 +422,7 @@ fn split_commands(line: &str) -> Vec<&str> {
                     }
                     return segs;
                 }
+                // Otherwise a `"` opens a string literal.
                 dq = true;
             }
             b'|' => {

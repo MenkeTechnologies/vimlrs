@@ -85,10 +85,29 @@ pub fn get_option_value(name: &str) -> typval_T {
     })
 }
 
+thread_local! {
+    /// Host hook fired with the raw `:set` argument string whenever `:set` runs,
+    /// so an embedding editor (zemacs) can mirror the option onto its own live
+    /// config. EXTENSION — no `csrc/` counterpart; the analogue of Vim's
+    /// option-change side-effect callbacks (`did_set_*`). The installer lives in
+    /// the crate-root carve-out [`crate::fusevm_bridge::install_set_hook`] (net-new
+    /// synthesis does not belong under `src/ported/`); unset by default (no-op).
+    pub static SET_HOST_HOOK: std::cell::RefCell<Option<Box<dyn Fn(&str)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// Port of `do_set()` (`option.c`) — parse and apply a `:set` argument string:
 /// `set opt` / `set noopt` / `set opt!` / `set invopt` / `set opt=val` /
 /// `set opt:val` / `set opt?` (whitespace-separated, multiple per line).
 pub fn do_set(args: &str) {
+    // Mirror the whole `:set` line to the host editor first (if a hook is
+    // installed), then keep vimlrs' own option table in sync below so `&opt`
+    // reads inside vimscript still see the value.
+    SET_HOST_HOOK.with(|h| {
+        if let Some(f) = h.borrow().as_ref() {
+            f(args);
+        }
+    });
     for part in args.split_whitespace() {
         // `opt=val` / `opt:val`.
         if let Some((name, val)) = part.split_once(['=', ':']) {
@@ -136,6 +155,20 @@ pub fn do_set(args: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn set_host_hook_fires_with_raw_args() {
+        use std::cell::RefCell;
+        thread_local! { static SEEN: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) }; }
+        super::SET_HOST_HOOK.with(|h| {
+            *h.borrow_mut() = Some(Box::new(|a: &str| SEEN.with(|s| s.borrow_mut().push(a.to_string()))));
+        });
+        super::do_set("number tw=80");
+        SEEN.with(|s| assert_eq!(s.borrow().as_slice(), &["number tw=80".to_string()]));
+        // and vimlrs' own option table still tracks it (dual-write):
+        assert!(super::findoption("tw").is_some());
+    }
+
 
     #[test]
     fn set_and_get_bool_and_number() {

@@ -268,6 +268,8 @@ pub enum Stmt {
     Break,
     /// `:continue`.
     Continue,
+    /// `:finish` — stop sourcing the rest of the current script/file.
+    Finish,
     /// `:return [expr]`.
     Return(Option<Expr>),
     /// `:function {name}(args) … :endfunction`.

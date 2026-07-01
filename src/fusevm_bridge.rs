@@ -2511,7 +2511,14 @@ fn b_map(vm: &mut VM, _: u8) -> Value {
     let cmd = &line[..cmd_end];
     let rest = &line[cmd_end..];
     if let Some((mode, unmap, clear, noremap)) = crate::ported::eval::funcs::get_map_mode(cmd) {
+        // Keep vimlrs' own mapping table in sync (so `maparg()`/`hasmapto()` work)…
         crate::ported::eval::funcs::do_map(rest, mode, unmap, clear, noremap);
+        // …then mirror the whole command onto the host editor's live keymap.
+        MAP_HOST_HOOK.with(|h| {
+            if let Some(f) = h.borrow().as_ref() {
+                f(line);
+            }
+        });
     }
     Value::Undef
 }
@@ -2904,6 +2911,31 @@ pub fn reset_run() {
     PENDING_EXC.with(|p| *p.borrow_mut() = None);
     V_EXCEPTION.with(|e| e.borrow_mut().clear());
     message::did_emsg.with(|d| d.set(0));
+}
+
+/// Install a host callback invoked with the raw `:set` args (e.g. `"nu tw=80"`)
+/// on every `:set`, so an embedding editor can mirror the option onto its live
+/// config. EXTENSION seam — the net-new installer for the ported
+/// [`crate::ported::option::SET_HOST_HOOK`] slot (net-new synthesis lives here,
+/// not under `src/ported/`).
+pub fn install_set_hook(f: Box<dyn Fn(&str)>) {
+    crate::ported::option::SET_HOST_HOOK.with(|h| *h.borrow_mut() = Some(f));
+}
+
+thread_local! {
+    /// Host hook fired with the full raw `:map`-family command line (e.g.
+    /// `"nnoremap <leader>x :Foo<CR>"`) whenever one runs, so an embedding editor
+    /// can mirror the mapping onto its own live keymap. EXTENSION — no `csrc/`
+    /// counterpart; a bridge seam living in the carve-out, not `src/ported/`.
+    /// Installed via [`install_map_hook`]; unset by default (no-op).
+    static MAP_HOST_HOOK: RefCell<Option<Box<dyn Fn(&str)>>> = const { RefCell::new(None) };
+}
+
+/// Install a host callback invoked with the raw `:map`-family command line on
+/// every `:map`/`:nmap`/`:nnoremap`/… (and `:unmap`/`:mapclear`), so an
+/// embedding editor can apply the mapping to its real keymap.
+pub fn install_map_hook(f: Box<dyn Fn(&str)>) {
+    MAP_HOST_HOOK.with(|h| *h.borrow_mut() = Some(f));
 }
 
 /// Register every `VIML_*` builtin on a fresh VM before `vm.run()`.
@@ -3776,6 +3808,29 @@ mod tests {
         capture_begin();
         eval_source(src).unwrap();
         capture_take()
+    }
+
+    #[test]
+    fn map_host_hook_fires_with_raw_line() {
+        use std::cell::RefCell;
+        thread_local! { static SEEN: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) }; }
+        SEEN.with(|s| s.borrow_mut().clear());
+        install_map_hook(Box::new(|line: &str| {
+            SEEN.with(|s| s.borrow_mut().push(line.to_string()))
+        }));
+        eval_source("nnoremap <silent> <leader>x :Foo<CR>").unwrap();
+        eval_source("inoremap jk <Esc>").unwrap();
+        SEEN.with(|s| {
+            assert_eq!(
+                s.borrow().as_slice(),
+                &[
+                    "nnoremap <silent> <leader>x :Foo<CR>".to_string(),
+                    "inoremap jk <Esc>".to_string(),
+                ]
+            )
+        });
+        // uninstall so later tests on this thread are unaffected
+        MAP_HOST_HOOK.with(|h| *h.borrow_mut() = None);
     }
 
     /// Proof that a vimlrs numeric loop runs on fusevm's tracing JIT: a

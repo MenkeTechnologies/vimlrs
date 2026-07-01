@@ -194,6 +194,10 @@ pub fn compile_program(stmts: &[Stmt]) -> Result<CompiledProgram, VimlError> {
     for j in frame {
         c.b.patch_jump(j, report);
     }
+    // `:finish` jumps to the end of the top-level script.
+    for j in std::mem::take(&mut c.finishes) {
+        c.b.patch_jump(j, report);
+    }
     if exc {
         // Any exception that reached the top uncaught is reported here.
         c.emit(Op::CallBuiltin(h::VIML_REPORT_UNCAUGHT, 0));
@@ -224,6 +228,9 @@ fn compile_function_body(body: &[Stmt], exc: bool) -> Result<fusevm::Chunk, Viml
     let frame = c.unwind.pop().expect("fn unwind frame");
     let end = c.b.current_pos();
     for j in std::mem::take(&mut c.returns) {
+        c.b.patch_jump(j, end);
+    }
+    for j in std::mem::take(&mut c.finishes) {
         c.b.patch_jump(j, end);
     }
     for j in frame {
@@ -288,6 +295,9 @@ struct Compiler {
     in_function: bool,
     /// `:return` jump sites in a function body, patched to the body end.
     returns: Vec<usize>,
+    /// `:finish` jump sites, patched to the end of the current chunk (stops
+    /// sourcing the rest of the script/file).
+    finishes: Vec<usize>,
     /// Whether the program uses exceptions (`:try`/`:throw`). When set, a
     /// per-statement unwind check is emitted after every statement.
     exc: bool,
@@ -702,6 +712,7 @@ impl Compiler {
             hidden: 0,
             in_function,
             returns: Vec::new(),
+            finishes: Vec::new(),
             exc,
             unwind: Vec::new(),
             slots: std::collections::HashMap::new(),
@@ -865,6 +876,14 @@ impl Compiler {
                     .ok_or_else(|| VimlError::msg("E587: :break without :while or :for"))?
                     .breaks
                     .push(j);
+                Ok(())
+            }
+            Stmt::Finish => {
+                // `:finish` stops sourcing the rest of the script/file: jump to
+                // the end of the current chunk (patched in compile_program /
+                // compile_function_body). Unwinds cleanly out of :if / :while.
+                let j = self.emit(Op::Jump(0));
+                self.finishes.push(j);
                 Ok(())
             }
             Stmt::Continue => {
