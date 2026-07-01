@@ -505,7 +505,6 @@ pub const BUILTIN_ARGC: &[(&str, u8, u8)] = &[
     ("xor", 2, 2),
 ];
 
-
 /// (name, base_arg) for builtins that accept a method base (expr->f()),
 /// from csrc/eval.lua base field. Sorted by name for binary search; builtins
 /// absent here have no method base (BASE_NONE).

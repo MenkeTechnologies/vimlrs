@@ -912,38 +912,155 @@ pub const BUILTIN_CHAPTERS: &[&str] = &[
 
 /// Ex-command words the Phase-3 statement parser recognizes: `(name, doc)`.
 pub const EX_COMMANDS: &[(&str, &str)] = &[
-    ("echo", ":echo {expr} — evaluate and display {expr} (space-separated)."),
-    ("echon", ":echon {expr} — like :echo but without a trailing newline."),
-    ("echomsg", ":echomsg {expr} — display {expr} and save it in the message history."),
-    ("let", ":let {var} = {expr} — assign the value of {expr} to {var}."),
-    ("call", ":call {func}({args}) — call a function and discard its return value."),
-    ("eval", ":eval {expr} — evaluate {expr} for its side effects."),
+    (
+        "echo",
+        ":echo {expr} — evaluate and display {expr} (space-separated).",
+    ),
+    (
+        "echon",
+        ":echon {expr} — like :echo but without a trailing newline.",
+    ),
+    (
+        "echomsg",
+        ":echomsg {expr} — display {expr} and save it in the message history.",
+    ),
+    (
+        "let",
+        ":let {var} = {expr} — assign the value of {expr} to {var}.",
+    ),
+    (
+        "call",
+        ":call {func}({args}) — call a function and discard its return value.",
+    ),
+    (
+        "eval",
+        ":eval {expr} — evaluate {expr} for its side effects.",
+    ),
 ];
 
 /// Predefined `v:` constants: `(name, doc)`.
 pub const V_VARS: &[(&str, &str)] = &[
-    ("v:true", "Boolean true; numeric value 1, string value \"v:true\"."),
-    ("v:false", "Boolean false; numeric value 0, string value \"v:false\"."),
-    ("v:null", "Null value; behaves like an empty string in most contexts."),
+    (
+        "v:true",
+        "Boolean true; numeric value 1, string value \"v:true\".",
+    ),
+    (
+        "v:false",
+        "Boolean false; numeric value 0, string value \"v:false\".",
+    ),
+    (
+        "v:null",
+        "Null value; behaves like an empty string in most contexts.",
+    ),
 ];
 
 /// Supported `:set` options: `(canonical, abbreviation, kind, default, doc)`.
 pub const OPTION_DOCS: &[(&str, &str, &str, i64, &str)] = &[
-    ("ignorecase", "ic", "Bool", 0, "Ignore case in search patterns."),
-    ("smartcase", "scs", "Bool", 0, "Override 'ignorecase' when the pattern has uppercase letters."),
-    ("magic", "magic", "Bool", 1, "Use 'magic' regexp special-character meanings."),
-    ("expandtab", "et", "Bool", 0, "Insert spaces instead of a <Tab>."),
-    ("number", "nu", "Bool", 0, "Show line numbers in the left margin."),
-    ("relativenumber", "rnu", "Bool", 0, "Show line numbers relative to the cursor."),
-    ("wrap", "wrap", "Bool", 1, "Wrap long lines to fit the window width."),
-    ("hlsearch", "hls", "Bool", 0, "Highlight all matches of the last search pattern."),
-    ("incsearch", "is", "Bool", 0, "Show the match for the search pattern as it is typed."),
-    ("autoindent", "ai", "Bool", 0, "Copy the indent of the current line to a new line."),
-    ("tabstop", "ts", "Number", 8, "Number of spaces a <Tab> counts for."),
-    ("shiftwidth", "sw", "Number", 8, "Number of spaces used for each step of (auto)indent."),
-    ("softtabstop", "sts", "Number", 0, "Number of spaces a <Tab> counts for while editing."),
-    ("textwidth", "tw", "Number", 0, "Maximum text width; longer lines are broken (0 = off)."),
-    ("scrolloff", "so", "Number", 0, "Minimum lines kept above and below the cursor."),
+    (
+        "ignorecase",
+        "ic",
+        "Bool",
+        0,
+        "Ignore case in search patterns.",
+    ),
+    (
+        "smartcase",
+        "scs",
+        "Bool",
+        0,
+        "Override 'ignorecase' when the pattern has uppercase letters.",
+    ),
+    (
+        "magic",
+        "magic",
+        "Bool",
+        1,
+        "Use 'magic' regexp special-character meanings.",
+    ),
+    (
+        "expandtab",
+        "et",
+        "Bool",
+        0,
+        "Insert spaces instead of a <Tab>.",
+    ),
+    (
+        "number",
+        "nu",
+        "Bool",
+        0,
+        "Show line numbers in the left margin.",
+    ),
+    (
+        "relativenumber",
+        "rnu",
+        "Bool",
+        0,
+        "Show line numbers relative to the cursor.",
+    ),
+    (
+        "wrap",
+        "wrap",
+        "Bool",
+        1,
+        "Wrap long lines to fit the window width.",
+    ),
+    (
+        "hlsearch",
+        "hls",
+        "Bool",
+        0,
+        "Highlight all matches of the last search pattern.",
+    ),
+    (
+        "incsearch",
+        "is",
+        "Bool",
+        0,
+        "Show the match for the search pattern as it is typed.",
+    ),
+    (
+        "autoindent",
+        "ai",
+        "Bool",
+        0,
+        "Copy the indent of the current line to a new line.",
+    ),
+    (
+        "tabstop",
+        "ts",
+        "Number",
+        8,
+        "Number of spaces a <Tab> counts for.",
+    ),
+    (
+        "shiftwidth",
+        "sw",
+        "Number",
+        8,
+        "Number of spaces used for each step of (auto)indent.",
+    ),
+    (
+        "softtabstop",
+        "sts",
+        "Number",
+        0,
+        "Number of spaces a <Tab> counts for while editing.",
+    ),
+    (
+        "textwidth",
+        "tw",
+        "Number",
+        0,
+        "Maximum text width; longer lines are broken (0 = off).",
+    ),
+    (
+        "scrolloff",
+        "so",
+        "Number",
+        0,
+        "Minimum lines kept above and below the cursor.",
+    ),
 ];
 
 /// Look up the hover doc for `name`, formatting it as the LSP markdown body:

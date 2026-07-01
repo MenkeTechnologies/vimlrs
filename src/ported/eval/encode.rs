@@ -61,9 +61,7 @@ pub fn encode_blob_write(blob: &mut crate::ported::eval::typval_defs_h::blob_T, 
 /// Serialize a List of strings to the `writefile()` byte form: items joined by
 /// `NL`, with each item's embedded `NL` mapped to `NUL`. Returns `None` (the C
 /// `false`) if any item is not a String.
-pub fn encode_vim_list_to_buf(
-    list: &crate::ported::eval::typval_defs_h::list_T,
-) -> Option<String> {
+pub fn encode_vim_list_to_buf(list: &crate::ported::eval::typval_defs_h::list_T) -> Option<String> {
     let mut parts: Vec<String> = Vec::with_capacity(list.lv_items.len());
     for it in &list.lv_items {
         if it.li_tv.v_type != VAR_STRING {
@@ -99,7 +97,11 @@ pub fn encode_init_lrstate(list: &crate::ported::eval::typval_defs_h::list_T) ->
         v_string(s) => s.len(),
         _ => 0,
     });
-    ListReaderState { li: 0, offset: 0, li_length }
+    ListReaderState {
+        li: 0,
+        offset: 0,
+        li_length,
+    }
 }
 
 /// Port of `encode_read_from_list()` from `Src/eval/encode.c:257`.
@@ -119,10 +121,14 @@ pub fn encode_read_from_list(
     let nbuf = buf.len();
     let mut p = 0;
     while p < nbuf {
-        if let Some(bytes) = list.lv_items.get(state.li).and_then(|it| match &it.li_tv.vval {
-            v_string(s) => Some(s.as_bytes()),
-            _ => None,
-        }) {
+        if let Some(bytes) = list
+            .lv_items
+            .get(state.li)
+            .and_then(|it| match &it.li_tv.vval {
+                v_string(s) => Some(s.as_bytes()),
+                _ => None,
+            })
+        {
             while state.offset < state.li_length && p < nbuf {
                 let ch = bytes[state.offset];
                 state.offset += 1;

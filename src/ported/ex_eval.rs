@@ -141,7 +141,10 @@ mod tests {
         assert_eq!(get_exception_string("boom", ET_USER, None), "boom");
         assert_eq!(get_exception_string("boom", ET_USER, Some("catch")), "boom");
         // error exception gets a Vim[(cmd)]: prefix
-        assert_eq!(get_exception_string("E492: msg", ET_ERROR, None), "Vim:E492: msg");
+        assert_eq!(
+            get_exception_string("E492: msg", ET_ERROR, None),
+            "Vim:E492: msg"
+        );
         assert_eq!(
             get_exception_string("E492: msg", ET_ERROR, Some("echo")),
             "Vim(echo):E492: msg"

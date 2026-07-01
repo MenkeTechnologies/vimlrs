@@ -412,7 +412,12 @@ pub fn find_internal_func(name: &str) -> Option<EvalFuncDef> {
     let base_arg = BUILTIN_BASE
         .binary_search_by(|e| e.0.cmp(name))
         .map_or(0, |j| BUILTIN_BASE[j].1);
-    Some(EvalFuncDef { name: n, min_argc, max_argc, base_arg })
+    Some(EvalFuncDef {
+        name: n,
+        min_argc,
+        max_argc,
+        base_arg,
+    })
 }
 
 /// Port of `check_internal_func()` from `Src/eval/funcs.c:257`.
@@ -483,7 +488,10 @@ pub fn call_internal_method(
         v_lock: VarLockStatus::VAR_UNLOCKED,
         vval: v_string(fname.to_string()),
     };
-    match CALL_FUNC_HOOK.with(|h| *h.borrow()).and_then(|f| f(&callee, &argv)) {
+    match CALL_FUNC_HOOK
+        .with(|h| *h.borrow())
+        .and_then(|f| f(&callee, &argv))
+    {
         Some(result) => {
             *rettv = result;
             FCERR_NONE
@@ -520,7 +528,10 @@ pub fn call_internal_func(fname: &str, argvars: &[typval_T], rettv: &mut typval_
         v_lock: VarLockStatus::VAR_UNLOCKED,
         vval: v_string(fname.to_string()),
     };
-    match CALL_FUNC_HOOK.with(|h| *h.borrow()).and_then(|f| f(&callee, argvars)) {
+    match CALL_FUNC_HOOK
+        .with(|h| *h.borrow())
+        .and_then(|f| f(&callee, argvars))
+    {
         Some(result) => {
             *rettv = result;
             FCERR_NONE
@@ -9040,8 +9051,8 @@ mod helper_tests {
         // check_internal_func: arity + base index. "add" has base=1, args 2..2.
         assert_eq!(check_internal_func("add", 2), 1);
         assert_eq!(check_internal_func("add", 1), -1); // too few (E119)
-        // a non-method builtin (no base) → 0 (BASE_NONE)
-        // call_internal_method inserts base at position (base-1) and dispatches.
+                                                       // a non-method builtin (no base) → 0 (BASE_NONE)
+                                                       // call_internal_method inserts base at position (base-1) and dispatches.
         fn hook(_c: &typval_T, args: &[typval_T]) -> Option<typval_T> {
             Some(typval_T::from(args.len() as i64))
         }
@@ -9055,7 +9066,10 @@ mod helper_tests {
         );
         assert!(matches!(rv.vval, v_number(2)));
         // unknown builtin
-        assert_eq!(call_internal_method("no_such_xyz", &[], &typval_T::from(0), &mut rv), FCERR_UNKNOWN);
+        assert_eq!(
+            call_internal_method("no_such_xyz", &[], &typval_T::from(0), &mut rv),
+            FCERR_UNKNOWN
+        );
         CALL_FUNC_HOOK.with(|h| *h.borrow_mut() = saved);
     }
 
@@ -9070,26 +9084,44 @@ mod helper_tests {
         }
         let mut rv = typval_T::from(0);
         // unknown builtin
-        assert_eq!(call_internal_func("no_such_builtin_xyz", &[], &mut rv), FCERR_UNKNOWN);
-        // "add" requires exactly 2 args (arity checked before the hook)
-        assert_eq!(call_internal_func("add", &[typval_T::from(1)], &mut rv), FCERR_TOOFEW);
         assert_eq!(
-            call_internal_func("add", &[typval_T::from(1), typval_T::from(2), typval_T::from(3)], &mut rv),
+            call_internal_func("no_such_builtin_xyz", &[], &mut rv),
+            FCERR_UNKNOWN
+        );
+        // "add" requires exactly 2 args (arity checked before the hook)
+        assert_eq!(
+            call_internal_func("add", &[typval_T::from(1)], &mut rv),
+            FCERR_TOOFEW
+        );
+        assert_eq!(
+            call_internal_func(
+                "add",
+                &[typval_T::from(1), typval_T::from(2), typval_T::from(3)],
+                &mut rv
+            ),
             FCERR_TOOMANY
         );
         // correct arity, no hook installed → UNKNOWN; with hook → NONE
         let saved = CALL_FUNC_HOOK.with(|h| *h.borrow());
         CALL_FUNC_HOOK.with(|h| *h.borrow_mut() = None);
-        assert_eq!(call_internal_func("add", &[typval_T::from(1), typval_T::from(2)], &mut rv), FCERR_UNKNOWN);
+        assert_eq!(
+            call_internal_func("add", &[typval_T::from(1), typval_T::from(2)], &mut rv),
+            FCERR_UNKNOWN
+        );
         CALL_FUNC_HOOK.with(|h| *h.borrow_mut() = Some(hook));
-        assert_eq!(call_internal_func("add", &[typval_T::from(1), typval_T::from(2)], &mut rv), FCERR_NONE);
+        assert_eq!(
+            call_internal_func("add", &[typval_T::from(1), typval_T::from(2)], &mut rv),
+            FCERR_NONE
+        );
         CALL_FUNC_HOOK.with(|h| *h.borrow_mut() = saved);
     }
 
     #[test]
     fn return_register_char_or_empty() {
         use super::return_register;
-        use crate::ported::eval::typval_defs_h::{typval_T, typval_vval_union::v_string, VarType::VAR_STRING};
+        use crate::ported::eval::typval_defs_h::{
+            typval_T, typval_vval_union::v_string, VarType::VAR_STRING,
+        };
         let mut tv = typval_T::from(0);
         return_register(b'a', &mut tv);
         assert!(matches!(&tv.vval, v_string(s) if s == "a"));
