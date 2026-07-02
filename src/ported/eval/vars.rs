@@ -1569,6 +1569,956 @@ pub fn var_check_fixed(flags: i32, name: &str, _name_len: usize) -> bool {
 /// in the standalone interpreter, so it is permanently 0 (false).
 const SANDBOX: bool = false;
 
+// ── :let / :unlet / :lockvar command drivers (vars.c) ───────────────────────
+//
+// RUST-PORT NOTE: these `exarg_T` command drivers are SUPERSEDED at runtime by
+// the bytecode frontend (`viml_parser.rs` / `compile_viml.rs`); they are ported
+// here as strict REFERENCE ports (dead_code allowed), exactly as `eval0..eval7`
+// were. The reduced [`exarg_T`] below models only the fields these drivers read
+// (`ea_arg`/`cmdidx`/`forceit`/`skip`/`nextcmd`/`cmdlinep`/`ea_getline`+cookie).
+// `check_nextcmd` (ex_docmd.c) is not vendored — no bar-command chaining exists
+// standalone, so `eap.nextcmd` is set to `None` where C calls `check_nextcmd`.
+
+/// Reduced `cmdidx_T` (`ex_cmds_defs.h`) — only the command indices these
+/// drivers branch on. `ex_let` reads `CMD_const`; `do_lock_var` reads
+/// `CMD_lockvar`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum cmdidx_T {
+    /// `:let`
+    CMD_let,
+    /// `:const`
+    CMD_const,
+    /// `:unlet`
+    CMD_unlet,
+    /// `:lockvar`
+    CMD_lockvar,
+    /// `:unlockvar`
+    CMD_unlockvar,
+}
+
+/// Reduced `exarg_T` (`ex_cmds_defs.h:303`) — the command-argument block. Only
+/// the fields the ported drivers read are modelled. RUST-PORT NOTE: the C
+/// `ea_getline`/`cookie` pair (a `char *(*)(int, void *, int, bool)` plus its
+/// opaque cookie) collapses into one owned line source closure.
+#[derive(Default)]
+pub struct exarg_T {
+    /// `char *arg` — argument of the command.
+    pub arg: String,
+    /// `cmdidx_T cmdidx` — the command's index.
+    pub cmdidx: cmdidx_T,
+    /// `bool forceit` — the `!` was used.
+    pub forceit: bool,
+    /// `int skip` — don't execute the command, only parse it.
+    pub skip: bool,
+    /// `char *nextcmd` — the next command after a `|` (None standalone).
+    pub nextcmd: Option<String>,
+    /// `char **cmdlinep` — the whole command line (for heredoc `trim` indent).
+    pub cmdlinep: String,
+    /// `char *(*ea_getline)(...)` + `void *cookie` — next-line source for a
+    /// heredoc body. `None` when there is no getline (C `ea_getline == NULL`).
+    pub ea_getline: Option<Box<dyn FnMut() -> Option<String>>>,
+}
+
+impl Default for cmdidx_T {
+    fn default() -> Self {
+        cmdidx_T::CMD_let
+    }
+}
+
+/// `typedef int (*ex_unletlock_callback)(lval_T *, char *, exarg_T *, int);`
+/// (vars.c) — the per-name handler dispatched by [`ex_unletlock`].
+type ex_unletlock_callback =
+    fn(&mut crate::ported::eval::lval_T, &str, &mut exarg_T, i32) -> i32;
+
+/// Port of `heredoc_get()` from `Src/eval/vars.c:724`.
+///
+/// Get a List of lines from a here document (`cmd << {marker}` … `{marker}`),
+/// honouring the optional `trim`/`eval` words before the marker. When `cmd`
+/// contains a newline the body is taken from the string after it (heredoc in a
+/// string); otherwise lines come from `eap.ea_getline`. Returns the body List or
+/// `None` on failure.
+pub fn heredoc_get(
+    eap: &mut exarg_T,
+    cmd: &str,
+    script_get: bool,
+) -> Option<Rc<RefCell<list_T>>> {
+    let mut marker_indent_len = 0usize; // c:727
+    let mut text_indent_len: i32 = 0; // c:728
+    let mut text_indent: Option<String> = None; // c:729
+    let mut heredoc_in_string = false; // c:731
+    let mut line_arg = String::new(); // c:732
+
+    // c:733 char *nl_ptr = vim_strchr(cmd, '\n');
+    let mut cmd_owned = cmd.to_string();
+    if let Some(nl) = cmd_owned.find('\n') {
+        // c:735 heredoc in a string separated by newlines.
+        heredoc_in_string = true;
+        line_arg = cmd_owned[nl + 1..].to_string();
+        cmd_owned.truncate(nl); // c:738 *nl_ptr = NUL
+    } else if eap.ea_getline.is_none() {
+        // c:739
+        crate::ported::message::emsg("E991: Cannot use =<< here");
+        return None;
+    }
+
+    // c:745 Check for the optional 'trim'/'eval' words before the marker.
+    let mut cmd_s = crate::ported::eval::skipwhite(&cmd_owned).to_string();
+    let mut evalstr = false; // c:746
+    let mut eval_failed = false; // c:747
+    let iswhite = |c: u8| c == b' ' || c == b'\t';
+    loop {
+        // c:749 "trim"
+        if cmd_s.starts_with("trim")
+            && cmd_s.as_bytes().get(4).map_or(true, |&c| iswhite(c))
+        {
+            cmd_s = crate::ported::eval::skipwhite(&cmd_s[4..]).to_string();
+            // c:757 marker indent is the indent of the :let command line.
+            let p = eap.cmdlinep.as_bytes();
+            let mut i = 0;
+            while i < p.len() && iswhite(p[i]) {
+                i += 1;
+                marker_indent_len += 1;
+            }
+            text_indent_len = -1; // c:762
+            continue;
+        }
+        // c:766 "eval"
+        if cmd_s.starts_with("eval")
+            && cmd_s.as_bytes().get(4).map_or(true, |&c| iswhite(c))
+        {
+            cmd_s = crate::ported::eval::skipwhite(&cmd_s[4..]).to_string();
+            evalstr = true; // c:769
+            continue;
+        }
+        break; // c:772
+    }
+
+    let comment_char = b'"'; // c:775
+    // c:776 The marker is the next word.
+    let marker: String;
+    let cb = cmd_s.as_bytes();
+    if cb.first().is_some_and(|&c| c != 0 && c != comment_char) {
+        // c:778 marker = skipwhite(cmd); p = skiptowhite(marker);
+        let m = crate::ported::eval::skipwhite(&cmd_s);
+        let end = m
+            .as_bytes()
+            .iter()
+            .position(|&c| iswhite(c) || c == 0)
+            .unwrap_or(m.len());
+        // c:780 trailing after the marker must be empty or a comment.
+        let rest = crate::ported::eval::skipwhite(&m[end..]);
+        if rest.as_bytes().first().is_some_and(|&c| c != 0 && c != comment_char) {
+            crate::ported::message::semsg(&format!(
+                "E488: Trailing characters: {}",
+                &m[end..]
+            ));
+            return None;
+        }
+        marker = m[..end].to_string(); // c:784 *p = NUL
+        // c:785 non-script markers cannot start with a lower case letter.
+        if !script_get && marker.as_bytes().first().is_some_and(|c| c.is_ascii_lowercase()) {
+            crate::ported::message::emsg("E221: Marker cannot start with lower case letter");
+            return None;
+        }
+    } else if script_get {
+        // c:792 embedded script with a missing marker accepts '.'.
+        marker = ".".to_string();
+    } else {
+        crate::ported::message::emsg("E172: Missing marker"); // c:795
+        return None;
+    }
+
+    let l = crate::ported::eval::typval::tv_list_alloc(0); // c:801
+    loop {
+        let mut mi = 0usize; // c:803
+        let mut ti = 0i32; // c:804
+        let theline: String;
+
+        if heredoc_in_string {
+            // c:810 get the next line from the string.
+            if line_arg.is_empty() {
+                if !script_get {
+                    crate::ported::message::semsg(&format!(
+                        "E990: Missing end marker '{marker}'"
+                    ));
+                }
+                break;
+            }
+            match line_arg.find('\n') {
+                None => {
+                    theline = line_arg.clone();
+                    line_arg = String::new(); // c:820 line_arg += strlen(line_arg)
+                }
+                Some(nl) => {
+                    theline = line_arg[..nl].to_string();
+                    line_arg = line_arg[nl + 1..].to_string(); // c:823
+                }
+            }
+        } else {
+            // c:827 theline = eap->ea_getline(...)
+            match eap.ea_getline.as_mut().and_then(|g| g()) {
+                None => {
+                    if !script_get {
+                        crate::ported::message::semsg(&format!(
+                            "E990: Missing end marker '{marker}'"
+                        ));
+                    }
+                    break;
+                }
+                Some(t) => theline = t,
+            }
+        }
+
+        // c:838 with "trim": skip the indent matching the :let line.
+        if marker_indent_len > 0
+            && theline.len() >= marker_indent_len
+            && eap.cmdlinep.len() >= marker_indent_len
+            && theline.as_bytes()[..marker_indent_len]
+                == eap.cmdlinep.as_bytes()[..marker_indent_len]
+        {
+            mi = marker_indent_len;
+        }
+        // c:842 if (strcmp(marker, theline + mi) == 0) break;
+        if marker == theline[mi..] {
+            break;
+        }
+
+        // c:848 skip till the end marker after a failed expression.
+        if eval_failed {
+            continue;
+        }
+
+        // c:852 set the text indent from the first line.
+        if text_indent_len == -1 && !theline.is_empty() {
+            let tb = theline.as_bytes();
+            let mut i = 0;
+            let mut tl = 0i32;
+            while i < tb.len() && iswhite(tb[i]) {
+                i += 1;
+                tl += 1;
+            }
+            text_indent_len = tl;
+            text_indent = Some(theline[..tl as usize].to_string()); // c:860
+        }
+        // c:863 with "trim": skip the indent matching the first line.
+        if let Some(ind) = &text_indent {
+            let tb = theline.as_bytes();
+            let ib = ind.as_bytes();
+            let mut t = 0i32;
+            while (t as usize) < text_indent_len as usize {
+                if tb.get(t as usize) != ib.get(t as usize) {
+                    break;
+                }
+                t += 1;
+            }
+            ti = t;
+        }
+
+        let str_slice = &theline[ti as usize..]; // c:871
+        if evalstr && !eap.skip {
+            // c:873 str = eval_all_expr_in_str(str);
+            match eval_all_expr_in_str(str_slice) {
+                None => {
+                    eval_failed = true; // c:876
+                    continue;
+                }
+                Some(s) => crate::ported::eval::typval::tv_list_append_allocated_string(
+                    &mut l.borrow_mut(),
+                    s,
+                ),
+            }
+        } else {
+            tv_list_append_string(&mut l.borrow_mut(), str_slice); // c:881
+        }
+    }
+    if heredoc_in_string {
+        // c:886 next command follows the heredoc in the string.
+        eap.nextcmd = Some(line_arg);
+    }
+
+    if eval_failed {
+        // c:892 expression evaluation in the heredoc failed.
+        crate::ported::eval::typval::tv_list_free(&mut l.borrow_mut());
+        return None;
+    }
+    Some(l)
+}
+
+/// Port of `ex_let()` from `Src/eval/vars.c:916`.
+///
+/// The `:let` / `:const` command: list variables, assign an expression, unpack a
+/// List, or read a here document.
+pub fn ex_let(eap: &mut exarg_T) {
+    use crate::ported::eval::{ends_excmd, skipwhite};
+    let is_const = eap.cmdidx == cmdidx_T::CMD_const; // c:918
+    let arg = eap.arg.clone(); // c:919
+    let mut rettv = typval_T::default(); // c:921
+    let mut first = 1i32; // c:926
+
+    // c:928 argend = skip_var_list(arg, &var_count, &semicolon, false);
+    let (argend_off, var_count, semicolon) = match skip_var_list(&arg, false) {
+        Some(x) => x,
+        None => return, // c:930
+    };
+    // c:932 expr = skipwhite(argend);
+    let expr_full = skipwhite(&arg[argend_off..]);
+    let eb = expr_full.as_bytes();
+    let concat = expr_full.starts_with("..="); // c:933
+    // c:934 has_assign: '=' or one of +-*/%. followed by '='.
+    let has_assign = eb.first() == Some(&b'=')
+        || (eb.first().is_some_and(|&c| b"+-*/%.".contains(&c)) && eb.get(1) == Some(&b'='));
+
+    if !has_assign && !concat {
+        // c:937 ":let" without "=": list variables.
+        if arg.as_bytes().first() == Some(&b'[') {
+            crate::ported::message::emsg("E474: Invalid argument"); // c:939 e_invarg
+        } else if !ends_excmd(arg.as_bytes().first().copied().unwrap_or(0)) {
+            // c:942 ":let var1 var2" — listing is a no-op standalone.
+            list_arg_vars(&mut first);
+        } else if !eap.skip {
+            // c:944 ":let" — list every scope (all no-ops standalone).
+            list_glob_vars(&mut first);
+            list_buf_vars(&mut first);
+            list_win_vars(&mut first);
+            list_tab_vars(&mut first);
+            list_script_vars(&mut first);
+            // c:950 list_func_vars(&first) — defined in eval.c, no-op standalone.
+            list_vim_vars(&mut first);
+        }
+        eap.nextcmd = None; // c:953 check_nextcmd(arg)
+        return;
+    }
+
+    if eb.first() == Some(&b'=') && eb.get(1) == Some(&b'<') && eb.get(2) == Some(&b'<') {
+        // c:957 HERE document.
+        if let Some(l) = heredoc_get(eap, &expr_full[3..], false) {
+            // c:961 tv_list_set_ret(&rettv, l);
+            rettv = typval_T {
+                v_type: VAR_LIST,
+                v_lock: VarLockStatus::VAR_UNLOCKED,
+                vval: v_list(Some(l)),
+            };
+            if !eap.skip {
+                // c:965 op = "="
+                let arg2 = eap.arg.clone();
+                ex_let_vars(
+                    &arg2,
+                    &mut rettv,
+                    false,
+                    if semicolon { 1 } else { 0 },
+                    var_count,
+                    is_const,
+                    Some("="),
+                );
+            }
+            crate::ported::eval::typval::tv_clear(&mut rettv); // c:967
+        }
+        return;
+    }
+
+    rettv.v_type = VAR_UNKNOWN; // c:972
+
+    // c:974 op = "="; parse a compound operator.
+    let mut op = String::from("=");
+    let expr_after: &str;
+    if eb.first() != Some(&b'=') {
+        let c = eb.first().copied().unwrap_or(0);
+        let mut adv = 2usize; // c:983 expr += 2
+        if b"+-*/%.".contains(&c) {
+            op = (c as char).to_string(); // c:978 op[0] = *expr
+            if c == b'.' && eb.get(1) == Some(&b'.') {
+                adv = 3; // c:980 ..= : expr++ then expr += 2
+            }
+        }
+        expr_after = &expr_full[adv..];
+    } else {
+        expr_after = &expr_full[1..]; // c:985 expr += 1
+    }
+    let expr_s = skipwhite(expr_after); // c:988
+
+    // c:990 eap->skip → emsg_skip++ (not modeled standalone).
+    // c:993 fill_evalarg_from_eap / eval0 / clear_evalarg. RUST-PORT NOTE:
+    // fill_evalarg_from_eap sets EVAL_EVALUATE unless eap->skip; model that with
+    // an evalarg here (passing None would leave EVAL_EVALUATE unset → the RHS is
+    // parsed but never evaluated, so the assignment value stays VAR_UNKNOWN).
+    let mut evalarg = crate::ported::eval::evalarg_T {
+        eval_flags: if eap.skip {
+            0
+        } else {
+            crate::ported::eval::EVAL_EVALUATE
+        },
+    };
+    let eval_res = crate::ported::eval::eval0(expr_s, &mut rettv, Some(&mut evalarg)); // c:995
+
+    if !eap.skip && eval_res != crate::ported::eval_h::FAIL {
+        // c:1002
+        let arg2 = eap.arg.clone();
+        ex_let_vars(
+            &arg2,
+            &mut rettv,
+            false,
+            if semicolon { 1 } else { 0 },
+            var_count,
+            is_const,
+            Some(&op),
+        );
+    }
+    if eval_res != crate::ported::eval_h::FAIL {
+        crate::ported::eval::typval::tv_clear(&mut rettv); // c:1005
+    }
+}
+
+/// Port of `ex_let_vars()` from `Src/eval/vars.c:1021`.
+///
+/// Assign `tv` to the variable(s) at `arg_start`: a single `var`, or a
+/// `[v1, v2; rest]` List unpack. Returns `OK` or `FAIL`.
+pub fn ex_let_vars(
+    arg_start: &str,
+    tv: &mut typval_T,
+    copy: bool,
+    semicolon: i32,
+    var_count: i32,
+    is_const: bool,
+    op: Option<&str>,
+) -> i32 {
+    use crate::ported::eval::skipwhite;
+    use crate::ported::eval_h::{FAIL, OK};
+
+    if arg_start.as_bytes().first() != Some(&b'[') {
+        // c:1027 ":let var = expr" or ":for var in list"
+        if ex_let_one(arg_start, tv, copy, is_const, op, op).is_none() {
+            return FAIL;
+        }
+        return OK;
+    }
+
+    // c:1036 ":let [v1, v2] = list"
+    if tv.v_type != VAR_LIST {
+        crate::ported::message::emsg("E714: List required");
+        return FAIL;
+    }
+    // c:1040 list_T *const l = tv->vval.v_list;
+    let l_opt: Option<Rc<RefCell<list_T>>> = match &tv.vval {
+        v_list(x) => x.clone(),
+        _ => None,
+    };
+    let len = l_opt
+        .as_ref()
+        .map(|l| crate::ported::eval::typval::tv_list_len(&l.borrow()))
+        .unwrap_or(0); // c:1042
+    if semicolon == 0 && var_count < len {
+        crate::ported::message::emsg("E687: Less targets than List items"); // c:1044
+        return FAIL;
+    }
+    if var_count - semicolon > len {
+        crate::ported::message::emsg("E688: More targets than List items"); // c:1048
+        return FAIL;
+    }
+    // c:1053 assert(l != NULL);
+    let l = match l_opt {
+        Some(l) => l,
+        None => return FAIL,
+    };
+
+    // c:1055 item = tv_list_first(l); rest_len = tv_list_len(l);
+    let mut item_idx = 0usize;
+    let mut rest_len = len as usize;
+    let mut pos = 0usize; // offset into arg_start; starts at '['
+    while arg_start.as_bytes()[pos] != b']' {
+        // c:1058 arg = skipwhite(arg + 1);
+        let after = skipwhite(&arg_start[pos + 1..]);
+        let start = arg_start.len() - after.len();
+        // c:1059 ex_let_one(arg, TV_LIST_ITEM_TV(item), true, is_const, ",;]", op)
+        let mut item_tv = l
+            .borrow()
+            .lv_items
+            .get(item_idx)
+            .map(|it| it.li_tv.clone())
+            .unwrap_or_default();
+        let r = match ex_let_one(&arg_start[start..], &mut item_tv, true, is_const, Some(",;]"), op)
+        {
+            Some(x) => start + x,
+            None => return FAIL, // c:1060
+        };
+        rest_len -= 1; // c:1063
+        item_idx += 1; // c:1065 item = TV_LIST_ITEM_NEXT(l, item)
+        // c:1066 arg = skipwhite(arg);
+        let sw = skipwhite(&arg_start[r..]);
+        let newpos = arg_start.len() - sw.len();
+        match arg_start.as_bytes().get(newpos).copied() {
+            Some(b';') => {
+                // c:1068 put the rest of the list in the var after ';'.
+                let rest_list = crate::ported::eval::typval::tv_list_alloc(rest_len as isize); // c:1070
+                {
+                    let src = l.borrow();
+                    let mut rl = rest_list.borrow_mut();
+                    let mut it = item_idx;
+                    while it < src.lv_items.len() {
+                        crate::ported::eval::typval::tv_list_append_tv(
+                            &mut rl,
+                            src.lv_items[it].li_tv.clone(),
+                        );
+                        it += 1;
+                    }
+                }
+                // c:1076 ltv.v_type = VAR_LIST; tv_list_ref(rest_list);
+                let mut ltv = typval_T {
+                    v_type: VAR_LIST,
+                    v_lock: VarLockStatus::VAR_UNLOCKED,
+                    vval: v_list(Some(Rc::clone(&rest_list))),
+                };
+                crate::ported::eval::typval::tv_list_ref(&mut rest_list.borrow_mut());
+                // c:1081 ex_let_one(skipwhite(arg + 1), &ltv, false, is_const, "]", op)
+                let sw2 = skipwhite(&arg_start[newpos + 1..]);
+                let start2 = arg_start.len() - sw2.len();
+                let r2 = ex_let_one(&arg_start[start2..], &mut ltv, false, is_const, Some("]"), op);
+                crate::ported::eval::typval::tv_clear(&mut ltv); // c:1082
+                if r2.is_none() {
+                    return FAIL; // c:1084
+                }
+                break; // c:1086
+            }
+            Some(b',') | Some(b']') => {
+                pos = newpos;
+            }
+            _ => {
+                // c:1088 internal_error("ex_let_vars()");
+                crate::ported::message::emsg("E473: Internal error: ex_let_vars()");
+                return FAIL;
+            }
+        }
+    }
+
+    OK // c:1093
+}
+
+/// Port of `ex_let_env()` from `Src/eval/vars.c:1299`.
+///
+/// Set an environment variable, part of [`ex_let_one`]. Returns the byte offset
+/// (into `arg`) just past the name on success, or `None` on error.
+fn ex_let_env(
+    arg: &str,
+    tv: &mut typval_T,
+    is_const: bool,
+    endchars: Option<&str>,
+    op: Option<&str>,
+) -> Option<usize> {
+    use crate::ported::eval::skipwhite;
+    if is_const {
+        crate::ported::message::emsg("E996: Cannot lock an environment variable"); // c:1304
+        return None;
+    }
+    let mut arg_end = None; // c:1309
+    // c:1310 arg++; name = arg; len = get_env_len(&arg);
+    let after = &arg[1..];
+    let len = crate::ported::eval::get_env_len(after) as usize;
+    if len == 0 {
+        // c:1314 semsg(e_invarg2, name - 1) — name-1 is the '$'.
+        crate::ported::message::semsg(&format!("E475: Invalid argument: {arg}"));
+    } else {
+        let opc = op.and_then(|o| o.as_bytes().first().copied());
+        if op.is_some() && matches!(opc, Some(c) if b"+-*/%".contains(&c)) {
+            // c:1317 semsg(e_letwrong, op)
+            crate::ported::message::semsg(&format!("E734: Wrong variable type for {}=", op.unwrap()));
+        } else if endchars.is_some() && {
+            // c:1318 vim_strchr(endchars, *skipwhite(arg)) == NULL
+            let nc = skipwhite(&after[len..]).as_bytes().first().copied().unwrap_or(0);
+            !(nc == 0 || endchars.unwrap().as_bytes().contains(&nc))
+        } {
+            crate::ported::message::emsg("E18: Unexpected characters in :let"); // c:1320
+        } else {
+            // c:1321 !check_secure() — 'secure'/sandbox not modeled (always allowed).
+            let name = &after[..len]; // c:1324 name[len] = NUL
+            let mut p = crate::ported::eval::typval::tv_get_string_chk(tv); // c:1325
+            if let (Some(pv), Some('.')) = (&p, op.and_then(|o| o.chars().next())) {
+                // c:1326 op == '.' : concatenate with the current value.
+                if let Ok(s) = std::env::var(name) {
+                    // c:1329 concat_str(s, p)
+                    p = Some(format!("{s}{pv}"));
+                }
+            }
+            if let Some(pv) = p {
+                // c:1335 vim_setenv_ext(name, p)
+                std::env::set_var(name, &pv);
+                arg_end = Some(1 + len); // c:1336
+            }
+        }
+    }
+    arg_end
+}
+
+/// Port of `ex_let_option()` from `Src/eval/vars.c:1346`.
+///
+/// Set an option, part of [`ex_let_one`]. RUST-PORT NOTE: the option substrate
+/// (`find_option_var_end`, `get_option_value`, `set_option_value_handle_tty`,
+/// `tv_to_optval` — all `option.c`, not vendored) is absent standalone, so only
+/// the `:const` guard is ported; the assignment itself is a deferred dependency.
+fn ex_let_option(
+    _arg: &str,
+    _tv: &mut typval_T,
+    is_const: bool,
+    _endchars: Option<&str>,
+    _op: Option<&str>,
+) -> Option<usize> {
+    if is_const {
+        crate::ported::message::emsg("E996: Cannot lock an option"); // c:1351
+        return None;
+    }
+    // DEFERRED: find_option_var_end / get_option_value / set_option_value_handle_tty
+    // / tv_to_optval (option.c) not vendored — `:let &opt = …` cannot apply here.
+    None
+}
+
+/// Port of `ex_let_register()` from `Src/eval/vars.c:1446`.
+///
+/// Set a register, part of [`ex_let_one`]. RUST-PORT NOTE: the register substrate
+/// (`get_reg_contents` / `write_reg_contents` — `ops.c`, not vendored) is absent
+/// standalone, so only the `:const` guard is ported; writing the register is a
+/// deferred dependency.
+fn ex_let_register(
+    _arg: &str,
+    _tv: &mut typval_T,
+    is_const: bool,
+    _endchars: Option<&str>,
+    _op: Option<&str>,
+) -> Option<usize> {
+    if is_const {
+        crate::ported::message::emsg("E996: Cannot lock a register"); // c:1451
+        return None;
+    }
+    // DEFERRED: get_reg_contents / write_reg_contents (ops.c) not vendored —
+    // `:let @r = …` cannot apply here.
+    None
+}
+
+/// Port of `ex_let_one()` from `Src/eval/vars.c:1493`.
+///
+/// Set one item of `:let var = expr` (or one target of a List unpack) to its
+/// value. `endchars` are the valid characters after the name (or `None`); `op`
+/// is `None` for `=` or e.g. `"+"` for `+=`. Returns the byte offset (into
+/// `arg`) just past the name, or `None` on error.
+fn ex_let_one(
+    arg: &str,
+    tv: &mut typval_T,
+    copy: bool,
+    is_const: bool,
+    endchars: Option<&str>,
+    op: Option<&str>,
+) -> Option<usize> {
+    use crate::ported::eval::skipwhite;
+    let mut arg_end = None; // c:1497
+    match arg.as_bytes().first().copied() {
+        Some(b'$') => {
+            // c:1499 ":let $VAR = expr": Set environment variable.
+            ex_let_env(arg, tv, is_const, endchars, op)
+        }
+        Some(b'&') => {
+            // c:1502 ":let &option = expr": Set option value.
+            ex_let_option(arg, tv, is_const, endchars, op)
+        }
+        Some(b'@') => {
+            // c:1507 ":let @r = expr": Set register contents.
+            ex_let_register(arg, tv, is_const, endchars, op)
+        }
+        Some(c) if crate::ported::eval::eval_isnamec1(c) || c == b'{' => {
+            // c:1510 ":let var = expr" / ":let {expr} = expr": internal variable.
+            let mut lv = crate::ported::eval::lval_T::default();
+            let p = crate::ported::eval::get_lval(
+                arg,
+                Some(&*tv),
+                &mut lv,
+                false,
+                false,
+                0,
+                crate::ported::eval::FNE_CHECK_START,
+            ); // c:1514
+            if let Some(p) = p {
+                if lv.ll_name.is_some() {
+                    // c:1516 endchars check (vim_strchr(endchars, *skipwhite(p))).
+                    let nc = skipwhite(&arg[p..]).as_bytes().first().copied().unwrap_or(0);
+                    let end_ok = match endchars {
+                        None => true,
+                        Some(ec) => nc == 0 || ec.as_bytes().contains(&nc),
+                    };
+                    if !end_ok {
+                        crate::ported::message::emsg("E18: Unexpected characters in :let"); // c:1517
+                    } else {
+                        // c:1519 set_var_lval(&lv, p, tv, copy, is_const, op);
+                        crate::ported::eval::set_var_lval(&mut lv, p, tv, copy, is_const, op);
+                        arg_end = Some(p); // c:1520
+                    }
+                }
+            }
+            crate::ported::eval::clear_lval(&mut lv); // c:1523
+            arg_end
+        }
+        _ => {
+            crate::ported::message::semsg(&format!("E475: Invalid argument: {arg}")); // c:1525
+            None
+        }
+    }
+}
+
+/// Port of `ex_unlet()` from `Src/eval/vars.c:1532` — the `:unlet[!]` command.
+pub fn ex_unlet(eap: &mut exarg_T) {
+    let argstart = eap.arg.clone();
+    let glv_flags = if eap.forceit {
+        crate::ported::eval::GLV_QUIET
+    } else {
+        0
+    };
+    ex_unletlock(eap, &argstart, 0, glv_flags, do_unlet_var);
+}
+
+/// Port of `ex_lockvar()` from `Src/eval/vars.c:1538` — `:lockvar`/`:unlockvar`.
+pub fn ex_lockvar(eap: &mut exarg_T) {
+    use crate::ported::eval::skipwhite;
+    let mut arg = eap.arg.clone(); // c:1540
+    let mut deep = 2i32; // c:1541
+
+    if eap.forceit {
+        deep = -1; // c:1544
+    } else if arg.as_bytes().first().is_some_and(|c| c.is_ascii_digit()) {
+        // c:1546 deep = getdigits_int(&arg, false, -1);
+        let digits: String = arg.chars().take_while(|c| c.is_ascii_digit()).collect();
+        deep = digits.parse::<i32>().unwrap_or(-1);
+        arg = skipwhite(&arg[digits.len()..]).to_string(); // c:1547
+    }
+
+    ex_unletlock(eap, &arg, deep, 0, do_lock_var); // c:1550
+}
+
+/// Port of `ex_unletlock()` from `Src/eval/vars.c:1562`.
+///
+/// Common parsing loop for `:unlet`, `:lockvar` and `:unlockvar`: parse each
+/// name (or `$ENV`), then invoke `callback` when not skipping / not already in
+/// error.
+fn ex_unletlock(
+    eap: &mut exarg_T,
+    argstart: &str,
+    deep: i32,
+    glv_flags: i32,
+    callback: ex_unletlock_callback,
+) {
+    use crate::ported::eval::{ends_excmd, skipwhite};
+    use crate::ported::eval_h::FAIL;
+
+    let mut arg_pos = 0usize; // offset into argstart
+    let mut error = false; // c:1568
+    loop {
+        let arg = &argstart[arg_pos..];
+        let name_end_off: usize;
+        if arg.as_bytes().first() == Some(&b'$') {
+            // c:1572 environment variable.
+            let mut lv = crate::ported::eval::lval_T::default();
+            lv.ll_name = Some(arg.to_string()); // c:1573
+            // c:1574 lv.ll_tv = NULL (default LlTv::Null)
+            let after = &arg[1..]; // c:1575 arg++
+            let envlen = crate::ported::eval::get_env_len(after) as usize;
+            if envlen == 0 {
+                // c:1577 semsg(e_invarg2, arg - 1) — the '$'.
+                crate::ported::message::semsg(&format!("E475: Invalid argument: {arg}"));
+                return;
+            }
+            let name_end_slice = &after[envlen..];
+            if !error && !eap.skip && callback(&mut lv, name_end_slice, eap, deep) == FAIL {
+                error = true; // c:1582
+            }
+            name_end_off = arg_pos + 1 + envlen; // c:1584
+        } else {
+            // c:1587 parse the name and find the end.
+            let mut lv = crate::ported::eval::lval_T::default();
+            let p = crate::ported::eval::get_lval(
+                arg,
+                None,
+                &mut lv,
+                true,
+                eap.skip || error,
+                glv_flags,
+                crate::ported::eval::FNE_CHECK_START,
+            );
+            if lv.ll_name.is_none() {
+                error = true; // c:1590
+            }
+            let ne = p.map(|x| arg_pos + x);
+            // c:1592 name_end == NULL or not whitespace/end-of-command → trailing.
+            let bad = match ne {
+                None => true,
+                Some(off) => {
+                    let c = argstart.as_bytes().get(off).copied().unwrap_or(0);
+                    !(c == b' ' || c == b'\t') && !ends_excmd(c)
+                }
+            };
+            if bad {
+                if let Some(off) = ne {
+                    crate::ported::message::semsg(&format!(
+                        "E488: Trailing characters: {}",
+                        &argstart[off..]
+                    )); // c:1596
+                }
+                if !(eap.skip || error) {
+                    crate::ported::eval::clear_lval(&mut lv); // c:1599
+                }
+                break; // c:1601
+            }
+            let off = ne.unwrap();
+            if !error && !eap.skip && callback(&mut lv, &argstart[off..], eap, deep) == FAIL {
+                error = true; // c:1604
+            }
+            if !eap.skip {
+                crate::ported::eval::clear_lval(&mut lv); // c:1609
+            }
+            name_end_off = off;
+        }
+        // c:1612 arg = skipwhite(name_end);
+        let sw = skipwhite(&argstart[name_end_off..]);
+        arg_pos = argstart.len() - sw.len();
+        if ends_excmd(argstart.as_bytes().get(arg_pos).copied().unwrap_or(0)) {
+            break; // c:1613 while (!ends_excmd(*arg))
+        }
+    }
+    eap.nextcmd = None; // c:1615 check_nextcmd(arg)
+}
+
+/// Port of `do_unlet_var()` from `Src/eval/vars.c:1626`.
+///
+/// Unlet the variable indicated by `lp`. RUST-PORT NOTE: the C `*name_end = NUL`
+/// bracketing is elided — `lp.ll_name` is already an owned exact substring.
+fn do_unlet_var(
+    lp: &mut crate::ported::eval::lval_T,
+    _name_end: &str,
+    eap: &mut exarg_T,
+    _deep: i32,
+) -> i32 {
+    use crate::ported::eval::LlTv;
+    use crate::ported::eval_h::{FAIL, OK};
+    let forceit = eap.forceit; // c:1629
+    let mut ret = OK; // c:1630
+
+    if matches!(lp.ll_tv, LlTv::Null) {
+        // c:1632 environment variable, normal name or expanded name.
+        let name = lp.ll_name.clone().unwrap_or_default();
+        if name.as_bytes().first() == Some(&b'$') {
+            // c:1638 vim_unsetenv_ext(lp->ll_name + 1)
+            std::env::remove_var(&name[1..]);
+        } else if do_unlet(&name, lp.ll_name_len, forceit) == FAIL {
+            ret = FAIL; // c:1640
+        }
+    } else if {
+        // c:1643 fail when the containing List/Dict is locked.
+        let name = lp.ll_name.as_deref();
+        let list_locked = lp.ll_list.as_ref().is_some_and(|l| {
+            crate::ported::eval::typval::value_check_lock(l.borrow().lv_lock, name, lp.ll_name_len)
+        });
+        list_locked
+            || lp.ll_dict.as_ref().is_some_and(|d| {
+                crate::ported::eval::typval::value_check_lock(
+                    d.borrow().dv_lock,
+                    name,
+                    lp.ll_name_len,
+                )
+            })
+    } {
+        return FAIL; // c:1653
+    } else if lp.ll_range {
+        // c:1655 unlet a range of List items.
+        let l = lp.ll_list.clone().expect("ll_range implies ll_list");
+        tv_list_unlet_range(
+            &mut l.borrow_mut(),
+            lp.ll_li.unwrap_or(0),
+            lp.ll_n1,
+            !lp.ll_empty2,
+            lp.ll_n2,
+        );
+    } else if let Some(l) = lp.ll_list.clone() {
+        // c:1657 unlet a List item.
+        crate::ported::eval::typval::tv_list_item_remove(&mut l.borrow_mut(), lp.ll_li.unwrap_or(0));
+    } else {
+        // c:1660 unlet a Dict item. RUST-PORT NOTE: dict watchers not modeled.
+        if let (Some(d), Some(key)) = (lp.ll_dict.clone(), lp.ll_di.clone()) {
+            crate::ported::eval::typval::tv_dict_item_remove(&mut d.borrow_mut(), &key);
+        }
+    }
+
+    ret // c:1683
+}
+
+/// Port of `do_lock_var()` from `Src/eval/vars.c:1786`.
+///
+/// Lock (`:lockvar`) or unlock (`:unlockvar`) the variable indicated by `lp`.
+/// RUST-PORT NOTE: `dictitem_T.di_flags` is not modeled on scope entries, so the
+/// `DI_FLAGS_FIX` guard and the `DI_FLAGS_LOCK` flag toggle are elided; the
+/// observable value lock (`tv_item_lock`) is applied. For a plain scope variable
+/// [`find_var`] returns a clone, so the locked value is written back through
+/// [`set_var`] to persist the lock.
+fn do_lock_var(
+    lp: &mut crate::ported::eval::lval_T,
+    _name_end: &str,
+    eap: &mut exarg_T,
+    deep: i32,
+) -> i32 {
+    use crate::ported::eval::LlTv;
+    use crate::ported::eval::typval::tv_item_lock;
+    use crate::ported::eval_h::{FAIL, OK};
+    let lock = eap.cmdidx == cmdidx_T::CMD_lockvar; // c:1789
+    let mut ret = OK; // c:1790
+
+    if matches!(lp.ll_tv, LlTv::Null) {
+        let name = lp.ll_name.clone().unwrap_or_default();
+        if name.as_bytes().first() == Some(&b'$') {
+            // c:1794 semsg(e_lock_unlock, lp->ll_name)
+            crate::ported::message::semsg(&format!("E940: Cannot lock or unlock variable {name}"));
+            ret = FAIL;
+        } else {
+            // c:1798 di = find_var(lp->ll_name, ..., true)
+            match find_var(&name, true) {
+                None => ret = FAIL, // c:1801
+                Some(mut di_tv) => {
+                    // c:1802 DI_FLAGS_FIX guard elided (di_flags not modeled).
+                    // c:1810 di->di_flags LOCK toggle elided (di_flags not modeled).
+                    if deep != 0 {
+                        // c:1816 tv_item_lock(&di->di_tv, deep, lock, false);
+                        tv_item_lock(&mut di_tv, deep, lock, false);
+                        set_var(&name, name.len(), di_tv, false);
+                    }
+                }
+            }
+        }
+    } else if deep == 0 {
+        // c:1820 nothing to do
+    } else if lp.ll_range {
+        // c:1822 (un)lock a range of List items.
+        let l = lp.ll_list.clone().expect("ll_range implies ll_list");
+        let mut li = lp.ll_li.unwrap_or(0);
+        loop {
+            let len = l.borrow().lv_items.len();
+            if !(li < len && (lp.ll_empty2 || lp.ll_n2 >= lp.ll_n1)) {
+                break;
+            }
+            tv_item_lock(&mut l.borrow_mut().lv_items[li].li_tv, deep, lock, false); // c:1827
+            li += 1; // c:1828 TV_LIST_ITEM_NEXT
+            lp.ll_n1 += 1; // c:1829
+        }
+    } else if let Some(l) = lp.ll_list.clone() {
+        // c:1831 (un)lock a List item.
+        let li = lp.ll_li.unwrap_or(0);
+        let mut b = l.borrow_mut();
+        if li < b.lv_items.len() {
+            tv_item_lock(&mut b.lv_items[li].li_tv, deep, lock, false);
+        }
+    } else {
+        // c:1834 (un)lock a Dict item.
+        if let (Some(d), Some(key)) = (lp.ll_dict.clone(), lp.ll_di.clone()) {
+            let mut b = d.borrow_mut();
+            if let Some(tv) = b.dv_hashtab.get_mut(&key) {
+                tv_item_lock(tv, deep, lock, false);
+            }
+        }
+    }
+
+    ret // c:1839
+}
+
 #[cfg(test)]
 mod misc_helper_tests {
     use super::*;
@@ -1794,5 +2744,202 @@ mod misc_helper_tests {
         reset_v_option_vars();
         assert_eq!(get_vim_var_str(vv::VV_OPTION_NEW), "");
         assert_eq!(get_vim_var_str(vv::VV_OPTION_TYPE), "");
+    }
+}
+
+#[cfg(test)]
+mod let_driver_tests {
+    use super::*;
+    use crate::ported::eval::typval::tv_get_string;
+    use crate::ported::eval::typval_defs_h::{
+        varnumber_T,
+        typval_vval_union::{v_dict, v_list, v_number},
+        VarLockStatus,
+    };
+
+    fn let_eap(arg: &str) -> exarg_T {
+        exarg_T {
+            arg: arg.to_string(),
+            cmdidx: cmdidx_T::CMD_let,
+            ..Default::default()
+        }
+    }
+
+    fn as_num(name: &str) -> Option<varnumber_T> {
+        eval_variable(name).and_then(|tv| match tv.vval {
+            v_number(n) => Some(n),
+            _ => None,
+        })
+    }
+
+    // The :let RHS is evaluated through EVAL_STRING_HOOK (the bridge integration
+    // point ex_let_one/get_lval delegate sub-expressions to). Install the ported
+    // eval0 tree-walker as the hook so the driver ports evaluate their operands.
+    fn install_eval_hook() {
+        use crate::ported::eval::typval::EVAL_STRING_HOOK;
+        fn hook(src: &str) -> Option<crate::ported::eval::typval_defs_h::typval_T> {
+            let mut tv = crate::ported::eval::typval_defs_h::typval_T::default();
+            let mut ev = crate::ported::eval::evalarg_T {
+                eval_flags: crate::ported::eval::EVAL_EVALUATE,
+            };
+            if crate::ported::eval::eval0(src, &mut tv, Some(&mut ev))
+                == crate::ported::eval_h::OK
+            {
+                Some(tv)
+            } else {
+                None
+            }
+        }
+        EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = Some(hook));
+    }
+
+    #[test]
+    fn ex_let_scalar_and_compound() {
+        install_eval_hook();
+        // ":let g:a = 5" then ":let g:a += 3" -> 8.
+        ex_let(&mut let_eap("g:ld_a = 5"));
+        assert_eq!(as_num("g:ld_a"), Some(5));
+        ex_let(&mut let_eap("g:ld_a += 3"));
+        assert_eq!(as_num("g:ld_a"), Some(8));
+        // ".=" string concat via set_var_lval.
+        ex_let(&mut let_eap("g:ld_s = 'ab'"));
+        ex_let(&mut let_eap("g:ld_s .= 'cd'"));
+        assert_eq!(tv_get_string(&eval_variable("g:ld_s").unwrap()), "abcd");
+    }
+
+    #[test]
+    fn ex_let_list_unpack() {
+        install_eval_hook();
+        ex_let(&mut let_eap("[g:ld_x, g:ld_y] = [11, 22]"));
+        assert_eq!(as_num("g:ld_x"), Some(11));
+        assert_eq!(as_num("g:ld_y"), Some(22));
+    }
+
+    #[test]
+    fn ex_let_list_unpack_semicolon_rest() {
+        install_eval_hook();
+        // [head; tail] captures the remaining items in `tail`.
+        ex_let(&mut let_eap("[g:ld_h; g:ld_t] = [1, 2, 3]"));
+        assert_eq!(as_num("g:ld_h"), Some(1));
+        let tail = eval_variable("g:ld_t").unwrap();
+        match tail.vval {
+            v_list(Some(l)) => {
+                let nums: Vec<varnumber_T> = l
+                    .borrow()
+                    .lv_items
+                    .iter()
+                    .map(|it| match it.li_tv.vval {
+                        v_number(n) => n,
+                        _ => -1,
+                    })
+                    .collect();
+                assert_eq!(nums, vec![2, 3]);
+            }
+            _ => panic!("tail is not a List"),
+        }
+    }
+
+    #[test]
+    fn ex_let_env_and_ex_unlet() {
+        install_eval_hook();
+        // ":let $VAR = 'v'" sets the process environment.
+        ex_let(&mut let_eap("$VIMLRS_LD_ENV = 'envval'"));
+        assert_eq!(std::env::var("VIMLRS_LD_ENV").as_deref(), Ok("envval"));
+        std::env::remove_var("VIMLRS_LD_ENV");
+
+        // ":unlet g:var" removes a global.
+        ex_let(&mut let_eap("g:ld_u = 7"));
+        assert!(eval_variable("g:ld_u").is_some());
+        let mut eap = exarg_T {
+            arg: "g:ld_u".to_string(),
+            cmdidx: cmdidx_T::CMD_unlet,
+            ..Default::default()
+        };
+        ex_unlet(&mut eap);
+        assert!(eval_variable("g:ld_u").is_none());
+    }
+
+    #[test]
+    fn ex_unlet_dict_item() {
+        install_eval_hook();
+        // Build g:d = {'a': 1, 'b': 2} then ":unlet g:d.a".
+        ex_let(&mut let_eap("g:ld_d = {'a': 1, 'b': 2}"));
+        let mut eap = exarg_T {
+            arg: "g:ld_d.a".to_string(),
+            cmdidx: cmdidx_T::CMD_unlet,
+            ..Default::default()
+        };
+        ex_unlet(&mut eap);
+        let d = eval_variable("g:ld_d").unwrap();
+        match d.vval {
+            v_dict(Some(dd)) => {
+                assert!(!dd.borrow().dv_hashtab.contains_key("a"));
+                assert!(dd.borrow().dv_hashtab.contains_key("b"));
+            }
+            _ => panic!("g:ld_d is not a Dict"),
+        }
+    }
+
+    #[test]
+    fn ex_lockvar_locks_value() {
+        ex_let(&mut let_eap("g:ld_lk = 5"));
+        let mut eap = exarg_T {
+            arg: "g:ld_lk".to_string(),
+            cmdidx: cmdidx_T::CMD_lockvar,
+            ..Default::default()
+        };
+        ex_lockvar(&mut eap);
+        assert_eq!(find_var("g:ld_lk", true).unwrap().v_lock, VarLockStatus::VAR_LOCKED);
+
+        // ":unlockvar g:x" clears it again.
+        let mut eap2 = exarg_T {
+            arg: "g:ld_lk".to_string(),
+            cmdidx: cmdidx_T::CMD_unlockvar,
+            ..Default::default()
+        };
+        ex_lockvar(&mut eap2);
+        assert_eq!(
+            find_var("g:ld_lk", true).unwrap().v_lock,
+            VarLockStatus::VAR_UNLOCKED
+        );
+    }
+
+    #[test]
+    fn heredoc_get_in_string() {
+        // ":let g:hd =<< END\nfoo\nbar\nEND" — heredoc body from the string.
+        ex_let(&mut let_eap("g:ld_hd =<< END\nfoo\nbar\nEND"));
+        let l = eval_variable("g:ld_hd").unwrap();
+        match l.vval {
+            v_list(Some(list)) => {
+                let items: Vec<String> = list
+                    .borrow()
+                    .lv_items
+                    .iter()
+                    .map(|it| tv_get_string(&it.li_tv))
+                    .collect();
+                assert_eq!(items, vec!["foo".to_string(), "bar".to_string()]);
+            }
+            _ => panic!("g:ld_hd is not a List"),
+        }
+    }
+
+    #[test]
+    fn heredoc_get_via_getline() {
+        // No newline in cmd -> body comes from eap.ea_getline.
+        let mut lines = vec!["one".to_string(), "two".to_string(), "EOF".to_string()].into_iter();
+        let mut eap = exarg_T {
+            arg: String::new(),
+            cmdidx: cmdidx_T::CMD_let,
+            ea_getline: Some(Box::new(move || lines.next())),
+            ..Default::default()
+        };
+        let l = heredoc_get(&mut eap, "EOF", false).unwrap();
+        let items: Vec<String> = l
+            .borrow()
+            .lv_items
+            .iter()
+            .map(|it| tv_get_string(&it.li_tv))
+            .collect();
+        assert_eq!(items, vec!["one".to_string(), "two".to_string()]);
     }
 }

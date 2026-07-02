@@ -1279,9 +1279,1226 @@ pub fn find_hi_in_scoped_ht(_name: &str) -> Option<crate::ported::eval::typval_d
     None
 }
 
+// ── :function / :call / :return / :delfunction command drivers (userfunc.c) ──
+//
+// RUST-PORT NOTE: these `exarg_T` command drivers are faithful strict REFERENCE
+// ports. At runtime the bytecode frontend (`viml_parser.rs`/`compile_viml.rs`)
+// supersedes them, exactly as the `eval0..eval7` tree-walker was ported in wave
+// 1 as a reference. The `exarg_T` struct is reduced to the fields these drivers
+// read; the ex_docmd source-line getter (`eap->ea_getline`/`cookie`) and the
+// `:try` conditional stack (`eap->cstack`) have no standalone counterpart, so
+// the drivers are ported up to those calls and the getline extern is an honest
+// deferred dep (see [`get_function_body`]).
+
+/// `#define K_SPECIAL (0x80)` (`keycodes.h:19`) — first byte of a special-key
+/// sequence; the `<SNR>` name encoding leads with it.
+const K_SPECIAL: u8 = 0x80;
+/// `#define KS_EXTRA 253` (`keycodes.h:41`) — second byte of a `KS_EXTRA` key.
+const KS_EXTRA: u8 = 253;
+/// `KE_SNR = 82` (`keycodes.h:196`) — the `<SNR>` extra-key code.
+const KE_SNR: u8 = 82;
+
+/// `TransFunctionNameFlags` (`eval.h:84`) — `trans_function_name()` flags.
+pub mod tfn {
+    /// `TFN_INT = 1` — may use an internal (builtin) function name.
+    pub const TFN_INT: i32 = 1;
+    /// `TFN_QUIET = 2` — do not emit error messages.
+    pub const TFN_QUIET: i32 = 2;
+    /// `TFN_NO_AUTOLOAD = 4` — do not use script autoloading.
+    pub const TFN_NO_AUTOLOAD: i32 = 4;
+    /// `TFN_NO_DEREF = 8` — do not dereference a Funcref.
+    pub const TFN_NO_DEREF: i32 = 8;
+    /// `TFN_READ_ONLY = 16` — caller will not change the variable.
+    pub const TFN_READ_ONLY: i32 = 16;
+}
+
+/// `typedef struct { … } funcdict_T;` (`csrc/eval/userfunc.h:35`) — the Dict
+/// context filled by [`trans_function_name`] for a `dict.func` target.
+///
+/// RUST-PORT NOTE: `fd_dict` (a `dict_T *`) becomes `Rc<RefCell<dict_T>>` and
+/// `fd_di` (a `dictitem_T *`) becomes the item key (the `IndexMap` model has no
+/// `dictitem_T`), matching the [`lval_T`](crate::ported::eval::lval_T) mapping.
+#[derive(Debug, Default, Clone)]
+pub struct funcdict_T {
+    /// `dict_T *fd_dict` — Dict used.
+    pub fd_dict: Option<std::rc::Rc<std::cell::RefCell<crate::ported::eval::typval_defs_h::dict_T>>>,
+    /// `char *fd_newkey` — new key in `dict`.
+    pub fd_newkey: Option<String>,
+    /// `dictitem_T *fd_di` — Dict item used (key stands in for the pointer).
+    pub fd_di: Option<String>,
+}
+
+/// Reduced `cmdidx_T` (`ex_cmds_defs.h`, not vendored) — only the command
+/// indices the ported drivers compare against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum cmdidx_T {
+    /// `CMD_call` — the `:call` command.
+    #[default]
+    CMD_call,
+    /// `CMD_defer` — the `:defer` command.
+    CMD_defer,
+}
+
+/// Reduced `struct exarg` (`ex_cmds_defs.h:108`, not vendored) — only the fields
+/// the ported `:function`/`:call`/`:return`/`:delfunction` drivers read.
+///
+/// RUST-PORT NOTE: `ea_getline`/`cookie` (the ex_docmd source-line reader) and
+/// `cstack` (the `:try` conditional stack from `ex_eval.c`) have no standalone
+/// counterpart; the drivers are ported up to their use and those externs are
+/// honest deferred deps.
+#[derive(Debug, Default, Clone)]
+pub struct exarg_T {
+    /// `char *arg` — argument of the command.
+    pub arg: String,
+    /// `char *cmd` — the name of the command.
+    pub cmd: String,
+    /// `char *nextcmd` — next command (`None` if none).
+    pub nextcmd: Option<String>,
+    /// `cmdidx_T cmdidx` — the index for the command.
+    pub cmdidx: cmdidx_T,
+    /// `int skip` — don't execute the command, only parse it.
+    pub skip: bool,
+    /// `int forceit` — true if `!` present.
+    pub forceit: bool,
+    /// `int addr_count` — the number of addresses given.
+    pub addr_count: i32,
+    /// `linenr_T line1` — the first line number.
+    pub line1: i64,
+    /// `linenr_T line2` — the second line number or count.
+    pub line2: i64,
+}
+
+/// Port of `func_tbl_get()` from `csrc/eval/userfunc.c:101`.
+///
+/// Return the function hash table. RUST-PORT NOTE: the C returns
+/// `&func_hashtab`, the module-static registry; here the user-function registry
+/// lives in the bytecode bridge (reached via [`FIND_FUNC_HOOK`]/
+/// [`REMOVE_FUNC_HOOK`]), so there is no standalone `hashtab_T` to hand back —
+/// this is a no-op accessor kept for call-site fidelity (mirrors [`func_init`]).
+pub fn func_tbl_get() {}
+
+/// Port of `trans_function_name()` from `csrc/eval/userfunc.c:1981`.
+///
+/// Parse the function name at `*pp` (a plain name, `s:`/`<SID>`/`<SNR>` local,
+/// `dict.func`, or a Funcref variable), advancing `*pp` past it and returning
+/// the resolved name (or `None` on error / when it is a Dict-key target). Fills
+/// `fdp` for a `dict.func` target and `partial` when the variable held one.
+/// Uses [`get_lval`](crate::ported::eval::get_lval) to walk `dict.key`/subscripts.
+///
+/// RUST-PORT NOTE: the C rewrites a leading `<SNR>` to the 3-byte
+/// `K_SPECIAL`/`KS_EXTRA`/`KE_SNR` sequence and expands `s:`/`<SID>` with the
+/// current script id; the reduced String model keeps the literal `<SNR>` prefix
+/// (see [`func_is_global`]) and has a single unnumbered script context — so an
+/// `s:`/`<SID>` *definition* errors `E81` (like [`get_scriptlocal_funcname`]).
+/// `aborting()` is always false here (matching the [`eval0`](crate::ported::eval::eval0)
+/// port), so the aborting branches are never taken.
+pub fn trans_function_name(
+    pp: &mut &str,
+    skip: bool,
+    flags: i32,
+    mut fdp: Option<&mut funcdict_T>,
+    mut partial: Option<&mut Option<std::rc::Rc<crate::ported::eval::typval_defs_h::partial_T>>>,
+) -> Option<String> {
+    use crate::ported::eval::typval_defs_h::{typval_vval_union::*, VarType::*};
+    use crate::ported::eval::{
+        check_luafunc_name, get_id_len, get_lval, is_luafunc, lval_T, partial_name, LlTv,
+        FNE_CHECK_START, GLV_READ_ONLY,
+    };
+    use crate::ported::message::{emsg, semsg};
+    use tfn::*;
+
+    let mut name: Option<String> = None;
+    let mut len: i32 = 0;
+    let mut lv = lval_T::default();
+
+    // c:1988 if (fdp != NULL) CLEAR_POINTER(fdp);
+    if let Some(fdp) = fdp.as_deref_mut() {
+        *fdp = funcdict_T::default();
+    }
+    let orig: &str = *pp; // c:1991 const char *start = *pp;
+
+    // c:1995 Check for hard coded <SNR>: already translated function ID.
+    {
+        let b = orig.as_bytes();
+        if b.first() == Some(&K_SPECIAL) && b.get(1) == Some(&KS_EXTRA) && b.get(2) == Some(&KE_SNR)
+        {
+            // c:1996 *pp += 3; len = get_id_len(pp) + 3;
+            let after = &orig[3..];
+            len = get_id_len(after) + 3;
+            let out = orig[..(len as usize).min(orig.len())].to_string();
+            *pp = &orig[(len as usize).min(orig.len())..];
+            return Some(out); // c:1999 return xmemdupz(start, len);
+        }
+    }
+
+    // c:2003 A name starting with "<SID>"/"<SNR>" is local to a script.
+    let mut lead = eval_fname_script(orig);
+    let mut start: &str = orig;
+    if lead > 2 {
+        start = &orig[lead as usize..]; // c:2005 start += lead;
+    }
+
+    // c:2009 get_lval() — TFN_ flags use the same values as GLV_ flags.
+    let end = get_lval(
+        start,
+        None,
+        &mut lv,
+        false,
+        skip,
+        flags | GLV_READ_ONLY,
+        if lead > 2 { 0 } else { FNE_CHECK_START },
+    );
+    // c:2011 if (end == start) — offset 0 into `start`.
+    if end == Some(0) {
+        if !skip {
+            emsg("E129: Function name required"); // c:2013
+        }
+        return None; // c:2015 goto theend
+    }
+    let ll_tv_present = !matches!(lv.ll_tv, LlTv::Null);
+    // c:2017 if (end == NULL || (ll_tv != NULL && (lead > 2 || ll_range)))
+    if end.is_none() || (ll_tv_present && (lead > 2 || lv.ll_range)) {
+        // c:2021 aborting() is always false here.
+        if end.is_some() {
+            semsg(&format!("E475: Invalid argument: {start}")); // c:2023 e_invarg2
+        }
+        return None; // c:2028 goto theend
+    }
+    let end = end.unwrap();
+
+    // c:2031 if (lv.ll_tv != NULL)
+    if ll_tv_present {
+        let tv = lv.ll_tv.get(); // *ll_tv (read-snapshot)
+        // c:2032 fill fdp from the lval Dict context.
+        let ll_dict_none = lv.ll_dict.is_none();
+        if let Some(fdp) = fdp.as_deref_mut() {
+            fdp.fd_dict = lv.ll_dict.clone();
+            fdp.fd_newkey = lv.ll_newkey.take();
+            fdp.fd_di = lv.ll_di.clone();
+        }
+        match tv.map(|t| (t.v_type, t.vval)) {
+            // c:2038 VAR_FUNC && v_string != NULL
+            Some((VAR_FUNC, v_string(s))) if !s.is_empty() => {
+                name = Some(s);
+                *pp = &start[end..];
+            }
+            // c:2041 VAR_PARTIAL && v_partial != NULL
+            Some((VAR_PARTIAL, v_partial(Some(pt)))) => {
+                let end_str = &start[end..];
+                if is_luafunc(&pt) && end_str.as_bytes().first() == Some(&b'.') {
+                    // c:2043 is_luafunc && *end == '.'
+                    let l = check_luafunc_name(&end_str[1..], true);
+                    if l == 0 {
+                        semsg("E15: Invalid expression: v:lua"); // c:2046 e_invexpr2
+                        return None;
+                    }
+                    name = Some(end_str[1..1 + l as usize].to_string());
+                    *pp = &start[end + 1 + l as usize..];
+                } else {
+                    name = Some(partial_name(&pt).to_string()); // c:2054
+                    *pp = &start[end..];
+                }
+                if let Some(partial) = partial.as_deref_mut() {
+                    *partial = Some(pt); // c:2058
+                }
+            }
+            _ => {
+                // c:2061 not a Funcref/Partial value.
+                let newkey_none = fdp
+                    .as_deref()
+                    .map(|f| f.fd_newkey.is_none())
+                    .unwrap_or(true);
+                if !skip
+                    && (flags & TFN_QUIET) == 0
+                    && (fdp.is_none() || ll_dict_none || newkey_none)
+                {
+                    emsg("E718: Funcref required"); // c:2065 e_funcref
+                } else {
+                    *pp = &start[end..];
+                }
+                name = None;
+            }
+        }
+        return name; // c:2072 goto theend
+    }
+
+    // c:2075 if (lv.ll_name == NULL) — error found, continue after the name.
+    if lv.ll_name.is_none() {
+        *pp = &start[end..]; // c:2077
+        return None; // c:2078 goto theend
+    }
+
+    // c:2082 Check if the name is a Funcref. If so, use the value.
+    if let Some(exp) = lv.ll_exp_name.clone() {
+        let d = deref_func_name(&exp, flags & TFN_NO_AUTOLOAD != 0); // c:2084
+        if d.name != exp {
+            // c:2085 name != lv.ll_exp_name
+            name = Some(d.name);
+            if let Some(partial) = partial.as_deref_mut() {
+                *partial = d.partial;
+            }
+        }
+    } else if (flags & TFN_NO_DEREF) == 0 {
+        // c:2088 len = end - *pp; *pp is `orig` (unchanged).
+        let src = &orig[..(end + if lead > 2 { lead as usize } else { 0 })];
+        let d = deref_func_name(src, flags & TFN_NO_AUTOLOAD != 0);
+        if d.name.as_str() != src {
+            // c:2091 name != *pp
+            name = Some(d.name);
+            if let Some(partial) = partial.as_deref_mut() {
+                *partial = d.partial;
+            }
+        }
+    }
+    if let Some(nm) = name {
+        // c:2094 name = xstrdup(name); *pp = end;
+        *pp = &start[end..];
+        // RUST-PORT NOTE: the C rewrites a leading "<SNR>" to the 3-byte
+        // K_SPECIAL/KS_EXTRA/KE_SNR sequence (c:2097); the reduced String model
+        // keeps the literal "<SNR>" prefix (see `func_is_global`).
+        return Some(nm); // c:2103 goto theend
+    }
+
+    // c:2106 Copy the function name to allocated memory.
+    let mut ll_name = lv.ll_name.clone().unwrap_or_default();
+    let mut ll_name_len = lv.ll_name_len;
+    len = 0;
+    if let Some(ref exp_s) = lv.ll_exp_name {
+        len = exp_s.len() as i32; // c:2108
+        if lead <= 2
+            && lv.ll_name.as_deref() == Some(exp_s.as_str())
+            && ll_name_len >= 2
+            && ll_name.as_bytes().get(..2) == Some(b"s:".as_slice())
+        {
+            // c:2109 remove a leading "s:".
+            ll_name = ll_name[2..].to_string();
+            ll_name_len -= 2;
+            len -= 2;
+            lead = 2;
+        }
+    } else {
+        // c:2119 Skip over "s:" and "g:".
+        if lead == 2
+            || (ll_name.as_bytes().first() == Some(&b'g') && ll_name.as_bytes().get(1) == Some(&b':'))
+        {
+            ll_name = ll_name[2..].to_string();
+            ll_name_len -= 2;
+        }
+        // c:2123 len = end - lv.ll_name. RUST-PORT NOTE: the pointer arithmetic
+        // reduces to the (post-strip) name length.
+        len = ll_name_len as i32;
+    }
+
+    let mut sid_buf = String::new();
+    // c:2130 Accept <SID>/<SNR> and translate into <SNR>123_.
+    if skip {
+        lead = 0; // c:2132 do nothing
+    } else if lead > 0 {
+        lead = 3; // c:2134
+        if lv
+            .ll_exp_name
+            .as_deref()
+            .map(eval_fname_sid)
+            .unwrap_or(false)
+            || eval_fname_sid(orig)
+        {
+            // c:2136 It's "s:" or "<SID>": needs a script id.
+            // c:2138 current_sctx.sc_sid <= 0 in the reduced single-script model.
+            emsg("E81: Using <SID> not in a script context"); // e_usingsid
+            return None; // c:2141 goto theend
+        }
+        let _ = &mut sid_buf;
+    } else if (flags & TFN_INT) == 0 && builtin_function(&ll_name, ll_name_len as i32) {
+        // c:2148 E128: Function name must start with a capital or "s:".
+        semsg(&format!(
+            "E128: Function name must start with a capital or \"s:\": {orig}"
+        ));
+        return None; // c:2151 goto theend
+    }
+
+    // c:2154 Reject a colon inside the function name.
+    if !skip && (flags & TFN_QUIET) == 0 && (flags & TFN_NO_DEREF) == 0 {
+        if ll_name.as_bytes()[..ll_name_len]
+            .iter()
+            .rposition(|&c| c == b':')
+            .is_some()
+        {
+            semsg(&format!(
+                "E884: Function name cannot contain a colon: {orig}"
+            )); // c:2159
+            return None; // c:2160 goto theend
+        }
+    }
+
+    // c:2164 name = xmalloc(len + lead + 1); build the (literal) <SNR> prefix.
+    let mut result = String::new();
+    if !skip && lead > 0 {
+        // RUST-PORT NOTE: literal "<SNR>" instead of the K_SPECIAL byte prefix.
+        result.push_str("<SNR>");
+        if !sid_buf.is_empty() {
+            result.push_str(&sid_buf);
+        }
+    }
+    result.push_str(&ll_name[..(len as usize).min(ll_name.len())]); // c:2174 memmove
+    *pp = &start[end..]; // c:2176
+    Some(result)
+}
+
+/// Port of `save_function_name()` from `csrc/eval/userfunc.c:2215`.
+///
+/// Call [`trans_function_name`], except a `<lambda>N` name is returned as-is (the
+/// `<lambda>` prefix plus its trailing digits). Advances `*name`.
+pub fn save_function_name(
+    name: &mut &str,
+    skip: bool,
+    flags: i32,
+    fudi: Option<&mut funcdict_T>,
+) -> Option<String> {
+    let orig: &str = *name; // c:2217 char *p = *name;
+    if orig.starts_with("<lambda>") {
+        // c:2220 p += 8; getdigits(&p, false, 0);
+        let b = orig.as_bytes();
+        let mut p = 8;
+        while p < b.len() && b[p].is_ascii_digit() {
+            p += 1;
+        }
+        let saved = orig[..p].to_string(); // c:2222 xmemdupz(*name, p - *name)
+        if let Some(fudi) = fudi {
+            *fudi = funcdict_T::default(); // c:2224 CLEAR_POINTER(fudi)
+        }
+        *name = &orig[p..]; // c:2229 *name = p;
+        Some(saved)
+    } else {
+        let mut p: &str = orig;
+        let saved = trans_function_name(&mut p, skip, flags, fudi, None); // c:2227
+        *name = p;
+        saved
+    }
+}
+
+/// Port of `get_lambda_tv()` from `csrc/eval/userfunc.c:299`.
+///
+/// Parse a `{args -> expr}` lambda at `*arg`, advancing it past the closing `}`
+/// and (when evaluating) storing a `VAR_PARTIAL` Funcref in `rettv`. Returns
+/// [`OK`](crate::ported::eval_h::OK)/[`FAIL`](crate::ported::eval_h::FAIL), or
+/// [`NOTDONE`](crate::ported::eval::NOTDONE) when the text is not a lambda (no
+/// top-level `->`), so the caller can retry it as a Dict / `{expr}` name.
+///
+/// RUST-PORT NOTE: `skip_expr` (the `eval.c` parse-pointer expression skipper)
+/// is replaced by a bracket-balanced scan (the same approach as
+/// [`get_func_arguments`]); the generated `ufunc_T` body (`uf_lines = "return
+/// <expr>"`), its `hash_add` into `func_hashtab`, `register_closure`, profiling
+/// and `sctx` are bridge-owned, so the reduced [`partial_T`] only carries the
+/// generated `<lambda>N` name. `eval_lavars_used`/`sandbox` state is not modeled.
+pub fn get_lambda_tv(
+    arg: &mut &str,
+    rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
+    evalarg: Option<&crate::ported::eval::evalarg_T>,
+) -> i32 {
+    use crate::ported::eval::skipwhite;
+    use crate::ported::eval::typval_defs_h::{
+        partial_T, typval_T, typval_vval_union::v_partial, VarLockStatus, VarType::VAR_PARTIAL,
+    };
+    use crate::ported::eval::{EVAL_EVALUATE, NOTDONE};
+    use crate::ported::eval_h::{FAIL, OK};
+
+    let evaluate = evalarg.map(|e| e.eval_flags & EVAL_EVALUATE != 0).unwrap_or(false);
+
+    let orig: &str = *arg;
+    // c:315 char *s = skipwhite(*arg + 1); First check: "->" must exist.
+    let after_brace = &orig[1..];
+    // Scan for a top-level "->" (balancing brackets, skipping strings).
+    let arrow = {
+        let b = after_brace.as_bytes();
+        let (mut depth, mut i, mut found) = (0i32, 0usize, None);
+        while i < b.len() {
+            match b[i] {
+                b'\'' => {
+                    i += 1;
+                    while i < b.len() && b[i] != b'\'' {
+                        i += 1;
+                    }
+                }
+                b'"' => {
+                    i += 1;
+                    while i < b.len() && b[i] != b'"' {
+                        if b[i] == b'\\' && i + 1 < b.len() {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                }
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => depth -= 1,
+                b'-' if depth == 0 && b.get(i + 1) == Some(&b'>') => {
+                    found = Some(i);
+                    break;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        found
+    };
+    // c:317 if (ret == FAIL || *s != '>') return NOTDONE;
+    let arrow = match arrow {
+        Some(a) => a,
+        None => return NOTDONE,
+    };
+
+    // c:328 Parse the arguments (the text before "->").
+    let params = &after_brace[..arrow];
+    let (names, _defaults, _varargs) = match get_function_args(params) {
+        Some(v) => v,
+        None => return FAIL, // c:330 goto errret
+    };
+
+    // c:340 Get the start and end of the expression.
+    let expr_tail = &after_brace[arrow + 2..];
+    let ws = expr_tail.len() - skipwhite(expr_tail).len();
+    let expr_region = skipwhite(expr_tail);
+    // skip_expr → the matching top-level '}'.
+    let close = {
+        let b = expr_region.as_bytes();
+        let (mut depth, mut i, mut found) = (0i32, 0usize, None);
+        while i < b.len() {
+            match b[i] {
+                b'\'' => {
+                    i += 1;
+                    while i < b.len() && b[i] != b'\'' {
+                        i += 1;
+                    }
+                }
+                b'"' => {
+                    i += 1;
+                    while i < b.len() && b[i] != b'"' {
+                        if b[i] == b'\\' && i + 1 < b.len() {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                }
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' => depth -= 1,
+                b'}' if depth == 0 => {
+                    found = Some(i);
+                    break;
+                }
+                b'}' => depth -= 1,
+                _ => {}
+            }
+            i += 1;
+        }
+        found
+    };
+    // c:352 if (**arg != '}') semsg(E451); goto errret;
+    let close = match close {
+        Some(c) => c,
+        None => {
+            crate::ported::message::semsg(&format!("E451: Expected }}: {expr_region}"));
+            return FAIL;
+        }
+    };
+    // c:356 (*arg)++ past the '}'.
+    let close_abs = 1 + arrow + 2 + ws + close;
+    *arg = &orig[close_abs + 1..];
+
+    if evaluate {
+        // c:358 String name = get_lambda_name();
+        let name = get_lambda_name();
+        // c:359 fp = alloc_ufunc(name); (reduced: body/registration is bridge-owned)
+        let mut fp = alloc_ufunc(&name);
+        fp.uf_args = names;
+        fp.uf_varargs = true; // c:404
+        let _ = fp;
+        // c:360 pt = xcalloc(1, sizeof(partial_T)); pt->pt_func = fp;
+        let pt = partial_T {
+            pt_refcount: 1, // c:409
+            pt_name: name,
+            pt_argv: Vec::new(),
+            pt_dict: None,
+        };
+        *rettv = typval_T {
+            v_type: VAR_PARTIAL, // c:412
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_partial(Some(std::rc::Rc::new(pt))), // c:410
+        };
+    }
+    OK // c:424
+}
+
+/// Port of `ex_return()` from `csrc/eval/userfunc.c:3290`.
+///
+/// Handle a `:return [expr]` command: evaluate the optional expression with
+/// [`eval0`](crate::ported::eval::eval0) and carry out the return via
+/// [`do_return`]. Errors `E133` when not inside a function.
+///
+/// RUST-PORT NOTE: `emsg_skip`/`update_force_abort()`/`aborting()` editor state
+/// is not modeled (matching [`eval0`](crate::ported::eval::eval0)); `check_nextcmd`
+/// (ex_docmd.c, not vendored) is inlined for the "no argument" advance.
+pub fn ex_return(eap: &mut exarg_T) {
+    use crate::ported::eval::typval::tv_clear;
+    use crate::ported::eval::{eval0, evalarg_T, skipwhite, typval_defs_h::typval_T, EVAL_EVALUATE};
+    use crate::ported::eval_h::FAIL;
+
+    let arg = eap.arg.clone(); // c:3292
+    let mut returning = false; // c:3294
+
+    // c:3296 if (current_funccal == NULL)
+    if get_current_funccal().is_none() {
+        crate::ported::message::emsg("E133: :return not inside a function"); // c:3297
+        return;
+    }
+
+    // c:3301 evalarg_T evalarg = { .eval_flags = eap->skip ? 0 : EVAL_EVALUATE };
+    let mut evalarg = evalarg_T {
+        eval_flags: if eap.skip { 0 } else { EVAL_EVALUATE },
+    };
+
+    eap.nextcmd = None; // c:3307
+    let first = arg.as_bytes().first().copied().unwrap_or(0);
+    let mut rettv = typval_T::default();
+    // c:3308 (*arg != NUL && *arg != '|' && *arg != '\n') && eval0(...) != FAIL
+    if first != 0
+        && first != b'|'
+        && first != b'\n'
+        && eval0(&arg, &mut rettv, Some(&mut evalarg)) != FAIL
+    {
+        if !eap.skip {
+            returning = do_return(false, true, Some(rettv.clone())); // c:3311
+        } else {
+            tv_clear(&mut rettv); // c:3313
+        }
+    } else if !eap.skip {
+        // c:3315 It's safer to return also on error. aborting() is false here.
+        returning = do_return(false, true, None); // c:3322
+    }
+
+    // c:3328 advance to the next command unless the return was carried out.
+    if returning {
+        eap.nextcmd = None; // c:3330
+    } else if eap.nextcmd.is_none() {
+        // c:3332 check_nextcmd(arg) — inlined.
+        let p = skipwhite(&arg);
+        let c = p.as_bytes().first().copied().unwrap_or(0);
+        eap.nextcmd = if c == b'|' || c == b'\n' {
+            Some(p[1..].to_string())
+        } else {
+            None
+        };
+    }
+}
+
+/// Port of `ex_call_inner()` from `csrc/eval/userfunc.c:3342`.
+///
+/// The lower-level implementation of `:call`: evaluate `name(args)` over the
+/// command's line range, dereferencing a returned Funcref/Dict/List via
+/// [`handle_subscript`](crate::ported::eval::handle_subscript). Returns non-zero
+/// (`failed`) on error.
+///
+/// RUST-PORT NOTE: the C threads a `funcexe_T` and (when `addr_count > 0`)
+/// positions the cursor per range line via `curbuf`/`curwin`; there is no buffer
+/// standalone, so the range loop runs `fe_doesrange == false` and the isolated
+/// argument text (between the call parens) is passed via the reduced
+/// [`get_func_tv`]. `aborting()` is always false here.
+pub fn ex_call_inner(
+    eap: &exarg_T,
+    name: &str,
+    args_text: &str,
+    rettv: &mut crate::ported::eval::typval_defs_h::typval_T,
+) -> i32 {
+    use crate::ported::eval::handle_subscript;
+    use crate::ported::eval::typval::tv_clear;
+    use crate::ported::eval_h::FAIL;
+
+    let mut failed = false; // c:3346
+    let mut lnum = eap.line1; // c:3348
+    while lnum <= eap.line2 {
+        // c:3349 addr_count>0 buffer positioning omitted (no buffer standalone).
+        if get_func_tv(name, args_text, rettv) == FAIL {
+            // c:3367
+            failed = true; // c:3368
+            break;
+        }
+        // c:3373 Handle a function returning a Funcref, Dict or List.
+        if handle_subscript(rettv, &[], true) == FAIL {
+            failed = true; // c:3375
+            break;
+        }
+        tv_clear(rettv); // c:3379
+        // c:3380 doesrange is false in the reduced model → continue.
+        // c:3387 aborting() is always false → continue.
+        lnum += 1;
+    }
+    failed as i32 // c:3392
+}
+
+/// Port of `ex_call()` from `csrc/eval/userfunc.c:3542`.
+///
+/// Handle `:call func(args)` (and `:defer func(args)`): resolve the name with
+/// [`trans_function_name`]/[`deref_func_name`], then dispatch through
+/// [`ex_call_inner`] (or [`ex_defer_inner`] for `:defer`).
+///
+/// RUST-PORT NOTE: when skipping, the C uses `eval0()` to skip to the next
+/// command; `fill_evalarg_from_eap`/`clear_evalarg` and the `fudi.fd_dict`
+/// refcount bump are `Rc`/no-op-managed; `cstack->cs_trylevel` is not modeled so
+/// the trailing-character check reduces to `!failed`.
+pub fn ex_call(eap: &mut exarg_T) {
+    use crate::ported::eval::typval::tv_clear;
+    use crate::ported::eval::{eval0, ends_excmd, evalarg_T, skipwhite, typval_defs_h::typval_T, EVAL_EVALUATE};
+    use crate::ported::message::semsg;
+
+    let orig_arg = eap.arg.clone(); // c:3544
+    let mut fudi = funcdict_T::default();
+    let mut partial: Option<std::rc::Rc<crate::ported::eval::typval_defs_h::partial_T>> = None;
+    let mut evalarg = evalarg_T {
+        eval_flags: if eap.skip { 0 } else { EVAL_EVALUATE },
+    };
+
+    // c:3551 if (eap->skip) — use eval0() to skip to any following command.
+    if eap.skip {
+        let mut rettv = typval_T::default();
+        if eval0(&orig_arg, &mut rettv, Some(&mut evalarg)) != crate::ported::eval_h::FAIL {
+            tv_clear(&mut rettv); // c:3559
+        }
+        return; // c:3564
+    }
+
+    // c:3567 trans_function_name()
+    let mut arg: &str = &orig_arg;
+    let tofree = trans_function_name(
+        &mut arg,
+        false,
+        tfn::TFN_INT,
+        Some(&mut fudi),
+        Some(&mut partial),
+    );
+    if let Some(nk) = fudi.fd_newkey.take() {
+        // c:3568 Still need to give an error message for a missing key.
+        semsg(&format!("E716: Key not present in Dictionary: {nk}")); // e_dictkey
+    }
+    let tofree = match tofree {
+        Some(t) => t, // c:3572
+        None => return,
+    };
+
+    // c:3576 fd_dict->dv_refcount++ — Rc-managed, no-op.
+
+    // c:3581 deref_func_name(): use a Funcref/Partial variable's contents.
+    let d = deref_func_name(&tofree, false);
+    let name = d.name;
+    if partial.is_none() {
+        partial = d.partial; // c:3584
+    }
+
+    // c:3588 Skip white space to allow ":call func ()".
+    let startarg = skipwhite(arg);
+    if startarg.as_bytes().first() != Some(&b'(') {
+        // c:3591 E107: Missing parentheses.
+        semsg(&format!("E107: Missing parentheses: {orig_arg}"));
+        return; // goto end
+    }
+
+    // Isolate the (balanced) argument text between the call parens.
+    let (args_text, remaining) = {
+        let b = startarg.as_bytes();
+        let (mut depth, mut i, mut close) = (0i32, 0usize, None);
+        while i < b.len() {
+            match b[i] {
+                b'\'' => {
+                    i += 1;
+                    while i < b.len() && b[i] != b'\'' {
+                        i += 1;
+                    }
+                }
+                b'"' => {
+                    i += 1;
+                    while i < b.len() && b[i] != b'"' {
+                        if b[i] == b'\\' && i + 1 < b.len() {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                }
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        match close {
+            Some(c) => (&startarg[1..c], &startarg[c + 1..]),
+            None => (&startarg[1..], ""),
+        }
+    };
+
+    let failed;
+    let mut rettv = typval_T::default();
+    if eap.cmdidx == cmdidx_T::CMD_defer {
+        // c:3600 arg = startarg; ex_defer_inner(...)
+        failed = ex_defer_inner() == crate::ported::eval_h::FAIL;
+    } else {
+        // c:3603 funcexe setup + ex_call_inner()
+        failed = ex_call_inner(eap, &name, args_text, &mut rettv) != 0;
+    }
+
+    // c:3616 Trailing-character check. cstack->cs_trylevel is not modeled, so
+    // this reduces to "!failed" (aborting()/did_throw are false).
+    if !failed {
+        let c = remaining.as_bytes().first().copied().unwrap_or(0);
+        if !ends_excmd(c) {
+            // c:3620 emsg_severe; E488 trailing.
+            semsg(&format!("E488: Trailing characters: {remaining}"));
+        } else {
+            // c:3625 eap->nextcmd = check_nextcmd(arg) — inlined.
+            let p = skipwhite(remaining);
+            let c = p.as_bytes().first().copied().unwrap_or(0);
+            eap.nextcmd = if c == b'|' || c == b'\n' {
+                Some(p[1..].to_string())
+            } else {
+                None
+            };
+        }
+    }
+}
+
+/// Port of `ex_delfunction()` from `csrc/eval/userfunc.c:3119`.
+///
+/// Handle `:delfunction[!] {name}`: resolve the name with [`trans_function_name`]
+/// and remove it from the registry via [`func_remove`].
+///
+/// RUST-PORT NOTE: the `uf_calls`/`uf_refcount` in-use guards and
+/// `func_clear_free`/`tv_dict_item_remove` are `Rc`/`Drop`-managed (see the
+/// no-op reclamation ports above), so a resolved function is simply removed
+/// through the bridge's [`REMOVE_FUNC_HOOK`]. `check_nextcmd` (ex_docmd.c) is
+/// inlined.
+pub fn ex_delfunction(eap: &mut exarg_T) {
+    use crate::ported::eval::{ends_excmd, skipwhite};
+    use crate::ported::message::{emsg, semsg};
+
+    let orig = eap.arg.clone(); // c:3124
+    let mut p: &str = &orig;
+    let mut fudi = funcdict_T::default();
+    let name = trans_function_name(&mut p, eap.skip, 0, Some(&mut fudi), None); // c:3125
+    fudi.fd_newkey = None; // c:3126 xfree(fudi.fd_newkey)
+    let name = match name {
+        None => {
+            // c:3127 if (name == NULL)
+            if fudi.fd_dict.is_some() && !eap.skip {
+                emsg("E718: Funcref required"); // c:3129 e_funcref
+            }
+            return; // c:3131
+        }
+        Some(n) => n,
+    };
+    // c:3133 if (!ends_excmd(*skipwhite(p)))
+    let sw = skipwhite(p);
+    if !ends_excmd(sw.as_bytes().first().copied().unwrap_or(0)) {
+        semsg(&format!("E488: Trailing characters: {p}")); // c:3136 e_trailing_arg
+        return;
+    }
+    // c:3138 eap->nextcmd = check_nextcmd(p) — inlined.
+    let c = sw.as_bytes().first().copied().unwrap_or(0);
+    eap.nextcmd = if c == b'|' || c == b'\n' {
+        Some(sw[1..].to_string())
+    } else {
+        None
+    };
+
+    // c:3143 if (isdigit(*name) && fudi.fd_dict == NULL)
+    if name
+        .as_bytes()
+        .first()
+        .map(|c| c.is_ascii_digit())
+        .unwrap_or(false)
+        && fudi.fd_dict.is_none()
+    {
+        if !eap.skip {
+            semsg(&format!("E475: Invalid argument: {orig}")); // c:3145 e_invarg2
+        }
+        return;
+    }
+    // c:3150 if (!eap->skip) fp = find_func(name);
+    let fp = if !eap.skip { find_func(&name) } else { None };
+
+    if !eap.skip {
+        match fp {
+            None => {
+                // c:3155 if (fp == NULL)
+                if !eap.forceit {
+                    semsg(&format!("E130: Unknown function: {orig}")); // c:3157 e_nofunc
+                }
+                // c:3159 return
+            }
+            Some(fp) => {
+                // c:3161/3183 uf_calls/uf_refcount guards are Rc-managed; remove.
+                func_remove(&fp); // c:3187
+            }
+        }
+    }
+}
+
+/// Port of `get_function_body()` from `csrc/eval/userfunc.c:2363`.
+///
+/// Read the body of a `:function` (every line into `newlines`, up to
+/// `:endfunction`). Returns [`OK`](crate::ported::eval_h::OK)/[`FAIL`](crate::ported::eval_h::FAIL).
+///
+/// RUST-PORT NOTE: the body is read line-by-line via `eap->ea_getline` (the
+/// ex_docmd source-line reader) — an honest deferred dep with no standalone
+/// counterpart. This is the faithful port of the loop *entry* up to that call:
+/// with no getline source the first `theline` is NULL, so the loop reports `E126`
+/// and fails (the `endfunction`/heredoc/nesting scan over subsequent lines is
+/// bridge-owned). The inline `line_arg_in` split (`eap->arg` by `\n`) is modeled.
+pub fn get_function_body(
+    _eap: &exarg_T,
+    newlines: &mut Vec<String>,
+    line_arg_in: Option<&str>,
+) -> i32 {
+    use crate::ported::eval_h::FAIL;
+    let _ = newlines;
+    // c:2377 while (true) — the first iteration only (up to the getline call).
+    let theline: Option<&str> = match line_arg_in {
+        Some(la) => {
+            // c:2383 theline = line_arg; p = vim_strchr(theline, '\n');
+            match la.find('\n') {
+                Some(i) => Some(&la[..i]),
+                None => Some(la),
+            }
+        }
+        None => {
+            // c:2398 eap->ea_getline(...) — deferred dep (no standalone getline)
+            // yields NULL, i.e. end of input.
+            None
+        }
+    };
+    // c:2408 if (theline == NULL)
+    if theline.is_none() {
+        crate::ported::message::emsg("E126: Missing :endfunction"); // c:2412
+        return FAIL; // c:2414 goto theend
+    }
+    // Unreachable standalone (getline yields NULL): the endfunction/heredoc scan
+    // over subsequent getline lines is bridge-owned.
+    FAIL
+}
+
+/// Port of `ex_function()` from `csrc/eval/userfunc.c:2637`.
+///
+/// Handle a `:function` command: list functions (no argument / `/pat` / bare
+/// name), or define one by parsing the name ([`save_function_name`]) and
+/// parameter list ([`get_function_args`]), then reading the body
+/// ([`get_function_body`]).
+///
+/// RUST-PORT NOTE: interactive listing (`list_functions`/`list_one_function`),
+/// the `range`/`dict`/`abort`/`closure` extra-argument scan, and the registration
+/// of the parsed body into `func_hashtab` are bridge-owned / not modeled; this
+/// is the faithful port of the driver up to the [`get_function_body`] getline
+/// boundary. `aborting()`/`did_emsg` are not modeled.
+pub fn ex_function(eap: &mut exarg_T) {
+    use crate::ported::eval::{ends_excmd, skipwhite};
+    use crate::ported::eval_h::FAIL;
+    use crate::ported::message::semsg;
+
+    let orig = eap.arg.clone();
+    let mut fudi = funcdict_T::default();
+
+    // c:2654 ":function" without argument: list functions.
+    if ends_excmd(orig.as_bytes().first().copied().unwrap_or(0)) {
+        if !eap.skip {
+            list_functions(); // c:2657
+        }
+        // c:2659 eap->nextcmd = check_nextcmd(eap->arg) — inlined.
+        let c = orig.as_bytes().first().copied().unwrap_or(0);
+        eap.nextcmd = if c == b'|' || c == b'\n' {
+            Some(orig[1..].to_string())
+        } else {
+            None
+        };
+        return;
+    }
+
+    // c:2664 ":function /pat": list functions matching pattern.
+    if orig.as_bytes().first() == Some(&b'/') {
+        let _ = list_functions_matching_pat(); // c:2665
+        eap.nextcmd = None;
+        return; // c:2667
+    }
+
+    // c:2686 Get the function name.
+    let mut p: &str = &orig;
+    let name = save_function_name(&mut p, eap.skip, tfn::TFN_NO_AUTOLOAD, Some(&mut fudi)); // c:2687
+    let paren = p.contains('('); // c:2688
+    if name.is_none() && (fudi.fd_dict.is_none() || !paren) && !eap.skip {
+        // c:2692 aborting() is false here.
+        if let Some(nk) = fudi.fd_newkey.take() {
+            semsg(&format!("E716: Key not present in Dictionary: {nk}")); // c:2694 e_dictkey
+        }
+        return; // c:2697
+    }
+
+    // c:2708 ":function func" with only a function name: list the function.
+    if !paren {
+        let _ = list_one_function(); // c:2710
+        return; // c:2711 goto ret_free
+    }
+
+    // c:2714 ":function name(arg1, arg2)" Define function.
+    p = skipwhite(p);
+    if p.as_bytes().first() != Some(&b'(') {
+        if !eap.skip {
+            semsg(&format!("E124: Missing '(': {orig}")); // c:2717
+            return; // c:2718 goto ret_free
+        }
+    }
+    // c:2724 p = skipwhite(p + 1);
+    p = if p.is_empty() { p } else { skipwhite(&p[1..]) };
+
+    // c:2761 get_function_args(&p, ')', ...) — reduced takes the params substring
+    // (the text up to the matching ')').
+    let params = {
+        let b = p.as_bytes();
+        let (mut depth, mut i, mut close) = (0i32, 0usize, None);
+        while i < b.len() {
+            match b[i] {
+                b')' if depth == 0 => {
+                    close = Some(i);
+                    break;
+                }
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => depth -= 1,
+                _ => {}
+            }
+            i += 1;
+        }
+        match close {
+            Some(c) => &p[..c],
+            None => p,
+        }
+    };
+    if get_function_args(params).is_none() {
+        return; // c:2763 goto errret_2
+    }
+
+    // c:2766 range/dict/abort/closure extra-argument scan is bridge-owned.
+
+    // c:2xxx Read the function body (up to the ea_getline boundary).
+    let mut newlines: Vec<String> = Vec::new();
+    if get_function_body(eap, &mut newlines, None) == FAIL {
+        return; // errret
+    }
+    // RUST-PORT NOTE: registration of the parsed body into func_hashtab
+    // (hash_add / uf_lines) is bridge-owned; the reference port stops here.
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trans_function_name_plain() {
+        // A plain global name resolves as-is; *pp advances past it.
+        let mut p: &str = "MyFunc()";
+        let n = trans_function_name(&mut p, false, tfn::TFN_INT, None, None);
+        assert_eq!(n.as_deref(), Some("MyFunc"));
+        assert_eq!(p, "()");
+        // A lowercase name without TFN_INT is rejected (E128, builtin-shaped).
+        let mut q: &str = "foo()";
+        assert!(trans_function_name(&mut q, false, 0, None, None).is_none());
+    }
+
+    #[test]
+    fn save_function_name_lambda_and_name() {
+        // <lambda>N is returned verbatim (prefix + digits).
+        let mut n: &str = "<lambda>42()";
+        assert_eq!(
+            save_function_name(&mut n, false, 0, None).as_deref(),
+            Some("<lambda>42")
+        );
+        assert_eq!(n, "()");
+        // A normal name delegates to trans_function_name.
+        let mut m: &str = "Helper(x)";
+        assert_eq!(
+            save_function_name(&mut m, false, tfn::TFN_INT, None).as_deref(),
+            Some("Helper")
+        );
+        assert_eq!(m, "(x)");
+    }
+
+    #[test]
+    fn get_lambda_tv_parses_and_declines() {
+        use crate::ported::eval::evalarg_T;
+        use crate::ported::eval::typval_defs_h::{typval_T, typval_vval_union::v_partial};
+        use crate::ported::eval::{EVAL_EVALUATE, NOTDONE};
+        use crate::ported::eval_h::OK;
+        let ea = evalarg_T {
+            eval_flags: EVAL_EVALUATE,
+        };
+        // A real lambda evaluates to a VAR_PARTIAL and consumes through '}'.
+        let mut arg: &str = "{a, b -> a + b} rest";
+        let mut rv = typval_T::default();
+        assert_eq!(get_lambda_tv(&mut arg, &mut rv, Some(&ea)), OK);
+        assert!(matches!(rv.vval, v_partial(Some(_))));
+        assert_eq!(arg, " rest");
+        // No top-level "->": it's a Dict/{expr}, not a lambda → NOTDONE.
+        let mut arg2: &str = "{'a': 1}";
+        let mut rv2 = typval_T::default();
+        assert_eq!(get_lambda_tv(&mut arg2, &mut rv2, Some(&ea)), NOTDONE);
+    }
+
+    #[test]
+    fn ex_return_carries_value() {
+        use crate::ported::eval::typval_defs_h::{typval_T, typval_vval_union::v_number};
+        // Not inside a function → E133, nothing carried, no panic.
+        current_funccal.with(|c| *c.borrow_mut() = None);
+        let mut eap = exarg_T {
+            arg: "1".into(),
+            ..Default::default()
+        };
+        ex_return(&mut eap);
+
+        // Inside a function, ":return 42" records the value.
+        let fp = ufunc_T {
+            uf_name: "F".into(),
+            ..Default::default()
+        };
+        let fc = create_funccal(&fp, None);
+        let mut eap2 = exarg_T {
+            arg: "42".into(),
+            ..Default::default()
+        };
+        ex_return(&mut eap2);
+        assert!(fc.borrow().fc_returned);
+        assert!(matches!(
+            fc.borrow().fc_rettv.as_ref().unwrap().vval,
+            v_number(42)
+        ));
+        let _ = typval_T::default();
+        current_funccal.with(|c| *c.borrow_mut() = None);
+    }
+
+    #[test]
+    fn ex_call_inner_dispatches_via_hooks() {
+        use crate::ported::eval::typval::{CALL_FUNC_HOOK, EVAL_STRING_HOOK};
+        use crate::ported::eval::typval_defs_h::{typval_T, typval_vval_union::v_number};
+        fn eval_hook(e: &str) -> Option<typval_T> {
+            e.trim().parse::<i64>().ok().map(typval_T::from)
+        }
+        fn call_hook(_c: &typval_T, args: &[typval_T]) -> Option<typval_T> {
+            Some(typval_T::from(
+                args.iter()
+                    .map(|a| match a.vval {
+                        v_number(n) => n,
+                        _ => 0,
+                    })
+                    .sum::<i64>(),
+            ))
+        }
+        let (se, sc) = (
+            EVAL_STRING_HOOK.with(|h| *h.borrow()),
+            CALL_FUNC_HOOK.with(|h| *h.borrow()),
+        );
+        EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = Some(eval_hook));
+        CALL_FUNC_HOOK.with(|h| *h.borrow_mut() = Some(call_hook));
+        let eap = exarg_T {
+            line1: 1,
+            line2: 1,
+            ..Default::default()
+        };
+        let mut rv = typval_T::default();
+        // Range of one line, args evaluate + dispatch → not failed (0).
+        assert_eq!(ex_call_inner(&eap, "Sum", "2, 3, 4", &mut rv), 0);
+        // A non-evaluable argument fails the call.
+        let mut rv2 = typval_T::default();
+        assert_eq!(ex_call_inner(&eap, "Sum", "1, bad", &mut rv2), 1);
+        EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = se);
+        CALL_FUNC_HOOK.with(|h| *h.borrow_mut() = sc);
+    }
+
+    #[test]
+    fn ex_call_resolves_and_runs() {
+        use crate::ported::eval::typval::{CALL_FUNC_HOOK, EVAL_STRING_HOOK};
+        use crate::ported::eval::typval_defs_h::typval_T;
+        fn eval_hook(e: &str) -> Option<typval_T> {
+            e.trim().parse::<i64>().ok().map(typval_T::from)
+        }
+        fn call_hook(_c: &typval_T, args: &[typval_T]) -> Option<typval_T> {
+            Some(typval_T::from(args.len() as i64))
+        }
+        let (se, sc) = (
+            EVAL_STRING_HOOK.with(|h| *h.borrow()),
+            CALL_FUNC_HOOK.with(|h| *h.borrow()),
+        );
+        EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = Some(eval_hook));
+        CALL_FUNC_HOOK.with(|h| *h.borrow_mut() = Some(call_hook));
+        // Full driver: name resolution + arg isolation + dispatch, no panic.
+        let mut eap = exarg_T {
+            arg: "Sum(2, 3, 4)".into(),
+            line1: 1,
+            line2: 1,
+            ..Default::default()
+        };
+        ex_call(&mut eap);
+        // Missing parentheses is reported (no dispatch), no panic.
+        let mut eap2 = exarg_T {
+            arg: "Sum".into(),
+            ..Default::default()
+        };
+        ex_call(&mut eap2);
+        EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = se);
+        CALL_FUNC_HOOK.with(|h| *h.borrow_mut() = sc);
+    }
+
+    #[test]
+    fn ex_delfunction_removes_via_hook() {
+        fn rm(name: &str) -> bool {
+            name == "MyFunc"
+        }
+        fn find(name: &str) -> Option<ufunc_T> {
+            (name == "MyFunc").then(|| ufunc_T {
+                uf_name: "MyFunc".into(),
+                ..Default::default()
+            })
+        }
+        let savedr = REMOVE_FUNC_HOOK.with(|h| *h.borrow());
+        let savedf = FIND_FUNC_HOOK.with(|h| *h.borrow());
+        REMOVE_FUNC_HOOK.with(|h| *h.borrow_mut() = Some(rm));
+        FIND_FUNC_HOOK.with(|h| *h.borrow_mut() = Some(find));
+        // Known function: resolves + removes, no panic.
+        let mut eap = exarg_T {
+            arg: "MyFunc".into(),
+            ..Default::default()
+        };
+        ex_delfunction(&mut eap);
+        // Unknown function with ! is silently tolerated.
+        let mut eap2 = exarg_T {
+            arg: "Nope".into(),
+            forceit: true,
+            ..Default::default()
+        };
+        ex_delfunction(&mut eap2);
+        REMOVE_FUNC_HOOK.with(|h| *h.borrow_mut() = savedr);
+        FIND_FUNC_HOOK.with(|h| *h.borrow_mut() = savedf);
+    }
+
+    #[test]
+    fn ex_function_body_needs_getline() {
+        // With no getline source, :function reaches get_function_body and fails
+        // with E126 (no :endfunction) rather than panicking.
+        assert_eq!(
+            get_function_body(&exarg_T::default(), &mut Vec::new(), None),
+            crate::ported::eval_h::FAIL
+        );
+        let mut eap = exarg_T {
+            arg: "Foo()".into(),
+            ..Default::default()
+        };
+        ex_function(&mut eap);
+    }
 
     #[test]
     fn name_classification() {
