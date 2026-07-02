@@ -189,7 +189,11 @@ pub fn file_close(fp: &mut FileDescriptor, do_fsync: bool) -> i32 {
         return 0;
     }
 
-    let flush_error = if do_fsync { file_fsync(fp) } else { file_flush(fp) };
+    let flush_error = if do_fsync {
+        file_fsync(fp)
+    } else {
+        file_flush(fp)
+    };
     let close_error = os_close(fp.fd);
     free_block(&mut fp.buffer);
     if close_error != 0 {
@@ -393,7 +397,13 @@ fn os_open_stdin_fd() -> i32 {
 /// Port of `os_read()` from `csrc/os/fs.c:585` — read up to `size` bytes.
 /// Returns the number of bytes read (0 with `*ret_eof` set at EOF), or a
 /// negative error code.
-fn os_read(fd: i32, ret_eof: &mut bool, ret_buf: &mut [u8], size: usize, non_blocking: bool) -> isize {
+fn os_read(
+    fd: i32,
+    ret_eof: &mut bool,
+    ret_buf: &mut [u8],
+    size: usize,
+    non_blocking: bool,
+) -> isize {
     *ret_eof = false;
     // c: if (ret_buf == NULL) { assert(size == 0); return 0; }  (a slice is never
     //    NULL; an empty request returns 0 via the loop guard.)
@@ -534,7 +544,10 @@ mod tests {
         assert_eq!(err, 0, "file_open: {}", os_strerror(err));
         assert!(fp.wr);
         let payload = b"hello\nworld";
-        assert_eq!(file_write(&mut fp, payload, payload.len()), payload.len() as isize);
+        assert_eq!(
+            file_write(&mut fp, payload, payload.len()),
+            payload.len() as isize
+        );
         assert_eq!(file_close(&mut fp, false), 0);
         assert!(fp.buffer.is_empty(), "buffer freed on close");
 
@@ -560,7 +573,12 @@ mod tests {
             .into_owned();
         let mut fp = FileDescriptor::default();
         assert_eq!(
-            file_open(&mut fp, &path, kFileCreate | kFileTruncate | kFileWriteOnly, 0o644),
+            file_open(
+                &mut fp,
+                &path,
+                kFileCreate | kFileTruncate | kFileWriteOnly,
+                0o644
+            ),
             0
         );
         let big = vec![7u8; ARENA_BLOCK_SIZE * 3 + 5];

@@ -16,12 +16,12 @@ pub mod ex_eval;
 /// Port of `src/nvim/mbyte.c` (subset: the UTF-8 codec helpers `utf_ptr2char`,
 /// `utf_ptr2len`, `utf_char2len`, `utf_char2bytes` behind the JSON decoder).
 pub mod mbyte;
+/// Port of `src/nvim/message.c` (extern: `emsg`/`did_emsg`).
+pub mod message;
 /// Port of vendored libmpack (`src/mpack/{mpack_core,object,conv}.c`) — the
 /// streaming msgpack token reader + parser node-stack driving `decode.c`'s
 /// `unpack_typval`/`msgpackparse`.
 pub mod mpack;
-/// Port of `src/nvim/message.c` (extern: `emsg`/`did_emsg`).
-pub mod message;
 /// Port of `src/nvim/ops.c` (subset: the yank-register store for `getreg`/`setreg`).
 pub mod ops;
 /// Port of `src/nvim/option.c` (subset: the option table, `&opt`, `:set`).

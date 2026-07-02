@@ -20,8 +20,8 @@ use crate::ported::eval::typval_defs_h::{
 use crate::ported::eval_h::{FAIL, OK};
 use crate::ported::message::{emsg, semsg};
 use crate::ported::os::fileio::{
-    file_close, file_flush, file_open, file_write, os_strerror, kFileAppend, kFileCreate,
-    kFileMkDir, kFileTruncate, FileDescriptor,
+    file_close, file_flush, file_open, file_write, kFileAppend, kFileCreate, kFileMkDir,
+    kFileTruncate, os_strerror, FileDescriptor,
 };
 use crate::ported::path::shorten_dir_len;
 
@@ -664,7 +664,8 @@ fn read_file_or_blob(argvars: &[typval_T], rettv: &mut typval_T, always_blob: bo
         //   newline.
         let mut start = 0usize; // Start of current line.
         let mut p = 0usize; // Position in buf.
-        while (readlen > 0 && p < readlen as usize) || (readlen <= 0 && (!prev.is_empty() || binary))
+        while (readlen > 0 && p < readlen as usize)
+            || (readlen <= 0 && (!prev.is_empty() || binary))
         {
             if readlen <= 0 || buf[p] == b'\n' {
                 let at_eof = readlen <= 0;
@@ -853,7 +854,11 @@ fn write_list(fp: &mut FileDescriptor, list: &list_T, binary: bool) -> bool {
         return true;
     }
     // write_list_error:
-    semsg(&format!("{}{}", e_error_while_writing_str, os_strerror(error)));
+    semsg(&format!(
+        "{}{}",
+        e_error_while_writing_str,
+        os_strerror(error)
+    ));
     false
 }
 
@@ -879,7 +884,11 @@ fn write_data(fp: &mut FileDescriptor, data: &[u8], len: usize) -> bool {
         return true;
     }
     // write_blob_error:
-    semsg(&format!("{}{}", e_error_while_writing_str, os_strerror(error)));
+    semsg(&format!(
+        "{}{}",
+        e_error_while_writing_str,
+        os_strerror(error)
+    ));
     false
 }
 
@@ -1811,7 +1820,10 @@ mod tests {
         assert_eq!(b.borrow().bv_ga, vec![2u8, 3, 4]);
 
         // Negative offset reads from EOF.
-        let argr = [typval_T::from(path.clone()), typval_T::from(-2 as varnumber_T)];
+        let argr = [
+            typval_T::from(path.clone()),
+            typval_T::from(-2 as varnumber_T),
+        ];
         let mut rr = typval_T::default();
         f_readblob(&argr, &mut rr);
         let b = match &rr.vval {

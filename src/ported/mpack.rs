@@ -388,13 +388,9 @@ pub fn mpack_rtoken(buf: &mut &[u8], buflen: &mut usize, tok: &mut mpack_token_t
             0xc2 => mpack_value(MPACK_TOKEN_BOOLEAN, 1, mpack_byte(0), tok), // false
             0xc3 => mpack_value(MPACK_TOKEN_BOOLEAN, 1, mpack_byte(1), tok), // true
             // bin 8/16/32
-            0xc4 | 0xc5 | 0xc6 => {
-                mpack_rblob(MPACK_TOKEN_BIN, TLEN!(t, 0xc4), buf, buflen, tok)
-            }
+            0xc4 | 0xc5 | 0xc6 => mpack_rblob(MPACK_TOKEN_BIN, TLEN!(t, 0xc4), buf, buflen, tok),
             // ext 8/16/32
-            0xc7 | 0xc8 | 0xc9 => {
-                mpack_rblob(MPACK_TOKEN_EXT, TLEN!(t, 0xc7), buf, buflen, tok)
-            }
+            0xc7 | 0xc8 | 0xc9 => mpack_rblob(MPACK_TOKEN_EXT, TLEN!(t, 0xc7), buf, buflen, tok),
             // float 32/64
             0xca | 0xcb => mpack_rvalue(MPACK_TOKEN_FLOAT, TLEN!(t, 0xc8), buf, buflen, tok),
             // uint 8/16/32/64
@@ -418,9 +414,7 @@ pub fn mpack_rtoken(buf: &mut &[u8], buflen: &mut usize, tok: &mut mpack_token_t
                 MPACK_OK
             }
             // str 8/16/32
-            0xd9 | 0xda | 0xdb => {
-                mpack_rblob(MPACK_TOKEN_STR, TLEN!(t, 0xd9), buf, buflen, tok)
-            }
+            0xd9 | 0xda | 0xdb => mpack_rblob(MPACK_TOKEN_STR, TLEN!(t, 0xd9), buf, buflen, tok),
             // array 16/32
             0xdc | 0xdd => mpack_rblob(MPACK_TOKEN_ARRAY, TLEN!(t, 0xdb), buf, buflen, tok),
             // map 16/32
@@ -918,7 +912,12 @@ fn mpack_is_be() -> i32 {
 mod tests {
     use super::*;
 
-    fn tok_value(r#type: mpack_token_type_t, length: mpack_uint32_t, lo: u32, hi: u32) -> mpack_token_t {
+    fn tok_value(
+        r#type: mpack_token_type_t,
+        length: mpack_uint32_t,
+        lo: u32,
+        hi: u32,
+    ) -> mpack_token_t {
         mpack_token_t {
             r#type,
             length,
@@ -1026,12 +1025,18 @@ mod tests {
         let mut buf: &[u8] = &bytes;
         let mut buflen = bytes.len();
         let mut tok = mpack_token_t::default();
-        assert_eq!(mpack_read(&mut tb, &mut buf, &mut buflen, &mut tok), MPACK_OK);
+        assert_eq!(
+            mpack_read(&mut tb, &mut buf, &mut buflen, &mut tok),
+            MPACK_OK
+        );
         assert_eq!(tok.r#type, MPACK_TOKEN_STR);
         assert_eq!(tok.length, 3);
         // Next read yields the CHUNK with the 3 payload bytes.
         let mut chunk = mpack_token_t::default();
-        assert_eq!(mpack_read(&mut tb, &mut buf, &mut buflen, &mut chunk), MPACK_OK);
+        assert_eq!(
+            mpack_read(&mut tb, &mut buf, &mut buflen, &mut chunk),
+            MPACK_OK
+        );
         assert_eq!(chunk.r#type, MPACK_TOKEN_CHUNK);
         match &chunk.data {
             mpack_token_data::chunk_ptr(b) => assert_eq!(b, b"abc"),

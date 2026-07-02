@@ -161,14 +161,15 @@ mod tests {
         use std::cell::RefCell;
         thread_local! { static SEEN: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) }; }
         super::SET_HOST_HOOK.with(|h| {
-            *h.borrow_mut() = Some(Box::new(|a: &str| SEEN.with(|s| s.borrow_mut().push(a.to_string()))));
+            *h.borrow_mut() = Some(Box::new(|a: &str| {
+                SEEN.with(|s| s.borrow_mut().push(a.to_string()))
+            }));
         });
         super::do_set("number tw=80");
         SEEN.with(|s| assert_eq!(s.borrow().as_slice(), &["number tw=80".to_string()]));
         // and vimlrs' own option table still tracks it (dual-write):
         assert!(super::findoption("tw").is_some());
     }
-
 
     #[test]
     fn set_and_get_bool_and_number() {

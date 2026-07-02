@@ -2821,10 +2821,7 @@ pub fn get_lval(
             && pc != Some(b'[')
             && pc != Some(b'.')
         {
-            crate::ported::message::semsg(&format!(
-                "E488: Trailing characters: {}",
-                &name[p..]
-            ));
+            crate::ported::message::semsg(&format!("E488: Trailing characters: {}", &name[p..]));
             return None;
         }
         lp.ll_exp_name = make_expanded_name(name, es, ee);
@@ -2916,8 +2913,7 @@ pub fn set_var_lval(
 
             if lp.ll_range && rettv.v_type == VAR_BLOB {
                 if lp.ll_empty2 {
-                    lp.ll_n2 =
-                        crate::ported::eval::typval::tv_blob_len(&blob_rc.borrow()) - 1;
+                    lp.ll_n2 = crate::ported::eval::typval::tv_blob_len(&blob_rc.borrow()) - 1;
                 }
                 let src = match &rettv.vval {
                     v_blob(Some(b)) => b.clone(),
@@ -2974,7 +2970,9 @@ pub fn set_var_lval(
     } else if crate::ported::eval::typval::value_check_lock(
         // c: value_check_lock(ll_newkey == NULL ? ll_tv->v_lock : ll_tv->vval.v_dict->dv_lock, …)
         if lp.ll_newkey.is_none() {
-            lp.ll_tv.get().map_or(VarLockStatus::VAR_UNLOCKED, |t| t.v_lock)
+            lp.ll_tv
+                .get()
+                .map_or(VarLockStatus::VAR_UNLOCKED, |t| t.v_lock)
         } else {
             lp.ll_dict
                 .as_ref()
@@ -5402,7 +5400,9 @@ mod tests {
         // Assign 99; the write persists through the aliased Rc.
         let mut rettv = typval_T::from(99);
         set_var_lval(&mut lp, 0, &mut rettv, true, false, Some("="));
-        assert!(matches!(d.borrow().dv_hashtab.get("a"), Some(t) if matches!(t.vval, v_number(99))));
+        assert!(
+            matches!(d.borrow().dv_hashtab.get("a"), Some(t) if matches!(t.vval, v_number(99)))
+        );
     }
 
     #[test]

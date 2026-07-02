@@ -40,6 +40,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use crate::ported::eval::encode::encode_list_write;
+use crate::ported::eval::string2float; // c: string2float() (eval.c)
 use crate::ported::eval::typval::{
     tv_blob_alloc_ret, tv_clear, tv_dict_add, tv_dict_alloc, tv_dict_find, tv_list_alloc,
     tv_list_append_list, tv_list_append_number, tv_list_append_owned_tv, tv_list_len, tv_list_ref,
@@ -48,16 +50,14 @@ use crate::ported::eval::typval_defs_h::{
     list_T, typval_T, typval_vval_union::*, varnumber_T, BoolVarValue::*, SpecialVarValue::*,
     VarLockStatus::VAR_UNLOCKED, VarType::*, VARNUMBER_MAX,
 };
-use crate::ported::eval::encode::encode_list_write;
-use crate::ported::eval::string2float; // c: string2float() (eval.c)
 use crate::ported::eval_h::{FAIL, OK};
+use crate::ported::mbyte::{utf_char2bytes, utf_char2len, utf_ptr2char, utf_ptr2len};
+use crate::ported::message::{emsg, semsg};
 use crate::ported::mpack::{
     mpack_data_t, mpack_parse, mpack_parser_init, mpack_parser_t, mpack_token_data,
     mpack_token_type_t::*, mpack_unpack_boolean, mpack_unpack_float, mpack_unpack_sint,
     mpack_unpack_uint, MPACK_OK,
 };
-use crate::ported::mbyte::{utf_char2bytes, utf_char2len, utf_ptr2char, utf_ptr2len};
-use crate::ported::message::{emsg, semsg};
 
 // ── ascii_defs.h control-character constants used by the JSON grammar. ──
 const NUL: u8 = 0x00;
@@ -196,9 +196,8 @@ fn json_decoder_pop(
     didcomma: &mut bool,
     didcolon: &mut bool,
 ) -> i32 {
-    let suffix = |loc: usize| -> String {
-        String::from_utf8_lossy(&buf[loc.min(buf.len())..]).into_owned()
-    };
+    let suffix =
+        |loc: usize| -> String { String::from_utf8_lossy(&buf[loc.min(buf.len())..]).into_owned() };
     // c: if (kv_size(*container_stack) == 0) { kv_push(*stack, obj); return OK; }
     if container_stack.is_empty() {
         stack.push(obj);
@@ -316,7 +315,7 @@ fn json_decoder_pop(
             let mut ov = obj.val;
             tv_clear(&mut ov); // c: tv_clear(&obj.val);
             container_stack.pop(); // c: (void)kv_pop(*container_stack);
-            // c: ValuesStackItem last_container_val = kv_A(*stack, stack_index);
+                                   // c: ValuesStackItem last_container_val = kv_A(*stack, stack_index);
             let dc = stack[last_container.stack_index].didcomma;
             let dcol = stack[last_container.stack_index].didcolon;
             // c: while (kv_size(*stack) > stack_index) tv_clear(&(kv_pop(*stack).val));
@@ -494,7 +493,14 @@ fn parse_json_string(
                     break 'string;
                 }
                 let ch_len = utf_char2len(ch) as usize;
-                debug_assert!(ch_len == if ch != 0 { utf_ptr2len(&buf[p..]) as usize } else { 1 });
+                debug_assert!(
+                    ch_len
+                        == if ch != 0 {
+                            utf_ptr2len(&buf[p..]) as usize
+                        } else {
+                            1
+                        }
+                );
                 len += ch_len;
                 p += ch_len;
             }
@@ -542,7 +548,8 @@ fn parse_json_string(
                             &ubuf_s,
                             None,
                             None,
-                            crate::ported::charset::STR2NR_HEX | crate::ported::charset::STR2NR_FORCE,
+                            crate::ported::charset::STR2NR_HEX
+                                | crate::ported::charset::STR2NR_FORCE,
                             None,
                             Some(&mut ch),
                             4,
@@ -719,9 +726,9 @@ fn parse_json_number(
             vval: v_number(0),
         };
         let exp_num_len = p - s; // c: const size_t exp_num_len = (size_t)(p - s);
-        // RUST-PORT NOTE: C passes the NUL-terminated `s` and lets string2float /
-        // vim_str2nr find the token; here the scanned slice buf[s..p] (all ASCII)
-        // is passed, which is exactly that token.
+                                 // RUST-PORT NOTE: C passes the NUL-terminated `s` and lets string2float /
+                                 // vim_str2nr find the token; here the scanned slice buf[s..p] (all ASCII)
+                                 // is passed, which is exactly that token.
         let numstr = String::from_utf8_lossy(&buf[s..p]).into_owned();
         if fracs.is_some() || exps.is_some() {
             // Convert floating-point number
@@ -1383,7 +1390,10 @@ fn typval_parse_enter(parser: &mut mpack_parser_t<TypvalNodeData>, node: usize) 
         MPACK_TOKEN_UINT => {
             // c: positive_integer_to_special_typval(result, mpack_unpack_uint(node->tok));
             let mut tmp = typval_T::default();
-            positive_integer_to_special_typval(&mut tmp, mpack_unpack_uint(&parser.items[node].tok));
+            positive_integer_to_special_typval(
+                &mut tmp,
+                mpack_unpack_uint(&parser.items[node].tok),
+            );
             set_result(&result, tmp);
         }
         MPACK_TOKEN_FLOAT => {
@@ -1711,10 +1721,7 @@ mod tests {
 
     #[test]
     fn nested_and_whitespace() {
-        assert_eq!(
-            roundtrip(" { \"k\" : [ 1 , 2 ] } "),
-            r#"{"k":[1,2]}"#
-        );
+        assert_eq!(roundtrip(" { \"k\" : [ 1 , 2 ] } "), r#"{"k":[1,2]}"#);
     }
 
     #[test]

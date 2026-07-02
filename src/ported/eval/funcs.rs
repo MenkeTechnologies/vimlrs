@@ -5056,7 +5056,6 @@ fn mpack_pack_map_len(n: usize, out: &mut Vec<u8>) {
     }
 }
 
-
 /// Collect the input byte stream of `msgpackparse()`: a Blob is taken verbatim;
 /// a readfile()-style List is joined on '\n' (the project's text convention).
 fn mpack_input_bytes(tv: &typval_T) -> Result<Vec<u8>, &'static str> {

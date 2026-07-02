@@ -77,7 +77,8 @@ pub fn utf_ptr2char(p: &[u8]) -> i32 {
             .wrapping_shl(12)
             .wrapping_add(v1.wrapping_shl(6))
             .wrapping_add(v2)
-            .wrapping_sub((0xE0u32 << 12).wrapping_add(s(6)).wrapping_add(s(0))) as i32;
+            .wrapping_sub((0xE0u32 << 12).wrapping_add(s(6)).wrapping_add(s(0)))
+            as i32;
     }
 
     let v3 = byte(3);

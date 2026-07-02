@@ -1214,7 +1214,7 @@ pub fn get_current_funccal() -> Option<std::rc::Rc<std::cell::RefCell<funccall_T
 /// `fc_caller` walk is skipped — the current funccall is returned.
 pub fn get_funccal() -> Option<std::rc::Rc<std::cell::RefCell<funccall_T>>> {
     let funccal = current_funccal.with(|c| c.borrow().clone()); // c:3931
-    // c:3932 debug_backtrace_level is always 0 here (no debugger).
+                                                                // c:3932 debug_backtrace_level is always 0 here (no debugger).
     funccal
 }
 
@@ -1255,7 +1255,7 @@ pub fn do_return(
             }
             // c:3654 cleanup_conditionals() -> idx < 0 (no cstack): else branch.
             fc.fc_returned = true; // c:3689
-            // c:3694 store the return value.
+                                   // c:3694 store the return value.
             if !reanimate {
                 if let Some(v) = rettv {
                     fc.fc_rettv = Some(v);
@@ -1274,9 +1274,7 @@ pub fn do_return(
 /// parent-`funccall_T` chain; the reduced `ufunc_T` does not model `uf_scoped`
 /// (closures capture their enclosing scope at compile time in the bridge), so
 /// `fc_func->uf_scoped` is always absent → `None` (mirrors [`find_var_in_scoped_ht`]).
-pub fn find_hi_in_scoped_ht(
-    _name: &str,
-) -> Option<crate::ported::eval::typval_defs_h::typval_T> {
+pub fn find_hi_in_scoped_ht(_name: &str) -> Option<crate::ported::eval::typval_defs_h::typval_T> {
     // c:4025 current_funccal == NULL || fc_func->uf_scoped == NULL -> return NULL.
     None
 }
