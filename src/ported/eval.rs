@@ -2440,7 +2440,7 @@ pub fn eval_method(method: &str, args: &str, basetv: &typval_T, rettv: &mut typv
 pub fn eval_lambda(
     arg: &mut &str,
     rettv: &mut typval_T,
-    mut evalarg: Option<&mut evalarg_T>,
+    evalarg: Option<&mut evalarg_T>,
     verbose: bool,
 ) -> i32 {
     let evaluate = evalarg

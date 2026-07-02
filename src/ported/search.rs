@@ -21,7 +21,7 @@
 use crate::ported::buffer::{curbuf, ml_get};
 use crate::ported::eval::eval_expr_to_bool;
 use crate::ported::eval::typval_defs_h::typval_T;
-use crate::ported::eval_h::{FAIL, OK};
+use crate::ported::eval_h::FAIL;
 use crate::ported::window::{colnr_T, curwin, linenr_T, pos_T};
 use crate::viml_regex::Regex;
 use std::cell::RefCell;

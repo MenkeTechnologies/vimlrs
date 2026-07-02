@@ -14,6 +14,12 @@
 #![allow(unused_assignments)]
 #![allow(unused_parens)]
 #![allow(private_interfaces)]
+// Faithful C ports keep the upstream lowercase global names (p_ws, msg_silent,
+// capture_ga, ...) and include reference ports no runtime path calls (the
+// bytecode frontend supersedes them), so these lints don't apply to this subtree.
+#![allow(non_upper_case_globals)]
+#![allow(dead_code)]
+#![allow(unused_variables)]
 
 /// Port of `src/nvim/buffer.c` + `memline.c` (subset: the `buf_T` model, buffer
 /// list `buflist_*`, and the `ml_*` line store behind `getbufline`/`bufnr`/…).

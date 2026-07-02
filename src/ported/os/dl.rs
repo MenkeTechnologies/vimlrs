@@ -15,7 +15,7 @@
 #![allow(dead_code, non_snake_case, non_camel_case_types)]
 
 use std::ffi::{CStr, CString};
-use std::os::raw::{c_char, c_int, c_void};
+use std::os::raw::{c_char, c_int};
 
 // c: os/dl.c uses uv_dlopen/uv_dlsym/uv_dlclose; here the POSIX equivalents from
 // libc (via nix). Imported (not re-declared) so no non-C `fn` names are introduced.

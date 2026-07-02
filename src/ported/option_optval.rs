@@ -634,7 +634,7 @@ pub fn find_option_var_end(arg: &str) -> (Option<String>, OptIndex, i32) {
     let bytes = arg.as_bytes();
     // c:6302 p++;  (skip the '&' / '+' sigil)
     let mut p = 1usize;
-    let mut opt_flags;
+    let opt_flags;
 
     // c:6303 if (*p == 'g' && p[1] == ':') { *opt_flags = OPT_GLOBAL; p += 2; }
     if p + 1 < bytes.len() && bytes[p] == b'g' && bytes[p + 1] == b':' {
