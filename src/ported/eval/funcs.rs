@@ -2991,9 +2991,12 @@ pub fn f_did_filetype(_argvars: &[typval_T], rettv: &mut typval_T) {
 pub fn f_eventhandler(_argvars: &[typval_T], rettv: &mut typval_T) {
     *rettv = typval_T::from(0 as varnumber_T);
 }
-/// Port of `f_hlexists()` — no highlight groups → 0.
-pub fn f_hlexists(_argvars: &[typval_T], rettv: &mut typval_T) {
-    *rettv = typval_T::from(0 as varnumber_T);
+/// Port of `f_hlexists()` — whether highlight group `{name}` exists. Standalone
+/// there is no UI, but a sourced colorscheme/vimrc defines groups via
+/// `:highlight`; those are tracked in the highlight registry (see [`HL_GROUPS`]).
+pub fn f_hlexists(argvars: &[typval_T], rettv: &mut typval_T) {
+    let name = argvars.first().map(tv_get_string).unwrap_or_default();
+    *rettv = typval_T::from(hl_exists(&name) as varnumber_T);
 }
 /// Port of `f_windowsversion()` — non-Windows → "".
 pub fn f_windowsversion(_argvars: &[typval_T], rettv: &mut typval_T) {
@@ -3969,6 +3972,274 @@ pub fn f_confirm(argvars: &[typval_T], rettv: &mut typval_T) {
 // (`["", ""]`), an empty result List, a cursor/position set that cannot apply
 // (-1), or a timer that cannot be created without an event loop (-1).
 
+// ── Highlight-group registry (EXTENSION — no `csrc/` counterpart) ─────────────
+//
+// A standalone interpreter has no UI, so csrc's highlight groups never exist and
+// the C `:highlight` machinery (`syn_name2id`/`highlight_exists`/`syn_id2attr`)
+// finds nothing. But a sourced colorscheme or vimrc DEFINES groups via
+// `:highlight {group} …` and real scripts guard on `hlexists()`/`hlID()` before
+// (re)defining or reading a group. We keep a minimal ordered registry so those
+// reflect what the running script has actually defined; an embedding editor (see
+// [`crate::fusevm_bridge`]) additionally receives each definition to map onto its
+// own theme. Group name lookup is case-insensitive, matching Vim.
+
+/// One `:highlight` definition: either a link (`hi link A B`) or the raw
+/// `key=val` attributes (`ctermfg=…`, `guifg=…`, `cterm=…`, `gui=…`, …).
+#[derive(Default, Clone)]
+pub struct HlGroup {
+    pub attrs: std::collections::HashMap<String, String>,
+    pub link: Option<String>,
+    pub cleared: bool,
+}
+
+#[derive(Default)]
+pub struct HlRegistry {
+    /// Group name by id-1 (Vim highlight ids are 1-based, allocation order).
+    order: Vec<String>,
+    /// Canonical (lowercase) name → definition.
+    groups: std::collections::HashMap<String, HlGroup>,
+}
+
+thread_local! {
+    pub static HL_GROUPS: std::cell::RefCell<HlRegistry> =
+        std::cell::RefCell::new(HlRegistry::default());
+}
+
+/// Allocate (or find) the 1-based id for `name`, creating an empty slot the first
+/// time a group is named — mirrors `syn_check_group()`.
+fn hl_intern(reg: &mut HlRegistry, name: &str) -> varnumber_T {
+    let key = name.to_ascii_lowercase();
+    if let Some(pos) = reg.order.iter().position(|g| *g == key) {
+        return (pos + 1) as varnumber_T;
+    }
+    reg.order.push(key.clone());
+    reg.groups.entry(key).or_default();
+    reg.order.len() as varnumber_T
+}
+
+/// Apply one `:highlight` command's argument text to the registry and return the
+/// target group name (for the host hook), or `None` for an argument-less listing
+/// query. Handles `hi[!] [default] {group} key=val…`, `hi link A B`,
+/// `hi clear [group]`, and `hi default link A B`.
+pub fn hl_define_from_args(args: &str) -> Option<String> {
+    let args = args.trim();
+    if args.is_empty() {
+        return None; // bare `:highlight` — a listing query.
+    }
+    let mut toks = args.split_whitespace().peekable();
+    // Skip a leading `default` keyword (does not change the target group).
+    let mut first = *toks.peek()?;
+    if first == "default" {
+        toks.next();
+        first = *toks.peek()?;
+    }
+    // `hi clear` / `hi clear {group}`.
+    if first == "clear" {
+        toks.next();
+        return HL_GROUPS.with(|r| {
+            let mut reg = r.borrow_mut();
+            match toks.next() {
+                Some(g) => {
+                    hl_intern(&mut reg, g);
+                    let key = g.to_ascii_lowercase();
+                    if let Some(def) = reg.groups.get_mut(&key) {
+                        *def = HlGroup {
+                            cleared: true,
+                            ..HlGroup::default()
+                        };
+                    }
+                    Some(g.to_string())
+                }
+                None => {
+                    // `hi clear` alone resets every group.
+                    for def in reg.groups.values_mut() {
+                        *def = HlGroup {
+                            cleared: true,
+                            ..HlGroup::default()
+                        };
+                    }
+                    None
+                }
+            }
+        });
+    }
+    // `hi link {from} {to}` / `hi! link …` / `hi default link …`.
+    if first == "link" {
+        toks.next();
+        let from = toks.next()?;
+        let to = toks.next()?;
+        return HL_GROUPS.with(|r| {
+            let mut reg = r.borrow_mut();
+            hl_intern(&mut reg, from);
+            hl_intern(&mut reg, to);
+            let key = from.to_ascii_lowercase();
+            let def = reg.groups.entry(key).or_default();
+            def.link = Some(to.to_string());
+            def.cleared = false;
+            Some(from.to_string())
+        });
+    }
+    // `hi {group} key=val …`.
+    let group = toks.next()?.to_string();
+    HL_GROUPS.with(|r| {
+        let mut reg = r.borrow_mut();
+        hl_intern(&mut reg, &group);
+        let key = group.to_ascii_lowercase();
+        let def = reg.groups.entry(key).or_default();
+        def.cleared = false;
+        def.link = None;
+        for kv in toks {
+            if let Some((k, v)) = kv.split_once('=') {
+                def.attrs.insert(k.to_ascii_lowercase(), v.to_string());
+            }
+        }
+        Some(group)
+    })
+}
+
+/// A highlight group resolved through its `link` chain, for an embedding editor
+/// to translate into its own theme. Colours are the raw Vim tokens (`#rrggbb`,
+/// a cterm number, or a colour name like `DarkBlue`); `attrs` is the union of the
+/// `gui=`/`cterm=` display-attribute lists (`bold`, `italic`, `underline`, …).
+#[derive(Default, Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedHl {
+    pub guifg: Option<String>,
+    pub guibg: Option<String>,
+    pub guisp: Option<String>,
+    pub ctermfg: Option<String>,
+    pub ctermbg: Option<String>,
+    pub attrs: Vec<String>,
+    pub cleared: bool,
+}
+
+/// Names of every highlight group named this session, in allocation order.
+pub fn hl_names() -> Vec<String> {
+    HL_GROUPS.with(|r| r.borrow().order.clone())
+}
+
+/// Resolve group `name` (following `link`s) to concrete colours + attributes for
+/// an embedding editor. `None` if the group was never named; a `cleared` group
+/// resolves to an all-empty `ResolvedHl` with `cleared = true`.
+pub fn hl_resolved(name: &str) -> Option<ResolvedHl> {
+    HL_GROUPS.with(|r| {
+        let reg = r.borrow();
+        let def = reg.groups.get(&name.to_ascii_lowercase())?;
+        if def.cleared {
+            return Some(ResolvedHl {
+                cleared: true,
+                ..ResolvedHl::default()
+            });
+        }
+        let attr_list = hl_lookup(&reg, name, "gui", 0)
+            .or_else(|| hl_lookup(&reg, name, "cterm", 0))
+            .or_else(|| hl_lookup(&reg, name, "term", 0))
+            .map(|list| {
+                list.split(',')
+                    .filter(|a| !a.eq_ignore_ascii_case("none") && !a.is_empty())
+                    .map(|a| a.to_ascii_lowercase())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        // A colour token of "NONE" means "no colour" — treat as unset.
+        let colour = |key: &str| {
+            hl_lookup(&reg, name, key, 0).filter(|v| !v.eq_ignore_ascii_case("none"))
+        };
+        Some(ResolvedHl {
+            guifg: colour("guifg"),
+            guibg: colour("guibg"),
+            guisp: colour("guisp"),
+            ctermfg: colour("ctermfg"),
+            ctermbg: colour("ctermbg"),
+            attrs: attr_list,
+            cleared: false,
+        })
+    })
+}
+
+/// Resolve a highlight `key` (following `link`s) to a string attribute value.
+fn hl_lookup(reg: &HlRegistry, name: &str, key: &str, depth: u8) -> Option<String> {
+    if depth > 16 {
+        return None;
+    }
+    let def = reg.groups.get(&name.to_ascii_lowercase())?;
+    if let Some(v) = def.attrs.get(key) {
+        return Some(v.clone());
+    }
+    if let Some(link) = &def.link {
+        return hl_lookup(reg, link, key, depth + 1);
+    }
+    None
+}
+
+/// 1-based id of highlight group `name`, or 0 if never named (`syn_name2id`).
+pub fn hl_id(name: &str) -> varnumber_T {
+    HL_GROUPS.with(|r| {
+        let reg = r.borrow();
+        reg.order
+            .iter()
+            .position(|g| *g == name.to_ascii_lowercase())
+            .map(|p| (p + 1) as varnumber_T)
+            .unwrap_or(0)
+    })
+}
+
+/// Whether highlight group `name` exists (has been named and not cleared).
+pub fn hl_exists(name: &str) -> bool {
+    HL_GROUPS.with(|r| {
+        r.borrow()
+            .groups
+            .get(&name.to_ascii_lowercase())
+            .is_some_and(|d| !d.cleared)
+    })
+}
+
+/// `synIDattr(id, what[, mode])` over the registry: resolve group id → name, then
+/// the requested attribute. Colour queries (`fg`/`bg`/`sp`, with an optional `#`)
+/// prefer the GUI value in "gui" mode and the cterm value otherwise; boolean
+/// attributes (`bold`/`italic`/…) test the relevant `cterm=`/`gui=` list.
+fn hl_synidattr(id: varnumber_T, what: &str, mode: &str) -> String {
+    if id < 1 {
+        return String::new();
+    }
+    HL_GROUPS.with(|r| {
+        let reg = r.borrow();
+        let Some(name) = reg.order.get((id - 1) as usize).cloned() else {
+            return String::new();
+        };
+        let gui = mode == "gui" || mode.is_empty();
+        let what = what.trim_end_matches('#');
+        let colour = |g_key: &str, c_key: &str| -> String {
+            let primary = if gui { g_key } else { c_key };
+            hl_lookup(&reg, &name, primary, 0)
+                .or_else(|| hl_lookup(&reg, &name, if gui { c_key } else { g_key }, 0))
+                .unwrap_or_default()
+        };
+        match what {
+            "name" => name,
+            "fg" => colour("guifg", "ctermfg"),
+            "bg" => colour("guibg", "ctermbg"),
+            "sp" => colour("guisp", "ctermul"),
+            "font" => hl_lookup(&reg, &name, "font", 0).unwrap_or_default(),
+            // Boolean display attributes live in the `gui=`/`cterm=`/`term=` lists.
+            "bold" | "italic" | "reverse" | "inverse" | "standout" | "underline"
+            | "undercurl" | "underdouble" | "underdotted" | "underdashed" | "strikethrough"
+            | "nocombine" => {
+                let list_key = if gui { "gui" } else { "cterm" };
+                let hit = hl_lookup(&reg, &name, list_key, 0)
+                    .or_else(|| hl_lookup(&reg, &name, "term", 0))
+                    .map(|list| {
+                        // `reverse` and `inverse` are synonyms in the attr list.
+                        let want = if what == "inverse" { "reverse" } else { what };
+                        list.split(',').any(|a| a.eq_ignore_ascii_case(want))
+                    })
+                    .unwrap_or(false);
+                if hit { "1".into() } else { String::new() }
+            }
+            _ => String::new(),
+        }
+    })
+}
+
 /// Port of `f_synID()` — no syntax highlighter → id 0.
 pub fn f_synID(_argvars: &[typval_T], rettv: &mut typval_T) {
     *rettv = typval_T::from(0 as varnumber_T);
@@ -3977,9 +4248,18 @@ pub fn f_synID(_argvars: &[typval_T], rettv: &mut typval_T) {
 pub fn f_synIDtrans(_argvars: &[typval_T], rettv: &mut typval_T) {
     *rettv = typval_T::from(0 as varnumber_T);
 }
-/// Port of `f_synIDattr()` — no syntax → "" (the C NULL string).
-pub fn f_synIDattr(_argvars: &[typval_T], rettv: &mut typval_T) {
-    *rettv = typval_T::from(String::new());
+/// Port of `f_synIDattr()`. There is no live syntax highlighter, so a `synID()`
+/// result is 0 and yields "". But `synIDattr(hlID('Group'), …)` — reading a
+/// script-defined group's colour/attributes — resolves through the highlight
+/// registry (see [`HL_GROUPS`]).
+pub fn f_synIDattr(argvars: &[typval_T], rettv: &mut typval_T) {
+    let id = argvars
+        .first()
+        .map(|a| tv_get_number_chk(a, None))
+        .unwrap_or(0);
+    let what = argvars.get(1).map(tv_get_string).unwrap_or_default();
+    let mode = argvars.get(2).map(tv_get_string).unwrap_or_default();
+    *rettv = typval_T::from(hl_synidattr(id, &what, &mode));
 }
 /// Port of `f_synstack()` — `tv_list_set_ret(rettv, NULL)`, never filled with no
 /// buffer → empty List.
@@ -8308,9 +8588,11 @@ pub fn f_foldtextresult(_argvars: &[typval_T], rettv: &mut typval_T) {
 }
 
 /// Port of `f_highlight_exists()` (Neovim highlight_group.c) — whether highlight
-/// group `{name}` is defined. No highlight groups standalone → 0.
-pub fn f_highlight_exists(_argvars: &[typval_T], rettv: &mut typval_T) {
-    rettv.vval = v_number(0);
+/// group `{name}` is defined. Tracks groups defined by a sourced
+/// colorscheme/vimrc via the highlight registry (see [`HL_GROUPS`]).
+pub fn f_highlight_exists(argvars: &[typval_T], rettv: &mut typval_T) {
+    let name = argvars.first().map(tv_get_string).unwrap_or_default();
+    rettv.vval = v_number(hl_exists(&name) as varnumber_T);
 }
 
 /// Port of `f_diff_filler()` (Neovim diff.c) — the number of filler lines above
@@ -8323,9 +8605,10 @@ pub fn f_diff_filler(_argvars: &[typval_T], rettv: &mut typval_T) {
 /// group named `{name}`, or 0 when it does not exist. Standalone there are no
 /// highlight groups, so `syn_name2id()` finds nothing → 0. `highlightID()` is the
 /// deprecated alias and shares this implementation.
-pub fn f_hlID(_argvars: &[typval_T], rettv: &mut typval_T) {
+pub fn f_hlID(argvars: &[typval_T], rettv: &mut typval_T) {
     // c: rettv->vval.v_number = syn_name2id(tv_get_string(&argvars[0]));
-    rettv.vval = v_number(0);
+    let name = argvars.first().map(tv_get_string).unwrap_or_default();
+    rettv.vval = v_number(hl_id(&name));
 }
 
 /// Port of `f_diff_hlID()` (Neovim diff.c) — the highlight ID for diff mode at

@@ -404,6 +404,14 @@ pub const VIML_AUGROUP: u16 = 3567;
 pub const VIML_DOAUTOCMD: u16 = 3568;
 /// `:[range]cmd` statement: pop the raw line, run it against the buffer.
 pub const VIML_EXCMD: u16 = 3569;
+/// `:colorscheme {name}` statement: pop the name, source `colors/{name}.vim`.
+pub const VIML_COLORSCHEME: u16 = 3576;
+/// `:highlight {args}` statement: pop the args, define a highlight group.
+pub const VIML_HIGHLIGHT: u16 = 3577;
+/// `:syntax {args}` statement: pop the args, forward to the host (else no-op).
+pub const VIML_SYNTAX: u16 = 3578;
+/// `:filetype {args}` statement: pop the args, forward to the host (else no-op).
+pub const VIML_FILETYPE: u16 = 3579;
 /// `:source {file}`: pop the filename, read and run it in the current scope.
 pub const VIML_SOURCE: u16 = 3500;
 /// `:unlet {name}`: pop the name, delete the variable.
@@ -2595,6 +2603,90 @@ fn b_excmd(vm: &mut VM, _: u8) -> Value {
     Value::Undef
 }
 
+/// `:colorscheme {name}` statement. Sets `g:colors_name`, sources the matching
+/// `colors/{name}.vim` from the runtime path (which fires its `:highlight`
+/// commands, populating the registry + firing the highlight host hook), then
+/// fires the colorscheme host hook so an embedding editor can apply its theme.
+/// A bare `:colorscheme` (no name) is a query — echo the current scheme.
+fn b_colorscheme(vm: &mut VM, _: u8) -> Value {
+    let name = tv_get_string(&pop_tv(vm));
+    let name = name.trim();
+    if name.is_empty() {
+        // Query: echo the active scheme (blank if none), matching Vim.
+        let cur = crate::ported::eval::vars::get_var_value("g:colors_name").unwrap_or_default();
+        echo_write(&format!("{cur}\n"));
+        return Value::Undef;
+    }
+    // Record the active scheme name (Vim sets this before sourcing).
+    crate::ported::eval::vars::set_var(
+        "g:colors_name",
+        "g:colors_name".len(),
+        tv_str(name.to_string()),
+        false,
+    );
+    // Source colors/{name}.vim if we can find it — this runs the `:highlight`
+    // commands that define the scheme.
+    if let Some(path) = resolve_colorscheme(name) {
+        if let Ok(src) = std::fs::read_to_string(&path) {
+            let sname = std::fs::canonicalize(&path)
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| path.display().to_string());
+            crate::ported::eval::fs::push_sourcing_name(sname);
+            let _ = run_source_nested(&src);
+            crate::ported::eval::fs::pop_sourcing_name();
+        }
+    }
+    // Tell the host to (re)build + apply its theme from what was just defined.
+    COLORSCHEME_HOST_HOOK.with(|h| {
+        if let Some(f) = h.borrow().as_ref() {
+            f(name);
+        }
+    });
+    Value::Undef
+}
+
+/// `:highlight {args}` statement. Applies the definition to the highlight
+/// registry (so `hlexists()`/`hlID()`/`synIDattr()` see it) and mirrors the raw
+/// args to the highlight host hook so an embedding editor can map it onto its
+/// theme. A bare `:highlight` / `:highlight {group}` listing query is a no-op.
+fn b_highlight(vm: &mut VM, _: u8) -> Value {
+    let args = tv_get_string(&pop_tv(vm));
+    if let Some(group) = crate::ported::eval::funcs::hl_define_from_args(&args) {
+        let _ = group;
+        HIGHLIGHT_HOST_HOOK.with(|h| {
+            if let Some(f) = h.borrow().as_ref() {
+                f(args.trim());
+            }
+        });
+    }
+    Value::Undef
+}
+
+/// `:syntax {args}` statement. Standalone this is a no-op (there is no live
+/// highlighter); the raw args are forwarded to the syntax host hook so an
+/// embedding editor may act on `syntax on`/`off`/`enable`.
+fn b_syntax(vm: &mut VM, _: u8) -> Value {
+    let args = tv_get_string(&pop_tv(vm));
+    SYNTAX_HOST_HOOK.with(|h| {
+        if let Some(f) = h.borrow().as_ref() {
+            f(args.trim());
+        }
+    });
+    Value::Undef
+}
+
+/// `:filetype {args}` statement. Standalone no-op; forwarded to the filetype
+/// host hook so an embedding editor may act on `filetype plugin indent on` etc.
+fn b_filetype(vm: &mut VM, _: u8) -> Value {
+    let args = tv_get_string(&pop_tv(vm));
+    FILETYPE_HOST_HOOK.with(|h| {
+        if let Some(f) = h.borrow().as_ref() {
+            f(args.trim());
+        }
+    });
+    Value::Undef
+}
+
 /// User-command invocation: pop the raw line (`Name[!] args`), expand the
 /// command's replacement and run it; error E492 if there is no such command.
 fn b_usercmd(vm: &mut VM, _: u8) -> Value {
@@ -2943,6 +3035,115 @@ pub fn install_map_hook(f: Box<dyn Fn(&str)>) {
     MAP_HOST_HOOK.with(|h| *h.borrow_mut() = Some(f));
 }
 
+// ── COLORSCHEME / HIGHLIGHT / SYNTAX / FILETYPE HOST HOOKS ────────────────────
+//
+// EXTENSION — no `csrc/` counterpart. A vimrc that runs `:colorscheme molokai`
+// selects a scheme; Vim then sources `colors/molokai.vim` from the runtime path,
+// which issues the `:highlight` commands that paint every group. vimlrs sources
+// that file itself (via [`b_colorscheme`], firing each `:highlight` through the
+// registry + the highlight host hook), so an embedding editor (zemacs) can
+// translate the vim highlight groups into its own theme and apply it.
+
+thread_local! {
+    /// Extra directories (highest priority first) searched for `colors/{name}.vim`
+    /// in addition to the default Vim runtime dirs. A host prepends its own theme
+    /// directory here so bundled schemes resolve.
+    static COLORSCHEME_DIRS: RefCell<Vec<std::path::PathBuf>> = const { RefCell::new(Vec::new()) };
+    /// Fired with the color-scheme name AFTER `colors/{name}.vim` has been sourced,
+    /// so the host can rebuild + apply its theme from the highlights just defined.
+    #[allow(clippy::type_complexity)]
+    static COLORSCHEME_HOST_HOOK: RefCell<Option<Box<dyn Fn(&str)>>> = const { RefCell::new(None) };
+    /// Fired with each `:highlight` command's raw argument text (e.g.
+    /// `"Normal ctermfg=252 guifg=#d0d0d0 guibg=#1c1c1c"`) as it runs.
+    #[allow(clippy::type_complexity)]
+    static HIGHLIGHT_HOST_HOOK: RefCell<Option<Box<dyn Fn(&str)>>> = const { RefCell::new(None) };
+    /// Fired with each `:syntax` command's raw argument text (`"on"`, `"off"`, …).
+    #[allow(clippy::type_complexity)]
+    static SYNTAX_HOST_HOOK: RefCell<Option<Box<dyn Fn(&str)>>> = const { RefCell::new(None) };
+    /// Fired with each `:filetype` command's raw argument text (`"plugin indent on"`).
+    #[allow(clippy::type_complexity)]
+    static FILETYPE_HOST_HOOK: RefCell<Option<Box<dyn Fn(&str)>>> = const { RefCell::new(None) };
+}
+
+// Re-export the highlight-registry readers so an embedding editor can snapshot
+// the groups a sourced colorscheme/vimrc defined (see `install_colorscheme_hook`).
+pub use crate::ported::eval::funcs::{hl_names, hl_resolved, ResolvedHl};
+
+/// Prepend a directory searched (before the default Vim runtime dirs) for
+/// `colors/{name}.vim` when `:colorscheme {name}` runs.
+pub fn add_colorscheme_dir(dir: std::path::PathBuf) {
+    COLORSCHEME_DIRS.with(|d| d.borrow_mut().insert(0, dir));
+}
+
+/// Install a host callback fired with the scheme name once `:colorscheme` has
+/// sourced its `colors/{name}.vim`.
+pub fn install_colorscheme_hook(f: Box<dyn Fn(&str)>) {
+    COLORSCHEME_HOST_HOOK.with(|h| *h.borrow_mut() = Some(f));
+}
+
+/// Install a host callback fired with each `:highlight` command's raw args.
+pub fn install_highlight_hook(f: Box<dyn Fn(&str)>) {
+    HIGHLIGHT_HOST_HOOK.with(|h| *h.borrow_mut() = Some(f));
+}
+
+/// Install a host callback fired with each `:syntax` command's raw args.
+pub fn install_syntax_hook(f: Box<dyn Fn(&str)>) {
+    SYNTAX_HOST_HOOK.with(|h| *h.borrow_mut() = Some(f));
+}
+
+/// Install a host callback fired with each `:filetype` command's raw args.
+pub fn install_filetype_hook(f: Box<dyn Fn(&str)>) {
+    FILETYPE_HOST_HOOK.with(|h| *h.borrow_mut() = Some(f));
+}
+
+/// Resolve `colors/{name}.vim` against the host-registered dirs and the default
+/// Vim runtime dirs (`~/.vim`, `~/.config/nvim`, `$VIMRUNTIME`, plus
+/// `pack/*/start/*` and `pack/*/opt/*` bundles). Returns the first existing file.
+fn resolve_colorscheme(name: &str) -> Option<std::path::PathBuf> {
+    let rel = format!("colors/{name}.vim");
+    let mut roots: Vec<std::path::PathBuf> =
+        COLORSCHEME_DIRS.with(|d| d.borrow().clone());
+    if let Ok(home) = std::env::var("HOME") {
+        let home = std::path::PathBuf::from(home);
+        roots.push(home.join(".vim"));
+        roots.push(home.join(".config/nvim"));
+        roots.push(home.join(".local/share/nvim/site"));
+    }
+    if let Ok(rt) = std::env::var("VIMRUNTIME") {
+        roots.push(std::path::PathBuf::from(rt));
+    }
+    // Direct `{root}/colors/{name}.vim`.
+    for root in &roots {
+        let p = root.join(&rel);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    // Plugin bundles: `{root}/pack/*/{start,opt}/*/colors/{name}.vim`.
+    for root in &roots {
+        for pack in ["pack"] {
+            let packdir = root.join(pack);
+            let Ok(vendors) = std::fs::read_dir(&packdir) else {
+                continue;
+            };
+            for vendor in vendors.flatten() {
+                for kind in ["start", "opt"] {
+                    let Ok(plugins) = std::fs::read_dir(vendor.path().join(kind)) else {
+                        continue;
+                    };
+                    for plugin in plugins.flatten() {
+                        let p = plugin.path().join(&rel);
+                        if p.is_file() {
+                            return Some(p);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 // ── EDITOR HOST (embedding seam) ─────────────────────────────────────────────
 //
 // EXTENSION — no `csrc/` counterpart. When vimlrs runs standalone the editor
@@ -3218,6 +3419,10 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_AUGROUP, b_augroup);
     vm.register_builtin(VIML_DOAUTOCMD, b_doautocmd);
     vm.register_builtin(VIML_EXCMD, b_excmd);
+    vm.register_builtin(VIML_COLORSCHEME, b_colorscheme);
+    vm.register_builtin(VIML_HIGHLIGHT, b_highlight);
+    vm.register_builtin(VIML_SYNTAX, b_syntax);
+    vm.register_builtin(VIML_FILETYPE, b_filetype);
     vm.register_builtin(VIML_FN_JSON_ENCODE, |vm, n| call_func(vm, n, f_json_encode));
     vm.register_builtin(VIML_FN_JSON_DECODE, |vm, n| call_func(vm, n, f_json_decode));
     vm.register_builtin(VIML_FN_STRGETCHAR, |vm, n| call_func(vm, n, f_strgetchar));
@@ -4010,6 +4215,115 @@ mod tests {
         });
         // uninstall so later tests on this thread are unaffected
         MAP_HOST_HOOK.with(|h| *h.borrow_mut() = None);
+    }
+
+    /// `:highlight` populates the registry so `hlexists()`/`hlID()`/`synIDattr()`
+    /// reflect script-defined groups, and fires the highlight host hook with the
+    /// raw args.
+    #[test]
+    fn highlight_registry_and_host_hook() {
+        use std::cell::RefCell;
+        thread_local! { static SEEN: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) }; }
+        SEEN.with(|s| s.borrow_mut().clear());
+        crate::ported::eval::funcs::HL_GROUPS.with(|r| *r.borrow_mut() = Default::default());
+        install_highlight_hook(Box::new(|args: &str| {
+            SEEN.with(|s| s.borrow_mut().push(args.to_string()))
+        }));
+
+        // Before any definition the group does not exist.
+        assert_eq!(run("echo hlexists('Comment')").trim(), "0");
+
+        eval_source("highlight Normal ctermfg=252 guifg=#d0d0d0 guibg=#1c1c1c gui=bold").unwrap();
+        eval_source("hi link Comment Normal").unwrap();
+
+        // hlexists / hlID see the defined + linked groups.
+        assert_eq!(run("echo hlexists('Normal')").trim(), "1");
+        assert_eq!(run("echo hlexists('Comment')").trim(), "1");
+        assert_eq!(run("echo hlID('Normal')").trim(), "1");
+
+        // synIDattr reads colours (gui by default) and follows links.
+        assert_eq!(run("echo synIDattr(hlID('Normal'), 'fg')").trim(), "#d0d0d0");
+        assert_eq!(run("echo synIDattr(hlID('Normal'), 'fg', 'cterm')").trim(), "252");
+        assert_eq!(run("echo synIDattr(hlID('Normal'), 'bold')").trim(), "1");
+        // Comment links to Normal → inherits its foreground.
+        assert_eq!(run("echo synIDattr(hlID('Comment'), 'fg')").trim(), "#d0d0d0");
+
+        // The host hook saw each raw definition.
+        SEEN.with(|s| {
+            assert_eq!(
+                s.borrow().as_slice(),
+                &[
+                    "Normal ctermfg=252 guifg=#d0d0d0 guibg=#1c1c1c gui=bold".to_string(),
+                    "link Comment Normal".to_string(),
+                ]
+            )
+        });
+        HIGHLIGHT_HOST_HOOK.with(|h| *h.borrow_mut() = None);
+    }
+
+    /// `:colorscheme {name}` records `g:colors_name`, sources the matching
+    /// `colors/{name}.vim` from a host-registered dir (firing its `:highlight`
+    /// commands), then fires the colorscheme host hook with the name.
+    #[test]
+    fn colorscheme_sources_file_and_fires_hook() {
+        use std::cell::RefCell;
+        use std::io::Write;
+        thread_local! { static APPLIED: RefCell<Option<String>> = const { RefCell::new(None) }; }
+        APPLIED.with(|s| *s.borrow_mut() = None);
+        crate::ported::eval::funcs::HL_GROUPS.with(|r| *r.borrow_mut() = Default::default());
+
+        // A temp runtime dir holding colors/acme.vim.
+        let dir = std::env::temp_dir().join(format!("vimlrs-colo-{}", std::process::id()));
+        let colors = dir.join("colors");
+        std::fs::create_dir_all(&colors).unwrap();
+        let mut f = std::fs::File::create(colors.join("acme.vim")).unwrap();
+        writeln!(f, "highlight Normal guifg=#abcdef guibg=#111111").unwrap();
+        writeln!(f, "hi Comment guifg=#00ff00").unwrap();
+        drop(f);
+
+        add_colorscheme_dir(dir.clone());
+        install_colorscheme_hook(Box::new(|name: &str| {
+            APPLIED.with(|s| *s.borrow_mut() = Some(name.to_string()))
+        }));
+
+        eval_source("colorscheme acme").unwrap();
+
+        // g:colors_name recorded, groups from the sourced file defined, hook fired
+        // AFTER sourcing (so the host sees the fully-populated registry).
+        assert_eq!(run("echo g:colors_name").trim(), "acme");
+        assert_eq!(run("echo synIDattr(hlID('Normal'), 'fg')").trim(), "#abcdef");
+        assert_eq!(run("echo synIDattr(hlID('Comment'), 'fg')").trim(), "#00ff00");
+        APPLIED.with(|s| assert_eq!(s.borrow().as_deref(), Some("acme")));
+
+        COLORSCHEME_HOST_HOOK.with(|h| *h.borrow_mut() = None);
+        COLORSCHEME_DIRS.with(|d| d.borrow_mut().clear());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `:syntax` and `:filetype` parse (so real vimrc files load) and forward
+    /// their args to the host hooks; standalone they are otherwise no-ops.
+    #[test]
+    fn syntax_and_filetype_forward_to_host() {
+        use std::cell::RefCell;
+        thread_local! {
+            static SYN: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+            static FT: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+        }
+        SYN.with(|s| s.borrow_mut().clear());
+        FT.with(|s| s.borrow_mut().clear());
+        install_syntax_hook(Box::new(|a: &str| SYN.with(|s| s.borrow_mut().push(a.to_string()))));
+        install_filetype_hook(Box::new(|a: &str| FT.with(|s| s.borrow_mut().push(a.to_string()))));
+
+        // These lines must parse and run without error (the point of the port).
+        eval_source("syntax on").unwrap();
+        eval_source("syntax enable").unwrap();
+        eval_source("filetype plugin indent on").unwrap();
+
+        SYN.with(|s| assert_eq!(s.borrow().as_slice(), &["on".to_string(), "enable".to_string()]));
+        FT.with(|s| assert_eq!(s.borrow().as_slice(), &["plugin indent on".to_string()]));
+
+        SYNTAX_HOST_HOOK.with(|h| *h.borrow_mut() = None);
+        FILETYPE_HOST_HOOK.with(|h| *h.borrow_mut() = None);
     }
 
     /// Proof that a vimlrs numeric loop runs on fusevm's tracing JIT: a

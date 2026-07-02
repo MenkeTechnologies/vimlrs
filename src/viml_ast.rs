@@ -330,4 +330,22 @@ pub enum Stmt {
     /// range (`:%s/…`, `:1,3d`, `%g/…/d`): the whole raw line, parsed and run
     /// against the current buffer at run time.
     ExCmd(String),
+    /// `:colorscheme {name}` (`:colo`) — select a color scheme. Sources the
+    /// matching `colors/{name}.vim` from the runtime path (firing its
+    /// `:highlight` commands) and records `g:colors_name`. The raw name; empty
+    /// for the bare `:colorscheme` query.
+    Colorscheme(String),
+    /// `:highlight [default] {group} {key}={val}…` (`:hi`) — define a highlight
+    /// group. The raw argument text; parsed at run time into the highlight
+    /// registry and mirrored to an embedding editor via the highlight host hook.
+    Highlight(String),
+    /// `:syntax …` (`:syn`) — syntax-highlighting control. Recognized so real
+    /// vimrc files parse; the raw argument text is forwarded to an optional host
+    /// hook (an embedding editor may enable its own highlighter) and is
+    /// otherwise a no-op standalone.
+    Syntax(String),
+    /// `:filetype …` (`:filet`) — filetype-detection control. Recognized so real
+    /// vimrc files parse; forwarded to an optional host hook and otherwise a
+    /// no-op standalone.
+    Filetype(String),
 }

@@ -843,6 +843,30 @@ impl Compiler {
                 self.emit(Op::Pop);
                 Ok(())
             }
+            Stmt::Colorscheme(name) => {
+                self.load_str(name);
+                self.emit(Op::CallBuiltin(h::VIML_COLORSCHEME, 1));
+                self.emit(Op::Pop);
+                Ok(())
+            }
+            Stmt::Highlight(args) => {
+                self.load_str(args);
+                self.emit(Op::CallBuiltin(h::VIML_HIGHLIGHT, 1));
+                self.emit(Op::Pop);
+                Ok(())
+            }
+            Stmt::Syntax(args) => {
+                self.load_str(args);
+                self.emit(Op::CallBuiltin(h::VIML_SYNTAX, 1));
+                self.emit(Op::Pop);
+                Ok(())
+            }
+            Stmt::Filetype(args) => {
+                self.load_str(args);
+                self.emit(Op::CallBuiltin(h::VIML_FILETYPE, 1));
+                self.emit(Op::Pop);
+                Ok(())
+            }
             Stmt::Source(path) => {
                 self.load_str(path);
                 self.emit(Op::CallBuiltin(h::VIML_SOURCE, 1));

@@ -104,6 +104,31 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
         _ if is_map_command(cmd) && !line[cmd.len()..].starts_with('(') => {
             Ok(Stmt::Map(line.to_string()))
         }
+        // `:colorscheme {name}` / `:colo` — the bare form (no name) is a query.
+        "colorscheme" | "colo" | "colors" | "colorsc" | "colorsch" | "colorsche"
+        | "colorschem"
+            if !line[cmd.len()..].starts_with('(') =>
+        {
+            Ok(Stmt::Colorscheme(rest.trim().to_string()))
+        }
+        // `:highlight`/`:hi` — define or link a highlight group. `:hi` on its own
+        // (or `:hi {group}` with no keys) is a listing query in real vim; we keep
+        // the raw args and let the runtime decide.
+        "highlight" | "hi" | "highligh" | "highlig" | "highli" | "highl" | "high" | "hig"
+            if !line[cmd.len()..].starts_with('(') =>
+        {
+            Ok(Stmt::Highlight(line[cmd.len()..].trim_start().to_string()))
+        }
+        // `:syntax`/`:syn` and `:filetype`/`:filet` — recognized so real vimrc
+        // files parse. Standalone they are no-ops (zemacs highlights and detects
+        // filetypes itself); an embedding editor may hook them.
+        "syntax" | "syn" | "synta" | "synt" if !line[cmd.len()..].starts_with('(') => {
+            Ok(Stmt::Syntax(rest.trim().to_string()))
+        }
+        // `:filet` is the shortest form (`:file` is a different command).
+        "filetype" | "filetyp" | "filety" | "filet" if !line[cmd.len()..].starts_with('(') => {
+            Ok(Stmt::Filetype(rest.trim().to_string()))
+        }
         // A `:`-prefixed line, or a `%`-prefixed line (`%s/…`), is an Ex command
         // with an optional line range. Neither can begin a valid expression
         // statement, so this is safe; unrecognized Ex commands fall back to
