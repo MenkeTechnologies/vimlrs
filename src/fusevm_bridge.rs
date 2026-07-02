@@ -2632,7 +2632,12 @@ fn b_colorscheme(vm: &mut VM, _: u8) -> Value {
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|_| path.display().to_string());
             crate::ported::eval::fs::push_sourcing_name(sname);
-            let _ = run_source_nested(&src);
+            // Source the scheme statement-by-statement: real colour schemes often
+            // contain a construct that errors at parse OR run time, and a single
+            // aborted chunk would drop every `:highlight` after it — including the
+            // core `Normal` group. Per-statement sourcing keeps the groups that do
+            // work (mirrors Vim continuing after an error while sourcing).
+            source_tolerant(&src);
             crate::ported::eval::fs::pop_sourcing_name();
         }
     }
@@ -3096,9 +3101,11 @@ pub fn install_filetype_hook(f: Box<dyn Fn(&str)>) {
     FILETYPE_HOST_HOOK.with(|h| *h.borrow_mut() = Some(f));
 }
 
-/// Resolve `colors/{name}.vim` against the host-registered dirs and the default
-/// Vim runtime dirs (`~/.vim`, `~/.config/nvim`, `$VIMRUNTIME`, plus
-/// `pack/*/start/*` and `pack/*/opt/*` bundles). Returns the first existing file.
+/// Resolve `colors/{name}.vim` across the host-registered dirs, the user's Vim /
+/// Neovim config trees (including plugin managers: native `pack/*`, pathogen
+/// `bundle/*`, vim-plug/dein `plugged/*`), and the installed Vim runtime
+/// (`$VIMRUNTIME` or a discovered system Vim, so built-in schemes like `desert`
+/// resolve even when `$VIMRUNTIME` is unset). Returns the first existing file.
 fn resolve_colorscheme(name: &str) -> Option<std::path::PathBuf> {
     let rel = format!("colors/{name}.vim");
     let mut roots: Vec<std::path::PathBuf> = COLORSCHEME_DIRS.with(|d| d.borrow().clone());
@@ -3111,6 +3118,8 @@ fn resolve_colorscheme(name: &str) -> Option<std::path::PathBuf> {
     if let Ok(rt) = std::env::var("VIMRUNTIME") {
         roots.push(std::path::PathBuf::from(rt));
     }
+    roots.extend(system_vim_runtime_dirs());
+
     // Direct `{root}/colors/{name}.vim`.
     for root in &roots {
         let p = root.join(&rel);
@@ -3118,29 +3127,73 @@ fn resolve_colorscheme(name: &str) -> Option<std::path::PathBuf> {
             return Some(p);
         }
     }
-    // Plugin bundles: `{root}/pack/*/{start,opt}/*/colors/{name}.vim`.
+    // Plugin managers: a scheme lives under `{root}/{layout}/*/colors/{name}.vim`
+    // — native packages (`pack/*/start`, `pack/*/opt`), pathogen (`bundle`), and
+    // vim-plug/dein (`plugged`).
     for root in &roots {
-        for pack in ["pack"] {
-            let packdir = root.join(pack);
-            let Ok(vendors) = std::fs::read_dir(&packdir) else {
-                continue;
-            };
+        // `pack/*/{start,opt}/*/colors/…`
+        if let Ok(vendors) = std::fs::read_dir(root.join("pack")) {
             for vendor in vendors.flatten() {
                 for kind in ["start", "opt"] {
-                    let Ok(plugins) = std::fs::read_dir(vendor.path().join(kind)) else {
-                        continue;
-                    };
-                    for plugin in plugins.flatten() {
-                        let p = plugin.path().join(&rel);
-                        if p.is_file() {
-                            return Some(p);
-                        }
+                    if let Some(p) = first_child_with(&vendor.path().join(kind), &rel) {
+                        return Some(p);
                     }
                 }
             }
         }
+        // `bundle/*/colors/…` (pathogen) and `plugged/*/colors/…` (vim-plug/dein).
+        for layout in ["bundle", "plugged"] {
+            if let Some(p) = first_child_with(&root.join(layout), &rel) {
+                return Some(p);
+            }
+        }
     }
     None
+}
+
+/// Search each immediate subdirectory of `dir` for `rel`, returning the first
+/// existing `{dir}/{child}/{rel}`.
+fn first_child_with(dir: &std::path::Path, rel: &str) -> Option<std::path::PathBuf> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    for child in entries.flatten() {
+        let p = child.path().join(rel);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// Discover installed Vim runtime `colors/` roots when `$VIMRUNTIME` is unset
+/// (it is normally exported only by a running Vim). Globs the standard install
+/// prefixes for `vim{NN}/` and matching Neovim runtimes.
+fn system_vim_runtime_dirs() -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let prefixes = [
+        "/usr/share/vim",
+        "/usr/local/share/vim",
+        "/opt/homebrew/share/vim",
+        "/opt/local/share/vim",
+        "/usr/share/nvim/runtime",
+        "/usr/local/share/nvim/runtime",
+        "/opt/homebrew/share/nvim/runtime",
+    ];
+    for prefix in prefixes {
+        let path = std::path::Path::new(prefix);
+        // Neovim runtime dirs already point at the runtime root.
+        if path.join("colors").is_dir() {
+            out.push(path.to_path_buf());
+        }
+        // Vim install prefixes contain a versioned `vimNN/` runtime dir.
+        if let Ok(entries) = std::fs::read_dir(path) {
+            for e in entries.flatten() {
+                if e.path().join("colors").is_dir() {
+                    out.push(e.path());
+                }
+            }
+        }
+    }
+    out
 }
 
 // ── EDITOR HOST (embedding seam) ─────────────────────────────────────────────
@@ -4108,10 +4161,47 @@ fn eval_file_inner(path: &std::path::Path) -> Result<(), VimlError> {
     }
     let src = std::fs::read_to_string(path)
         .map_err(|e| VimlError::msg(format!("vimlrs: {}: {e}", path.display())))?;
-    let prog = compile_program(&crate::viml_parser::parse_program(&src)?)?;
-    crate::script_cache::store(path, &prog);
-    run_compiled(prog);
-    Ok(())
+    // Fast path: the whole file parses + compiles as one chunk (cached).
+    match crate::viml_parser::parse_program(&src) {
+        Ok(stmts) => {
+            let prog = compile_program(&stmts)?;
+            crate::script_cache::store(path, &prog);
+            run_compiled(prog);
+            Ok(())
+        }
+        // A real-world config (e.g. `~/.vimrc`) often contains a construct vimlrs
+        // does not yet parse. Rather than abort the entire file — losing every
+        // option, mapping, and colour scheme after the offending line — fall back
+        // to sourcing it statement-by-statement, skipping the ones that don't
+        // parse or that error at run time, exactly as Vim reports an error while
+        // sourcing and continues with the next command.
+        Err(_) => {
+            source_tolerant(&src);
+            Ok(())
+        }
+    }
+}
+
+/// Best-effort statement-by-statement sourcing: parse the file tolerantly and run
+/// each top-level statement (or block) in its own chunk so a parse *or* run-time
+/// failure in one is contained and the rest of the file still takes effect.
+/// Returns the number of statements that ran and the number skipped.
+pub fn source_tolerant(src: &str) -> (usize, usize) {
+    let (stmts, parse_errs) = crate::viml_parser::parse_program_lines_tolerant(src);
+    let mut ran = 0usize;
+    let mut skipped = parse_errs.len();
+    for (_lineno, stmt) in stmts {
+        // Each statement compiles + runs independently; a compile error or an
+        // uncaught run-time error ends only that statement's chunk.
+        match compile_program(std::slice::from_ref(&stmt)) {
+            Ok(prog) => {
+                run_compiled(prog);
+                ran += 1;
+            }
+            Err(_) => skipped += 1,
+        }
+    }
+    (ran, skipped)
 }
 
 /// Parse + compile + run a single expression, returning its value.
@@ -4241,11 +4331,20 @@ mod tests {
         assert_eq!(run("echo hlID('Normal')").trim(), "1");
 
         // synIDattr reads colours (gui by default) and follows links.
-        assert_eq!(run("echo synIDattr(hlID('Normal'), 'fg')").trim(), "#d0d0d0");
-        assert_eq!(run("echo synIDattr(hlID('Normal'), 'fg', 'cterm')").trim(), "252");
+        assert_eq!(
+            run("echo synIDattr(hlID('Normal'), 'fg')").trim(),
+            "#d0d0d0"
+        );
+        assert_eq!(
+            run("echo synIDattr(hlID('Normal'), 'fg', 'cterm')").trim(),
+            "252"
+        );
         assert_eq!(run("echo synIDattr(hlID('Normal'), 'bold')").trim(), "1");
         // Comment links to Normal → inherits its foreground.
-        assert_eq!(run("echo synIDattr(hlID('Comment'), 'fg')").trim(), "#d0d0d0");
+        assert_eq!(
+            run("echo synIDattr(hlID('Comment'), 'fg')").trim(),
+            "#d0d0d0"
+        );
 
         // The host hook saw each raw definition.
         SEEN.with(|s| {
@@ -4258,6 +4357,20 @@ mod tests {
             )
         });
         HIGHLIGHT_HOST_HOOK.with(|h| *h.borrow_mut() = None);
+    }
+
+    /// `source_tolerant` keeps sourcing past a statement that fails to parse OR
+    /// errors at run time — the good statements on either side still take effect.
+    #[test]
+    fn source_tolerant_continues_past_errors() {
+        // Line 2 is an unterminated string (parse error); line 3 calls an
+        // undefined function (run-time error). The `:let`s on 1 and 4 must run.
+        let (ran, skipped) = source_tolerant(
+            "let g:sta = 10\nlet bad = \"oops\ncall NoSuchFunc_xyz()\nlet g:stb = 20\n",
+        );
+        assert_eq!(run("echo g:sta").trim(), "10");
+        assert_eq!(run("echo g:stb").trim(), "20");
+        assert!(ran >= 2 && skipped >= 1, "ran={ran} skipped={skipped}");
     }
 
     /// `:colorscheme {name}` records `g:colors_name`, sources the matching
@@ -4290,8 +4403,14 @@ mod tests {
         // g:colors_name recorded, groups from the sourced file defined, hook fired
         // AFTER sourcing (so the host sees the fully-populated registry).
         assert_eq!(run("echo g:colors_name").trim(), "acme");
-        assert_eq!(run("echo synIDattr(hlID('Normal'), 'fg')").trim(), "#abcdef");
-        assert_eq!(run("echo synIDattr(hlID('Comment'), 'fg')").trim(), "#00ff00");
+        assert_eq!(
+            run("echo synIDattr(hlID('Normal'), 'fg')").trim(),
+            "#abcdef"
+        );
+        assert_eq!(
+            run("echo synIDattr(hlID('Comment'), 'fg')").trim(),
+            "#00ff00"
+        );
         APPLIED.with(|s| assert_eq!(s.borrow().as_deref(), Some("acme")));
 
         COLORSCHEME_HOST_HOOK.with(|h| *h.borrow_mut() = None);
@@ -4310,15 +4429,24 @@ mod tests {
         }
         SYN.with(|s| s.borrow_mut().clear());
         FT.with(|s| s.borrow_mut().clear());
-        install_syntax_hook(Box::new(|a: &str| SYN.with(|s| s.borrow_mut().push(a.to_string()))));
-        install_filetype_hook(Box::new(|a: &str| FT.with(|s| s.borrow_mut().push(a.to_string()))));
+        install_syntax_hook(Box::new(|a: &str| {
+            SYN.with(|s| s.borrow_mut().push(a.to_string()))
+        }));
+        install_filetype_hook(Box::new(|a: &str| {
+            FT.with(|s| s.borrow_mut().push(a.to_string()))
+        }));
 
         // These lines must parse and run without error (the point of the port).
         eval_source("syntax on").unwrap();
         eval_source("syntax enable").unwrap();
         eval_source("filetype plugin indent on").unwrap();
 
-        SYN.with(|s| assert_eq!(s.borrow().as_slice(), &["on".to_string(), "enable".to_string()]));
+        SYN.with(|s| {
+            assert_eq!(
+                s.borrow().as_slice(),
+                &["on".to_string(), "enable".to_string()]
+            )
+        });
         FT.with(|s| assert_eq!(s.borrow().as_slice(), &["plugin indent on".to_string()]));
 
         SYNTAX_HOST_HOOK.with(|h| *h.borrow_mut() = None);

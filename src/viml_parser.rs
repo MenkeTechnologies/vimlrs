@@ -37,7 +37,14 @@ pub const PHASE3_BUILTINS: &[&str] = &[
 /// in expression position it opens a string. Full-line comments are skipped by
 /// the source splitter before this is called.
 pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
-    let line = line.trim();
+    // Strip leading command modifiers (`silent`, `silent!`, `verbose 9`,
+    // `noautocmd`, `keepjumps`, …). They change how a command runs, not what it
+    // is, and real vimrcs use them constantly (`silent! colorscheme x`). A bare
+    // modifier with no command (`silent`) becomes a no-op.
+    let line = strip_command_modifiers(line.trim());
+    if line.is_empty() {
+        return Ok(Stmt::Expr(Expr::Number(0)));
+    }
     let cmd_end = line
         .find(|c: char| !c.is_ascii_alphabetic())
         .unwrap_or(line.len());
@@ -105,8 +112,7 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
             Ok(Stmt::Map(line.to_string()))
         }
         // `:colorscheme {name}` / `:colo` — the bare form (no name) is a query.
-        "colorscheme" | "colo" | "colors" | "colorsc" | "colorsch" | "colorsche"
-        | "colorschem"
+        "colorscheme" | "colo" | "colors" | "colorsc" | "colorsch" | "colorsche" | "colorschem"
             if !line[cmd.len()..].starts_with('(') =>
         {
             Ok(Stmt::Colorscheme(rest.trim().to_string()))
@@ -149,6 +155,96 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
         }
         _ => Ok(Stmt::Expr(parse_expr(line)?)),
     }
+}
+
+/// The `:h :command-modifiers` (and their common abbreviations) that may prefix
+/// any Ex command. They set execution context (silencing, verbosity, split
+/// direction, …) and are stripped before the command is parsed.
+const CMD_MODIFIERS: &[&str] = &[
+    "silent",
+    "sil",
+    "unsilent",
+    "uns",
+    "verbose",
+    "verb",
+    "noautocmd",
+    "noa",
+    "keepmarks",
+    "keepm",
+    "keepjumps",
+    "keepj",
+    "keepalt",
+    "keepa",
+    "keeppatterns",
+    "keepp",
+    "lockmarks",
+    "lockm",
+    "noswapfile",
+    "nos",
+    "sandbox",
+    "sandb",
+    "browse",
+    "bro",
+    "confirm",
+    "conf",
+    "hide",
+    "hid",
+    "aboveleft",
+    "abo",
+    "belowright",
+    "bel",
+    "botright",
+    "bo",
+    "topleft",
+    "to",
+    "leftabove",
+    "lefta",
+    "rightbelow",
+    "rightb",
+    "vertical",
+    "vert",
+    "horizontal",
+    "hor",
+    "tab",
+];
+
+/// Strip a leading run of command modifiers from an Ex command line, returning
+/// the remaining command text. Each modifier is a standalone word (optionally
+/// with a `!`, e.g. `silent!`); `verbose`/`tab` may carry a numeric count
+/// (`verbose 15 …`). A line that is only modifiers strips to empty.
+fn strip_command_modifiers(mut line: &str) -> &str {
+    loop {
+        line = line.trim_start();
+        let end = line
+            .find(|c: char| !c.is_ascii_alphabetic())
+            .unwrap_or(line.len());
+        if end == 0 {
+            break;
+        }
+        let word = &line[..end];
+        if !CMD_MODIFIERS.contains(&word) {
+            break;
+        }
+        let after = &line[end..];
+        // The modifier must be a standalone token: the next char is `!`, a space,
+        // or end-of-line. (`silentfoo` is an identifier, not the modifier.)
+        let mut rest = match after.chars().next() {
+            None => "",
+            Some('!') => &after[1..],
+            Some(c) if c.is_whitespace() => after,
+            _ => break,
+        };
+        // `verbose`/`tab` take an optional numeric count.
+        if matches!(word, "verbose" | "verb" | "tab") {
+            let r = rest.trim_start();
+            let ne = r.find(|c: char| !c.is_ascii_digit()).unwrap_or(r.len());
+            if ne > 0 {
+                rest = &r[ne..];
+            }
+        }
+        line = rest;
+    }
+    line
 }
 
 /// Whether `cmd` is the (alphabetic) word of a `:map`-family command — any of
@@ -226,6 +322,53 @@ pub fn parse_program_lines(src: &str) -> Result<Vec<(u32, Stmt)>, VimlError> {
         }
     }
     Ok(out)
+}
+
+/// The result of [`parse_program_lines_tolerant`]: the top-level statements that
+/// parsed (each with its 1-based source line), and `(line, message)` for each
+/// statement that was skipped because it failed to parse.
+pub type TolerantParse = (Vec<(u32, Stmt)>, Vec<(u32, String)>);
+
+/// Like [`parse_program_lines`] but error-tolerant: a top-level statement (or
+/// block) that fails to parse is skipped — its first logical line is dropped and
+/// parsing resumes at the next — so one unsupported construct does not abort the
+/// whole file. Returns the statements that parsed, paired with `(line, message)`
+/// for each skipped one. Mirrors Vim reporting an error while sourcing a script
+/// and continuing; used for best-effort config sourcing (e.g. a real `.vimrc`).
+pub fn parse_program_lines_tolerant(src: &str) -> TolerantParse {
+    let mut cur = Lines::new(src);
+    let mut out = Vec::new();
+    let mut errs = Vec::new();
+    loop {
+        cur.skip_blanks();
+        let Some(line) = cur.peek() else { break };
+        let lineno = cur.line_no();
+        let snapshot = cur.i;
+        let (cmd, _) = cmd_word(&line);
+        if is_block_terminator(cmd) {
+            // An orphaned terminator (e.g. left after skipping a broken opener):
+            // report and step past it.
+            errs.push((
+                lineno,
+                format!("E580: `:{cmd}` without matching block opener"),
+            ));
+            cur.i = snapshot + 1;
+            continue;
+        }
+        match parse_one(&mut cur) {
+            Ok(stmts) => {
+                for s in stmts {
+                    out.push((lineno, s));
+                }
+            }
+            Err(e) => {
+                errs.push((lineno, e.0));
+                // Resume at the line after the one that began the failed parse.
+                cur.i = snapshot + 1;
+            }
+        }
+    }
+    (out, errs)
 }
 
 /// Cursor over the LOGICAL lines of a source block. Physical lines whose first
@@ -1562,6 +1705,43 @@ impl Parser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_modifiers_are_stripped() {
+        // `silent!` + a real command → the command survives.
+        assert!(matches!(
+            parse_stmt("silent! colorscheme molokai").unwrap(),
+            Stmt::Colorscheme(n) if n == "molokai"
+        ));
+        // Stacked modifiers, a `verbose` count, and abbreviations.
+        assert!(matches!(
+            parse_stmt("silent noautocmd verbose 9 set number").unwrap(),
+            Stmt::Set(a) if a == "number"
+        ));
+        // A bare modifier is a no-op, not an error.
+        assert!(matches!(parse_stmt("silent").unwrap(), Stmt::Expr(_)));
+        // A longer identifier that merely starts with a modifier word is NOT a
+        // modifier (`silentfoo` is a user command, not `silent` + `foo`).
+        assert!(matches!(
+            parse_stmt("Silentcmd arg").unwrap(),
+            Stmt::UserCmd(_)
+        ));
+    }
+
+    #[test]
+    fn tolerant_parse_skips_bad_statements() {
+        // Line 2 is an unterminated string (a parse error). Tolerant parsing must
+        // still yield the good statements on lines 1 and 3.
+        let src = "set number\nlet x = \"oops\ncolorscheme molokai\n";
+        let (stmts, errs) = parse_program_lines_tolerant(src);
+        assert_eq!(errs.len(), 1, "one statement skipped");
+        assert!(stmts
+            .iter()
+            .any(|(_, s)| matches!(s, Stmt::Set(a) if a == "number")));
+        assert!(stmts
+            .iter()
+            .any(|(_, s)| matches!(s, Stmt::Colorscheme(n) if n == "molokai")));
+    }
 
     #[test]
     fn precedence_add_mul() {
