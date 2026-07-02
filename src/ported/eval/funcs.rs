@@ -3061,6 +3061,9 @@ thread_local! {
 /// Number of lines in the current buffer (minimum 1: an unset buffer reads as a
 /// single empty line, like Vim).
 fn curbuf_len() -> varnumber_T {
+    if let Some(n) = crate::fusevm_bridge::editor_line_count() {
+        return n.max(1);
+    }
     CURBUF.with(|b| b.borrow().len().max(1) as varnumber_T)
 }
 
@@ -3071,7 +3074,7 @@ fn tv_get_lnum(tv: &typval_T) -> varnumber_T {
     if tv.v_type == VAR_STRING {
         let s = tv_get_string(tv);
         match s.as_str() {
-            "." => CURPOS.with(|c| c.borrow().0),
+            "." => crate::fusevm_bridge::editor_curpos(CURPOS.with(|c| *c.borrow())).0,
             "$" | "w$" => curbuf_len(),
             "w0" => 1,
             _ if s.starts_with('\'') => {
@@ -3108,6 +3111,9 @@ fn getmark(name: char) -> Option<(varnumber_T, varnumber_T)> {
 /// Port of `get_buffer_lines()` (Neovim buffer.c) — the current buffer's lines
 /// from `start` to `end` (1-based, inclusive, clamped to the buffer).
 fn get_buffer_lines(start: varnumber_T, end: varnumber_T) -> Vec<String> {
+    if let Some(v) = crate::fusevm_bridge::editor_get_lines(start, end) {
+        return v;
+    }
     CURBUF.with(|b| {
         let b = b.borrow();
         // An unset buffer reads as a single empty line.
@@ -3132,6 +3138,9 @@ fn get_buffer_lines(start: varnumber_T, end: varnumber_T) -> Vec<String> {
 /// `lnum == 0` inserts before the first line). Returns 0 on success, 1 on
 /// failure (an out-of-range replace).
 fn set_buffer_lines(lnum: varnumber_T, lines: Vec<String>, append: bool) -> varnumber_T {
+    if crate::fusevm_bridge::editor_host_active() {
+        return crate::fusevm_bridge::editor_set_lines(lnum, lines, append).unwrap_or(1);
+    }
     CURBUF.with(|b| {
         let mut b = b.borrow_mut();
         if b.is_empty() {
@@ -3184,6 +3193,9 @@ pub fn set_cursorpos(lnum: varnumber_T, col: varnumber_T) {
         .first()
         .map_or(0, |s| s.len() as varnumber_T);
     let c = col.clamp(1, linelen + 1);
+    if crate::fusevm_bridge::editor_set_cursor(l, c) {
+        return;
+    }
     CURPOS.with(|p| {
         let mut p = p.borrow_mut();
         *p = (l, c, c);
@@ -3221,7 +3233,7 @@ pub fn f_getcharpos(argvars: &[typval_T], rettv: &mut typval_T) {
 /// Port of `f_getcurpos()`/`getpos_both(…,true,false)` — the cursor position as
 /// `[bufnum, lnum, col, off, curswant]`.
 pub fn f_getcurpos(_argvars: &[typval_T], rettv: &mut typval_T) {
-    let (lnum, col, curswant) = CURPOS.with(|c| *c.borrow());
+    let (lnum, col, curswant) = crate::fusevm_bridge::editor_curpos(CURPOS.with(|c| *c.borrow()));
     let l = tv_list_alloc_ret(rettv, 5);
     let mut lb = l.borrow_mut();
     tv_list_append_number(&mut lb, 0);
@@ -3238,10 +3250,10 @@ pub fn f_getcursorcharpos(_argvars: &[typval_T], rettv: &mut typval_T) {
 /// the cursor column, `$` is one past the end of the cursor's line.
 pub fn f_col(argvars: &[typval_T], rettv: &mut typval_T) {
     let s = tv_get_string(&argvars[0]);
-    let (lnum, ccol) = CURPOS.with(|c| {
-        let c = c.borrow();
-        (c.0, c.1)
-    });
+    let (lnum, ccol) = {
+        let __p = crate::fusevm_bridge::editor_curpos(CURPOS.with(|c| *c.borrow()));
+        (__p.0, __p.1)
+    };
     let col = match s.as_str() {
         "." => ccol,
         "$" => get_buffer_lines(lnum, lnum)
@@ -3255,10 +3267,10 @@ pub fn f_col(argvars: &[typval_T], rettv: &mut typval_T) {
 /// Port of `f_charcol()`/`get_col(…,true)` — like `col()` but a character index.
 pub fn f_charcol(argvars: &[typval_T], rettv: &mut typval_T) {
     let s = tv_get_string(&argvars[0]);
-    let (lnum, ccol) = CURPOS.with(|c| {
-        let c = c.borrow();
-        (c.0, c.1)
-    });
+    let (lnum, ccol) = {
+        let __p = crate::fusevm_bridge::editor_curpos(CURPOS.with(|c| *c.borrow()));
+        (__p.0, __p.1)
+    };
     let col = match s.as_str() {
         "." => ccol,
         "$" => get_buffer_lines(lnum, lnum)
@@ -3277,10 +3289,10 @@ pub fn f_line(argvars: &[typval_T], rettv: &mut typval_T) {
 pub fn f_virtcol(argvars: &[typval_T], rettv: &mut typval_T) {
     let s = tv_get_string(&argvars[0]);
     let want_list = argvars.len() > 1 && tv_get_bool(&argvars[1]) != 0;
-    let (lnum, ccol) = CURPOS.with(|c| {
-        let c = c.borrow();
-        (c.0, c.1)
-    });
+    let (lnum, ccol) = {
+        let __p = crate::fusevm_bridge::editor_curpos(CURPOS.with(|c| *c.borrow()));
+        (__p.0, __p.1)
+    };
     let line = get_buffer_lines(lnum, lnum)
         .into_iter()
         .next()
@@ -3414,10 +3426,10 @@ pub fn f_prevnonblank(argvars: &[typval_T], rettv: &mut typval_T) {
 /// Port of `f_wordcount()`/`cursor_pos_info()` — empty buffer → every count 0.
 pub fn f_wordcount(_argvars: &[typval_T], rettv: &mut typval_T) {
     let lines = get_buffer_lines(1, curbuf_len());
-    let (clnum, ccol) = CURPOS.with(|c| {
-        let c = c.borrow();
-        (c.0, c.1)
-    });
+    let (clnum, ccol) = {
+        let __p = crate::fusevm_bridge::editor_curpos(CURPOS.with(|c| *c.borrow()));
+        (__p.0, __p.1)
+    };
     let (mut bytes, mut chars, mut words) = (0i64, 0i64, 0i64);
     let (mut cbytes, mut cchars, mut cwords) = (0i64, 0i64, 0i64);
     for (i, line) in lines.iter().enumerate() {
@@ -3555,10 +3567,10 @@ fn searchit(pat: &str, flags: &str, _stopline: varnumber_T) -> Option<(varnumber
     let want_end = flags.contains('e');
     let wrap = !flags.contains('W');
     let ic = tv_get_number_chk(&get_option_value("ignorecase"), None) != 0;
-    let (clnum, ccol) = CURPOS.with(|c| {
-        let c = c.borrow();
-        (c.0, c.1)
-    });
+    let (clnum, ccol) = {
+        let __p = crate::fusevm_bridge::editor_curpos(CURPOS.with(|c| *c.borrow()));
+        (__p.0, __p.1)
+    };
     let lines = get_buffer_lines(1, curbuf_len());
     let n = lines.len();
     if n == 0 {
@@ -3682,10 +3694,10 @@ fn do_searchpair(
     let ic = tv_get_number_chk(&get_option_value("ignorecase"), None) != 0;
     let lines = get_buffer_lines(1, curbuf_len());
     let n = lines.len();
-    let (clnum, ccol) = CURPOS.with(|c| {
-        let c = c.borrow();
-        (c.0, c.1)
-    });
+    let (clnum, ccol) = {
+        let __p = crate::fusevm_bridge::editor_curpos(CURPOS.with(|c| *c.borrow()));
+        (__p.0, __p.1)
+    };
     let cur = (clnum - 1).clamp(0, n as varnumber_T - 1) as usize;
     let cbyte = (ccol - 1).max(0) as usize;
     let m_at = |pat: &str, line: &str, col: usize| -> Option<usize> {
@@ -4484,7 +4496,9 @@ pub fn f_environ(_argvars: &[typval_T], rettv: &mut typval_T) {
 
 /// Port of `f_bufnr()` (buffer.c) — no such buffer → -1.
 pub fn f_bufnr(_argvars: &[typval_T], rettv: &mut typval_T) {
-    *rettv = typval_T::from(-1 as varnumber_T);
+    // Embedded: the host's current-buffer number; standalone: no buffers -> -1.
+    let n = crate::fusevm_bridge::editor_buf_nr().unwrap_or(-1);
+    *rettv = typval_T::from(n);
 }
 /// Port of `f_bufexists()` (buffer.c) — no buffers → 0.
 pub fn f_bufexists(_argvars: &[typval_T], rettv: &mut typval_T) {
@@ -4500,7 +4514,9 @@ pub fn f_bufloaded(_argvars: &[typval_T], rettv: &mut typval_T) {
 }
 /// Port of `f_bufname()` (buffer.c) — no buffer → "" (the C NULL string).
 pub fn f_bufname(_argvars: &[typval_T], rettv: &mut typval_T) {
-    *rettv = typval_T::from(String::new());
+    // Embedded: the host's current-buffer name; standalone: "" (C NULL string).
+    let name = crate::fusevm_bridge::editor_buf_name().unwrap_or_default();
+    *rettv = typval_T::from(name);
 }
 /// Port of `f_bufwinnr()`/`buf_win_common()` (buffer.c) — no window → -1.
 pub fn f_bufwinnr(_argvars: &[typval_T], rettv: &mut typval_T) {
@@ -4613,7 +4629,11 @@ pub fn f_getbufinfo(_argvars: &[typval_T], rettv: &mut typval_T) {
         let mut db = d.borrow_mut();
         tv_dict_add_nr(&mut db, "bufnr", 1);
         tv_dict_add_str(&mut db, "name", "");
-        tv_dict_add_nr(&mut db, "lnum", CURPOS.with(|c| c.borrow().0));
+        tv_dict_add_nr(
+            &mut db,
+            "lnum",
+            crate::fusevm_bridge::editor_curpos(CURPOS.with(|c| *c.borrow())).0,
+        );
         tv_dict_add_nr(&mut db, "linecount", curbuf_len());
         tv_dict_add_nr(&mut db, "loaded", 1);
         tv_dict_add_nr(&mut db, "listed", 1);
@@ -7079,7 +7099,7 @@ fn parse_addr(s: &str) -> (varnumber_T, usize, bool) {
     let b = s.as_bytes();
     let mut i = 0;
     let last = curbuf_len();
-    let cur = CURPOS.with(|c| c.borrow().0);
+    let cur = crate::fusevm_bridge::editor_curpos(CURPOS.with(|c| *c.borrow())).0;
     let (mut lnum, had) = if i < b.len() && b[i] == b'.' {
         i += 1;
         (cur, true)
@@ -7128,7 +7148,7 @@ fn parse_line_range(s: &str) -> (varnumber_T, varnumber_T, bool, &str) {
     if let Some(rest) = s.strip_prefix('%') {
         return (1, curbuf_len(), true, rest.trim_start());
     }
-    let cur = CURPOS.with(|c| c.borrow().0);
+    let cur = crate::fusevm_bridge::editor_curpos(CURPOS.with(|c| *c.borrow())).0;
     let (a1, c1, had1) = parse_addr(s);
     let mut rest = &s[c1..];
     if let Some(after) = rest.strip_prefix([',', ';']) {
@@ -7655,7 +7675,10 @@ pub fn do_normal(keys: &str) {
     let put_line = |l: varnumber_T, cs: &[char]| {
         set_buffer_lines(l, vec![cs.iter().collect()], false);
     };
-    let cur = || CURPOS.with(|c| (c.borrow().0, c.borrow().1));
+    let cur = || {
+        let __p = crate::fusevm_bridge::editor_curpos(CURPOS.with(|c| *c.borrow()));
+        (__p.0, __p.1)
+    };
     // Forward word motion (`w`): step to the next word's start.
     let word_fwd = |l0: varnumber_T, ci0: usize| -> (varnumber_T, usize) {
         let (mut l, mut ci) = (l0, ci0);

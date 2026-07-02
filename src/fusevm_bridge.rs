@@ -2943,6 +2943,119 @@ pub fn install_map_hook(f: Box<dyn Fn(&str)>) {
     MAP_HOST_HOOK.with(|h| *h.borrow_mut() = Some(f));
 }
 
+// ── EDITOR HOST (embedding seam) ─────────────────────────────────────────────
+//
+// EXTENSION — no `csrc/` counterpart. When vimlrs runs standalone the editor
+// builtins (getline/setline/append/getbufline, line()/col()/getpos()/setpos()/
+// cursor(), bufname()/bufnr()) operate on the reduced in-crate buffer/cursor
+// model in `src/ported/eval/funcs.rs` (CURBUF/CURPOS). When vimlrs is embedded
+// inside a host editor (e.g. zemacs), the host installs an [`EditorHost`] so the
+// SAME builtins read and mutate the host's live buffer and cursor instead. The
+// buffer choke-points in funcs.rs consult these readers first and fall back to
+// CURBUF/CURPOS when no host is installed.
+
+/// Line number / column type (mirrors `varnumber_T`), 1-based line/col.
+type HostNum = crate::ported::eval::typval_defs_h::varnumber_T;
+
+/// Callbacks an embedding editor installs so Vimscript editor builtins act on the
+/// host's live buffer/cursor. All line numbers and columns are 1-based, matching
+/// Vim. `set_lines` mirrors `set_buffer_lines` (`append=false` replaces from
+/// `lnum`; `append=true` inserts after `lnum`, `lnum==0` before line 1) and
+/// returns 0 on success / 1 on an out-of-range replace.
+#[allow(clippy::type_complexity)]
+pub struct EditorHost {
+    pub line_count: Box<dyn Fn() -> HostNum>,
+    pub get_line: Box<dyn Fn(HostNum) -> Option<String>>,
+    pub set_lines: Box<dyn Fn(HostNum, Vec<String>, bool) -> HostNum>,
+    pub cursor: Box<dyn Fn() -> (HostNum, HostNum)>,
+    pub set_cursor: Box<dyn Fn(HostNum, HostNum)>,
+    pub buf_name: Box<dyn Fn() -> String>,
+    pub buf_nr: Box<dyn Fn() -> HostNum>,
+}
+
+thread_local! {
+    #[allow(clippy::type_complexity)]
+    static EDITOR_HOST: RefCell<Option<EditorHost>> = const { RefCell::new(None) };
+}
+
+/// Install the editor host (called by an embedding editor once per thread).
+/// After this, vimlrs editor builtins act on the host's live buffer/cursor.
+pub fn install_editor_host(h: EditorHost) {
+    EDITOR_HOST.with(|s| *s.borrow_mut() = Some(h));
+}
+
+/// Remove the editor host — builtins revert to the standalone CURBUF/CURPOS model.
+pub fn clear_editor_host() {
+    EDITOR_HOST.with(|s| *s.borrow_mut() = None);
+}
+
+/// True when a host editor is installed on this thread.
+pub fn editor_host_active() -> bool {
+    EDITOR_HOST.with(|s| s.borrow().is_some())
+}
+
+/// Host line count, or `None` when standalone.
+pub fn editor_line_count() -> Option<HostNum> {
+    EDITOR_HOST.with(|s| s.borrow().as_ref().map(|h| (h.line_count)()))
+}
+
+/// Host buffer lines `start..=end` (1-based, inclusive, clamped), or `None`
+/// when standalone.
+pub fn editor_get_lines(start: HostNum, end: HostNum) -> Option<Vec<String>> {
+    EDITOR_HOST.with(|s| {
+        s.borrow().as_ref().map(|h| {
+            let len = (h.line_count)().max(0);
+            let (a, b) = (start.max(1), end.min(len));
+            if a > b {
+                Vec::new()
+            } else {
+                (a..=b).filter_map(|i| (h.get_line)(i)).collect()
+            }
+        })
+    })
+}
+
+/// Apply `set_buffer_lines` through the host; `None` when standalone.
+pub fn editor_set_lines(lnum: HostNum, lines: Vec<String>, append: bool) -> Option<HostNum> {
+    EDITOR_HOST.with(|s| {
+        s.borrow()
+            .as_ref()
+            .map(|h| (h.set_lines)(lnum, lines, append))
+    })
+}
+
+/// The host cursor `(lnum, col, curswant)`, or `fallback` (the standalone
+/// CURPOS snapshot) when no host is installed.
+pub fn editor_curpos(fallback: (HostNum, HostNum, HostNum)) -> (HostNum, HostNum, HostNum) {
+    EDITOR_HOST.with(|s| {
+        s.borrow().as_ref().map_or(fallback, |h| {
+            let (l, c) = (h.cursor)();
+            (l, c, c)
+        })
+    })
+}
+
+/// Move the host cursor; returns `true` when a host handled it (so the caller
+/// skips the standalone CURPOS update), `false` when standalone.
+pub fn editor_set_cursor(lnum: HostNum, col: HostNum) -> bool {
+    EDITOR_HOST.with(|s| {
+        s.borrow().as_ref().is_some_and(|h| {
+            (h.set_cursor)(lnum, col);
+            true
+        })
+    })
+}
+
+/// The host current-buffer name, or `None` when standalone.
+pub fn editor_buf_name() -> Option<String> {
+    EDITOR_HOST.with(|s| s.borrow().as_ref().map(|h| (h.buf_name)()))
+}
+
+/// The host current-buffer number, or `None` when standalone.
+pub fn editor_buf_nr() -> Option<HostNum> {
+    EDITOR_HOST.with(|s| s.borrow().as_ref().map(|h| (h.buf_nr)()))
+}
+
 /// Register every `VIML_*` builtin on a fresh VM before `vm.run()`.
 pub fn install(vm: &mut VM) {
     // Turn on fusevm's tiered Cranelift JIT (Linear/Block/Tracing). Without
@@ -3812,6 +3925,68 @@ mod tests {
         capture_begin();
         eval_source(src).unwrap();
         capture_take()
+    }
+
+    #[test]
+    fn editor_host_delegation() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        // A fake host buffer + cursor the builtins should read/write instead of
+        // the standalone CURBUF/CURPOS.
+        let buf = Rc::new(RefCell::new(vec![
+            "alpha".to_string(),
+            "beta".to_string(),
+            "gamma".to_string(),
+        ]));
+        let cur = Rc::new(RefCell::new((2i64, 1i64)));
+        let (b1, b2, b3) = (buf.clone(), buf.clone(), buf.clone());
+        let (c1, c2) = (cur.clone(), cur.clone());
+        install_editor_host(EditorHost {
+            line_count: Box::new(move || b1.borrow().len() as i64),
+            get_line: Box::new(move |n| b2.borrow().get((n - 1) as usize).cloned()),
+            set_lines: Box::new(move |lnum, lines, append| {
+                let mut b = b3.borrow_mut();
+                if append {
+                    let pos = (lnum.max(0) as usize).min(b.len());
+                    for (i, l) in lines.into_iter().enumerate() {
+                        b.insert(pos + i, l);
+                    }
+                } else {
+                    for (i, l) in lines.into_iter().enumerate() {
+                        let idx = (lnum - 1) as usize + i;
+                        if idx < b.len() {
+                            b[idx] = l;
+                        } else {
+                            b.push(l);
+                        }
+                    }
+                }
+                0
+            }),
+            cursor: Box::new(move || *c1.borrow()),
+            set_cursor: Box::new(move |l, c| *c2.borrow_mut() = (l, c)),
+            buf_name: Box::new(|| "hostbuf".to_string()),
+            buf_nr: Box::new(|| 7),
+        });
+
+        // reads route to the host buffer/cursor
+        assert_eq!(run("echo getline(2)").trim(), "beta");
+        assert_eq!(run("echo line('$')").trim(), "3");
+        assert_eq!(run("echo line('.')").trim(), "2"); // host cursor line
+        assert_eq!(
+            run("echo bufname('') . '#' . bufnr('')").trim(),
+            "hostbuf#7"
+        );
+        // writes route to the host buffer
+        run("call setline(2, 'BETA')");
+        assert_eq!(buf.borrow()[1], "BETA");
+        // cursor move routes to the host cursor
+        run("call cursor(3, 1)");
+        assert_eq!(cur.borrow().0, 3);
+
+        clear_editor_host();
+        // after clearing, builtins fall back to the standalone model
+        assert_eq!(run("call setline(1,'x') | echo getline(1)").trim(), "x");
     }
 
     #[test]
