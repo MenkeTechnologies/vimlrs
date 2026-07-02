@@ -48,16 +48,9 @@ pub struct WinConfig {
     pub hide: bool,
 }
 
-/// RUST-PORT NOTE: placeholder for the buffer agent's `buf_T`. The eval window
-/// layer only reads `w_buffer->b_fnum` (in `win_findbuf`), so this stands in
-/// with just that field until the central pass reconciles it with the real
-/// `buf_T` from `buffer_defs.h`. `w_buffer` is modelled as an
-/// `Option<Rc<RefCell<buf_T>>>` handle per the coordination note.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct buf_T {
-    /// `handle_T handle` — buffer number (`b_fnum` aliases `handle`).
-    pub b_fnum: handle_T,
-}
+/// The real buffer type (central reconciliation): `w_buffer` points at the
+/// `buffer.rs` `buf_T`; C's `b_fnum` is the `#define`-alias of its `handle` field.
+pub use crate::ported::buffer::buf_T;
 
 /// Port of `struct window_S` (`win_T`) from `csrc/buffer_defs.h:1102`.
 /// Only the fields the eval layer reads are modelled (see module note).
