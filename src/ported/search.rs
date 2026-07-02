@@ -1,5 +1,5 @@
 //! Reference ports of the buffer-search core from `src/nvim/search.c` (not
-//! vendored under `csrc/`; names are recognized via the allowlist).
+//! vendored under `vendor/`; names are recognized via the allowlist).
 //!
 //! [`searchit`] and [`do_searchpair`] back the strict reference ports of
 //! `search_cmn`/`searchpair_cmn` in

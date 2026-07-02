@@ -1,6 +1,6 @@
 //! Port of `vim_str2nr()` and the `STR2NR_*` flags from `src/nvim/charset.c`.
 //!
-//! `charset.c` is not vendored under `csrc/` (only the eval tree is); this is
+//! `charset.c` is not vendored under `vendor/` (only the eval tree is); this is
 //! the extern dependency `tv_get_number_chk()` calls, ported against its home
 //! file (PORT.md Rule 9). The signature mirrors the C out-parameter form with
 //! `Option<&mut …>`.

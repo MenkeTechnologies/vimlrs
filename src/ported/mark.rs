@@ -1,4 +1,4 @@
-//! Port of `src/nvim/mark.c` (not vendored under `csrc/`; the names appear as
+//! Port of `src/nvim/mark.c` (not vendored under `vendor/`; the names appear as
 //! calls in the vendored eval tree, so the drift gate recognizes them via the
 //! allowlist / `nvim_c_functions.txt`).
 //!

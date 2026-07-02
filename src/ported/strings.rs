@@ -1,7 +1,7 @@
 //! Port of `src/nvim/strings.c` — the Vimscript string builtins.
 //!
 //! These are real Neovim functions whose C home is `strings.c` (not under
-//! `eval/`, so not in the vendored `csrc/eval/` tree). Ported from
+//! `eval/`, so not in the vendored `vendor/eval/` tree). Ported from
 //! `~/forkedRepos/neovim/src/nvim/strings.c`; their names are recorded in
 //! `tests/data/fake_fn_allowlist.txt` as category-A (real C, home file not
 //! vendored) until `strings.c` itself is vendored.
@@ -296,7 +296,7 @@ fn byteidx_impl(argvars: &[typval_T], skipcc: bool) -> varnumber_T {
 }
 
 /// Port of `f_charidx()` from Neovim `src/nvim/strings.c` (home file not under
-/// the vendored `csrc/eval/` tree). The character index of the byte at `{idx}`
+/// the vendored `vendor/eval/` tree). The character index of the byte at `{idx}`
 /// in `{string}`, or -1 if `{idx}` is out of range.
 ///
 /// SUBSET: the optional `{countcc}` (count composing chars) and `{utf16}`

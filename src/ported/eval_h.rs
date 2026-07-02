@@ -1,5 +1,5 @@
 //! Port of selected declarations from `src/nvim/eval.h` (vendored at
-//! `csrc/eval.h`). Header-defined eval types live in the header port
+//! `vendor/eval.h`). Header-defined eval types live in the header port
 //! (PORT.md Rule C).
 #![allow(non_camel_case_types, non_upper_case_globals)]
 

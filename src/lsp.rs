@@ -1,5 +1,5 @@
 //! ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-//! EXTENSION — NO `csrc/` COUNTERPART. Language Server Protocol (stdio) for
+//! EXTENSION — NO `vendor/` COUNTERPART. Language Server Protocol (stdio) for
 //! editors — `vimlrs --lsp`. Self-contained, reusing the synthesis
 //! lexer/parser: diagnostics come from per-line [`crate::viml_parser::parse_stmt`];
 //! completion / hover draw on the Phase-3 builtin set, the ex-command words, and

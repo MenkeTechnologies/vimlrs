@@ -13,9 +13,9 @@ readme = "README.md"
 # in-progress crates in the meta repo). Flip to publishable once the interpreter
 # is feature-complete and the crate is renamed to match the `vimlrs` repo.
 publish = false
-# `csrc/` is the vendored Neovim C spec for porting; `docs/` is the published
+# `vendor/` is the vendored Neovim C spec for porting; `docs/` is the published
 # HUD site — neither is part of the crate build.
-exclude = ["/csrc/", "/docs/"]
+exclude = ["/vendor/", "/docs/"]
 
 # vimlrs is a standalone crate, not a workspace member. An explicit empty
 # `[workspace]` stops cargo walking up to the MenkeTechnologiesMeta parent.

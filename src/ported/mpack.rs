@@ -1,5 +1,5 @@
 //! Port of neovim's vendored libmpack streaming MessagePack parser
-//! (`csrc/mpack/{mpack_core,object,conv}.{c,h}`).
+//! (`vendor/mpack/{mpack_core,object,conv}.{c,h}`).
 //!
 //! Only the *decode* half is ported — the token reader
 //! ([`mpack_read`]/[`mpack_rtoken`]/[`mpack_rvalue`]/[`mpack_rblob`]), the
@@ -7,7 +7,7 @@
 //! the [`mpack_parser_push`]/[`mpack_parser_pop`] node stack), and the
 //! number-unpacking conversions ([`mpack_unpack_boolean`]/[`mpack_unpack_uint`]/
 //! [`mpack_unpack_sint`]/[`mpack_unpack_float_fast`]). These are exactly what
-//! `csrc/eval/decode.c`'s `unpack_typval()` drives. The packing/writing half
+//! `vendor/eval/decode.c`'s `unpack_typval()` drives. The packing/writing half
 //! (`mpack_write`, `mpack_wtoken`, `mpack_pack_*`) is left unported: it is not
 //! referenced by the four decode stubs and `msgpackdump()` has its own encoder.
 //!
@@ -16,7 +16,7 @@
 //! * **The `void *p` user-data union is a type parameter.** libmpack's
 //!   `mpack_data_t` union carries arbitrary user state on nodes via `void *p`
 //!   (the C caller casts it to their own type). Here [`mpack_data_t`] is generic
-//!   over that payload `P`, so `csrc/eval/decode.c` instantiates the parser with
+//!   over that payload `P`, so `vendor/eval/decode.c` instantiates the parser with
 //!   its own [`crate::ported::eval::decode`] payload enum instead of casting raw
 //!   pointers. The `u`/`i`/`d` union members are kept for fidelity though the
 //!   typval path only uses `p`.
@@ -272,14 +272,14 @@ macro_rules! MIN {
     };
 }
 
-/// Port of `mpack_tokbuf_init()` from `csrc/mpack/mpack_core.c:37`.
+/// Port of `mpack_tokbuf_init()` from `vendor/mpack/mpack_core.c:37`.
 pub fn mpack_tokbuf_init(tokbuf: &mut mpack_tokbuf_t) {
     tokbuf.ppos = 0;
     tokbuf.plen = 0;
     tokbuf.passthrough = 0;
 }
 
-/// Port of `mpack_read()` from `csrc/mpack/mpack_core.c:44`.
+/// Port of `mpack_read()` from `vendor/mpack/mpack_core.c:44`.
 pub fn mpack_read(
     tokbuf: &mut mpack_tokbuf_t,
     buf: &mut &[u8],
@@ -364,7 +364,7 @@ pub fn mpack_read(
     MPACK_OK
 }
 
-/// Port of `mpack_rtoken()` from `csrc/mpack/mpack_core.c:171`.
+/// Port of `mpack_rtoken()` from `vendor/mpack/mpack_core.c:171`.
 pub fn mpack_rtoken(buf: &mut &[u8], buflen: &mut usize, tok: &mut mpack_token_t) -> i32 {
     if *buflen == 0 {
         return MPACK_EOF;
@@ -427,7 +427,7 @@ pub fn mpack_rtoken(buf: &mut &[u8], buflen: &mut usize, tok: &mut mpack_token_t
     }
 }
 
-/// Port of `mpack_rpending()` from `csrc/mpack/mpack_core.c:251`.
+/// Port of `mpack_rpending()` from `vendor/mpack/mpack_core.c:251`.
 fn mpack_rpending(buf: &mut &[u8], buflen: &mut usize, state: &mut mpack_tokbuf_t) -> i32 {
     let count;
     debug_assert!(state.ppos < state.plen);
@@ -445,7 +445,7 @@ fn mpack_rpending(buf: &mut &[u8], buflen: &mut usize, state: &mut mpack_tokbuf_
     1
 }
 
-/// Port of `mpack_rvalue()` from `csrc/mpack/mpack_core.c:268`.
+/// Port of `mpack_rvalue()` from `vendor/mpack/mpack_core.c:268`.
 fn mpack_rvalue(
     r#type: mpack_token_type_t,
     remaining: mpack_uint32_t,
@@ -495,7 +495,7 @@ fn mpack_rvalue(
     MPACK_OK
 }
 
-/// Port of `mpack_rblob()` from `csrc/mpack/mpack_core.c:306`.
+/// Port of `mpack_rblob()` from `vendor/mpack/mpack_core.c:306`.
 fn mpack_rblob(
     r#type: mpack_token_type_t,
     tlen: mpack_uint32_t,
@@ -527,7 +527,7 @@ fn mpack_rblob(
     MPACK_OK
 }
 
-/// Port of `mpack_value()` from `csrc/mpack/mpack_core.c:554`.
+/// Port of `mpack_value()` from `vendor/mpack/mpack_core.c:554`.
 fn mpack_value(
     r#type: mpack_token_type_t,
     length: mpack_uint32_t,
@@ -540,7 +540,7 @@ fn mpack_value(
     MPACK_OK
 }
 
-/// Port of `mpack_blob()` from `csrc/mpack/mpack_core.c:563`.
+/// Port of `mpack_blob()` from `vendor/mpack/mpack_core.c:563`.
 fn mpack_blob(
     r#type: mpack_token_type_t,
     length: mpack_uint32_t,
@@ -553,7 +553,7 @@ fn mpack_blob(
     MPACK_OK
 }
 
-/// Port of `mpack_byte()` from `csrc/mpack/mpack_core.c:572`.
+/// Port of `mpack_byte()` from `vendor/mpack/mpack_core.c:572`.
 fn mpack_byte(byte: u8) -> mpack_value_t {
     mpack_value_t {
         lo: byte as mpack_uint32_t,
@@ -563,7 +563,7 @@ fn mpack_byte(byte: u8) -> mpack_value_t {
 
 // ── object.c ────────────────────────────────────────────────────────────────
 
-/// Port of `mpack_parser_init()` from `csrc/mpack/object.c:9`.
+/// Port of `mpack_parser_init()` from `vendor/mpack/object.c:9`.
 pub fn mpack_parser_init<P>(parser: &mut mpack_parser_t<P>, capacity: mpack_uint32_t) {
     mpack_tokbuf_init(&mut parser.tokbuf);
     parser.data = mpack_data_t::Null;
@@ -582,7 +582,7 @@ pub fn mpack_parser_init<P>(parser: &mut mpack_parser_t<P>, capacity: mpack_uint
     parser.status = 0;
 }
 
-/// Port of `mpack_parse_tok()` from `csrc/mpack/object.c:52` (the `MPACK_WALK`
+/// Port of `mpack_parse_tok()` from `vendor/mpack/object.c:52` (the `MPACK_WALK`
 /// macro from object.c:29 is inlined here — this is the parse, not unparse,
 /// direction, so `action` is `{n->tok = tok; enter_cb(parser, n);}`).
 pub fn mpack_parse_tok<P>(
@@ -627,7 +627,7 @@ pub fn mpack_parse_tok<P>(
     MPACK_EOF
 }
 
-/// Port of `mpack_parse()` from `csrc/mpack/object.c:66`.
+/// Port of `mpack_parse()` from `vendor/mpack/object.c:66`.
 pub fn mpack_parse<P>(
     parser: &mut mpack_parser_t<P>,
     buf: &mut &[u8],
@@ -680,12 +680,12 @@ pub fn mpack_parse<P>(
     status
 }
 
-/// Port of `mpack_parser_full()` from `csrc/mpack/object.c:146`.
+/// Port of `mpack_parser_full()` from `vendor/mpack/object.c:146`.
 fn mpack_parser_full<P>(parser: &mpack_parser_t<P>) -> i32 {
     (parser.size == parser.capacity) as i32
 }
 
-/// Port of `mpack_parser_push()` from `csrc/mpack/object.c:151`.
+/// Port of `mpack_parser_push()` from `vendor/mpack/object.c:151`.
 ///
 /// RUST-PORT NOTE: returns the new top node's index into `parser.items` rather
 /// than a `mpack_node_t *`.
@@ -701,7 +701,7 @@ fn mpack_parser_push<P>(parser: &mut mpack_parser_t<P>) -> usize {
     top
 }
 
-/// Port of `mpack_parser_pop()` from `csrc/mpack/object.c:166`.
+/// Port of `mpack_parser_pop()` from `vendor/mpack/object.c:166`.
 ///
 /// RUST-PORT NOTE: returns `Some(index)` / `None` rather than a
 /// `mpack_node_t *` / `NULL`.
@@ -744,7 +744,7 @@ fn POW2(n: u32) -> f64 {
     (1u64 << (n / 2)) as f64 * (1u64 << (n / 2)) as f64 * (1u64 << (n % 2)) as f64
 }
 
-/// Port of `mpack_unpack_boolean()` from `csrc/mpack/conv.c:193`.
+/// Port of `mpack_unpack_boolean()` from `vendor/mpack/conv.c:193`.
 pub fn mpack_unpack_boolean(t: &mpack_token_t) -> bool {
     match &t.data {
         mpack_token_data::value(v) => v.lo != 0 || v.hi != 0,
@@ -752,7 +752,7 @@ pub fn mpack_unpack_boolean(t: &mpack_token_t) -> bool {
     }
 }
 
-/// Port of `mpack_unpack_uint()` from `csrc/mpack/conv.c:198`.
+/// Port of `mpack_unpack_uint()` from `vendor/mpack/conv.c:198`.
 pub fn mpack_unpack_uint(t: &mpack_token_t) -> mpack_uintmax_t {
     match &t.data {
         mpack_token_data::value(v) => {
@@ -762,7 +762,7 @@ pub fn mpack_unpack_uint(t: &mpack_token_t) -> mpack_uintmax_t {
     }
 }
 
-/// Port of `mpack_unpack_sint()` from `csrc/mpack/conv.c:205`.
+/// Port of `mpack_unpack_sint()` from `vendor/mpack/conv.c:205`.
 ///
 /// Unpack a signed integer without relying on two's complement as the internal
 /// representation.
@@ -784,7 +784,7 @@ pub fn mpack_unpack_sint(t: &mpack_token_t) -> mpack_sintmax_t {
     -((rv - 1) as mpack_sintmax_t) - 1
 }
 
-/// Port of `mpack_unpack_float_compat()` from `csrc/mpack/conv.c:224`.
+/// Port of `mpack_unpack_float_compat()` from `vendor/mpack/conv.c:224`.
 pub fn mpack_unpack_float_compat(t: &mpack_token_t) -> f64 {
     let (vlo, vhi) = match &t.data {
         mpack_token_data::value(v) => (v.lo, v.hi),
@@ -843,7 +843,7 @@ pub fn mpack_unpack_float_compat(t: &mpack_token_t) -> f64 {
     mant * if sign != 0 { -1.0 } else { 1.0 }
 }
 
-/// Port of `mpack_unpack_float_fast()` from `csrc/mpack/conv.c:263`.
+/// Port of `mpack_unpack_float_fast()` from `vendor/mpack/conv.c:263`.
 pub fn mpack_unpack_float_fast(t: &mpack_token_t) -> f64 {
     let (lo, hi) = match &t.data {
         mpack_token_data::value(v) => (v.lo, v.hi),
@@ -870,7 +870,7 @@ pub fn mpack_unpack_float(t: &mpack_token_t) -> f64 {
     mpack_unpack_float_fast(t)
 }
 
-/// Port of `mpack_unpack_number()` from `csrc/mpack/conv.c:287`.
+/// Port of `mpack_unpack_number()` from `vendor/mpack/conv.c:287`.
 pub fn mpack_unpack_number(t: &mpack_token_t) -> f64 {
     let rv;
     let (mut hi, mut lo) = match &t.data {
@@ -903,7 +903,7 @@ pub fn mpack_unpack_number(t: &mpack_token_t) -> f64 {
     }
 }
 
-/// Port of `mpack_is_be()` from `csrc/mpack/conv.c:358`.
+/// Port of `mpack_is_be()` from `vendor/mpack/conv.c:358`.
 fn mpack_is_be() -> i32 {
     (cfg!(target_endian = "big")) as i32
 }

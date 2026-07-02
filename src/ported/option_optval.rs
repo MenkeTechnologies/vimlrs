@@ -5,10 +5,10 @@
 //! → `set_option_value_handle_tty`), and option-name resolution
 //! (`find_option`, `find_option_var_end`).
 //!
-//! Vendored spec: `csrc/option.c` (a curated subset of upstream `option.c` +
+//! Vendored spec: `vendor/option.c` (a curated subset of upstream `option.c` +
 //! `option_defs.h` + `option.h` + `types_defs.h`). `tv_to_optval`,
 //! `optval_as_tv`, `set_option_from_tv` live upstream in `eval/vars.c`
-//! (`csrc/eval/vars.c`) and `find_option_var_end` in `eval.c` (`csrc/eval.c`);
+//! (`vendor/eval/vars.c`) and `find_option_var_end` in `eval.c` (`vendor/eval.c`);
 //! they are ported here because they are the OptVal↔typval boundary.
 //!
 //! ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -269,7 +269,7 @@ thread_local! {
 
 // ── option.c ports ───────────────────────────────────────────────────────────
 
-/// Port of `find_option_len()` from `csrc/option.c` (upstream `option.c:3341`).
+/// Port of `find_option_len()` from `vendor/option.c` (upstream `option.c:3341`).
 /// RUST-PORT NOTE: the generated perfect hash (`find_option_hash`) is a linear
 /// scan over the reduced table, matching full name or abbreviation.
 pub fn find_option_len(name: &str, len: usize) -> OptIndex {
@@ -284,14 +284,14 @@ pub fn find_option_len(name: &str, len: usize) -> OptIndex {
     kOptInvalid
 }
 
-/// Port of `find_option()` from `csrc/option.c` (upstream `option.c:3353`) —
+/// Port of `find_option()` from `vendor/option.c` (upstream `option.c:3353`) —
 /// resolve an option name (or abbreviation) to its index.
 pub fn find_option(name: &str) -> OptIndex {
     // c:3356 return find_option_len(name, strlen(name));
     find_option_len(name, name.len())
 }
 
-/// Port of `find_option_end()` from `csrc/option.c` (upstream `option.c:1303`).
+/// Port of `find_option_end()` from `vendor/option.c` (upstream `option.c:1303`).
 /// RUST-PORT NOTE: TTY/keycode handling (`find_tty_option_end`) is dropped (no
 /// terminal); returns the byte length of the isolated option name (the C `end`
 /// offset) and writes the resolved index to `opt_idxp`, or `None` if `arg` does
@@ -316,13 +316,13 @@ pub fn find_option_end(arg: &str, opt_idxp: &mut OptIndex) -> Option<usize> {
     Some(i)
 }
 
-/// Port of `option_has_type()` from `csrc/option.c` (upstream `option.c`).
+/// Port of `option_has_type()` from `vendor/option.c` (upstream `option.c`).
 pub fn option_has_type(opt_idx: OptIndex, r#type: OptValType) -> bool {
     // c: return opt_idx != kOptInvalid && options[opt_idx].type == type;
     opt_idx != kOptInvalid && options[opt_idx].r#type == r#type
 }
 
-/// Port of `is_tty_option()` from `csrc/option.c` (upstream `option.c:3280`).
+/// Port of `is_tty_option()` from `vendor/option.c` (upstream `option.c:3280`).
 /// RUST-PORT NOTE: reduced to the recognizable TTY names (`t_*`, `term`,
 /// `ttytype`) instead of parsing keycodes via `find_tty_option_end`.
 pub fn is_tty_option(name: &str) -> bool {
@@ -330,7 +330,7 @@ pub fn is_tty_option(name: &str) -> bool {
     name == "term" || name == "ttytype" || name.starts_with("t_")
 }
 
-/// Port of `optval_free()` from `csrc/option.c` (upstream `option.c:3359`).
+/// Port of `optval_free()` from `vendor/option.c` (upstream `option.c:3359`).
 /// RUST-PORT NOTE: no-op — the owned `String` inside an `OptVal` is dropped by
 /// Rust; retained as a named port so the `set_option_from_tv` call site matches
 /// the C control flow.
@@ -339,7 +339,7 @@ pub fn optval_free(o: OptVal) {
     let _ = o;
 }
 
-/// Port of `optval_copy()` from `csrc/option.c` (upstream `option.c:3377`).
+/// Port of `optval_copy()` from `vendor/option.c` (upstream `option.c:3377`).
 /// RUST-PORT NOTE: `String` clone stands in for `copy_string`; scalar variants
 /// return the value unchanged as in C.
 pub fn optval_copy(o: OptVal) -> OptVal {
@@ -359,7 +359,7 @@ pub fn optval_copy(o: OptVal) -> OptVal {
     }
 }
 
-/// Port of `optval_from_varp()` from `csrc/option.c` (upstream `option.c:3424`).
+/// Port of `optval_from_varp()` from `vendor/option.c` (upstream `option.c:3424`).
 /// RUST-PORT NOTE: the `void *varp` dereference (`*(int*)varp` etc.) is replaced
 /// by a read from the thread-local `option_values` store, falling back to the
 /// option's `def_val`; the `varp` parameter and the `b_changed` special case are
@@ -382,7 +382,7 @@ pub fn optval_from_varp(opt_idx: OptIndex) -> OptVal {
     }
 }
 
-/// Port of `get_option_value()` from `csrc/option.c` (upstream `option.c:3630`).
+/// Port of `get_option_value()` from `vendor/option.c` (upstream `option.c:3630`).
 /// RUST-PORT NOTE: `get_varp_scope` is collapsed — the value is read straight
 /// from `optval_from_varp(opt_idx)`.
 pub fn get_option_value(opt_idx: OptIndex, opt_flags: i32) -> OptVal {
@@ -398,7 +398,7 @@ pub fn get_option_value(opt_idx: OptIndex, opt_flags: i32) -> OptVal {
     optval_copy(optval_from_varp(opt_idx))
 }
 
-/// Port of `set_option_value()` from `csrc/option.c` (upstream `option.c:4116`).
+/// Port of `set_option_value()` from `vendor/option.c` (upstream `option.c:4116`).
 /// RUST-PORT NOTE: the `sandbox` counter is not modeled standalone (see
 /// `vars.c`'s `check_secure` port), so the `kOptFlagSecure` guard is inert here;
 /// the validating `set_option` (with `did_set` side effects) collapses to a
@@ -423,7 +423,7 @@ pub fn set_option_value(opt_idx: OptIndex, value: OptVal, opt_flags: i32) -> Opt
     None
 }
 
-/// Port of `set_option_value_handle_tty()` from `csrc/option.c` (upstream
+/// Port of `set_option_value_handle_tty()` from `vendor/option.c` (upstream
 /// `option.c:4152`). Returns `Some(msg)` on error, `None` on success.
 pub fn set_option_value_handle_tty(
     name: &str,
@@ -447,7 +447,7 @@ pub fn set_option_value_handle_tty(
 
 // ── eval/vars.c ports (the OptVal↔typval boundary) ───────────────────────────
 
-/// Port of `tv_to_optval()` from `csrc/eval/vars.c` (upstream `vars.c:3196`) —
+/// Port of `tv_to_optval()` from `vendor/eval/vars.c` (upstream `vars.c:3196`) —
 /// convert a `typval_T` to the `OptVal` for option `opt_idx`. Sets `*error` on a
 /// type error.
 fn tv_to_optval(tv: &typval_T, opt_idx: OptIndex, option: &str, error: &mut bool) -> OptVal {
@@ -532,7 +532,7 @@ fn tv_to_optval(tv: &typval_T, opt_idx: OptIndex, option: &str, error: &mut bool
     value
 }
 
-/// Port of `optval_as_tv()` from `csrc/eval/vars.c` (upstream `vars.c:3256`) —
+/// Port of `optval_as_tv()` from `vendor/eval/vars.c` (upstream `vars.c:3256`) —
 /// convert an `OptVal` to a `typval_T`. `numbool` renders booleans as numbers
 /// (for backwards compatibility).
 pub fn optval_as_tv(value: OptVal, numbool: bool) -> typval_T {
@@ -594,7 +594,7 @@ pub fn optval_as_tv(value: OptVal, numbool: bool) -> typval_T {
     rettv
 }
 
-/// Port of `set_option_from_tv()` from `csrc/eval/vars.c` (upstream
+/// Port of `set_option_from_tv()` from `vendor/eval/vars.c` (upstream
 /// `vars.c:3286`) — set option `varname` to the value of `varp` (as used by
 /// `setbufvar`/`setwinvar` with a `&`-prefixed name).
 pub fn set_option_from_tv(varname: &str, varp: &typval_T) {
@@ -624,7 +624,7 @@ pub fn set_option_from_tv(varname: &str, varp: &typval_T) {
     optval_free(value);
 }
 
-/// Port of `find_option_var_end()` from `csrc/eval.c` (upstream `eval.c:6297`) —
+/// Port of `find_option_var_end()` from `vendor/eval.c` (upstream `eval.c:6297`) —
 /// isolate the option name after a `&`/`+` sigil, decoding a leading `g:`/`l:`
 /// scope prefix. RUST-PORT NOTE: C takes `const char **arg` (advanced past the
 /// prefix) and returns the `end` pointer; here `arg` is the full sigil-prefixed

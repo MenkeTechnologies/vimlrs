@@ -1,5 +1,5 @@
 //! ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-//! EXTENSION — NO `csrc/` COUNTERPART. The vimlrs analogue of zshrs's
+//! EXTENSION — NO `vendor/` COUNTERPART. The vimlrs analogue of zshrs's
 //! `src/fusevm_bridge.rs`: pure fusevm plumbing, no operator logic. It only
 //!   1. converts between [`typval_T`] and `fusevm::Value` (the refpool smuggle),
 //!   2. holds the per-run bridge state (refpool, last result, echo sink),
@@ -1822,7 +1822,7 @@ fn b_unlet(vm: &mut VM, _: u8) -> Value {
 
 /// `:unlet base[index]` / `:unlet base.key` — remove one List item or Dict
 /// entry. Mirrors the two element branches of `do_unlet_var()`
-/// (csrc/eval/vars.c): list → `tv_list_item_remove`, dict → `tv_dict_item_remove`
+/// (vendor/eval/vars.c): list → `tv_list_item_remove`, dict → `tv_dict_item_remove`
 /// (with a watcher notification), else E689.
 fn b_unlet_index(vm: &mut VM, _: u8) -> Value {
     use crate::ported::eval::typval::{
@@ -2155,9 +2155,9 @@ fn tv_string_item(it: &listitem_T) -> String {
 ///
 /// Bridge-level (like `execute()`): it must run a command and observe the error
 /// machinery — `did_emsg`, the captured error text, and a thrown exception
-/// (reported by the nested top level). Spec: `csrc/eval.lua`; the implementation
+/// (reported by the nested top level). Spec: `vendor/eval.lua`; the implementation
 /// follows Neovim's `testing.c`, which is not part of the vendored eval tree.
-/// Appends through the ported `assert_error` (`csrc/eval/vars.c`).
+/// Appends through the ported `assert_error` (`vendor/eval/vars.c`).
 fn b_assert_fails(vm: &mut VM, argc: u8) -> Value {
     let mut args = Vec::with_capacity(argc as usize);
     for _ in 0..argc {
@@ -2254,7 +2254,7 @@ fn assert_beeps_run(cmd: &str) -> bool {
 
 /// `assert_beeps({cmd})` — run `{cmd}` and record a failure in `v:errors` if it
 /// does NOT cause a beep. Bridge-level (runs a command, like `assert_fails()`);
-/// spec in `csrc/eval.lua`, implementation follows Neovim's testing.c.
+/// spec in `vendor/eval.lua`, implementation follows Neovim's testing.c.
 fn b_assert_beeps(vm: &mut VM, argc: u8) -> Value {
     let mut args = Vec::with_capacity(argc as usize);
     for _ in 0..argc {
@@ -3021,7 +3021,7 @@ pub fn install_set_hook(f: Box<dyn Fn(&str)>) {
 thread_local! {
     /// Host hook fired with the full raw `:map`-family command line (e.g.
     /// `"nnoremap <leader>x :Foo<CR>"`) whenever one runs, so an embedding editor
-    /// can mirror the mapping onto its own live keymap. EXTENSION — no `csrc/`
+    /// can mirror the mapping onto its own live keymap. EXTENSION — no `vendor/`
     /// counterpart; a bridge seam living in the carve-out, not `src/ported/`.
     /// Installed via [`install_map_hook`]; unset by default (no-op).
     #[allow(clippy::type_complexity)]
@@ -3037,7 +3037,7 @@ pub fn install_map_hook(f: Box<dyn Fn(&str)>) {
 
 // ── COLORSCHEME / HIGHLIGHT / SYNTAX / FILETYPE HOST HOOKS ────────────────────
 //
-// EXTENSION — no `csrc/` counterpart. A vimrc that runs `:colorscheme molokai`
+// EXTENSION — no `vendor/` counterpart. A vimrc that runs `:colorscheme molokai`
 // selects a scheme; Vim then sources `colors/molokai.vim` from the runtime path,
 // which issues the `:highlight` commands that paint every group. vimlrs sources
 // that file itself (via [`b_colorscheme`], firing each `:highlight` through the
@@ -3101,8 +3101,7 @@ pub fn install_filetype_hook(f: Box<dyn Fn(&str)>) {
 /// `pack/*/start/*` and `pack/*/opt/*` bundles). Returns the first existing file.
 fn resolve_colorscheme(name: &str) -> Option<std::path::PathBuf> {
     let rel = format!("colors/{name}.vim");
-    let mut roots: Vec<std::path::PathBuf> =
-        COLORSCHEME_DIRS.with(|d| d.borrow().clone());
+    let mut roots: Vec<std::path::PathBuf> = COLORSCHEME_DIRS.with(|d| d.borrow().clone());
     if let Ok(home) = std::env::var("HOME") {
         let home = std::path::PathBuf::from(home);
         roots.push(home.join(".vim"));
@@ -3146,7 +3145,7 @@ fn resolve_colorscheme(name: &str) -> Option<std::path::PathBuf> {
 
 // ── EDITOR HOST (embedding seam) ─────────────────────────────────────────────
 //
-// EXTENSION — no `csrc/` counterpart. When vimlrs runs standalone the editor
+// EXTENSION — no `vendor/` counterpart. When vimlrs runs standalone the editor
 // builtins (getline/setline/append/getbufline, line()/col()/getpos()/setpos()/
 // cursor(), bufname()/bufnr()) operate on the reduced in-crate buffer/cursor
 // model in `src/ported/eval/funcs.rs` (CURBUF/CURPOS). When vimlrs is embedded

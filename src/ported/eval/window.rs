@@ -1,4 +1,4 @@
-//! Port of `src/nvim/eval/window.c` (vendored at `csrc/eval/window.c`).
+//! Port of `src/nvim/eval/window.c` (vendored at `vendor/eval/window.c`).
 //!
 //! The window-lookup helper layer behind the `win_*`/`tabpage*` builtins. The
 //! window/tab-page list itself is modelled in [`crate::ported::window`]; these
@@ -28,14 +28,14 @@ use crate::ported::window::{
     win_get_tabwin,
 };
 
-/// `LOWEST_WIN_ID = 1000` — lowest number used for a window ID (`csrc/window.h:35`).
+/// `LOWEST_WIN_ID = 1000` — lowest number used for a window ID (`vendor/window.h:35`).
 const LOWEST_WIN_ID: i32 = 1000;
 
 /// `e_invalwindow[] = N_("E957: Invalid window number")` (`errors.h:181`; that
-/// file is not yet vendored under `csrc/`).
+/// file is not yet vendored under `vendor/`).
 const e_invalwindow: &str = "E957: Invalid window number";
 
-/// Port of `win_has_winnr()` from `csrc/eval/window.c:42`.
+/// Port of `win_has_winnr()` from `vendor/eval/window.c:42`.
 pub fn win_has_winnr(
     wp: &Rc<std::cell::RefCell<win_T>>,
     tp: &Rc<std::cell::RefCell<tabpage_T>>,
@@ -51,7 +51,7 @@ pub fn win_has_winnr(
         || (!wp.borrow().w_config.hide && wp.borrow().w_config.focusable)
 }
 
-/// Port of `win_getid()` from `csrc/eval/window.c:49`.
+/// Port of `win_getid()` from `vendor/eval/window.c:49`.
 pub fn win_getid(argvars: &[typval_T]) -> i32 {
     if argvars.first().map_or(true, |t| t.v_type == VAR_UNKNOWN) {
         // c:50
@@ -110,7 +110,7 @@ pub fn win_getid(argvars: &[typval_T]) -> i32 {
     0 // c:85
 }
 
-/// Port of `win_id2tabwin()` from `csrc/eval/window.c:89`.
+/// Port of `win_id2tabwin()` from `vendor/eval/window.c:89`.
 pub fn win_id2tabwin(argvars: &[typval_T], rettv: &mut typval_T) {
     let id = tv_get_number(&argvars[0]) as handle_T; // c:91
 
@@ -123,12 +123,12 @@ pub fn win_id2tabwin(argvars: &[typval_T], rettv: &mut typval_T) {
     tv_list_append_number(&mut list.borrow_mut(), winnr as varnumber_T); // c:99
 }
 
-/// Port of `win_id2wp()` from `csrc/eval/window.c:102`.
+/// Port of `win_id2wp()` from `vendor/eval/window.c:102`.
 pub fn win_id2wp(id: i32) -> Option<Rc<std::cell::RefCell<win_T>>> {
     win_id2wp_tp(id, None) // c:104
 }
 
-/// Port of `win_id2wp_tp()` from `csrc/eval/window.c:109`.
+/// Port of `win_id2wp_tp()` from `vendor/eval/window.c:109`.
 /// Return the window and tab pointer of window "id".
 /// Returns NULL when not found.
 ///
@@ -165,7 +165,7 @@ pub fn win_id2wp_tp(
     None // c:120 return NULL
 }
 
-/// Port of `win_id2win()` from `csrc/eval/window.c:123`.
+/// Port of `win_id2win()` from `vendor/eval/window.c:123`.
 pub fn win_id2win(argvars: &[typval_T]) -> i32 {
     let mut nr = 1; // c:125
     let id = tv_get_number(&argvars[0]) as i32; // c:126
@@ -185,7 +185,7 @@ pub fn win_id2win(argvars: &[typval_T]) -> i32 {
     0 // c:134
 }
 
-/// Port of `win_findbuf()` from `csrc/eval/window.c:137`.
+/// Port of `win_findbuf()` from `vendor/eval/window.c:137`.
 ///
 /// RUST-PORT NOTE: C dereferences `wp->w_buffer` directly (always non-NULL);
 /// the placeholder `w_buffer` is an `Option`, so a window with no buffer simply
@@ -219,7 +219,7 @@ pub fn win_findbuf(argvars: &[typval_T], list: &mut list_T) {
     }
 }
 
-/// Port of `find_win_by_nr()` from `csrc/eval/window.c:153`.
+/// Port of `find_win_by_nr()` from `vendor/eval/window.c:153`.
 /// Find window specified by "vp" in tabpage "tp".
 ///
 /// @param tp  NULL for current tab page
@@ -276,7 +276,7 @@ pub fn find_win_by_nr(
     None // c:179
 }
 
-/// Port of `find_win_by_nr_or_id()` from `csrc/eval/window.c:185`.
+/// Port of `find_win_by_nr_or_id()` from `vendor/eval/window.c:185`.
 /// Find a window: When using a Window ID in any tab page, when using a number
 /// in the current tab page.
 /// Returns NULL when not found.
@@ -291,7 +291,7 @@ pub fn find_win_by_nr_or_id(vp: &typval_T) -> Option<Rc<std::cell::RefCell<win_T
     find_win_by_nr(vp, None) // c:193
 }
 
-/// Port of `find_tabwin()` from `csrc/eval/window.c:197`.
+/// Port of `find_tabwin()` from `vendor/eval/window.c:197`.
 /// Find window specified by "wvp" in tabpage "tvp".
 pub fn find_tabwin(wvp: &typval_T, tvp: &typval_T) -> Option<Rc<std::cell::RefCell<win_T>>> {
     let mut wp: Option<Rc<std::cell::RefCell<win_T>>> = None; // c:199
@@ -321,7 +321,7 @@ pub fn find_tabwin(wvp: &typval_T, tvp: &typval_T) -> Option<Rc<std::cell::RefCe
     wp // c:219
 }
 
-/// Port of `get_optional_window()` from `csrc/eval/funcs.c:769` (that file's
+/// Port of `get_optional_window()` from `vendor/eval/funcs.c:769` (that file's
 /// mirror `eval/funcs.rs` is owned by the funcs agent; this window-lookup helper
 /// is placed with the other window helpers it delegates to). `idx` selects the
 /// argument to interpret as a window.

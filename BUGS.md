@@ -77,7 +77,7 @@ Covered by `examples/index_get.vim`.
 ## Float formatting — systemic `string()` divergence
 
 ### 7. `string()` of a Float diverges in exponent format, precision, and exp threshold — ⊘ WONTFIX (matches Neovim)
-vimlrs targets **Neovim** (the vendored `csrc/` is the spec), and Neovim renders
+vimlrs targets **Neovim** (the vendored `vendor/` is the spec), and Neovim renders
 a Float with plain C `printf("%g")` (`encode.c:369`, `typval.c:4591`) — 6
 significant digits, C-style `e+NN` exponent, `.0` appended when integral.
 vimlrs's `vim_float_g` already reproduces that exactly, so its output **matches

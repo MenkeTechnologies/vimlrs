@@ -1,5 +1,5 @@
 //! ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-//! EXTENSION — NO `csrc/` COUNTERPART. Neovim's `eval.c` parses and evaluates
+//! EXTENSION — NO `vendor/` COUNTERPART. Neovim's `eval.c` parses and evaluates
 //! in one pass over the source string; there is no AST. This tree is net-new,
 //! its shape dictated by the `eval1`…`eval7` precedence ladder so the compiler
 //! can lower it to fusevm bytecode.
@@ -197,7 +197,7 @@ pub enum LetTarget {
 
 /// A single `:unlet` argument: either a bare variable name or a List/Dict
 /// element target. Mirrors the two non-name branches of `do_unlet_var()`
-/// (`csrc/eval/vars.c`).
+/// (`vendor/eval/vars.c`).
 #[derive(Debug, Clone)]
 pub enum UnletArg {
     /// `unlet x` / `unlet g:x` / `unlet $ENV` — remove a variable by name.

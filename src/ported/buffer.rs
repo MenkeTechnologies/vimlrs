@@ -1,6 +1,6 @@
 //! Port of `src/nvim/buffer.c` + the line-store readers of `src/nvim/memline.c`
-//! (vendored as `csrc/buffer.c` / `csrc/memline.c`, structs in
-//! `csrc/buffer_defs.h` / `csrc/memline_defs.h`).
+//! (vendored as `vendor/buffer.c` / `vendor/memline.c`, structs in
+//! `vendor/buffer_defs.h` / `vendor/memline_defs.h`).
 //!
 //! The minimal buffer substrate the Vimscript eval layer reaches: the `buf_T`
 //! model (only the fields eval reads), the global buffer list
@@ -16,7 +16,7 @@
 //!      is replaced by a `Vec<String>` line store; `ml_mfp` collapses to a
 //!      `bool` ("buffer loaded"). `ml_get_buf`/`ml_append_buf`/`ml_replace_buf`/
 //!      `ml_delete` operate on the Vec, not on `ml_get_buf_impl`/`ml_append_int`
-//!      /`ml_replace_buf_len`/`ml_delete_int` (those stay in `csrc` for
+//!      /`ml_replace_buf_len`/`ml_delete_int` (those stay in `vendor` for
 //!      reference only).
 //!   3. FileID / os_fileid / regexp / autocmd / option / window subsystems the
 //!      leaves do not need are deferred: private extern-adapters carry the real
@@ -47,12 +47,12 @@ pub const BLN_NOOPT: i32 = 16;
 pub const BLN_NOCURWIN: i32 = 128;
 
 /// `#define BF_CHECK_RO`/`BF_NEVERLOADED`/`BF_DUMMY` — `b_flags` bits.
-/// (`csrc/buffer_defs.h`.)
+/// (`vendor/buffer_defs.h`.)
 pub const BF_CHECK_RO: i32 = 0x02;
 pub const BF_NEVERLOADED: i32 = 0x04;
 pub const BF_DUMMY: i32 = 0x80;
 
-/// `memline_T` — the contents of a buffer. (`csrc/memline_defs.h`.)
+/// `memline_T` — the contents of a buffer. (`vendor/memline_defs.h`.)
 ///
 /// RUST-PORT NOTE: `ml_mfp` (the `memfile_T *`) becomes a `bool` "buffer
 /// loaded" flag, and the block-tree line storage becomes `ml_lines`, a
@@ -70,7 +70,7 @@ pub struct memline_T {
     pub ml_lines: Vec<String>,
 }
 
-/// `struct file_buffer` (`buf_T`) — one file/buffer. (`csrc/buffer_defs.h`.)
+/// `struct file_buffer` (`buf_T`) — one file/buffer. (`vendor/buffer_defs.h`.)
 ///
 /// Only the fields the eval layer reads are modeled; the rest of Neovim's
 /// buf_T (windows, folds, marks, undo, syntax, per-buffer options beyond the
@@ -137,7 +137,7 @@ thread_local! {
 // ---------------------------------------------------------------------------
 // Extern-adapters for subsystems not vendored (real C names, deferred bodies).
 // Same discipline as `vim_regcomp` in ex_eval.rs: the name traces to vendored
-// csrc (so the drift gate recognizes it) but the body is a faithful stand-in.
+// vendor (so the drift gate recognizes it) but the body is a faithful stand-in.
 // ---------------------------------------------------------------------------
 
 /// Port of `handle_get_buffer()` from `Src/map.c` (not vendored).
@@ -187,7 +187,7 @@ pub fn buf_get_changedtick(buf: &buf_T) -> varnumber_T {
 // memline.c line accessors — backed by the Vec<String> store (RUST-PORT NOTE)
 // ---------------------------------------------------------------------------
 
-/// Port of `ml_get_buf()` from `csrc/memline.c:19`.
+/// Port of `ml_get_buf()` from `vendor/memline.c:19`.
 ///
 /// RUST-PORT NOTE: replaces `ml_get_buf_impl()` (the block-tree walk). Returns
 /// a copy of the line; C returns a pointer into the (read-only) data block.
@@ -210,7 +210,7 @@ pub fn ml_get_buf(buf: &mut buf_T, lnum: linenr_T) -> String {
     line
 }
 
-/// Port of `ml_get()` from `csrc/memline.c:13`. Line from `curbuf`.
+/// Port of `ml_get()` from `vendor/memline.c:13`. Line from `curbuf`.
 pub fn ml_get(lnum: linenr_T) -> String {
     // c: return ml_get_buf_impl(curbuf, lnum, false);
     let cur = curbuf.with(|c| c.borrow().clone()).expect("curbuf is NULL");
@@ -218,7 +218,7 @@ pub fn ml_get(lnum: linenr_T) -> String {
     ml_get_buf(&mut b, lnum)
 }
 
-/// Port of `ml_get_buf_len()` from `csrc/memline.c:36`.
+/// Port of `ml_get_buf_len()` from `vendor/memline.c:36`.
 pub fn ml_get_buf_len(buf: &mut buf_T, lnum: linenr_T) -> colnr_T {
     // c: const char *line = ml_get_buf(buf, lnum);
     let line = ml_get_buf(buf, lnum);
@@ -230,7 +230,7 @@ pub fn ml_get_buf_len(buf: &mut buf_T, lnum: linenr_T) -> colnr_T {
     buf.b_ml.ml_line_textlen - 1
 }
 
-/// Port of `ml_append_buf()` from `csrc/memline.c:156`.
+/// Port of `ml_append_buf()` from `vendor/memline.c:156`.
 ///
 /// RUST-PORT NOTE: replaces `ml_append_flush()`/`ml_append_int()`. Appends
 /// `line` after `lnum` (0 == before the first line) in the Vec store and keeps
@@ -254,14 +254,14 @@ pub fn ml_append_buf(
     OK
 }
 
-/// Port of `ml_append()` from `csrc/memline.c:141`. Appends into `curbuf`.
+/// Port of `ml_append()` from `vendor/memline.c:141`. Appends into `curbuf`.
 pub fn ml_append(lnum: linenr_T, line: &str, len: colnr_T, newfile: bool) -> i32 {
     let cur = curbuf.with(|c| c.borrow().clone()).expect("curbuf is NULL");
     let mut b = cur.borrow_mut();
     ml_append_buf(&mut b, lnum, line, len, newfile)
 }
 
-/// Port of `ml_replace_buf()` from `csrc/memline.c:172`.
+/// Port of `ml_replace_buf()` from `vendor/memline.c:172`.
 ///
 /// RUST-PORT NOTE: replaces `ml_replace_buf_len()`. Replaces line `lnum`
 /// in-place in the Vec store. `copy`/`noalloc` are unused (owned `String`).
@@ -280,14 +280,14 @@ pub fn ml_replace_buf(
     OK
 }
 
-/// Port of `ml_replace()` from `csrc/memline.c:167`. Replaces in `curbuf`.
+/// Port of `ml_replace()` from `vendor/memline.c:167`. Replaces in `curbuf`.
 pub fn ml_replace(lnum: linenr_T, line: &str, copy: bool) -> i32 {
     let cur = curbuf.with(|c| c.borrow().clone()).expect("curbuf is NULL");
     let mut b = cur.borrow_mut();
     ml_replace_buf(&mut b, lnum, line, copy, false)
 }
 
-/// Port of `ml_delete_flags()` from `csrc/memline.c:185`.
+/// Port of `ml_delete_flags()` from `vendor/memline.c:185`.
 ///
 /// RUST-PORT NOTE: replaces `ml_delete_int()`. Deletes line `lnum` from the
 /// Vec store of `curbuf`.
@@ -303,7 +303,7 @@ pub fn ml_delete_flags(lnum: linenr_T, _flags: i32) -> i32 {
     OK
 }
 
-/// Port of `ml_delete()` from `csrc/memline.c:180`. Deletes from `curbuf`.
+/// Port of `ml_delete()` from `vendor/memline.c:180`. Deletes from `curbuf`.
 pub fn ml_delete(lnum: linenr_T) -> i32 {
     // c: return ml_delete_flags(lnum, 0);
     ml_delete_flags(lnum, 0)
@@ -313,7 +313,7 @@ pub fn ml_delete(lnum: linenr_T) -> i32 {
 // buffer.c — buffer-list lookups
 // ---------------------------------------------------------------------------
 
-/// Port of `otherfile_buf()` from `csrc/buffer.c:249`.
+/// Port of `otherfile_buf()` from `vendor/buffer.c:249`.
 ///
 /// RUST-PORT NOTE: FileID/os_fileid comparison is deferred; only the name
 /// compare (which C also does first, for files that don't exist yet) is kept.
@@ -335,7 +335,7 @@ fn otherfile_buf(buf: &buf_T, ffname: Option<&str>) -> bool {
     true
 }
 
-/// Port of `buflist_findname_file_id()` from `csrc/buffer.c:235`.
+/// Port of `buflist_findname_file_id()` from `vendor/buffer.c:235`.
 fn buflist_findname_file_id(ffname: &str) -> Option<Rc<RefCell<buf_T>>> {
     // c:238 FOR_ALL_BUFFERS_BACKWARDS(buf) — walk lastbuf via b_prev.
     let mut cur = lastbuf.with(|l| l.borrow().clone());
@@ -354,13 +354,13 @@ fn buflist_findname_file_id(ffname: &str) -> Option<Rc<RefCell<buf_T>>> {
     None
 }
 
-/// Port of `buflist_findname()` from `csrc/buffer.c:228`.
+/// Port of `buflist_findname()` from `vendor/buffer.c:228`.
 pub fn buflist_findname(ffname: &str) -> Option<Rc<RefCell<buf_T>>> {
     // c: FileID file_id; ... return buflist_findname_file_id(ffname, ...);
     buflist_findname_file_id(ffname)
 }
 
-/// Port of `buflist_findname_exp()` from `csrc/buffer.c:208`.
+/// Port of `buflist_findname_exp()` from `vendor/buffer.c:208`.
 pub fn buflist_findname_exp(fname: &str) -> Option<Rc<RefCell<buf_T>>> {
     // c:213 char *ffname = FullName_save(fname, ...);
     match FullName_save(fname, true) {
@@ -370,7 +370,7 @@ pub fn buflist_findname_exp(fname: &str) -> Option<Rc<RefCell<buf_T>>> {
     }
 }
 
-/// Port of `buflist_findnr()` from `csrc/buffer.c:393`.
+/// Port of `buflist_findnr()` from `vendor/buffer.c:393`.
 pub fn buflist_findnr(mut nr: i32) -> Option<Rc<RefCell<buf_T>>> {
     // c:395 if (nr == 0) { nr = curwin->w_alt_fnum; }
     // RUST-PORT NOTE: no windows, so w_alt_fnum is 0 and nr stays 0.
@@ -381,7 +381,7 @@ pub fn buflist_findnr(mut nr: i32) -> Option<Rc<RefCell<buf_T>>> {
     handle_get_buffer(nr as handle_T)
 }
 
-/// Port of `buflist_findpat()` from `csrc/buffer.c:290`.
+/// Port of `buflist_findpat()` from `vendor/buffer.c:290`.
 ///
 /// RUST-PORT NOTE: the four-attempt `vim_regcomp`/`buflist_match`/
 /// `file_pat_to_reg_pat` regexp search is deferred (the regexp engine is not
@@ -424,7 +424,7 @@ pub fn buflist_findpat(pattern: &str, _unlisted: bool, _diffmode: bool, _curtab_
     r#match
 }
 
-/// Port of `buflist_nr2name()` from `csrc/buffer.c:402`.
+/// Port of `buflist_nr2name()` from `vendor/buffer.c:402`.
 ///
 /// RUST-PORT NOTE: `home_replace_save()` (the `~/` shortener) is deferred; the
 /// stored name is returned as-is.
@@ -440,7 +440,7 @@ pub fn buflist_nr2name(n: i32, fullname: bool, _helptail: bool) -> Option<String
     }
 }
 
-/// Port of `buflist_findfmark()` from `csrc/buffer.c:413`.
+/// Port of `buflist_findfmark()` from `vendor/buffer.c:413`.
 ///
 /// RUST-PORT NOTE: `fmark_T` is not modeled; `buflist_findlnum` reads only
 /// `->mark.lnum`, so this collapses to that line number. With no per-window
@@ -451,13 +451,13 @@ fn buflist_findfmark(_buf: &buf_T) -> linenr_T {
     1
 }
 
-/// Port of `buflist_findlnum()` from `csrc/buffer.c:422`.
+/// Port of `buflist_findlnum()` from `vendor/buffer.c:422`.
 pub fn buflist_findlnum(buf: &buf_T) -> linenr_T {
     // c: return buflist_findfmark(buf)->mark.lnum;
     buflist_findfmark(buf)
 }
 
-/// Port of `buflist_name_nr()` from `csrc/buffer.c:429`.
+/// Port of `buflist_name_nr()` from `vendor/buffer.c:429`.
 ///
 /// Returns `Some((fname, lnum))` on success, `None` (== FAIL) otherwise.
 /// RUST-PORT NOTE: the C out-params `char **fname`/`linenr_T *lnum` become the
@@ -477,7 +477,7 @@ pub fn buflist_name_nr(fnum: i32) -> Option<(String, linenr_T)> {
 // buffer.c — buffer creation
 // ---------------------------------------------------------------------------
 
-/// Port of `buflist_new()` from `csrc/buffer.c:12`.
+/// Port of `buflist_new()` from `vendor/buffer.c:12`.
 ///
 /// RUST-PORT NOTE: reduced to the "allocate a new buffer structure" path — the
 /// heart of the C function ("This is the ONLY place where a new buffer
@@ -557,7 +557,7 @@ pub fn buflist_new(
     Some(buf)
 }
 
-/// Port of `buflist_add()` from `csrc/buffer.c:198`.
+/// Port of `buflist_add()` from `vendor/buffer.c:198`.
 pub fn buflist_add(fname: Option<String>, flags: i32) -> i32 {
     // c:200 buf_T *buf = buflist_new(fname, NULL, 0, flags);
     match buflist_new(fname, None, 0, flags) {
@@ -572,25 +572,25 @@ pub fn buflist_add(fname: Option<String>, flags: i32) -> i32 {
 // buffer.c — 'buftype' predicates
 // ---------------------------------------------------------------------------
 
-/// Port of `bt_prompt()` from `csrc/buffer.c:443`.
+/// Port of `bt_prompt()` from `vendor/buffer.c:443`.
 pub fn bt_prompt(buf: &buf_T) -> bool {
     // c: return buf != NULL && buf->b_p_bt[0] == 'p';
     buf.b_p_bt.as_bytes().first() == Some(&b'p')
 }
 
-/// Port of `bt_normal()` from `csrc/buffer.c:449`.
+/// Port of `bt_normal()` from `vendor/buffer.c:449`.
 pub fn bt_normal(buf: &buf_T) -> bool {
     // c: return buf != NULL && buf->b_p_bt[0] == NUL;
     buf.b_p_bt.is_empty()
 }
 
-/// Port of `bt_quickfix()` from `csrc/buffer.c:455`.
+/// Port of `bt_quickfix()` from `vendor/buffer.c:455`.
 pub fn bt_quickfix(buf: &buf_T) -> bool {
     // c: return buf != NULL && buf->b_p_bt[0] == 'q';
     buf.b_p_bt.as_bytes().first() == Some(&b'q')
 }
 
-/// Port of `bt_nofilename()` from `csrc/buffer.c:461`.
+/// Port of `bt_nofilename()` from `vendor/buffer.c:461`.
 pub fn bt_nofilename(buf: &buf_T) -> bool {
     // c: (b_p_bt[0]=='n' && b_p_bt[2]=='f') || b_p_bt[0]=='a' || terminal || 'p'
     let bt = buf.b_p_bt.as_bytes();

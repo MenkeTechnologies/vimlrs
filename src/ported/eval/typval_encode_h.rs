@@ -1,7 +1,7 @@
 //! Port of `src/nvim/eval/typval_encode.h` (vendored at
-//! `csrc/eval/typval_encode.h`) — the `MPConvStack` conversion-state types shared
+//! `vendor/eval/typval_encode.h`) — the `MPConvStack` conversion-state types shared
 //! by the `typval_encode.c.h` template, plus the minimal `klib/kvec.h`
-//! (vendored at `csrc/klib/kvec.h`) vector this header instantiates.
+//! (vendored at `vendor/klib/kvec.h`) vector this header instantiates.
 //!
 //! RUST-PORT NOTE: vimlrs's `encode.rs` renders values by direct recursion, so
 //! nothing constructs an `MPConvStack` at runtime — these types exist as a
@@ -19,7 +19,7 @@ use std::rc::Rc;
 use crate::ported::eval::typval_defs_h::{dict_T, list_T, partial_T, typval_T};
 
 /// `kvec_withinit_t(type, INIT_SIZE)` from `klib/kvec.h:150` (vendored at
-/// `csrc/klib/kvec.h`).
+/// `vendor/klib/kvec.h`).
 ///
 /// RUST-PORT NOTE: the C small-vector-optimized kvec (an `INIT_SIZE`-slot inline
 /// array that spills to a heap `items` pointer once it grows) collapses to a

@@ -1,6 +1,6 @@
 //! Port of the `emsg()` / `did_emsg` error path from `src/nvim/message.c`.
 //!
-//! `message.c` is not vendored under `csrc/` (only the eval tree is), so these
+//! `message.c` is not vendored under `vendor/` (only the eval tree is), so these
 //! are the extern dependencies the eval ports call, ported against their home
 //! file (PORT.md Rule 9 — extern deps get local impls citing the home file).
 //! The eval functions signal failure by calling `emsg()`, which sets the global

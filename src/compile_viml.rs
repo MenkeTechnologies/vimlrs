@@ -1,5 +1,5 @@
 //! ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-//! EXTENSION — NO `csrc/` COUNTERPART. Lowers the synthesis AST to a
+//! EXTENSION — NO `vendor/` COUNTERPART. Lowers the synthesis AST to a
 //! `fusevm::Chunk`. Neovim has no bytecode compiler; this is the net-new piece
 //! that makes VimL run on fusevm (the role zshrs's `compile_zsh.rs` plays for
 //! zsh). Each expression compiles to a sequence leaving one value on the stack;

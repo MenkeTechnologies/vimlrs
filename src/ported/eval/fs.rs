@@ -1,4 +1,4 @@
-//! Port of `src/nvim/eval/fs.c` (vendored at `csrc/eval/fs.c`).
+//! Port of `src/nvim/eval/fs.c` (vendored at `vendor/eval/fs.c`).
 //!
 //! Filesystem-related Vimscript builtins. The pure path-string builtins plus the
 //! filesystem-touching ones whose C leaf calls (`os_*`, `path.c`) map cleanly to
@@ -25,7 +25,7 @@ use crate::ported::os::fileio::{
 };
 use crate::ported::path::shorten_dir_len;
 
-/// `static const char e_error_while_writing_str[]` (`csrc/eval/fs.c:53`).
+/// `static const char e_error_while_writing_str[]` (`vendor/eval/fs.c:53`).
 const e_error_while_writing_str: &str = "E80: Error while writing: ";
 
 /// `kListLenUnknown = -1` (`eval/typval_defs.h:28`).
@@ -498,7 +498,7 @@ fn fread(fd: &mut std::fs::File, buf: &mut [u8]) -> i32 {
 
 /// Read blob from file "fd". Caller has allocated a blob in "rettv".
 ///
-/// Port of `read_blob()` from `csrc/eval/fs.c:1232`.
+/// Port of `read_blob()` from `vendor/eval/fs.c:1232`.
 ///
 /// @param[in]  fd  File to read from.
 /// @param[in,out]  rettv  Blob to write to.
@@ -572,7 +572,7 @@ fn read_blob(fd: &mut std::fs::File, rettv: &mut typval_T, offset: i64, size_arg
     OK
 }
 
-/// Port of `read_file_or_blob()` from `csrc/eval/fs.c:1283` — the shared body of
+/// Port of `read_file_or_blob()` from `vendor/eval/fs.c:1283` — the shared body of
 /// "readfile()" and "readblob()".
 ///
 /// RUST-PORT NOTE: `os_fopen(fname, READBIN)` → `std::fs::File::open` (binary
@@ -779,13 +779,13 @@ fn read_file_or_blob(argvars: &[typval_T], rettv: &mut typval_T, always_blob: bo
       // fclose on drop
 }
 
-/// Port of `f_readfile()` from `csrc/eval/fs.c:1487`.
+/// Port of `f_readfile()` from `vendor/eval/fs.c:1487`.
 pub fn f_readfile(argvars: &[typval_T], rettv: &mut typval_T) {
     // c: if (check_secure()) return;  (no sandbox standalone)
     read_file_or_blob(argvars, rettv, false);
 }
 
-/// Port of `f_readblob()` from `csrc/eval/fs.c:1477`.
+/// Port of `f_readblob()` from `vendor/eval/fs.c:1477`.
 pub fn f_readblob(argvars: &[typval_T], rettv: &mut typval_T) {
     // c: if (check_secure()) return;  (no sandbox standalone)
     read_file_or_blob(argvars, rettv, true);
@@ -793,7 +793,7 @@ pub fn f_readblob(argvars: &[typval_T], rettv: &mut typval_T) {
 
 /// Write "list" of strings to file "fp".
 ///
-/// Port of `write_list()` from `csrc/eval/fs.c:1698`.
+/// Port of `write_list()` from `vendor/eval/fs.c:1698`.
 ///
 /// @param  fp  File to write to.
 /// @param[in]  list  List to write.
@@ -864,7 +864,7 @@ fn write_list(fp: &mut FileDescriptor, list: &list_T, binary: bool) -> bool {
 
 /// Write data to file with descriptor `fp`.
 ///
-/// Port of `write_data()` from `csrc/eval/fs.c:1753`.
+/// Port of `write_data()` from `vendor/eval/fs.c:1753`.
 ///
 /// @return true on success, or false on failure.
 fn write_data(fp: &mut FileDescriptor, data: &[u8], len: usize) -> bool {
@@ -892,17 +892,17 @@ fn write_data(fp: &mut FileDescriptor, data: &[u8], len: usize) -> bool {
     false
 }
 
-/// Port of `write_blob()` from `csrc/eval/fs.c:1774`.
+/// Port of `write_blob()` from `vendor/eval/fs.c:1774`.
 fn write_blob(fp: &mut FileDescriptor, blob: &blob_T) -> bool {
     write_data(fp, &blob.bv_ga, tv_blob_len(blob) as usize)
 }
 
-/// Port of `write_string()` from `csrc/eval/fs.c:1780`.
+/// Port of `write_string()` from `vendor/eval/fs.c:1780`.
 fn write_string(fp: &mut FileDescriptor, data: &str) -> bool {
     write_data(fp, data.as_bytes(), data.len())
 }
 
-/// Port of `f_writefile()` from `csrc/eval/fs.c:1787` — write a List, Blob or
+/// Port of `f_writefile()` from `vendor/eval/fs.c:1787` — write a List, Blob or
 /// String to a file. Flags: `a` append, `b` binary, `p` mkdir parents, `s`/`S`
 /// fsync toggle. Returns 0 on success, -1 on failure.
 ///
@@ -1306,7 +1306,7 @@ pub fn f_glob2regpat(argvars: &[typval_T], rettv: &mut typval_T) {
 
 /// Evaluate "expr" (= "context") for readdir().
 ///
-/// Port of `readdir_checkitem()` from `csrc/eval/fs.c:1166`.
+/// Port of `readdir_checkitem()` from `vendor/eval/fs.c:1166`.
 ///
 /// RUST-PORT NOTE: `eval_expr_typval()` plus the `v:val` bookkeeping
 /// (`prepare_vimvar`/`set_vim_var_string`/`restore_vimvar` for `VV_VAL`) are the
@@ -1342,7 +1342,7 @@ fn readdir_checkitem(context: &typval_T, name: &str) -> varnumber_T {
 
 /// "readdir()" function.
 ///
-/// Port of `f_readdir()` from `csrc/eval/fs.c:1203`.
+/// Port of `f_readdir()` from `vendor/eval/fs.c:1203`.
 pub fn f_readdir(argvars: &[typval_T], rettv: &mut typval_T) {
     let l = tv_list_alloc_ret(rettv, kListLenUnknown);
     // c: if (check_secure()) return;  (no sandbox standalone)
@@ -1625,7 +1625,7 @@ pub fn f_browsedir(_argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.v_type = VAR_STRING;
     rettv.vval = v_string(String::new());
 }
-/// Port of `findfilendir()` from `csrc/eval/fs.c:536`.
+/// Port of `findfilendir()` from `vendor/eval/fs.c:536`.
 ///
 /// RUST-PORT NOTE: the search backend is editor state — `curbuf->b_p_path`/
 /// `p_path` (the `'path'` option), `find_file_in_path_option()` (file_search.c),
@@ -1673,14 +1673,14 @@ fn findfilendir(argvars: &[typval_T], rettv: &mut typval_T, _find_what: i32) {
 
 /// "finddir({fname}[, {path}[, {count}]])" function.
 ///
-/// Port of `f_finddir()` from `csrc/eval/fs.c:602`.
+/// Port of `f_finddir()` from `vendor/eval/fs.c:602`.
 pub fn f_finddir(argvars: &[typval_T], rettv: &mut typval_T) {
     findfilendir(argvars, rettv, FINDFILE_DIR);
 }
 
 /// "findfile({fname}[, {path}[, {count}]])" function.
 ///
-/// Port of `f_findfile()` from `csrc/eval/fs.c:608`.
+/// Port of `f_findfile()` from `vendor/eval/fs.c:608`.
 pub fn f_findfile(argvars: &[typval_T], rettv: &mut typval_T) {
     findfilendir(argvars, rettv, FINDFILE_FILE);
 }

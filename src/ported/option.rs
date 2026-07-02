@@ -88,7 +88,7 @@ pub fn get_option_value(name: &str) -> typval_T {
 thread_local! {
     /// Host hook fired with the raw `:set` argument string whenever `:set` runs,
     /// so an embedding editor (zemacs) can mirror the option onto its own live
-    /// config. EXTENSION — no `csrc/` counterpart; the analogue of Vim's
+    /// config. EXTENSION — no `vendor/` counterpart; the analogue of Vim's
     /// option-change side-effect callbacks (`did_set_*`). The installer lives in
     /// the crate-root carve-out [`crate::fusevm_bridge::install_set_hook`] (net-new
     /// synthesis does not belong under `src/ported/`); unset by default (no-op).

@@ -1,4 +1,4 @@
-//! Port of `src/nvim/eval/userfunc.c` (vendored at `csrc/eval/userfunc.c`).
+//! Port of `src/nvim/eval/userfunc.c` (vendored at `vendor/eval/userfunc.c`).
 //!
 //! The user-function call machinery itself is driven by the bytecode bridge
 //! (`b_call_user`, the `FUNCTIONS` registry); this module ports the pure
@@ -660,7 +660,7 @@ thread_local! {
         std::cell::RefCell::new(indexmap::IndexMap::new());
 }
 
-/// Port of `register_luafunc()` from `csrc/eval/userfunc.c:4199`.
+/// Port of `register_luafunc()` from `vendor/eval/userfunc.c:4199`.
 ///
 /// Register a Lua callback `ref` as an anonymous lambda: allocate a [`ufunc_T`]
 /// under a fresh `<lambda>N` name ([`get_lambda_name`]/[`alloc_ufunc`]), mark it
@@ -1390,7 +1390,7 @@ pub mod tfn {
     pub const TFN_READ_ONLY: i32 = 16;
 }
 
-/// `typedef struct { … } funcdict_T;` (`csrc/eval/userfunc.h:35`) — the Dict
+/// `typedef struct { … } funcdict_T;` (`vendor/eval/userfunc.h:35`) — the Dict
 /// context filled by [`trans_function_name`] for a `dict.func` target.
 ///
 /// RUST-PORT NOTE: `fd_dict` (a `dict_T *`) becomes `Rc<RefCell<dict_T>>` and
@@ -1447,7 +1447,7 @@ pub struct exarg_T {
     pub line2: i64,
 }
 
-/// Port of `func_tbl_get()` from `csrc/eval/userfunc.c:101`.
+/// Port of `func_tbl_get()` from `vendor/eval/userfunc.c:101`.
 ///
 /// Return the function hash table. RUST-PORT NOTE: the C returns
 /// `&func_hashtab`, the module-static registry; here the user-function registry
@@ -1456,7 +1456,7 @@ pub struct exarg_T {
 /// this is a no-op accessor kept for call-site fidelity (mirrors [`func_init`]).
 pub fn func_tbl_get() {}
 
-/// Port of `trans_function_name()` from `csrc/eval/userfunc.c:1981`.
+/// Port of `trans_function_name()` from `vendor/eval/userfunc.c:1981`.
 ///
 /// Parse the function name at `*pp` (a plain name, `s:`/`<SID>`/`<SNR>` local,
 /// `dict.func`, or a Funcref variable), advancing `*pp` past it and returning
@@ -1724,7 +1724,7 @@ pub fn trans_function_name(
     Some(result)
 }
 
-/// Port of `save_function_name()` from `csrc/eval/userfunc.c:2215`.
+/// Port of `save_function_name()` from `vendor/eval/userfunc.c:2215`.
 ///
 /// Call [`trans_function_name`], except a `<lambda>N` name is returned as-is (the
 /// `<lambda>` prefix plus its trailing digits). Advances `*name`.
@@ -1756,7 +1756,7 @@ pub fn save_function_name(
     }
 }
 
-/// Port of `get_lambda_tv()` from `csrc/eval/userfunc.c:299`.
+/// Port of `get_lambda_tv()` from `vendor/eval/userfunc.c:299`.
 ///
 /// Parse a `{args -> expr}` lambda at `*arg`, advancing it past the closing `}`
 /// and (when evaluating) storing a `VAR_PARTIAL` Funcref in `rettv`. Returns
@@ -1909,7 +1909,7 @@ pub fn get_lambda_tv(
     OK // c:424
 }
 
-/// Port of `ex_return()` from `csrc/eval/userfunc.c:3290`.
+/// Port of `ex_return()` from `vendor/eval/userfunc.c:3290`.
 ///
 /// Handle a `:return [expr]` command: evaluate the optional expression with
 /// [`eval0`](crate::ported::eval::eval0) and carry out the return via
@@ -1973,7 +1973,7 @@ pub fn ex_return(eap: &mut exarg_T) {
     }
 }
 
-/// Port of `ex_call_inner()` from `csrc/eval/userfunc.c:3342`.
+/// Port of `ex_call_inner()` from `vendor/eval/userfunc.c:3342`.
 ///
 /// The lower-level implementation of `:call`: evaluate `name(args)` over the
 /// command's line range, dereferencing a returned Funcref/Dict/List via
@@ -2017,7 +2017,7 @@ pub fn ex_call_inner(
     failed as i32 // c:3392
 }
 
-/// Port of `ex_call()` from `csrc/eval/userfunc.c:3542`.
+/// Port of `ex_call()` from `vendor/eval/userfunc.c:3542`.
 ///
 /// Handle `:call func(args)` (and `:defer func(args)`): resolve the name with
 /// [`trans_function_name`]/[`deref_func_name`], then dispatch through
@@ -2154,7 +2154,7 @@ pub fn ex_call(eap: &mut exarg_T) {
     }
 }
 
-/// Port of `ex_delfunction()` from `csrc/eval/userfunc.c:3119`.
+/// Port of `ex_delfunction()` from `vendor/eval/userfunc.c:3119`.
 ///
 /// Handle `:delfunction[!] {name}`: resolve the name with [`trans_function_name`]
 /// and remove it from the registry via [`func_remove`].
@@ -2230,7 +2230,7 @@ pub fn ex_delfunction(eap: &mut exarg_T) {
     }
 }
 
-/// Port of `get_function_body()` from `csrc/eval/userfunc.c:2363`.
+/// Port of `get_function_body()` from `vendor/eval/userfunc.c:2363`.
 ///
 /// Read the body of a `:function` (every line into `newlines`, up to
 /// `:endfunction`). Returns [`OK`](crate::ported::eval_h::OK)/[`FAIL`](crate::ported::eval_h::FAIL).
@@ -2273,7 +2273,7 @@ pub fn get_function_body(
     FAIL
 }
 
-/// Port of `ex_function()` from `csrc/eval/userfunc.c:2637`.
+/// Port of `ex_function()` from `vendor/eval/userfunc.c:2637`.
 ///
 /// Handle a `:function` command: list functions (no argument / `/pat` / bare
 /// name), or define one by parsing the name ([`save_function_name`]) and

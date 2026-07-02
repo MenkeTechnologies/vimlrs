@@ -1,4 +1,4 @@
-//! Port of `src/nvim/eval/decode.c` (vendored at `csrc/eval/decode.c`).
+//! Port of `src/nvim/eval/decode.c` (vendored at `vendor/eval/decode.c`).
 //!
 //! The JSON decoder: an explicit value/container stack machine
 //! ([`json_decode_string`], [`json_decoder_pop`], [`parse_json_string`],
@@ -22,7 +22,7 @@
 //!
 //! RUST-PORT NOTE (msgpack): the `typval_parse_enter`/`typval_parse_exit`/
 //! `mpack_parse_typval`/`unpack_typval` half of `decode.c` drives the libmpack
-//! streaming parser (`csrc/mpack/{mpack_core,object,conv}.c`: `mpack_parser_t`,
+//! streaming parser (`vendor/mpack/{mpack_core,object,conv}.c`: `mpack_parser_t`,
 //! `mpack_node_t`, `mpack_parse`, `mpack_unpack_*`, the `MPACK_TOKEN_*` enum),
 //! now ported at [`crate::ported::mpack`]. Those four functions are ported here;
 //! the libmpack node `data[0]`/`data[1]` `void *p` union members are represented
@@ -141,7 +141,7 @@ struct ValuesStackItem {
 
 /// Create special dictionary
 ///
-/// Port of `create_special_dict()` from `csrc/eval/decode.c:62`.
+/// Port of `create_special_dict()` from `vendor/eval/decode.c:62`.
 ///
 /// @param[out]  rettv  Location where created dictionary will be saved.
 /// @param[in]  type  Type of the dictionary.
@@ -179,7 +179,7 @@ fn create_special_dict(rettv: &mut typval_T, r#type: MessagePackType, val: typva
 
 /// Helper function used for working with stack vectors used by JSON decoder
 ///
-/// Port of `json_decoder_pop()` from `csrc/eval/decode.c:106`.
+/// Port of `json_decoder_pop()` from `vendor/eval/decode.c:106`.
 ///
 /// RUST-PORT NOTE: `buf` is passed explicitly so error messages can reproduce
 /// the C `%s` suffix at a byte offset (C reaches it via the `char *` position
@@ -336,7 +336,7 @@ fn json_decoder_pop(
 
 /// Create a new special dictionary that ought to represent a MAP
 ///
-/// Port of `decode_create_map_special_dict()` from `csrc/eval/decode.c:230`.
+/// Port of `decode_create_map_special_dict()` from `vendor/eval/decode.c:230`.
 ///
 /// @return [allocated] list which should contain key-value pairs.
 pub fn decode_create_map_special_dict(ret_tv: &mut typval_T, len: isize) -> Rc<RefCell<list_T>> {
@@ -358,7 +358,7 @@ pub fn decode_create_map_special_dict(ret_tv: &mut typval_T, len: isize) -> Rc<R
 
 /// Convert char* string to typval_T
 ///
-/// Port of `decode_string()` from `csrc/eval/decode.c:257`.
+/// Port of `decode_string()` from `vendor/eval/decode.c:257`.
 ///
 /// Depending on whether string has (no) NUL bytes, it may use a special
 /// dictionary, VAR_BLOB, or decode string to VAR_STRING.
@@ -388,7 +388,7 @@ pub fn decode_string(s: &[u8], len: usize, force_blob: bool, _s_allocated: bool)
 
 /// Parse JSON double-quoted string
 ///
-/// Port of `parse_json_string()` from `csrc/eval/decode.c:301`.
+/// Port of `parse_json_string()` from `vendor/eval/decode.c:301`.
 ///
 /// @return OK in case of success, FAIL in case of error.
 fn parse_json_string(
@@ -628,7 +628,7 @@ fn parse_json_string(
 
 /// Parse JSON number: both floating-point and integer
 ///
-/// Port of `parse_json_number()` from `csrc/eval/decode.c:492`.
+/// Port of `parse_json_number()` from `vendor/eval/decode.c:492`.
 /// Number format: `-?\d+(?:.\d+)?(?:[eE][+-]?\d+)?`.
 ///
 /// @return OK in case of success, FAIL in case of error.
@@ -800,7 +800,7 @@ fn parse_json_number(
 
 /// Convert JSON string into Vimscript object
 ///
-/// Port of `json_decode_string()` from `csrc/eval/decode.c:619`.
+/// Port of `json_decode_string()` from `vendor/eval/decode.c:619`.
 ///
 /// RUST-PORT NOTE (signature): C is `int json_decode_string(const char *buf,
 /// size_t buf_len, typval_T *rettv)` returning OK/FAIL and writing `*rettv`.
@@ -1225,7 +1225,7 @@ pub fn json_decode_string(input: &str) -> Option<typval_T> {
     None // ret = FAIL
 }
 
-/// Port of `positive_integer_to_special_typval()` from `csrc/eval/decode.c:888`.
+/// Port of `positive_integer_to_special_typval()` from `vendor/eval/decode.c:888`.
 ///
 /// Store a `uint64_t` in `rettv`, spilling to a `kMPInteger` special dictionary
 /// when the value does not fit in a signed `varnumber_T`.
@@ -1261,7 +1261,7 @@ fn positive_integer_to_special_typval(rettv: &mut typval_T, val: u64) {
 
 /// The libmpack node `data[0]`/`data[1]` `void *p` payload for the typval parse.
 ///
-/// RUST-PORT NOTE: `csrc/eval/decode.c` casts the untyped `mpack_data_t.p`
+/// RUST-PORT NOTE: `vendor/eval/decode.c` casts the untyped `mpack_data_t.p`
 /// (object.h:27) to four different pointee types across the walk —
 /// `typval_T *result` (a write location), `list_T *` (an array's list),
 /// `char *` (a str/bin/ext byte buffer) and `typval_T (*)[2]` (a map's pending
@@ -1286,7 +1286,7 @@ enum TypvalNodeData {
     map_items(Rc<RefCell<Vec<[typval_T; 2]>>>),
 }
 
-/// Port of `typval_parse_enter()` from `csrc/eval/decode.c:911`.
+/// Port of `typval_parse_enter()` from `vendor/eval/decode.c:911`.
 fn typval_parse_enter(parser: &mut mpack_parser_t<TypvalNodeData>, node: usize) {
     // RUST-PORT NOTE: the C `*result = …` store writes through a raw
     // `typval_T *`; here `result` is a [`TypvalNodeData`] write-location handle,
@@ -1459,7 +1459,7 @@ fn typval_parse_enter(parser: &mut mpack_parser_t<TypvalNodeData>, node: usize) 
 
 /// Free node which was entered but never exited, due to a nested error
 ///
-/// Port of `typval_parser_error_free()` from `csrc/eval/decode.c:1016`.
+/// Port of `typval_parser_error_free()` from `vendor/eval/decode.c:1016`.
 ///
 /// Don't bother with typvals as these will be GC:d eventually.
 ///
@@ -1469,7 +1469,7 @@ fn typval_parse_enter(parser: &mut mpack_parser_t<TypvalNodeData>, node: usize) 
 /// the parser is dropped, so there is nothing to free → no-op.
 pub fn typval_parser_error_free(_parser: &mpack_parser_t<TypvalNodeData>) {}
 
-/// Port of `typval_parse_exit()` from `csrc/eval/decode.c:1033`.
+/// Port of `typval_parse_exit()` from `vendor/eval/decode.c:1033`.
 fn typval_parse_exit(parser: &mut mpack_parser_t<TypvalNodeData>, node: usize) {
     // RUST-PORT NOTE: see `typval_parse_enter` — the C `*result = …` store
     // becomes this write-location closure.
@@ -1629,7 +1629,7 @@ fn typval_parse_exit(parser: &mut mpack_parser_t<TypvalNodeData>, node: usize) {
     }
 }
 
-/// Port of `mpack_parse_typval()` from `csrc/eval/decode.c:1117`.
+/// Port of `mpack_parse_typval()` from `vendor/eval/decode.c:1117`.
 pub fn mpack_parse_typval(
     parser: &mut mpack_parser_t<TypvalNodeData>,
     data: &mut &[u8],
@@ -1639,7 +1639,7 @@ pub fn mpack_parse_typval(
     mpack_parse(parser, data, size, typval_parse_enter, typval_parse_exit)
 }
 
-/// Port of `unpack_typval()` from `csrc/eval/decode.c:1122`.
+/// Port of `unpack_typval()` from `vendor/eval/decode.c:1122`.
 ///
 /// RUST-PORT NOTE (signature): C is `int unpack_typval(const char **data,
 /// size_t *size, typval_T *ret)`; `data` is a moving `const char *` cursor with a

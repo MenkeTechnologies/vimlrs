@@ -1,4 +1,4 @@
-//! Port of `src/nvim/eval/vars.c` (vendored at `csrc/eval/vars.c`).
+//! Port of `src/nvim/eval/vars.c` (vendored at `vendor/eval/vars.c`).
 //!
 //! Variable storage and scope resolution. Ports the `g:` scope (`globvardict`),
 //! the predefined `v:` constants, and the function scopes `a:` (arguments) and

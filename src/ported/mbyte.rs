@@ -1,5 +1,5 @@
 //! Port of the UTF-8 codec helpers from `src/nvim/mbyte.c` (vendored at
-//! `csrc/mbyte.c`).
+//! `vendor/mbyte.c`).
 //!
 //! Only the four routines the JSON decoder (`eval/decode.c`) needs are ported
 //! here: [`utf_ptr2char`], [`utf_ptr2len`], [`utf_char2len`] and

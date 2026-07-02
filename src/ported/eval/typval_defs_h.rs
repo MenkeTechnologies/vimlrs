@@ -1,4 +1,4 @@
-//! Port of `src/nvim/eval/typval_defs.h` (vendored at `csrc/eval/typval_defs.h`).
+//! Port of `src/nvim/eval/typval_defs.h` (vendored at `vendor/eval/typval_defs.h`).
 //!
 //! Header-defined Vimscript value types. Names, field names, and enum members
 //! match the C source exactly (PORT.md Rule A / Rule C — header types live in

@@ -86,7 +86,7 @@ Early / in development.
 
 The full interpreter C surface is scaffolded: `scripts/gen_port_stubs.sh`
 generates one stub per not-yet-ported Neovim C function (real name +
-`csrc/<file>:<line>` citation) under `src/ported/stubs/`, so the remaining work
+`vendor/<file>:<line>` citation) under `src/ported/stubs/`, so the remaining work
 is enumerated and the drift gate covers it. Functions drop out of the stub tree
 as they are faithfully ported.
 
@@ -104,7 +104,7 @@ cargo test
 ```
 
 `fusevm` is pulled from crates.io with the `jit` and `jit-disk-cache` features.
-The vendored Neovim C eval sources under `csrc/` are the porting spec and are
+The vendored Neovim C eval sources under `vendor/` are the porting spec and are
 excluded from the crate build.
 
 ## Links

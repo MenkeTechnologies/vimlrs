@@ -108,7 +108,7 @@
 
       <section class="tutorial-section">
         <h2>Port methodology</h2>
-        <p>The semantics are ported faithfully from Neovim's C eval engine — the C source is the specification, not a starting point for an ad-hoc re-implementation. The vendored Neovim sources live under <code>csrc/</code> and are the porting reference; they are excluded from the crate build via <code>exclude = ["/csrc/", …]</code>.</p>
+        <p>The semantics are ported faithfully from Neovim's C eval engine — the C source is the specification, not a starting point for an ad-hoc re-implementation. The vendored Neovim sources live under <code>vendor/</code> (the <code>eval/*</code> tree in <code>vendor/eval/</code>, plus the supporting translation units it depends on) and are the porting reference; they carry no build role and are excluded from the crate via <code>exclude = ["/vendor/", …]</code>. Every ported <code>fn</code> under <code>src/ported/</code> traces back to a real C name in that tree — a drift-gate test (<code>tests/ported_fn_names_match_c.rs</code>) fails the build on any invented helper that has no <code>vendor/</code> origin and no sanctioned allowlist entry.</p>
         <p>The Vim-native runtime values were ported first so the rest of the engine has a faithful substrate to build on: <code>list</code> and <code>blob</code> behave as in Vim, and <code>dict</code> preserves insertion order to match Vim's observable hashtab iteration and keep <code>echo</code> / <code>string()</code> output deterministic.</p>
       </section>
 

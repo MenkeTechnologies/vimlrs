@@ -1,4 +1,4 @@
-//! Port of `src/nvim/path.c` (not vendored under `csrc/`; most names appear as
+//! Port of `src/nvim/path.c` (not vendored under `vendor/`; most names appear as
 //! calls in the vendored eval tree, so the drift gate recognizes them —
 //! `vim_ispathsep_nocolon` is the exception, see `fake_fn_allowlist.txt`).
 //!

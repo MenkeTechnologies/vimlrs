@@ -1,6 +1,6 @@
 //! Port of `src/nvim/grid_defs.h` (`ScreenGrid`) and the compositor query
 //! `ui_comp_get_grid_at_coord()` from `src/nvim/ui_compositor.c` (both vendored
-//! at `csrc/grid_defs.h` / `csrc/ui_compositor.c`).
+//! at `vendor/grid_defs.h` / `vendor/ui_compositor.c`).
 //!
 //! `screenchar()`/`screenattr()`/`screenchars()`/`screenstring()` read the
 //! composed screen through `screenchar_adjust()`, which asks the compositor for

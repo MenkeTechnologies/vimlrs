@@ -1,4 +1,4 @@
-//! Port of `src/nvim/eval/encode.c` (vendored at `csrc/eval/encode.c`) — the
+//! Port of `src/nvim/eval/encode.c` (vendored at `vendor/eval/encode.c`) — the
 //! `string()` / `:echo` value-rendering entry points and the recursive
 //! converter the `typval_encode.c.h` macro template generates.
 //!
@@ -56,7 +56,7 @@ pub fn encode_blob_write(blob: &mut crate::ported::eval::typval_defs_h::blob_T, 
     buf.len() as i32
 }
 
-/// Port of `conv_error()` from `csrc/eval/encode.c:113`.
+/// Port of `conv_error()` from `vendor/eval/encode.c:113`.
 ///
 /// Show an error message when converting to a msgpack value, building the path
 /// to the failed value by walking `mpstack`. `msg` must contain exactly two
@@ -583,7 +583,7 @@ pub fn encode_vim_to_json(tv: &typval_T) -> String {
     }
 }
 
-/// Port of `encode_check_json_key()` from `csrc/eval/encode.c:781`.
+/// Port of `encode_check_json_key()` from `vendor/eval/encode.c:781`.
 ///
 /// Check whether given key can be used in `json_encode()`: either a plain
 /// String, or a MessagePack string special dictionary

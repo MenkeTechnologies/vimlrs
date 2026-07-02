@@ -1,5 +1,5 @@
 //! ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-//! EXTENSION — NO `csrc/` COUNTERPART. Recursive-descent parser building the
+//! EXTENSION — NO `vendor/` COUNTERPART. Recursive-descent parser building the
 //! synthesis AST. The expression grammar transcribes the precedence ladder in
 //! `eval.c` (`eval1`…`eval7`) but builds a tree instead of evaluating inline:
 //!
@@ -56,7 +56,7 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
         "unlet" | "unl" => {
             // `:unlet[!] x y …` — the optional `!` suppresses the missing-var
             // error. Each argument is a bare name or a List/Dict element target
-            // (`l[i]` / `d.key`), matching `do_unlet_var()` (csrc/eval/vars.c).
+            // (`l[i]` / `d.key`), matching `do_unlet_var()` (vendor/eval/vars.c).
             let args = rest.trim_start_matches('!').trim();
             split_unlet_args(args)
                 .into_iter()
@@ -248,7 +248,7 @@ impl Lines {
         // into a single synthesized `let x = [...]` list-literal line. Body lines
         // are taken VERBATIM from the raw source — before continuation-folding or
         // bar-splitting — exactly as Vim's `ea_getline` feeds `heredoc_get()`
-        // (csrc/eval/vars.c). Each body line becomes a single-quoted list item.
+        // (vendor/eval/vars.c). Each body line becomes a single-quoted list item.
         let raw: Vec<&str> = src.lines().collect();
         let mut collapsed: Vec<(u32, String)> = Vec::new();
         let mut k = 0;
@@ -873,7 +873,7 @@ fn split_top_commas(s: &str) -> Vec<&str> {
 /// If `line` is a heredoc assignment opener (`let X =<< [trim] [eval] MARKER`),
 /// return `(prefix, trim, eval, marker)` where `prefix` is the `:let` target
 /// text before `=<<` (the caller appends `= [...]`). Mirrors the keyword scan
-/// at the top of `heredoc_get()` (csrc/eval/vars.c).
+/// at the top of `heredoc_get()` (vendor/eval/vars.c).
 fn heredoc_opener(line: &str) -> Option<(String, bool, bool, String)> {
     let (cmd, _) = cmd_word(line.trim_start());
     if !matches!(cmd, "let" | "const" | "cons") {

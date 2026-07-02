@@ -1,4 +1,4 @@
-//! Port of `src/nvim/plines.c` (not vendored under `csrc/`; names appear as calls
+//! Port of `src/nvim/plines.c` (not vendored under `vendor/`; names appear as calls
 //! in the vendored eval tree, so the drift gate recognizes them via the
 //! allowlist).
 //!

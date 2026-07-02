@@ -1,5 +1,5 @@
 //! ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-//! EXTENSION — NO `csrc/` COUNTERPART. rkyv-backed bytecode cache for `.vim`
+//! EXTENSION — NO `vendor/` COUNTERPART. rkyv-backed bytecode cache for `.vim`
 //! scripts, the same architecture as awkrs/strykelang/zshrs's `script_cache`.
 //!
 //! Single-file shard at `~/.cache/vimlrs/scripts.rkyv`. On the 2nd+ run of a

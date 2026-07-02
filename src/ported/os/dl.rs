@@ -1,4 +1,4 @@
-//! Port of `src/nvim/os/dl.c` (vendored at `csrc/os/dl.c`).
+//! Port of `src/nvim/os/dl.c` (vendored at `vendor/os/dl.c`).
 //!
 //! `os_libcall()` — call a function in a dynamically loadable library. Backs the
 //! `libcall()`/`libcallnr()` builtins via

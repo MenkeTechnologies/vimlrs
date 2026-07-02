@@ -1,5 +1,5 @@
 //! ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-//! EXTENSION — NO `csrc/` COUNTERPART. Debug Adapter Protocol server (stdio) —
+//! EXTENSION — NO `vendor/` COUNTERPART. Debug Adapter Protocol server (stdio) —
 //! `vimlrs --dap`. Mirrors zshrs's `dap.rs` architecture: the script runs
 //! IN-PROCESS on an executor thread; the compiler emits a `SET_LINENO` marker
 //! before each statement whose handler calls [`check_line`], which consults the

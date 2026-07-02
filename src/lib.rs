@@ -8,14 +8,14 @@
 //!
 //! ## Two-zone layout (the zshrs porting discipline)
 //!
-//! - [`ported`] — strict 1:1 ports of the Neovim eval C source under `csrc/`.
+//! - [`ported`] — strict 1:1 ports of the Neovim eval C source under `vendor/`.
 //!   Exact C names, `// c:NNN` citations, no invented helpers/structs. See
 //!   `docs/PORT.md`.
 //! - **Crate-root carve-outs** — net-new synthesis with no C counterpart
 //!   (Neovim's eval is a string-walking interpreter with no AST/bytecode):
 //!   [`viml_lexer`], [`viml_ast`], [`viml_parser`], [`compile_viml`],
 //!   [`fusevm_bridge`]. These mirror zshrs's `compile_zsh.rs`/`fusevm_bridge.rs`
-//!   carve-outs and are clearly headed "EXTENSION — NO csrc/ counterpart".
+//!   carve-outs and are clearly headed "EXTENSION — NO vendor/ counterpart".
 
 // The `ported` zone keeps Vim's exact C identifiers (e.g. `ufunc_T`,
 // `except_type_T`, `VAR_FLAVOUR_*`) for 1:1 fidelity, so the non-camel-case
@@ -24,7 +24,7 @@
 
 pub mod ported;
 
-// Synthesis carve-outs (no `csrc/` counterpart).
+// Synthesis carve-outs (no `vendor/` counterpart).
 pub mod aot;
 pub mod builtin_docs;
 pub mod cli;

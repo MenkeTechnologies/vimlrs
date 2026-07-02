@@ -1,2 +1,2 @@
-//! STUB surface for `csrc/eval/buffer.c` — generated, do not edit.
+//! STUB surface for `vendor/eval/buffer.c` — generated, do not edit.
 #![allow(dead_code, unused_variables, non_snake_case, clippy::all)]

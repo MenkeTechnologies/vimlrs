@@ -1,4 +1,4 @@
-//! Port of `src/nvim/eval.c` (vendored at `csrc/eval.c`).
+//! Port of `src/nvim/eval.c` (vendored at `vendor/eval.c`).
 //!
 //! Only the leaf operator helpers are ported here: `num_divide`,
 //! `num_modulus`, and `typval_compare`. The `eval0`…`eval7` recursive
@@ -9,7 +9,7 @@
 //! lines.
 #![allow(non_snake_case)]
 
-// The `eval/` subtree (ports of `csrc/eval/*.c` + the header).
+// The `eval/` subtree (ports of `vendor/eval/*.c` + the header).
 /// Port of `eval/buffer.c` (the buffer-introspection eval builtins).
 pub mod buffer;
 /// Port of `eval/decode.c`.
@@ -22,7 +22,7 @@ pub mod executor;
 pub mod fs;
 /// Port of `eval/funcs.c`.
 pub mod funcs;
-/// Generated builtin arg-count table (from `csrc/eval.lua`); see
+/// Generated builtin arg-count table (from `vendor/eval.lua`); see
 /// `scripts/gen_builtin_argc.sh`.
 pub mod funcs_argc;
 /// Port of `eval/list.c` (the `count()` family; callback ops stay bridge-side).
@@ -1693,7 +1693,7 @@ pub fn save_tv_as_string(tv: &typval_T, endnl: bool, crlf: bool) -> Option<Strin
 }
 
 /// Port of `os_can_exe()` from `src/nvim/os/fs.c` (extern; not vendored under
-/// `csrc/`) — resolve `name` to an executable full path (a name containing a
+/// `vendor/`) — resolve `name` to an executable full path (a name containing a
 /// path separator is checked directly, else searched on `$PATH`), or `None`.
 ///
 /// RUST-PORT NOTE: the same leaf is ported module-private in
@@ -1732,7 +1732,7 @@ fn os_can_exe(name: &str) -> Option<String> {
 }
 
 /// Port of `shell_build_argv()` from `src/nvim/os/shell.c` (extern; not vendored
-/// under `csrc/`) — build the shell argv that runs command string `cmd`.
+/// under `vendor/`) — build the shell argv that runs command string `cmd`.
 ///
 /// RUST-PORT NOTE: the C reads `'shell'`/`'shellcmdflag'`; standalone those
 /// options are not modeled, so the POSIX default `sh -c <cmd>` is used.
@@ -1741,7 +1741,7 @@ fn shell_build_argv(cmd: &str) -> Vec<String> {
 }
 
 /// Port of `os_system()` from `src/nvim/os/shell.c` (extern; not vendored under
-/// `csrc/`) — run `argv`, writing `input` to its stdin, and capture stdout.
+/// `vendor/`) — run `argv`, writing `input` to its stdin, and capture stdout.
 /// Returns `(exit_status, output)` with `output` `None` when the command
 /// produced no bytes, mirroring the C `*output == NULL` case.
 ///
@@ -1789,7 +1789,7 @@ fn os_system(argv: &[String], input: Option<&str>) -> (i32, Option<String>) {
 }
 
 /// Builds a process argument vector from a Vimscript object (`typval_T`).
-/// Port of `tv_to_argv()` from `csrc/eval.c:4644`.
+/// Port of `tv_to_argv()` from `vendor/eval.c:4644`.
 ///
 /// @param cmd_tv      Vimscript object
 /// @param cmd         Returns the command or executable name.
@@ -1871,7 +1871,7 @@ pub fn tv_to_argv(
 }
 
 /// os_system wrapper. Handles `v:shell_error`.
-/// Port of `get_system_output_as_rettv()` from `csrc/eval.c:4714`.
+/// Port of `get_system_output_as_rettv()` from `vendor/eval.c:4714`.
 ///
 /// RUST-PORT NOTE: `check_secure()` (restricted mode), `:profile`, and the
 /// `'verbose' > 3` echo are editor state not modeled standalone and are dropped.
@@ -2424,7 +2424,7 @@ pub fn eval_method(method: &str, args: &str, basetv: &typval_T, rettv: &mut typv
 }
 
 /// Evaluate "->method()" when the method is a lambda: `base->{...}(args)`.
-/// Port of `eval_lambda()` from `csrc/eval.c:2914`.
+/// Port of `eval_lambda()` from `vendor/eval.c:2914`.
 ///
 /// `*arg` points to the `-` of the `->`; on OK it is advanced to after the `)`.
 /// `rettv` holds the base value on entry and the call result on return.
@@ -2695,7 +2695,7 @@ pub fn tv_is_luafunc(tv: &typval_T) -> bool {
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Expression tree-walker (`eval0`…`eval7`) + leaf parsers, ported from
-// `csrc/eval.c`.
+// `vendor/eval.c`.
 //
 // PORT.md classes these as strict reference ports: faithful C control flow with
 // verbatim C names, cited `// c:NNN`. The bytecode frontend (viml_parser.rs /
@@ -2711,7 +2711,7 @@ pub fn tv_is_luafunc(tv: &typval_T) -> bool {
 // is `Copy`). Wide chars advance by `char::len_utf8`, matching `MB_PTR_ADV`.
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// `EVAL_EVALUATE` (`csrc/eval.h:140`) — `evalarg_T.eval_flags` bit: when unset,
+/// `EVAL_EVALUATE` (`vendor/eval.h:140`) — `evalarg_T.eval_flags` bit: when unset,
 /// the argument is only parsed, not executed.
 pub const EVAL_EVALUATE: i32 = 1;
 
@@ -2734,7 +2734,7 @@ pub struct evalarg_T {
 }
 
 /// `typedef enum { GLV_FAIL, GLV_OK, GLV_STOP } glv_status_T;`
-/// (`csrc/eval.c:134`) — result of `get_lval_dict_item()`.
+/// (`vendor/eval.c:134`) — result of `get_lval_dict_item()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum glv_status_T {
     /// Evaluation error.
@@ -2745,13 +2745,13 @@ pub enum glv_status_T {
     GLV_STOP,
 }
 
-/// `GLV_QUIET` (`csrc/eval.h:94`) — `get_lval()` flag: do not emit error
+/// `GLV_QUIET` (`vendor/eval.h:94`) — `get_lval()` flag: do not emit error
 /// messages (aliases `TFN_QUIET`).
 pub const GLV_QUIET: i32 = 2;
-/// `GLV_NO_AUTOLOAD` (`csrc/eval.h:95`) — do not use script autoloading
+/// `GLV_NO_AUTOLOAD` (`vendor/eval.h:95`) — do not use script autoloading
 /// (aliases `TFN_NO_AUTOLOAD`).
 pub const GLV_NO_AUTOLOAD: i32 = 4;
-/// `GLV_READ_ONLY` (`csrc/eval.h:96`) — caller will not change the value
+/// `GLV_READ_ONLY` (`vendor/eval.h:96`) — caller will not change the value
 /// (aliases `TFN_READ_ONLY`).
 pub const GLV_READ_ONLY: i32 = 16;
 
@@ -2816,7 +2816,7 @@ impl LlTv {
     }
 }
 
-/// `typedef struct { … } lval_T;` (`csrc/eval.h:52`) — the parsed assignment
+/// `typedef struct { … } lval_T;` (`vendor/eval.h:52`) — the parsed assignment
 /// target returned by [`get_lval`] and consumed by [`set_var_lval`].
 ///
 /// RUST-PORT NOTE: the raw interior pointers of the C struct become
@@ -3679,7 +3679,7 @@ pub fn set_var_lval(
 // ── small scanner helpers (extern, ported against their home C files) ──
 
 /// Port of `skipwhite()` from `src/nvim/charset.c` (extern; not vendored under
-/// `csrc/`) — skip leading spaces and tabs.
+/// `vendor/`) — skip leading spaces and tabs.
 pub fn skipwhite(s: &str) -> &str {
     s.trim_start_matches([' ', '\t'])
 }
@@ -3706,7 +3706,7 @@ pub fn hex2nr(c: u8) -> u8 {
 }
 
 /// Skip over an expression at "*pp".
-/// Port of `skip_expr()` from `csrc/eval.c:461`.
+/// Port of `skip_expr()` from `vendor/eval.c:461`.
 ///
 /// @return  FAIL for an error, OK otherwise.
 pub fn skip_expr(pp: &mut &str, mut evalarg: Option<&mut evalarg_T>) -> i32 {
@@ -3730,7 +3730,7 @@ pub fn skip_expr(pp: &mut &str, mut evalarg: Option<&mut evalarg_T>) -> i32 {
 
 /// Handle zero level expression. This calls [`eval1`] and handles the error
 /// message. Puts the result in `rettv` when returning OK and "evaluate" is true.
-/// Port of `eval0()` from `csrc/eval.c:1787`.
+/// Port of `eval0()` from `vendor/eval.c:1787`.
 ///
 /// RUST-PORT NOTE: the C `exarg_T *eap` (for `eap->nextcmd`) and the
 /// `did_emsg`/`called_emsg`/`aborting()` guards are editor state not modeled
@@ -3760,7 +3760,7 @@ pub fn eval0(arg: &str, rettv: &mut typval_T, mut evalarg: Option<&mut evalarg_T
 
 /// Handle zero level expression with optimization for a simple function call.
 /// Same arguments and return value as [`eval0`].
-/// Port of `eval0_simple_funccal()` from `csrc/eval.c:1862`.
+/// Port of `eval0_simple_funccal()` from `vendor/eval.c:1862`.
 ///
 /// RUST-PORT NOTE: the C `exarg_T *eap` is editor state not modeled standalone
 /// and is dropped, matching [`eval0`]'s signature. [`may_call_simple_func`]
@@ -3779,7 +3779,7 @@ pub fn eval0_simple_funccal(
 }
 
 /// Handle top level expression: `expr2 ? expr1 : expr1` / `expr2 ?? expr1`.
-/// Port of `eval1()` from `csrc/eval.c:1880`.
+/// Port of `eval1()` from `vendor/eval.c:1880`.
 pub fn eval1(arg: &mut &str, rettv: &mut typval_T, mut evalarg: Option<&mut evalarg_T>) -> i32 {
     let at = |s: &str, i: usize| s.as_bytes().get(i).copied().unwrap_or(0);
     *rettv = typval_T::default(); // c:1882 CLEAR_POINTER(rettv)
@@ -3879,7 +3879,7 @@ pub fn eval1(arg: &mut &str, rettv: &mut typval_T, mut evalarg: Option<&mut eval
 }
 
 /// Handle first level expression: `expr2 || expr2` (logical OR).
-/// Port of `eval2()` from `csrc/eval.c:1978`.
+/// Port of `eval2()` from `vendor/eval.c:1978`.
 pub fn eval2(arg: &mut &str, rettv: &mut typval_T, mut evalarg: Option<&mut evalarg_T>) -> i32 {
     let at = |s: &str, i: usize| s.as_bytes().get(i).copied().unwrap_or(0);
     // c:1981 Get the first variable.
@@ -3948,7 +3948,7 @@ pub fn eval2(arg: &mut &str, rettv: &mut typval_T, mut evalarg: Option<&mut eval
 }
 
 /// Handle second level expression: `expr3 && expr3` (logical AND).
-/// Port of `eval3()` from `csrc/eval.c:2056`.
+/// Port of `eval3()` from `vendor/eval.c:2056`.
 pub fn eval3(arg: &mut &str, rettv: &mut typval_T, mut evalarg: Option<&mut evalarg_T>) -> i32 {
     let at = |s: &str, i: usize| s.as_bytes().get(i).copied().unwrap_or(0);
     // c:2059 Get the first variable.
@@ -4018,7 +4018,7 @@ pub fn eval3(arg: &mut &str, rettv: &mut typval_T, mut evalarg: Option<&mut eval
 
 /// Handle third level expression: the comparison operators
 /// (`==` `!=` `>` `>=` `<` `<=` `=~` `!~` `is` `isnot`).
-/// Port of `eval4()` from `csrc/eval.c:2143`.
+/// Port of `eval4()` from `vendor/eval.c:2143`.
 pub fn eval4(arg: &mut &str, rettv: &mut typval_T, mut evalarg: Option<&mut evalarg_T>) -> i32 {
     let at = |s: &str, i: usize| s.as_bytes().get(i).copied().unwrap_or(0);
     let mut r#type = EXPR_UNKNOWN; // c:2146
@@ -4112,7 +4112,7 @@ pub fn eval4(arg: &mut &str, rettv: &mut typval_T, mut evalarg: Option<&mut eval
 
 /// Handle fourth level expression: `+` (number add / list-blob concat), `-`
 /// (subtract), `.`/`..` (string concat). Port of `eval5()` from
-/// `csrc/eval.c:2389`. Arithmetic is delegated to the leaf helpers
+/// `vendor/eval.c:2389`. Arithmetic is delegated to the leaf helpers
 /// [`eval_concat_str`]/[`eval_addblob`]/[`eval_addlist`]/[`eval_addsub_number`].
 pub fn eval5(arg: &mut &str, rettv: &mut typval_T, mut evalarg: Option<&mut evalarg_T>) -> i32 {
     let at = |s: &str, i: usize| s.as_bytes().get(i).copied().unwrap_or(0);
@@ -4183,7 +4183,7 @@ pub fn eval5(arg: &mut &str, rettv: &mut typval_T, mut evalarg: Option<&mut eval
 }
 
 /// Handle fifth level expression: `*` (multiply), `/` (divide), `%` (modulo).
-/// Port of `eval6()` from `csrc/eval.c:2545`. Arithmetic delegates to
+/// Port of `eval6()` from `vendor/eval.c:2545`. Arithmetic delegates to
 /// [`eval_multdiv_number`].
 pub fn eval6(
     arg: &mut &str,
@@ -4232,7 +4232,7 @@ pub fn eval6(
 /// Handle sixth level expression: constants, variables, function calls, nested
 /// expressions, Lists/Dicts, options, environment vars, registers, plus leading
 /// `!`/`-`/`+` and trailing subscripts/method-calls. Port of `eval7()` from
-/// `csrc/eval.c:2608`.
+/// `vendor/eval.c:2608`.
 ///
 /// RUST-PORT NOTE: several `eval7` branches call editor/userfunc subsystems that
 /// the standalone evaluator resolves through already-ported adapters or leaves
@@ -4525,7 +4525,7 @@ pub fn eval7(
 }
 
 /// Allocate a variable for a number constant. Also deals with "0z" for a Blob.
-/// Port of `eval_number()` from `csrc/eval.c:3424`.
+/// Port of `eval_number()` from `vendor/eval.c:3424`.
 pub fn eval_number(arg: &mut &str, rettv: &mut typval_T, evaluate: bool, want_string: bool) -> i32 {
     let src = *arg;
     let at = |s: &str, i: usize| s.as_bytes().get(i).copied().unwrap_or(0);
@@ -4622,7 +4622,7 @@ pub fn eval_number(arg: &mut &str, rettv: &mut typval_T, evaluate: bool, want_st
 
 /// Evaluate a `"string"` constant. When "interpolate" is true reduce `{{`→`{`,
 /// `}}`→`}` and stop at a single `{`. Port of `eval_string()` from
-/// `csrc/eval.c:3512`.
+/// `vendor/eval.c:3512`.
 ///
 /// RUST-PORT NOTE: the C two-pass (measure, then copy) is folded into one pass
 /// building a `String` (byte values 0x80–0xFF become the matching Latin-1
@@ -4765,7 +4765,7 @@ pub fn eval_string(arg: &mut &str, rettv: &mut typval_T, evaluate: bool, interpo
 
 /// Evaluate a `'str''ing'` literal-string constant. When "interpolate" is true
 /// reduce `{{`→`{` and stop at a single `{`. Port of `eval_lit_string()` from
-/// `csrc/eval.c:3686`.
+/// `vendor/eval.c:3686`.
 pub fn eval_lit_string(
     arg: &mut &str,
     rettv: &mut typval_T,
@@ -4832,7 +4832,7 @@ pub fn eval_lit_string(
 
 /// Evaluate a single/double quoted string that may contain `{expr}` groups.
 /// "arg" points to the `$`. Port of `eval_interp_string()` from
-/// `csrc/eval.c:3759`.
+/// `vendor/eval.c:3759`.
 ///
 /// RUST-PORT NOTE: the C `eval_one_expr_in_str()` helper (which parses one
 /// expression from the string, evaluates it, and appends its string form) is
@@ -4916,7 +4916,7 @@ pub fn eval_interp_string(
 }
 
 /// Allocate a variable for a List and fill it from `*arg` (points to the `[`).
-/// Port of `eval_list()` from `csrc/eval.c:3857`.
+/// Port of `eval_list()` from `vendor/eval.c:3857`.
 pub fn eval_list(arg: &mut &str, rettv: &mut typval_T, mut evalarg: Option<&mut evalarg_T>) -> i32 {
     let at = |s: &str, i: usize| s.as_bytes().get(i).copied().unwrap_or(0);
     let evaluate = evalarg
@@ -4984,7 +4984,7 @@ pub fn eval_list(arg: &mut &str, rettv: &mut typval_T, mut evalarg: Option<&mut 
 
 /// Allocate a variable for a Dictionary and fill it from `*arg` (points to the
 /// `{` or, for a literal `#{...}` dict, the char after `#`). Returns NOTDONE for
-/// a curly-braces `{expr}` name. Port of `eval_dict()` from `csrc/eval.c:4444`.
+/// a curly-braces `{expr}` name. Port of `eval_dict()` from `vendor/eval.c:4444`.
 pub fn eval_dict(
     arg: &mut &str,
     rettv: &mut typval_T,
@@ -5107,7 +5107,7 @@ pub fn eval_dict(
 
 /// Evaluate a literal dictionary `#{key: val, …}`. "*arg" points to the `#`.
 /// Returns NOTDONE for `{expr}`. Port of `eval_lit_dict()` from
-/// `csrc/eval.c:4552`.
+/// `vendor/eval.c:4552`.
 pub fn eval_lit_dict(arg: &mut &str, rettv: &mut typval_T, evalarg: Option<&mut evalarg_T>) -> i32 {
     let at = |s: &str, i: usize| s.as_bytes().get(i).copied().unwrap_or(0);
     if at(*arg, 1) == b'{' {
@@ -5122,7 +5122,7 @@ pub fn eval_lit_dict(arg: &mut &str, rettv: &mut typval_T, evalarg: Option<&mut 
 }
 
 /// Get the value of an environment variable. "arg" points to the `$`.
-/// Port of `eval_env_var()` from `csrc/eval.c:4603`.
+/// Port of `eval_env_var()` from `vendor/eval.c:4603`.
 ///
 /// RUST-PORT NOTE: `vim_getenv()` is `std::env::var`; the `expand_env_save`
 /// fallback for `$VIM`/`${HOME}` (the runtime-path expansion subsystem) is
@@ -5148,7 +5148,7 @@ pub fn eval_env_var(arg: &mut &str, rettv: &mut typval_T, evaluate: bool) -> i32
 }
 
 /// Evaluate an option value `&name`. "*arg" points to the `&`.
-/// Port of `eval_option()` from `csrc/eval.c:3371`.
+/// Port of `eval_option()` from `vendor/eval.c:3371`.
 ///
 /// RUST-PORT NOTE: `find_option_var_end()`/`OptIndex`/`is_tty_option()` (the
 /// option-table subsystem) are not modeled; the option name is scanned inline
@@ -5192,7 +5192,7 @@ pub const OPT_LOCAL: i32 = 0x02;
 
 /// Skip over the name of an option variable: `&option`, `&g:option` or
 /// `&l:option`.
-/// Port of `find_option_var_end()` from `csrc/eval.c:6297`.
+/// Port of `find_option_var_end()` from `vendor/eval.c:6297`.
 ///
 /// `*arg` points to the `&`/`+` on entry; on a found name it is advanced to the
 /// option name (past any `g:`/`l:` scope prefix) and `opt_flags` is set to
@@ -5230,7 +5230,7 @@ pub fn find_option_var_end(arg: &mut &str, opt_flags: &mut i32) -> Option<usize>
 }
 
 /// Writes "<sourcing_name>:<sourcing_lnum>".
-/// Port of `eval_fmt_source_name_line()` from `csrc/eval.c:6659`.
+/// Port of `eval_fmt_source_name_line()` from `vendor/eval.c:6659`.
 ///
 /// RUST-PORT NOTE: the C writes into a caller buffer; here the formatted string
 /// is returned. There is no execution stack standalone (no `SOURCING_NAME`), so
@@ -5241,7 +5241,7 @@ pub fn eval_fmt_source_name_line() -> String {
 }
 
 /// `typedef struct { … } forinfo_T;` — info used by a ":for" loop
-/// (`csrc/eval.c:123`).
+/// (`vendor/eval.c:123`).
 ///
 /// RUST-PORT NOTE: the C `listwatch_T fi_lw` field is omitted. List watchers
 /// are not modeled anywhere in this port (`tv_list_watch_add`/`tv_list_watch_*`
@@ -5267,7 +5267,7 @@ pub struct forinfo_T {
     pub fi_byte_idx: i32,
 }
 
-/// Port of `eval_for_line()` from `csrc/eval.c:1435`.
+/// Port of `eval_for_line()` from `vendor/eval.c:1435`.
 ///
 /// Set up a ":for" loop iterator from `arg` (`for {var} in {expr}`): parse the
 /// loop-variable lvalue, require the "in" keyword, then evaluate the source
@@ -5384,7 +5384,7 @@ pub fn eval_for_line(arg: &str, errp: &mut bool, evalarg: &mut evalarg_T) -> for
     fi // c:1503
 }
 
-/// Port of `buf_byteidx_to_charidx()` from `csrc/eval.c:5228`.
+/// Port of `buf_byteidx_to_charidx()` from `vendor/eval.c:5228`.
 ///
 /// Convert byte index `byteidx` of line `lnum` in `buf` to a character index
 /// (both zero-based). Works only for loaded buffers; returns -1 on failure.
@@ -5438,7 +5438,7 @@ pub fn buf_byteidx_to_charidx(
     count - 1 // c:5258
 }
 
-/// Port of `buf_charidx_to_byteidx()` from `csrc/eval.c:5266`.
+/// Port of `buf_charidx_to_byteidx()` from `vendor/eval.c:5266`.
 ///
 /// Convert character index `charidx` of line `lnum` in `buf` to a byte index
 /// (both zero-based). Works only for loaded buffers; returns -1 on failure.
@@ -5478,7 +5478,7 @@ pub fn buf_charidx_to_byteidx(
     t as i32 // c:5284 return (int)(t - str);
 }
 
-/// Port of `var2fpos()` from `csrc/eval.c:5299`.
+/// Port of `var2fpos()` from `vendor/eval.c:5299`.
 ///
 /// Translate a Vimscript object into a buffer/window position. Accepts a
 /// `VAR_LIST` (`[lnum, col, coladd]`) or a `VAR_STRING` name (`"."`, `"v"`,
@@ -5638,7 +5638,7 @@ pub fn var2fpos(
     None // c:5427
 }
 
-/// Port of `list2fpos()` from `csrc/eval.c:5440`.
+/// Port of `list2fpos()` from `vendor/eval.c:5440`.
 ///
 /// Convert list in `arg` into position `posp` and optional file number `fnump`.
 /// When `fnump` is `None` there is no file number, only 3 items:

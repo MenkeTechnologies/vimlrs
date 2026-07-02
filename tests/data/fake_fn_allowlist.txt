@@ -1,5 +1,5 @@
 # fake_fn_allowlist.txt — sanctioned `fn` names under src/ported/ that are NOT
-# in the csrc-derived list (docs/nvim_c_functions.txt).
+# in the vendor-derived list (docs/nvim_c_functions.txt).
 #
 # Ported from zshrs's tests/data/fake_fn_allowlist.txt + ported_fn_names_match_c.
 # The test `tests/ported_fn_names_match_c.rs` rejects any fn under src/ported/
@@ -8,7 +8,7 @@
 # exception — keep each justified.
 #
 # Every entry below is a REAL Neovim function whose defining C file is not
-# vendored under csrc/ (only the eval/ tree is). They are faithful ports of real
+# vendored under vendor/ (only the eval/ tree is). They are faithful ports of real
 # Vim builtins/helpers, cited to their home file — analogous to the already-
 # recognized extern deps emsg/vim_str2nr (those appear as calls in the eval tree,
 # so they land in the generated list; these do not). There are NO synthesis
@@ -68,8 +68,8 @@ vim_ispathsep_nocolon
 # ── testing.c (not vendored) ──
 # The Vim assert framework backing assert_equal()/assert_true()/… . Their
 # implementations live in Neovim's testing.c, which is not part of the vendored
-# eval tree; the spec is in csrc/eval.lua and v:errors is appended via the
-# vendored assert_error() (csrc/eval/vars.c). These are faithful ports, cited to
+# eval tree; the spec is in vendor/eval.lua and v:errors is appended via the
+# vendored assert_error() (vendor/eval/vars.c). These are faithful ports, cited to
 # testing.c. The shared helpers (fill_assert_error, assert_equal_common,
 # assert_match_common, assert_bool) are real Neovim functions from the same file.
 f_assert_equal
@@ -264,7 +264,7 @@ f_test_write_list_log
 # Provider evals with no provider (v:null), undo-file path computation, and the
 # remaining mouse/screen/completion/command-name/stacktrace queries. Home files:
 # if_py.c / if_pyx.c / undo.c / mouse.c / screen.c / cmdexpand.c / insexpand.c /
-# mapping.c / runtime.c / userfunc.c / ex_docmd.c — all outside csrc/eval/.
+# mapping.c / runtime.c / userfunc.c / ex_docmd.c — all outside vendor/eval/.
 f_pyeval
 f_pyxeval
 f_undofile
@@ -387,7 +387,7 @@ mpack_input_bytes
 
 # ── round 22: stdpath appname (eval/funcs.c get_xdg_var_list + os/env.c) ──
 # get_appname is Neovim's $NVIM_APPNAME resolver (os/env.c, home file not under
-# the vendored csrc/eval/ tree). get_xdg_var_list is a real funcs.c name and
+# the vendored vendor/eval/ tree). get_xdg_var_list is a real funcs.c name and
 # drops from the stub tree on regeneration.
 get_appname
 
@@ -398,3 +398,18 @@ get_appname
 push_sourcing_name
 pop_sourcing_name
 current_sourcing_name
+
+# ── highlight-group registry (highlight_group.c, not vendored) ──
+# A minimal ordered `:highlight` registry backing hlID()/hlexists()/synIDattr()
+# and hlget()/hlset() standalone (no UI → no real highlight table). These wrap
+# the real Neovim highlight machinery (syn_name2id/highlight_exists/syn_id2attr,
+# home file highlight_group.c, outside the vendored eval tree); the registry
+# abstraction itself has no single C name.
+hl_names
+hl_resolved
+hl_lookup
+hl_id
+hl_exists
+hl_synidattr
+hl_intern
+hl_define_from_args

@@ -1,4 +1,4 @@
-//! Port of `src/nvim/eval/funcs.c` (vendored at `csrc/eval/funcs.c`).
+//! Port of `src/nvim/eval/funcs.c` (vendored at `vendor/eval/funcs.c`).
 //!
 //! Vimscript builtin functions. Each `f_<name>` matches the C signature
 //! `void f_<name>(typval_T *argvars, typval_T *rettv, EvalFuncData fptr)`,
@@ -221,7 +221,7 @@ pub fn f_nr2char(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.vval = v_string(s);
 }
 
-/// Port of `repeat_list()` — `csrc/eval/funcs.c:5310`. Repeat list `l` `n` times
+/// Port of `repeat_list()` — `vendor/eval/funcs.c:5310`. Repeat list `l` `n` times
 /// into `rettv` (a new list).
 fn repeat_list(l: &std::rc::Rc<std::cell::RefCell<list_T>>, n: varnumber_T, rettv: &mut typval_T) {
     // c: tv_list_alloc_ret(rettv, (n > 0) * n * tv_list_len(l));
@@ -238,7 +238,7 @@ fn repeat_list(l: &std::rc::Rc<std::cell::RefCell<list_T>>, n: varnumber_T, rett
     }
 }
 
-/// Port of `repeat_blob()` — `csrc/eval/funcs.c:5319`. Repeat blob `b` `n` times
+/// Port of `repeat_blob()` — `vendor/eval/funcs.c:5319`. Repeat blob `b` `n` times
 /// into `rettv` (a new blob).
 fn repeat_blob(
     blob: Option<&std::rc::Rc<std::cell::RefCell<blob_T>>>,
@@ -277,7 +277,7 @@ fn repeat_blob(
     out.borrow_mut().bv_ga = data;
 }
 
-/// Port of `repeat_string()` — `csrc/eval/funcs.c:5356`. Repeat string `str_tv`
+/// Port of `repeat_string()` — `vendor/eval/funcs.c:5356`. Repeat string `str_tv`
 /// `n` times into `rettv` (a new string).
 fn repeat_string(str_tv: &typval_T, n: varnumber_T, rettv: &mut typval_T) {
     rettv.v_type = VAR_STRING;
@@ -315,7 +315,7 @@ fn repeat_string(str_tv: &typval_T, n: varnumber_T, rettv: &mut typval_T) {
     rettv.vval = v_string(String::from_utf8_lossy(&r).into_owned());
 }
 
-/// Port of `f_repeat()` — `csrc/eval/funcs.c:5393`. Repeat a List, Blob, or
+/// Port of `f_repeat()` — `vendor/eval/funcs.c:5393`. Repeat a List, Blob, or
 /// String `{count}` times.
 pub fn f_repeat(argvars: &[typval_T], rettv: &mut typval_T) {
     // c: varnumber_T n = tv_get_number(&argvars[1]);
@@ -597,7 +597,7 @@ pub fn dummy_timer_due_cb() {}
 /// close callback for `wait()`'s timer; never fires, no-op.
 pub fn dummy_timer_close_cb() {}
 
-/// Port of `tv_get_buf()` from `csrc/eval/funcs.c:471`.
+/// Port of `tv_get_buf()` from `vendor/eval/funcs.c:471`.
 ///
 /// Get buffer by number or pattern.
 ///
@@ -649,7 +649,7 @@ pub fn tv_get_buf(
     buf // c:506
 }
 
-/// Port of `tv_get_buf_from_arg()` from `csrc/eval/funcs.c:510`.
+/// Port of `tv_get_buf_from_arg()` from `vendor/eval/funcs.c:510`.
 ///
 /// Like [`tv_get_buf`] but give an error message if the type is wrong.
 ///
@@ -667,7 +667,7 @@ pub fn tv_get_buf_from_arg(tv: &typval_T) -> Option<std::rc::Rc<std::cell::RefCe
     buf // c:518
 }
 
-/// Port of `get_buf_arg()` from `csrc/eval/funcs.c:523`.
+/// Port of `get_buf_arg()` from `vendor/eval/funcs.c:523`.
 ///
 /// Get the buffer from "arg" and give an error and return NULL if it is not
 /// valid.
@@ -738,7 +738,7 @@ struct SomeMatch {
     item: typval_T,
 }
 
-/// Port of `find_some_match()` — `csrc/eval/funcs.c:4060`. The shared backend of
+/// Port of `find_some_match()` — `vendor/eval/funcs.c:4060`. The shared backend of
 /// `match()`/`matchstr()`/`matchend()`/`matchstrpos()`/`matchlist()`.
 ///
 /// String subject: `{start}` is a startcol when `{count}` is given (so `^`/`\<`
@@ -890,7 +890,7 @@ pub fn f_range(argvars: &[typval_T], rettv: &mut typval_T) {
     }
 }
 
-/// Port of `f_add()` — `csrc/eval/list.c:429`. Append `{expr}` to a List (any
+/// Port of `f_add()` — `vendor/eval/list.c:429`. Append `{expr}` to a List (any
 /// value) or a Blob (as a byte); else E897. Returns the same object, or 1 on
 /// failure.
 pub fn f_add(argvars: &[typval_T], rettv: &mut typval_T) {
@@ -912,7 +912,7 @@ pub fn f_add(argvars: &[typval_T], rettv: &mut typval_T) {
     }
 }
 
-/// Port of `f_reverse()` — `csrc/eval/list.c:826`. Reverse a List or Blob in
+/// Port of `f_reverse()` — `vendor/eval/list.c:826`. Reverse a List or Blob in
 /// place (returning the same object), or a String (returning a new, reversed
 /// String via `reverse_text()`). Anything else returns 0.
 pub fn f_reverse(argvars: &[typval_T], rettv: &mut typval_T) {
@@ -1148,7 +1148,7 @@ pub fn f_index(argvars: &[typval_T], rettv: &mut typval_T) {
     }
 }
 
-/// Port of `f_has()` from `csrc/eval/funcs.c:2654` — feature presence.
+/// Port of `f_has()` from `vendor/eval/funcs.c:2654` — feature presence.
 ///
 /// NOT a faithful copy of the C `has_list[]`: that table is gated by Neovim's
 /// build (`#ifdef UNIX`, `#ifdef __APPLE__`, …) and also lists editor features
@@ -1487,7 +1487,7 @@ pub fn f_invert(argvars: &[typval_T], rettv: &mut typval_T) {
 
 // ── more list / dict functions (Src/eval/funcs.c) ──
 
-/// Port of `f_insert()` — `csrc/eval/list.c:735`. Insert `{item}` before index
+/// Port of `f_insert()` — `vendor/eval/list.c:735`. Insert `{item}` before index
 /// `{idx}` (default 0; negative counts from the end) in a List, or insert a byte
 /// in a Blob. Out-of-range `{idx}` errors (E684 for a List, E475 for a Blob).
 pub fn f_insert(argvars: &[typval_T], rettv: &mut typval_T) {
@@ -2694,7 +2694,7 @@ pub fn f_id(argvars: &[typval_T], rettv: &mut typval_T) {
     });
 }
 
-/// Port of `indexof_eval_expr()` — `csrc/eval/funcs.c:2983`. Evaluate `expr`
+/// Port of `indexof_eval_expr()` — `vendor/eval/funcs.c:2983`. Evaluate `expr`
 /// with `v:key`/`v:val` bound and return whether it is true.
 ///
 /// RUST-PORT NOTE: the C reads the globals `VV_KEY`/`VV_VAL` and calls
@@ -2711,7 +2711,7 @@ fn indexof_eval_expr(expr: &typval_T, key: &typval_T, val: &typval_T) -> bool {
         .unwrap_or(false)
 }
 
-/// Port of `indexof_blob()` — `csrc/eval/funcs.c:3005`. The index of the first
+/// Port of `indexof_blob()` — `vendor/eval/funcs.c:3005`. The index of the first
 /// byte at/after `startidx` for which `expr` is true, or -1.
 fn indexof_blob(
     b: Option<&std::rc::Rc<std::cell::RefCell<blob_T>>>,
@@ -2742,7 +2742,7 @@ fn indexof_blob(
     -1
 }
 
-/// Port of `indexof_list()` — `csrc/eval/funcs.c:3042`. The index of the first
+/// Port of `indexof_list()` — `vendor/eval/funcs.c:3042`. The index of the first
 /// item at/after `startidx` for which `expr` is true, or -1.
 fn indexof_list(
     l: Option<&std::rc::Rc<std::cell::RefCell<list_T>>>,
@@ -2785,7 +2785,7 @@ fn indexof_list(
     -1
 }
 
-/// Port of `f_indexof()` — `csrc/eval/funcs.c:3086`. The index of the first
+/// Port of `f_indexof()` — `vendor/eval/funcs.c:3086`. The index of the first
 /// List/Blob item for which `{expr}` (string or funcref, seeing `v:key`/`v:val`)
 /// is true, or -1. An optional `{opts}` Dict's `startidx` begins the scan later.
 pub fn f_indexof(argvars: &[typval_T], rettv: &mut typval_T) {
@@ -2819,7 +2819,7 @@ pub fn f_indexof(argvars: &[typval_T], rettv: &mut typval_T) {
 
 // ── pattern / option / editor-absent builtins (funcs.c) ──────────────────────
 
-/// Port of `get_matches_in_str()` — `csrc/eval/funcs.c:4272`. Append a dict for
+/// Port of `get_matches_in_str()` — `vendor/eval/funcs.c:4272`. Append a dict for
 /// **every** match of `pat` in `s` to `mlist`: `{idx|lnum, byteidx, text
 /// [, submatches]}`. `matchbuf` selects the `lnum` key (`matchbufline`) over
 /// `idx` (`matchstrlist`); `submatches` adds the `\1`..`\9` group list.
@@ -3972,9 +3972,9 @@ pub fn f_confirm(argvars: &[typval_T], rettv: &mut typval_T) {
 // (`["", ""]`), an empty result List, a cursor/position set that cannot apply
 // (-1), or a timer that cannot be created without an event loop (-1).
 
-// ── Highlight-group registry (EXTENSION — no `csrc/` counterpart) ─────────────
+// ── Highlight-group registry (EXTENSION — no `vendor/` counterpart) ─────────────
 //
-// A standalone interpreter has no UI, so csrc's highlight groups never exist and
+// A standalone interpreter has no UI, so vendor's highlight groups never exist and
 // the C `:highlight` machinery (`syn_name2id`/`highlight_exists`/`syn_id2attr`)
 // finds nothing. But a sourced colorscheme or vimrc DEFINES groups via
 // `:highlight {group} …` and real scripts guard on `hlexists()`/`hlID()` before
@@ -4470,10 +4470,10 @@ pub fn f_settagstack(_argvars: &[typval_T], rettv: &mut typval_T) {
 // ── assert_*() — the Vim unit-testing framework (testing.c, not vendored) ──
 //
 // Each assert appends a failure message to `v:errors` (via the vendored
-// `assert_error`, csrc/eval/vars.c:3360) and returns 1 on failure, 0 on
+// `assert_error`, vendor/eval/vars.c:3360) and returns 1 on failure, 0 on
 // success — so a script can run a batch of asserts and then inspect
 // `v:errors`. Behaviour and message wording follow the spec documented in
-// `csrc/eval.lua` (the implementations live in Neovim's `testing.c`, which is
+// `vendor/eval.lua` (the implementations live in Neovim's `testing.c`, which is
 // not part of the vendored eval tree). Values render with `string()`
 // (`encode_tv2string`); a user `{msg}` renders with `:echo` rules
 // (`encode_tv2echo`), matching the C `fill_assert_error`.
@@ -4770,7 +4770,7 @@ pub fn f_environ(_argvars: &[typval_T], rettv: &mut typval_T) {
 // ── Buffer / window / tabpage builtins (no buffers or windows standalone) ──
 //
 // A standalone interpreter has no buffer list, windows, or tab pages, so these
-// reduce to the value their C bodies (csrc/eval/buffer.c, window.c) return when
+// reduce to the value their C bodies (vendor/eval/buffer.c, window.c) return when
 // the looked-up buffer/window is absent: a missing buffer is -1 / 0 / "", a
 // window measurement is -1, and there is one implicit window and tab page.
 
@@ -4849,7 +4849,7 @@ pub fn f_tabpagewinnr(_argvars: &[typval_T], rettv: &mut typval_T) {
 
 // ── More buffer/window builtins (no buffer lines or real windows standalone) ──
 //
-// Faithful to the C "absent" returns (csrc/eval/buffer.c, window.c): reading a
+// Faithful to the C "absent" returns (vendor/eval/buffer.c, window.c): reading a
 // buffer line yields "" / []; a line-changing command FAILs with 1; window
 // queries yield no id (0) / -1 / [] / [0,0]; GUI position is [-1,-1].
 
@@ -5607,7 +5607,7 @@ pub fn f_perleval(_argvars: &[typval_T], rettv: &mut typval_T) {
 /// given kind, resolved from the XDG base-directory environment variables (with
 /// the usual `~/.config`-style defaults) plus the `nvim` app subdirectory.
 /// Port of `get_appname()` (Neovim `src/nvim/os/env.c`, home file not under the
-/// vendored `csrc/eval/` tree). The application name used in the XDG paths:
+/// vendored `vendor/eval/` tree). The application name used in the XDG paths:
 /// `$NVIM_APPNAME` when set and non-empty, else "nvim".
 fn get_appname() -> String {
     std::env::var("NVIM_APPNAME")
@@ -5616,7 +5616,7 @@ fn get_appname() -> String {
         .unwrap_or_else(|| "nvim".to_string())
 }
 
-/// Port of `get_xdg_var_list()` — `csrc/eval/funcs.c:7140`. Split the XDG
+/// Port of `get_xdg_var_list()` — `vendor/eval/funcs.c:7140`. Split the XDG
 /// directory list in `$env` (or `default` when unset/empty) on the path
 /// separator and append the appname to each entry. Used by stdpath()'s
 /// `config_dirs`/`data_dirs`.
@@ -5724,7 +5724,7 @@ pub fn buf_win_common(_argvars: &[typval_T], rettv: &mut typval_T, _get_nr: bool
 
 // ════════════════════════════════════════════════════════════════════════════
 // Round-1 builtin expansion. These builtins' C home files lie outside the
-// vendored `csrc/eval/` tree (search.c, cmdhist.c, digraph.c, mbyte.c,
+// vendored `vendor/eval/` tree (search.c, cmdhist.c, digraph.c, mbyte.c,
 // testing.c, and the full eval/funcs.c table), so their `fn` names are recorded
 // in `tests/data/fake_fn_allowlist.txt`. Each is a faithful port cited to its
 // home file.
@@ -6360,7 +6360,7 @@ pub fn set_arglist(args: &[String]) {
 }
 
 /// Port of `f_argc()` — Neovim `src/nvim/arglist.c` (home file not under the
-/// vendored `csrc/eval/` tree, so allowlisted category-A). The size of the
+/// vendored `vendor/eval/` tree, so allowlisted category-A). The size of the
 /// global argument list (here the script files from the command line).
 pub fn f_argc(_argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.vval = v_number(ARGLIST.with(|a| a.borrow().len()) as varnumber_T);
@@ -6451,7 +6451,7 @@ pub fn f_foldlevel(_argvars: &[typval_T], rettv: &mut typval_T) {
 // ════════════════════════════════════════════════════════════════════════════
 // Round-2 builtin expansion. Match highlighting (window.c), sign definitions
 // (sign.c), fold-close queries (fold.c) and mapping queries (mapping.c) — all
-// outside the vendored csrc/eval/ tree, so recorded in the drift-gate
+// outside the vendored vendor/eval/ tree, so recorded in the drift-gate
 // allowlist. Standalone there are no windows/buffers, so the match and sign
 // tables are pure in-memory bookkeeping and the editor-only queries return
 // their documented "nothing here" values.
@@ -8235,7 +8235,7 @@ pub fn do_normal(keys: &str) {
 // Round-3 builtin expansion. Command-line state (ex_getln.c), sign placement
 // (sign.c), and a set of editor-feature queries whose answer is well-defined
 // when no editor is attached (indent.c / fold.c / highlight.c / diff.c /
-// search.c / popupmenu / cmdexpand). All outside the vendored csrc/eval/ tree,
+// search.c / popupmenu / cmdexpand). All outside the vendored vendor/eval/ tree,
 // so recorded in the drift-gate allowlist.
 // ════════════════════════════════════════════════════════════════════════════
 
@@ -8601,7 +8601,7 @@ pub fn f_diff_filler(_argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.vval = v_number(0);
 }
 
-/// Port of `f_hlID()` — `csrc/eval/funcs.c:2894`. The numeric ID of the highlight
+/// Port of `f_hlID()` — `vendor/eval/funcs.c:2894`. The numeric ID of the highlight
 /// group named `{name}`, or 0 when it does not exist. Standalone there are no
 /// highlight groups, so `syn_name2id()` finds nothing → 0. `highlightID()` is the
 /// deprecated alias and shares this implementation.
@@ -8701,7 +8701,7 @@ pub fn f_complete_info(_argvars: &[typval_T], rettv: &mut typval_T) {
 // Round-4 builtin expansion. The quickfix/location lists (quickfix.c) are real
 // in-memory error lists standalone; getcompletion() does real environment/file
 // completion; the remaining input/indent/completion/menu queries return their
-// documented "no editor" values. All outside the vendored csrc/eval/ tree.
+// documented "no editor" values. All outside the vendored vendor/eval/ tree.
 // ════════════════════════════════════════════════════════════════════════════
 
 // ── getqflist()/setqflist()/getloclist()/setloclist() — Neovim quickfix.c. ──
@@ -9028,7 +9028,7 @@ pub fn f_test_write_list_log(_argvars: &[typval_T], _rettv: &mut typval_T) {}
 // Round-5 builtin expansion — completing the eval.lua builtin table. Provider
 // evals with no provider (eval/funcs.c), undo-file path computation (undofile.c),
 // and the remaining mouse/screen/completion/command-name queries. All outside
-// the vendored csrc/eval/ tree.
+// the vendored vendor/eval/ tree.
 // ════════════════════════════════════════════════════════════════════════════
 
 /// Port of `f_pyeval()` (Neovim if_py.c) — evaluate Python. No Python provider →

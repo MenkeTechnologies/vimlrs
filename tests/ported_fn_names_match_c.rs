@@ -2,7 +2,7 @@
 //!
 //! Every `fn` defined under `src/ported/` must trace back to upstream Neovim C:
 //! its name must appear in `docs/nvim_c_functions.txt` (generated from the
-//! vendored `csrc/` by `scripts/gen_c_functions.sh`) OR be a sanctioned
+//! vendored `vendor/` by `scripts/gen_c_functions.sh`) OR be a sanctioned
 //! exception in `tests/data/fake_fn_allowlist.txt`. Trait-impl methods
 //! (`default`, `fmt`, …) and `#[cfg(test)]` functions are exempt.
 //!
@@ -48,15 +48,15 @@ fn read_set(path: &Path) -> HashSet<String> {
         .collect()
 }
 
-/// Collect every function-like C identifier from the vendored `csrc/` tree — the
+/// Collect every function-like C identifier from the vendored `vendor/` tree — the
 /// same set `scripts/gen_c_functions.sh` writes to `docs/nvim_c_functions.txt`,
 /// computed in-process so the gate needs no generated, git-ignored artifact (it
 /// would be empty on a fresh CI checkout). An identifier "appears as a callable"
 /// when it is immediately followed (allowing whitespace) by `(`, matching the
 /// generator's `\b[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(` grep.
-fn c_names_from_csrc(csrc: &Path) -> HashSet<String> {
+fn c_names_from_vendor(vendor: &Path) -> HashSet<String> {
     let mut files = Vec::new();
-    rs_or_ext_files(csrc, &["c", "h", "lua"], &mut files);
+    rs_or_ext_files(vendor, &["c", "h", "lua"], &mut files);
     let mut names = HashSet::new();
     for f in &files {
         let Ok(src) = fs::read_to_string(f) else {
@@ -186,16 +186,16 @@ fn fn_name(line: &str) -> Option<String> {
 fn ported_fn_names_exist_in_c_or_allowlist() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     // Derive the legal-name set straight from the vendored C (works on a fresh
-    // checkout / in CI); fall back to a pre-generated file only if csrc/ is
+    // checkout / in CI); fall back to a pre-generated file only if vendor/ is
     // somehow absent.
-    let mut c_names = c_names_from_csrc(&root.join("csrc"));
+    let mut c_names = c_names_from_vendor(&root.join("vendor"));
     if c_names.is_empty() {
         c_names = read_set(&root.join("docs/nvim_c_functions.txt"));
     }
     let allow = read_set(&root.join("tests/data/fake_fn_allowlist.txt"));
     assert!(
         !c_names.is_empty(),
-        "no C names found — csrc/ missing and docs/nvim_c_functions.txt empty"
+        "no C names found — vendor/ missing and docs/nvim_c_functions.txt empty"
     );
 
     let mut files = Vec::new();

@@ -1,4 +1,4 @@
-//! Port of `src/nvim/os/env.c` (not vendored under `csrc/`; the names appear as
+//! Port of `src/nvim/os/env.c` (not vendored under `vendor/`; the names appear as
 //! calls in the vendored eval tree, so the drift gate recognizes them).
 //!
 //! Only the process-id query used by `init_srand()` is ported here.

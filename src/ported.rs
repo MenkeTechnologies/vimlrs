@@ -1,6 +1,6 @@
-//! Strict 1:1 ports of the Neovim eval C source vendored under `csrc/`.
+//! Strict 1:1 ports of the Neovim eval C source vendored under `vendor/`.
 //!
-//! Every file here mirrors a `csrc/` file, uses the exact C names, and cites its
+//! Every file here mirrors a `vendor/` file, uses the exact C names, and cites its
 //! source (PORT.md discipline, adapted from zshrs). Net-new synthesis (lexer,
 //! parser, AST, bytecode compiler, fusevm bridge) lives in the crate-root
 //! carve-out modules instead, never here.
@@ -8,7 +8,7 @@
 // Faithful 1:1 C ports mirror Neovim's source structure line-for-line, so clippy
 // style lints (auto-deref, map_or, range patterns, …) and the unused-assignment /
 // unused-paren / private-interface warnings that would demand idiomatic-Rust
-// rewrites are relaxed for this subtree — the port must stay a match of `csrc/`,
+// rewrites are relaxed for this subtree — the port must stay a match of `vendor/`,
 // not diverge to satisfy a style linter. Net-new synthesis modules keep full lints.
 #![allow(clippy::all)]
 #![allow(unused_assignments)]
@@ -36,7 +36,7 @@ pub mod ex_eval;
 pub mod grid;
 /// Port of `src/nvim/strings.c` (the Vimscript string builtins `f_string`,
 /// `f_strlen`, `f_byteidx`, `f_tr`, …). Home file not under the vendored
-/// `csrc/eval/` tree; see `tests/data/fake_fn_allowlist.txt`.
+/// `vendor/eval/` tree; see `tests/data/fake_fn_allowlist.txt`.
 /// Port of `src/nvim/mark.c` (subset: the mark store behind setmark_pos/getpos).
 pub mod mark;
 /// Port of `src/nvim/mbyte.c` (subset: the UTF-8 codec helpers `utf_ptr2char`,
@@ -70,7 +70,7 @@ pub mod search;
 pub mod sha256;
 pub mod strings;
 /// Generated not-yet-ported surface: one stub per vendored C function
-/// definition (real name + `csrc/<file>:<line>` citation). Regenerate with
+/// definition (real name + `vendor/<file>:<line>` citation). Regenerate with
 /// `scripts/gen_port_stubs.sh`; ported functions drop out automatically.
 pub mod stubs;
 /// Port of `src/nvim/window.c` (subset: the `win_T`/`tabpage_T` model + window

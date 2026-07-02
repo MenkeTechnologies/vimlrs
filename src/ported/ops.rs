@@ -1,11 +1,11 @@
-//! Port of the yank-register store from `csrc/ops.c` — the `y_regs[NUM_REGISTERS]`
+//! Port of the yank-register store from `vendor/ops.c` — the `y_regs[NUM_REGISTERS]`
 //! register array plus the get/set paths behind `:let @r`, `getreg()`,
 //! `setreg()` and `getregtype()`.
 //!
 //! RUST-PORT NOTE: in current Neovim this code lives in `src/nvim/register.c`
 //! (+ `register.h` inline helpers, `register_defs.h` enums) after the
 //! ops.c/register.c split, and `MotionType` comes from `normal_defs.h`; it is
-//! vendored under the historical `csrc/ops.c` name. This is the editor-layer
+//! vendored under the historical `vendor/ops.c` name. This is the editor-layer
 //! carve-out backing the `funcs.c` register builtins — a faithful in-memory
 //! `yankreg_T` store (the standalone interpreter has no buffer/yank machinery).
 //! Clipboard (`get_clipboard`/`set_clipboard`), the `'/'`/`'='`/`'#'` special
@@ -106,7 +106,7 @@ thread_local! {
 
 // ── register.h inline helpers ───────────────────────────────────────────────
 
-/// Port of `op_reg_index()` from csrc/ops.c (register.h) — register name → index.
+/// Port of `op_reg_index()` from vendor/ops.c (register.h) — register name → index.
 ///
 /// @return Index in y_regs array or -1 if register name was not recognized.
 fn op_reg_index(regname: i32) -> i32 {
@@ -127,12 +127,12 @@ fn op_reg_index(regname: i32) -> i32 {
     }
 }
 
-/// Port of `is_append_register()` from csrc/ops.c (register.h).
+/// Port of `is_append_register()` from vendor/ops.c (register.h).
 fn is_append_register(regname: i32) -> bool {
     regname > 0 && (regname as u8 as char).is_ascii_uppercase()
 }
 
-/// Port of `get_register_name()` from csrc/ops.c (register.h) — the character
+/// Port of `get_register_name()` from vendor/ops.c (register.h) — the character
 /// name of the register with the given number.
 #[allow(dead_code)]
 fn get_register_name(num: i32) -> i32 {
@@ -151,7 +151,7 @@ fn get_register_name(num: i32) -> i32 {
     }
 }
 
-/// Port of `reg_empty()` from csrc/ops.c (register.h) — whether register is empty.
+/// Port of `reg_empty()` from vendor/ops.c (register.h) — whether register is empty.
 #[allow(dead_code)]
 fn reg_empty(reg: &yankreg_T) -> bool {
     reg.y_array.is_none()
@@ -167,7 +167,7 @@ fn reg_empty(reg: &yankreg_T) -> bool {
 
 // ── register.c ──────────────────────────────────────────────────────────────
 
-/// Port of `get_y_register()` from csrc/ops.c — the register at index `reg`
+/// Port of `get_y_register()` from vendor/ops.c — the register at index `reg`
 /// (C returns `&y_regs[reg]`).
 ///
 /// RUST-PORT NOTE: the C pointer into `y_regs` is represented by the register's
@@ -179,13 +179,13 @@ fn get_y_register(reg: usize) -> usize {
     reg // c: return &y_regs[reg];
 }
 
-/// Port of `get_y_previous()` from csrc/ops.c — the last written register index.
+/// Port of `get_y_previous()` from vendor/ops.c — the last written register index.
 #[allow(dead_code)]
 fn get_y_previous() -> Option<usize> {
     Y_PREVIOUS.with(|p| p.get())
 }
 
-/// Port of `valid_yank_reg()` from csrc/ops.c — whether `regname` names a valid
+/// Port of `valid_yank_reg()` from vendor/ops.c — whether `regname` names a valid
 /// yank register. `writing` allows only writable registers.
 ///
 /// @note There is no check for 0 (default register); caller must do that. The
@@ -200,7 +200,7 @@ fn valid_yank_reg(regname: i32, writing: bool) -> bool {
         || regname == '+' as i32
 }
 
-/// Port of `op_reg_get()` from csrc/ops.c — the register with name `name`, or
+/// Port of `op_reg_get()` from vendor/ops.c — the register with name `name`, or
 /// `None` when the name has no `y_regs` slot (C returns NULL).
 ///
 /// RUST-PORT NOTE: C returns `const yankreg_T *`; this returns the resolved
@@ -216,7 +216,7 @@ fn op_reg_get(name: char) -> Option<usize> {
     Some(i as usize) // c: return &y_regs[i];
 }
 
-/// Port of `get_yank_register()` from csrc/ops.c — resolve `regname`+`mode` to a
+/// Port of `get_yank_register()` from vendor/ops.c — resolve `regname`+`mode` to a
 /// `y_regs` index (mirrors returning `&y_regs[i]`), updating `y_previous` on
 /// yank.
 ///
@@ -249,14 +249,14 @@ fn get_yank_register(regname: i32, mode: yreg_mode_t) -> usize {
     i
 }
 
-/// Port of `free_register()` from csrc/ops.c — clear a register's contents.
+/// Port of `free_register()` from vendor/ops.c — clear a register's contents.
 fn free_register(reg: &mut yankreg_T) {
     // c: XFREE_CLEAR(reg->y_array); (additional_data has no analog here)
     reg.y_array = None;
     reg.y_size = 0;
 }
 
-/// Port of `format_reg_type()` from csrc/ops.c — the `getregtype()` code:
+/// Port of `format_reg_type()` from vendor/ops.c — the `getregtype()` code:
 /// `v` charwise, `V` linewise, `<C-V>{width}` blockwise, `""` for unknown.
 ///
 /// RUST-PORT NOTE: C writes into `buf` and returns the length; here we return the
@@ -272,7 +272,7 @@ pub fn format_reg_type(reg_type: MotionType, reg_width: colnr_T) -> String {
     }
 }
 
-/// Port of `get_reg_type()` from csrc/ops.c — the motion type of register
+/// Port of `get_reg_type()` from vendor/ops.c — the motion type of register
 /// `regname` (and, for a blockwise register, its width).
 ///
 /// RUST-PORT NOTE: C returns `kMTUnknown` for the special/absent-register cases;
@@ -308,7 +308,7 @@ pub fn get_reg_type(regname: char) -> (MotionType, colnr_T) {
     })
 }
 
-/// Port of `get_reg_wrap_one_line()` from csrc/ops.c — wrap the single line `s`
+/// Port of `get_reg_wrap_one_line()` from vendor/ops.c — wrap the single line `s`
 /// for [`get_reg_contents`].
 ///
 /// RUST-PORT NOTE: C returns `void *` — either the bare `char *s` (no `kGRegList`)
@@ -321,7 +321,7 @@ fn get_reg_wrap_one_line(s: &str) -> Vec<String> {
     vec![s.to_string()]
 }
 
-/// Port of `get_reg_contents()` from csrc/ops.c — the lines held by register
+/// Port of `get_reg_contents()` from vendor/ops.c — the lines held by register
 /// `regname`, or `None` when it is unset (C returns NULL).
 ///
 /// RUST-PORT NOTE: this returns the `kGRegList` shape (the register's lines); the
@@ -360,7 +360,7 @@ pub fn get_reg_contents(regname: char) -> Option<Vec<String>> {
     Y_REGS.with(|r| r.borrow()[i].y_array.clone())
 }
 
-/// Port of `init_write_reg()` from csrc/ops.c — validate `name`, snapshot
+/// Port of `init_write_reg()` from vendor/ops.c — validate `name`, snapshot
 /// `y_previous`, resolve the target register index and (unless appending) clear
 /// it. Returns `(reg index, old_y_previous)` or `None` on an invalid name.
 fn init_write_reg(name: i32, must_append: bool) -> Option<(usize, Option<usize>)> {
@@ -387,7 +387,7 @@ enum reg_input<'a> {
     List(&'a [String]),
 }
 
-/// Port of `str_to_reg()` from csrc/ops.c — put a string (or list of strings)
+/// Port of `str_to_reg()` from vendor/ops.c — put a string (or list of strings)
 /// into register `y_ptr`, appending when the register already holds charwise
 /// text. `yank_type == None` mirrors `kMTUnknown` (auto-detect).
 fn str_to_reg(
@@ -558,7 +558,7 @@ fn str_to_reg(
     y_ptr.y_array = Some(pp);
 }
 
-/// Port of `finish_write_reg()` from csrc/ops.c — restore `y_previous` for a
+/// Port of `finish_write_reg()` from vendor/ops.c — restore `y_previous` for a
 /// non-`"` register.
 ///
 /// RUST-PORT NOTE: `set_clipboard(name, reg)` is a no-op (no UI provider).
@@ -569,7 +569,7 @@ fn finish_write_reg(name: i32, old_y_previous: Option<usize>) {
     }
 }
 
-/// Port of `write_reg_contents_ex()` from csrc/ops.c — store `str` in register
+/// Port of `write_reg_contents_ex()` from vendor/ops.c — store `str` in register
 /// `name`. `yank_type == None` mirrors `kMTUnknown` (auto-detect from a trailing
 /// NL/CAR).
 ///
@@ -608,7 +608,7 @@ fn write_reg_contents_ex(
     finish_write_reg(name, old_y_previous);
 }
 
-/// Port of `write_reg_contents()` from csrc/ops.c — store `value` in register
+/// Port of `write_reg_contents()` from vendor/ops.c — store `value` in register
 /// `name`.
 ///
 /// RUST-PORT NOTE: the C `write_reg_contents(name, str, len, must_append)` passes
@@ -625,7 +625,7 @@ pub fn write_reg_contents(name: char, value: &str, mtype: MotionType, append: bo
     write_reg_contents_ex(name as i32, value.as_bytes(), append, yt, block_len);
 }
 
-/// Port of `write_reg_contents_lst()` from csrc/ops.c — store `lines` in register
+/// Port of `write_reg_contents_lst()` from vendor/ops.c — store `lines` in register
 /// `name`.
 ///
 /// RUST-PORT NOTE: arg order/shape is adapted to the `funcs.c` bridge — the

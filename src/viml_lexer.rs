@@ -1,5 +1,5 @@
 //! ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-//! EXTENSION — NO `csrc/` COUNTERPART. (PORT.md synthesis-layer carve-out, the
+//! EXTENSION — NO `vendor/` COUNTERPART. (PORT.md synthesis-layer carve-out, the
 //! vimlrs analogue of zshrs's crate-root `fusevm_bridge.rs`/`compile_zsh.rs`.)
 //!
 //! Neovim's `eval.c` has no separate lexer — `eval1`…`eval7` scan characters

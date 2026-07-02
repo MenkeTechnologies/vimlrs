@@ -1,4 +1,4 @@
-//! Port of `src/nvim/os/fileio.c` (vendored at `csrc/os/fileio.c`).
+//! Port of `src/nvim/os/fileio.c` (vendored at `vendor/os/fileio.c`).
 //!
 //! Buffered reading/writing to a file: an fopen/fread/fwrite replacement that
 //! does not deal with Nvim buffer/autocommand structures. `writefile()` writes
@@ -10,7 +10,7 @@
 //! `free_block()` become `Vec` allocation / drop.
 //!
 //! RUST-PORT NOTE: the `os_*` leaf calls live in `os/fs.c` (vendored at
-//! `csrc/os/fs.c`) where they wrap libuv's synchronous `uv_fs_*` API and the
+//! `vendor/os/fs.c`) where they wrap libuv's synchronous `uv_fs_*` API and the
 //! raw `read`/`write` syscalls. libuv's synchronous fs calls map 1:1 to the
 //! POSIX syscalls, so they are ported here against `nix::libc` (the same
 //! os-layer adaptation as `os/time.rs`). `os_translate_sys_error(errno)` maps a
@@ -61,7 +61,7 @@ fn os_translate_sys_error() -> i32 {
     -std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
 }
 
-/// Port of `struct { … } FileDescriptor` from `csrc/os/fileio_defs.h`.
+/// Port of `struct { … } FileDescriptor` from `vendor/os/fileio_defs.h`.
 ///
 /// Structure used to read from/write to file. `read_pos`/`write_pos` are byte
 /// offsets into `buffer` (see file-header RUST-PORT NOTE).
@@ -85,13 +85,13 @@ pub struct FileDescriptor {
     pub bytes_read: u64,
 }
 
-/// Port of `file_space()` from `csrc/os/fileio.h:36` — bytes free in the buffer.
+/// Port of `file_space()` from `vendor/os/fileio.h:36` — bytes free in the buffer.
 fn file_space(fp: &FileDescriptor) -> usize {
     // c: (fp->buffer + ARENA_BLOCK_SIZE) - fp->write_pos
     ARENA_BLOCK_SIZE - fp.write_pos
 }
 
-/// Port of `file_open()` from `csrc/os/fileio.c:41`.
+/// Port of `file_open()` from `vendor/os/fileio.c:41`.
 ///
 /// Open file. Returns an error code, or 0 on success (@see `os_strerror()`).
 pub fn file_open(ret_fp: &mut FileDescriptor, fname: &str, flags: i32, mode: i32) -> i32 {
@@ -141,7 +141,7 @@ pub fn file_open(ret_fp: &mut FileDescriptor, fname: &str, flags: i32, mode: i32
     file_open_fd(ret_fp, fd, flags)
 }
 
-/// Port of `file_open_fd()` from `csrc/os/fileio.c:103` — wrap a file descriptor
+/// Port of `file_open_fd()` from `vendor/os/fileio.c:103` — wrap a file descriptor
 /// with a `FileDescriptor`. Returns 0 (currently always).
 pub fn file_open_fd(ret_fp: &mut FileDescriptor, fd: i32, flags: i32) -> i32 {
     ret_fp.wr = (flags
@@ -159,7 +159,7 @@ pub fn file_open_fd(ret_fp: &mut FileDescriptor, fd: i32, flags: i32) -> i32 {
     0
 }
 
-/// Port of `file_open_stdin()` from `csrc/os/fileio.c:124` — open standard input.
+/// Port of `file_open_stdin()` from `vendor/os/fileio.c:124` — open standard input.
 pub fn file_open_stdin(fp: &mut FileDescriptor) -> i32 {
     let error = file_open_fd(fp, os_open_stdin_fd(), kFileReadOnly | kFileNonBlocking);
     // c: if (error != 0) ELOG("failed to open stdin: %s", os_strerror(error));
@@ -167,7 +167,7 @@ pub fn file_open_stdin(fp: &mut FileDescriptor) -> i32 {
     error
 }
 
-/// Port of `file_open_buffer()` from `csrc/os/fileio.c:135` — open a buffer for
+/// Port of `file_open_buffer()` from `vendor/os/fileio.c:135` — open a buffer for
 /// reading. RUST-PORT NOTE: C points `read_pos`/`write_pos` into the caller's
 /// `data` (`buffer = NULL`, no ownership); with the offset model the bytes are
 /// copied into an owned buffer.
@@ -182,7 +182,7 @@ pub fn file_open_buffer(ret_fp: &mut FileDescriptor, data: &[u8]) {
     ret_fp.bytes_read = 0;
 }
 
-/// Port of `file_close()` from `csrc/os/fileio.c:153` — close file and free its
+/// Port of `file_close()` from `vendor/os/fileio.c:153` — close file and free its
 /// buffer. Returns 0 or an error code.
 pub fn file_close(fp: &mut FileDescriptor, do_fsync: bool) -> i32 {
     if fp.fd < 0 {
@@ -202,7 +202,7 @@ pub fn file_close(fp: &mut FileDescriptor, do_fsync: bool) -> i32 {
     flush_error
 }
 
-/// Port of `file_fsync()` from `csrc/os/fileio.c:174` — flush modifications to
+/// Port of `file_fsync()` from `vendor/os/fileio.c:174` — flush modifications to
 /// disk and run `fsync()`. Returns 0 or an error code.
 pub fn file_fsync(fp: &mut FileDescriptor) -> i32 {
     if !fp.wr {
@@ -223,7 +223,7 @@ pub fn file_fsync(fp: &mut FileDescriptor) -> i32 {
     0
 }
 
-/// Port of `file_flush()` from `csrc/os/fileio.c:199` — flush modifications to
+/// Port of `file_flush()` from `vendor/os/fileio.c:199` — flush modifications to
 /// disk. Returns 0 or an error code.
 pub fn file_flush(fp: &mut FileDescriptor) -> i32 {
     if !fp.wr {
@@ -248,7 +248,7 @@ pub fn file_flush(fp: &mut FileDescriptor) -> i32 {
     0
 }
 
-/// Port of `file_read()` from `csrc/os/fileio.c:227` — read from file. Returns
+/// Port of `file_read()` from `vendor/os/fileio.c:227` — read from file. Returns
 /// an error code (< 0) or the number of bytes read.
 ///
 /// RUST-PORT NOTE: the `#else` (no `HAVE_READV`) branch is ported; the `readv`
@@ -311,7 +311,7 @@ pub fn file_read(fp: &mut FileDescriptor, ret_buf: &mut [u8], size: usize) -> is
     (size - read_remaining) as isize
 }
 
-/// Port of `file_write()` from `csrc/os/fileio.c:330` — write to a file. Returns
+/// Port of `file_write()` from `vendor/os/fileio.c:330` — write to a file. Returns
 /// the number of bytes written or a libuv error code (< 0).
 pub fn file_write(fp: &mut FileDescriptor, buf: &[u8], size: usize) -> isize {
     debug_assert!(fp.wr);
@@ -341,9 +341,9 @@ pub fn file_write(fp: &mut FileDescriptor, buf: &[u8], size: usize) -> isize {
     }
 }
 
-// ── `os/fs.c` leaves (vendored at `csrc/os/fs.c`; see file-header note) ───────
+// ── `os/fs.c` leaves (vendored at `vendor/os/fs.c`; see file-header note) ───────
 
-/// Port of `os_open()` from `csrc/os/fs.c:420` — open a path, returning the fd
+/// Port of `os_open()` from `vendor/os/fs.c:420` — open a path, returning the fd
 /// or a negative error code. C runs `uv_fs_open` synchronously → `open()`.
 fn os_open(path: &str, flags: i32, mode: i32) -> i32 {
     // c: if (path == NULL) return UV_EINVAL;  (a &str carries no NULL; an
@@ -360,7 +360,7 @@ fn os_open(path: &str, flags: i32, mode: i32) -> i32 {
     }
 }
 
-/// Port of `os_close()` from `csrc/os/fs.c:527`.
+/// Port of `os_close()` from `vendor/os/fs.c:527`.
 fn os_close(fd: i32) -> i32 {
     let r = unsafe { libc::close(fd) };
     if r < 0 {
@@ -370,7 +370,7 @@ fn os_close(fd: i32) -> i32 {
     }
 }
 
-/// Port of `os_dup()` from `csrc/os/fs.c:539`.
+/// Port of `os_dup()` from `vendor/os/fs.c:539`.
 fn os_dup(fd: i32) -> i32 {
     // c: os_dup_dup: label — retry on EINTR.
     loop {
@@ -387,14 +387,14 @@ fn os_dup(fd: i32) -> i32 {
     }
 }
 
-/// Port of `os_open_stdin_fd()` from `csrc/os/fs.c:558`.
+/// Port of `os_open_stdin_fd()` from `vendor/os/fs.c:558`.
 fn os_open_stdin_fd() -> i32 {
     // c: `stdin_fd` global (set for `--headless` etc.) is not present standalone,
     //    so `stdin_fd > 0` is false → dup STDIN_FILENO.
     os_dup(libc::STDIN_FILENO)
 }
 
-/// Port of `os_read()` from `csrc/os/fs.c:585` — read up to `size` bytes.
+/// Port of `os_read()` from `vendor/os/fs.c:585` — read up to `size` bytes.
 /// Returns the number of bytes read (0 with `*ret_eof` set at EOF), or a
 /// negative error code.
 fn os_read(
@@ -439,7 +439,7 @@ fn os_read(
     read_bytes as isize
 }
 
-/// Port of `os_write()` from `csrc/os/fs.c:690` — write `size` bytes. Returns
+/// Port of `os_write()` from `vendor/os/fs.c:690` — write `size` bytes. Returns
 /// the number of bytes written or a negative error code.
 fn os_write(fd: i32, buf: &[u8], size: usize, non_blocking: bool) -> isize {
     // c: if (buf == NULL) { assert(size == 0); return 0; }
@@ -473,7 +473,7 @@ fn os_write(fd: i32, buf: &[u8], size: usize, non_blocking: bool) -> isize {
     written_bytes as isize
 }
 
-/// Port of `os_fsync()` from `csrc/os/fs.c:743`. RUST-PORT NOTE: the `g_stats`
+/// Port of `os_fsync()` from `vendor/os/fs.c:743`. RUST-PORT NOTE: the `g_stats`
 /// counter bump has no counterpart standalone and is dropped.
 fn os_fsync(fd: i32) -> i32 {
     let r = unsafe { libc::fsync(fd) };
@@ -484,7 +484,7 @@ fn os_fsync(fd: i32) -> i32 {
     }
 }
 
-/// Port of `os_file_mkdir()` from `csrc/os/fs.c:1080` — create the parent
+/// Port of `os_file_mkdir()` from `vendor/os/fs.c:1080` — create the parent
 /// directory of `fname` if it does not already exist. Returns 0 or a negative
 /// error code.
 ///

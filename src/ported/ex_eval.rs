@@ -1,4 +1,4 @@
-//! Port of `src/nvim/ex_eval.c` (vendored at `csrc/ex_eval.c`).
+//! Port of `src/nvim/ex_eval.c` (vendored at `vendor/ex_eval.c`).
 //!
 //! The `:if`/`:while`/`:for`/`:try`/`:catch`/`:finally`/`:throw` conditional and
 //! exception command drivers, plus the `cstack_T` condition/exception stack they
@@ -311,12 +311,12 @@ fn skip_regexp_err(_pat: &str, _delim: u8, _magic: bool) -> Option<String> {
 
 /// Port of `vim_regcomp()` from `Src/regexp.c` (not vendored). Deferred.
 fn vim_regcomp(_expr: &str, _re_flags: i32) -> Option<Box<regprog_T>> {
-    unimplemented!("deferred: vim_regcomp — csrc regexp.c not vendored")
+    unimplemented!("deferred: vim_regcomp — vendor regexp.c not vendored")
 }
 
 /// Port of `vim_regexec_nl()` from `Src/regexp.c` (not vendored). Deferred.
 fn vim_regexec_nl(_rmp: &mut regmatch_T, _line: &str, _col: usize) -> bool {
-    unimplemented!("deferred: vim_regexec_nl — csrc regexp.c not vendored")
+    unimplemented!("deferred: vim_regexec_nl — vendor regexp.c not vendored")
 }
 
 /// Port of `vim_regfree()` from `Src/regexp.c` (not vendored). Deferred: `Drop`.

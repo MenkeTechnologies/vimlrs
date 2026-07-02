@@ -1,4 +1,4 @@
-//! Port of `src/nvim/sha256.c` (FIPS-180-2 SHA-256; not vendored under `csrc/`).
+//! Port of `src/nvim/sha256.c` (FIPS-180-2 SHA-256; not vendored under `vendor/`).
 //!
 //! `sha256_bytes` is referenced from the vendored eval tree (by `f_sha256`) so
 //! the drift gate recognizes it; `sha256_start`/`_process`/`_update`/`_finish`

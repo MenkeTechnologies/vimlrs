@@ -1,4 +1,4 @@
-//! Port of `src/nvim/eval/buffer.c` (vendored at `csrc/eval/buffer.c`).
+//! Port of `src/nvim/eval/buffer.c` (vendored at `vendor/eval/buffer.c`).
 //!
 //! The buffer-related builtin helper layer. The leaves whose dependencies are
 //! satisfied by the vimlrs buffer model (`crate::ported::buffer`) and the
@@ -76,7 +76,7 @@ fn inserted_bytes(_lnum: linenr_T, _start_col: colnr_T, _old_col: i32, _new_col:
 fn appended_lines_mark(_lnum: linenr_T, _count: i32) {}
 
 /// `cob_T` — saved context for [`change_other_buffer_prepare`] /
-/// [`change_other_buffer_restore`] (`csrc/eval/buffer.c:37`).
+/// [`change_other_buffer_restore`] (`vendor/eval/buffer.c:37`).
 ///
 /// RUST-PORT NOTE: the C struct saves `curwin` (`cob_curwin_save`), the autocmd
 /// window state (`cob_aco`/`cob_using_aco`) and `VIsual_active`
@@ -88,7 +88,7 @@ struct cob_T {
     cob_curbuf_save: Option<Rc<RefCell<buf_T>>>,
 }
 
-/// Port of `change_other_buffer_prepare()` from `csrc/eval/buffer.c:92`.
+/// Port of `change_other_buffer_prepare()` from `vendor/eval/buffer.c:92`.
 ///
 /// RUST-PORT NOTE: reduced to swapping `curbuf` to `buf` so the `ml_*` accessors
 /// edit the right buffer. `find_win_for_curbuf()`, the `curwin` save,
@@ -100,7 +100,7 @@ fn change_other_buffer_prepare(cob: &mut cob_T, buf: &Rc<RefCell<buf_T>>) {
     cob.cob_curbuf_save = curbuf.with(|c| c.borrow_mut().replace(buf.clone()));
 }
 
-/// Port of `change_other_buffer_restore()` from `csrc/eval/buffer.c:113`.
+/// Port of `change_other_buffer_restore()` from `vendor/eval/buffer.c:113`.
 ///
 /// RUST-PORT NOTE: restores `curbuf`; the aucmd-window / `curwin` /
 /// `VIsual_active` restore (c:115-123) is omitted per
@@ -110,7 +110,7 @@ fn change_other_buffer_restore(cob: &mut cob_T) {
     curbuf.with(|c| *c.borrow_mut() = cob.cob_curbuf_save.take());
 }
 
-/// Port of `find_buffer()` from `csrc/eval/buffer.c:47`.
+/// Port of `find_buffer()` from `vendor/eval/buffer.c:47`.
 ///
 /// Find a buffer by number or exact name.
 pub fn find_buffer(avar: &typval_T) -> Option<Rc<RefCell<buf_T>>> {
@@ -158,7 +158,7 @@ pub fn find_buffer(avar: &typval_T) -> Option<Rc<RefCell<buf_T>>> {
     buf
 }
 
-/// Port of `get_buffer_lines()` from `csrc/eval/buffer.c:678`.
+/// Port of `get_buffer_lines()` from `vendor/eval/buffer.c:678`.
 ///
 /// Get line or list of lines from buffer `buf` into `rettv`. When `retlist` is
 /// true the lines are returned as a `VAR_LIST`, otherwise the single line
@@ -226,7 +226,7 @@ pub fn get_buffer_lines(
     }
 }
 
-/// Port of `set_buffer_lines()` from `csrc/eval/buffer.c:126`.
+/// Port of `set_buffer_lines()` from `vendor/eval/buffer.c:126`.
 ///
 /// Set line or list of lines in buffer `buf` to `lines`. Any type is allowed and
 /// converted to a string. `rettv->vval.v_number` is left 0 (OK) or set 1 (FAIL).
@@ -400,7 +400,7 @@ pub fn set_buffer_lines(
     }
 }
 
-/// Port of `buf_set_append_line()` from `csrc/eval/buffer.c:257`.
+/// Port of `buf_set_append_line()` from `vendor/eval/buffer.c:257`.
 ///
 /// Set (`append == false`, behind `setbufline()`) or append (`append == true`,
 /// behind `appendbufline()`) lines to a buffer. `rettv->vval.v_number` receives
@@ -430,7 +430,7 @@ pub fn buf_set_append_line(argvars: &[typval_T], rettv: &mut typval_T, append: b
     }
 }
 
-/// Port of `getbufline()` from `csrc/eval/buffer.c:715`.
+/// Port of `getbufline()` from `vendor/eval/buffer.c:715`.
 ///
 /// `retlist` true → `getbufline()` (a List); false → `getbufoneline()` (the
 /// single line as a String).
@@ -465,7 +465,7 @@ pub fn getbufline(argvars: &[typval_T], rettv: &mut typval_T, retlist: bool) {
     get_buffer_lines(buf.as_ref(), lnum, end, retlist, rettv);
 }
 
-/// Port of `get_buffer_info()` from `csrc/eval/buffer.c:573`.
+/// Port of `get_buffer_info()` from `vendor/eval/buffer.c:573`.
 ///
 /// @return buffer options, variables and other attributes in a dictionary.
 pub fn get_buffer_info(buf: &Rc<RefCell<buf_T>>) -> Rc<RefCell<dict_T>> {

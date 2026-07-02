@@ -1,4 +1,4 @@
-//! Port of `src/nvim/eval/executor.c` (vendored at `csrc/eval/executor.c`).
+//! Port of `src/nvim/eval/executor.c` (vendored at `vendor/eval/executor.c`).
 //!
 //! The compound-assignment operators (`tv_op` family) behind `:let x += y`,
 //! `-= *= /= %=` and `.=`. `eexe_mod_op` mutates the left operand in place,

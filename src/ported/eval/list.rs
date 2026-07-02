@@ -1,4 +1,4 @@
-//! Port of `src/nvim/eval/list.c` (vendored at `csrc/eval/list.c`).
+//! Port of `src/nvim/eval/list.c` (vendored at `vendor/eval/list.c`).
 //!
 //! List/Dict/String builtins whose bodies live in `list.c`, including the
 //! callback-driven `map`/`filter`/`mapnew`/`foreach` (the per-item evaluation

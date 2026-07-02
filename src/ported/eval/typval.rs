@@ -1,4 +1,4 @@
-//! Port of `src/nvim/eval/typval.c` (vendored at `csrc/eval/typval.c`).
+//! Port of `src/nvim/eval/typval.c` (vendored at `vendor/eval/typval.c`).
 //!
 //! Vimscript value accessors and container operations. Function names,
 //! signatures, and control flow match the C source (PORT.md Rules A/B/4).
@@ -2974,7 +2974,7 @@ pub fn tv_dict_item_copy(tv: &typval_T) -> typval_T {
     out
 }
 
-/// Port of `tv_dict_item_alloc_len()` from `csrc/eval/typval.c:2059`.
+/// Port of `tv_dict_item_alloc_len()` from `vendor/eval/typval.c:2059`.
 ///
 /// Allocate a dictionary item.
 ///
@@ -3002,7 +3002,7 @@ pub fn tv_dict_item_alloc_len(key: &str, key_len: usize) -> (String, typval_T) {
     (di_key, di_tv)
 }
 
-/// Port of `tv_dict_item_alloc()` from `csrc/eval/typval.c:2082`.
+/// Port of `tv_dict_item_alloc()` from `vendor/eval/typval.c:2082`.
 ///
 /// Allocate a dictionary item.
 ///

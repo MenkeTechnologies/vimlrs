@@ -1,4 +1,4 @@
-//! Port of `src/nvim/window.c` (vendored subset at `csrc/window.c`) — only the
+//! Port of `src/nvim/window.c` (vendored subset at `vendor/window.c`) — only the
 //! window / tab-page list model the eval window layer reaches: the `win_T` and
 //! `tabpage_T` structs (fields eval reads), the global window/tab lists, and the
 //! two lookup helpers `find_tabpage()` and `win_get_tabwin()`.
@@ -52,7 +52,7 @@ pub struct WinConfig {
 /// `buffer.rs` `buf_T`; C's `b_fnum` is the `#define`-alias of its `handle` field.
 pub use crate::ported::buffer::buf_T;
 
-/// Port of `struct window_S` (`win_T`) from `csrc/buffer_defs.h:1102`.
+/// Port of `struct window_S` (`win_T`) from `vendor/buffer_defs.h:1102`.
 /// Only the fields the eval layer reads are modelled (see module note).
 #[derive(Default)]
 pub struct win_T {
@@ -74,7 +74,7 @@ pub struct win_T {
     pub w_config: WinConfig,
 }
 
-/// Port of `struct tabpage_S` (`tabpage_T`) from `csrc/buffer_defs.h:840`.
+/// Port of `struct tabpage_S` (`tabpage_T`) from `vendor/buffer_defs.h:840`.
 /// Only the fields the eval layer reads are modelled (see module note).
 #[derive(Default)]
 pub struct tabpage_T {
@@ -111,7 +111,7 @@ thread_local! {
     pub static curtab: RefCell<Option<Rc<RefCell<tabpage_T>>>> = const { RefCell::new(None) };
 }
 
-/// Port of `find_tabpage()` from `csrc/window.c:34`.
+/// Port of `find_tabpage()` from `vendor/window.c:34`.
 /// Find tab page "n" (first one is 1).  Returns NULL when not found.
 pub fn find_tabpage(n: i32) -> Option<Rc<RefCell<tabpage_T>>> {
     let mut i = 1; // c:37
@@ -133,7 +133,7 @@ pub fn find_tabpage(n: i32) -> Option<Rc<RefCell<tabpage_T>>> {
     tp // c:46
 }
 
-/// Port of `win_get_tabwin()` from `csrc/window.c:49`.
+/// Port of `win_get_tabwin()` from `vendor/window.c:49`.
 /// Set `*tabnr`/`*winnr` to the tab-page/window numbers of window id `id`.
 ///
 /// RUST-PORT NOTE: the C out-parameters `int *tabnr`/`int *winnr` become

@@ -1,5 +1,5 @@
 //! ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-//! EXTENSION — NO `csrc/` COUNTERPART. fusevm bytecode listing to stdout when
+//! EXTENSION — NO `vendor/` COUNTERPART. fusevm bytecode listing to stdout when
 //! `vimlrs` is invoked with `--disasm` (ported from zshrs's `fusevm_disasm.rs`).
 //! ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 

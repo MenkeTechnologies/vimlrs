@@ -1,5 +1,5 @@
 //! ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-//! EXTENSION — NO `csrc/` COUNTERPART. Ahead-of-time build: bake one or more
+//! EXTENSION — NO `vendor/` COUNTERPART. Ahead-of-time build: bake one or more
 //! `.vim` scripts into a copy of the running `vimlrs` binary as a
 //! zstd-compressed trailer, producing a self-contained executable. At startup
 //! `vimlrs` detects the trailer and runs every embedded script in input order
