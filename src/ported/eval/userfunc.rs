@@ -1321,7 +1321,8 @@ pub mod tfn {
 #[derive(Debug, Default, Clone)]
 pub struct funcdict_T {
     /// `dict_T *fd_dict` — Dict used.
-    pub fd_dict: Option<std::rc::Rc<std::cell::RefCell<crate::ported::eval::typval_defs_h::dict_T>>>,
+    pub fd_dict:
+        Option<std::rc::Rc<std::cell::RefCell<crate::ported::eval::typval_defs_h::dict_T>>>,
     /// `char *fd_newkey` — new key in `dict`.
     pub fd_newkey: Option<String>,
     /// `dictitem_T *fd_di` — Dict item used (key stands in for the pointer).
@@ -1469,7 +1470,7 @@ pub fn trans_function_name(
     // c:2031 if (lv.ll_tv != NULL)
     if ll_tv_present {
         let tv = lv.ll_tv.get(); // *ll_tv (read-snapshot)
-        // c:2032 fill fdp from the lval Dict context.
+                                 // c:2032 fill fdp from the lval Dict context.
         let ll_dict_none = lv.ll_dict.is_none();
         if let Some(fdp) = fdp.as_deref_mut() {
             fdp.fd_dict = lv.ll_dict.clone();
@@ -1579,7 +1580,8 @@ pub fn trans_function_name(
     } else {
         // c:2119 Skip over "s:" and "g:".
         if lead == 2
-            || (ll_name.as_bytes().first() == Some(&b'g') && ll_name.as_bytes().get(1) == Some(&b':'))
+            || (ll_name.as_bytes().first() == Some(&b'g')
+                && ll_name.as_bytes().get(1) == Some(&b':'))
         {
             ll_name = ll_name[2..].to_string();
             ll_name_len -= 2;
@@ -1702,7 +1704,9 @@ pub fn get_lambda_tv(
     use crate::ported::eval::{EVAL_EVALUATE, NOTDONE};
     use crate::ported::eval_h::{FAIL, OK};
 
-    let evaluate = evalarg.map(|e| e.eval_flags & EVAL_EVALUATE != 0).unwrap_or(false);
+    let evaluate = evalarg
+        .map(|e| e.eval_flags & EVAL_EVALUATE != 0)
+        .unwrap_or(false);
 
     let orig: &str = *arg;
     // c:315 char *s = skipwhite(*arg + 1); First check: "->" must exist.
@@ -1838,7 +1842,9 @@ pub fn get_lambda_tv(
 /// (ex_docmd.c, not vendored) is inlined for the "no argument" advance.
 pub fn ex_return(eap: &mut exarg_T) {
     use crate::ported::eval::typval::tv_clear;
-    use crate::ported::eval::{eval0, evalarg_T, skipwhite, typval_defs_h::typval_T, EVAL_EVALUATE};
+    use crate::ported::eval::{
+        eval0, evalarg_T, skipwhite, typval_defs_h::typval_T, EVAL_EVALUATE,
+    };
     use crate::ported::eval_h::FAIL;
 
     let arg = eap.arg.clone(); // c:3292
@@ -1926,8 +1932,8 @@ pub fn ex_call_inner(
             break;
         }
         tv_clear(rettv); // c:3379
-        // c:3380 doesrange is false in the reduced model → continue.
-        // c:3387 aborting() is always false → continue.
+                         // c:3380 doesrange is false in the reduced model → continue.
+                         // c:3387 aborting() is always false → continue.
         lnum += 1;
     }
     failed as i32 // c:3392
@@ -1945,7 +1951,9 @@ pub fn ex_call_inner(
 /// the trailing-character check reduces to `!failed`.
 pub fn ex_call(eap: &mut exarg_T) {
     use crate::ported::eval::typval::tv_clear;
-    use crate::ported::eval::{eval0, ends_excmd, evalarg_T, skipwhite, typval_defs_h::typval_T, EVAL_EVALUATE};
+    use crate::ported::eval::{
+        ends_excmd, eval0, evalarg_T, skipwhite, typval_defs_h::typval_T, EVAL_EVALUATE,
+    };
     use crate::ported::message::semsg;
 
     let orig_arg = eap.arg.clone(); // c:3544

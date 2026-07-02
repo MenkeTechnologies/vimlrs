@@ -3,9 +3,12 @@
 
 /// Port of `tv_dict_item_alloc_len()` — `csrc/eval/typval.c:2059`. STUB: not yet ported.
 /// C: `dictitem_T *tv_dict_item_alloc_len(const char *const key, const size_t key_len)`
-pub fn tv_dict_item_alloc_len() { unimplemented!("STUB tv_dict_item_alloc_len — csrc/eval/typval.c:2059") }
+pub fn tv_dict_item_alloc_len() {
+    unimplemented!("STUB tv_dict_item_alloc_len — csrc/eval/typval.c:2059")
+}
 
 /// Port of `tv_dict_item_alloc()` — `csrc/eval/typval.c:2082`. STUB: not yet ported.
 /// C: `dictitem_T *tv_dict_item_alloc(const char *const key)`
-pub fn tv_dict_item_alloc() { unimplemented!("STUB tv_dict_item_alloc — csrc/eval/typval.c:2082") }
-
+pub fn tv_dict_item_alloc() {
+    unimplemented!("STUB tv_dict_item_alloc — csrc/eval/typval.c:2082")
+}

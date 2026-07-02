@@ -19,13 +19,18 @@
 //! `cs_pending`, so no aliasing is lost); the `'verbose'`/debugger message
 //! rendering (`smsg`/`IObuff`/`report_pending`) is gated off standalone
 //! (`p_verbose == 0`, `debug_break_level == 0`) exactly as in C.
-#![allow(non_upper_case_globals, non_camel_case_types, dead_code, non_snake_case)]
+#![allow(
+    non_upper_case_globals,
+    non_camel_case_types,
+    dead_code,
+    non_snake_case
+)]
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use crate::ported::eval_h::{FAIL, OK};
 use crate::ported::eval::typval_defs_h::typval_T;
+use crate::ported::eval_h::{FAIL, OK};
 use crate::ported::message::{did_emsg, emsg, semsg};
 
 /// `linenr_T` (`Src/pos_defs.h`) — a 1-based buffer line number.
@@ -426,7 +431,8 @@ pub fn do_errthrow(_cstack: Option<&mut cstack_T>, _cmdname: Option<&str>) {
 /// so the early return at c:343 always fires → false.
 pub fn do_intthrow(cstack: &mut cstack_T) -> bool {
     // c:343 If no interrupt or no active try/throw, do nothing.
-    if !got_int.with(|g| g.get()) || (trylevel.with(|t| t.get()) == 0 && !did_throw.with(|t| t.get()))
+    if !got_int.with(|g| g.get())
+        || (trylevel.with(|t| t.get()) == 0 && !did_throw.with(|t| t.get()))
     {
         return false;
     }
@@ -434,8 +440,7 @@ pub fn do_intthrow(cstack: &mut cstack_T) -> bool {
     // THROW_ON_INTERRUPT is true, so the discard-only branch is compiled out.
     if did_throw.with(|t| t.get()) {
         // c:364 An interrupt exception already being thrown: do nothing.
-        if current_exception
-            .with(|c| c.borrow().as_ref().map(|e| e.borrow().type_))
+        if current_exception.with(|c| c.borrow().as_ref().map(|e| e.borrow().type_))
             == Some(except_type_T::ET_INTERRUPT)
         {
             return false;
@@ -443,7 +448,12 @@ pub fn do_intthrow(cstack: &mut cstack_T) -> bool {
         // c:369 An interrupt exception replaces any user or error exception.
         discard_current_exception();
     }
-    if throw_exception("Vim:Interrupt".to_string(), except_type_T::ET_INTERRUPT, None) != FAIL {
+    if throw_exception(
+        "Vim:Interrupt".to_string(),
+        except_type_T::ET_INTERRUPT,
+        None,
+    ) != FAIL
+    {
         do_throw(cstack); // c:372
     }
     true
@@ -508,8 +518,8 @@ fn throw_exception(value: String, type_: except_type_T, cmdname: Option<&str>) -
 /// `stacktrace` are freed by `Drop`; the `'verbose'` report is gated off.
 fn discard_exception(excp: &Rc<RefCell<except_T>>, _was_finished: bool) {
     // c:534 If it is the current exception, clear it.
-    let is_current = current_exception
-        .with(|c| c.borrow().as_ref().is_some_and(|ce| Rc::ptr_eq(ce, excp)));
+    let is_current =
+        current_exception.with(|c| c.borrow().as_ref().is_some_and(|ce| Rc::ptr_eq(ce, excp)));
     if is_current {
         current_exception.with(|c| *c.borrow_mut() = None);
     }
@@ -537,7 +547,7 @@ fn catch_exception(excp: &Rc<RefCell<except_T>>) {
     caught_stack.with(|c| *c.borrow_mut() = Some(excp.clone())); // c:596
     set_vim_var_string(0, Some(excp.borrow().value.as_str()), -1); // c:597 VV_EXCEPTION
     set_vim_var_list(); // c:598 VV_STACKTRACE
-    // c:599 v:throwpoint / verbose report deferred.
+                        // c:599 v:throwpoint / verbose report deferred.
 }
 
 /// Port of `finish_exception()` from `Src/ex_eval.c:641`.
@@ -988,7 +998,8 @@ pub fn do_throw(cstack: &mut cstack_T) {
             }
         }
         cstack.cs_flags[i] &= !CSF_ACTIVE; // c:1252
-        cstack.cs_pend.csp_ex[i] = current_exception.with(|c| c.borrow().clone()); // c:1253
+        cstack.cs_pend.csp_ex[i] = current_exception.with(|c| c.borrow().clone());
+        // c:1253
     }
 
     did_throw.with(|t| t.set(true)); // c:1256
@@ -1127,8 +1138,8 @@ pub fn ex_catch(eap: &mut exarg_T) {
                     // c:1409 Save got_int; only CTRL-C during matching aborts.
                     let prev_got_int = got_int.with(|g| g.get());
                     got_int.with(|g| g.set(false));
-                    let cur_val =
-                        current_exception.with(|c| c.borrow().as_ref().map(|e| e.borrow().value.clone()));
+                    let cur_val = current_exception
+                        .with(|c| c.borrow().as_ref().map(|e| e.borrow().value.clone()));
                     caught = vim_regexec_nl(&mut regmatch, cur_val.as_deref().unwrap_or(""), 0);
                     got_int.with(|g| g.set(g.get() | prev_got_int));
                     vim_regfree(regmatch.regprog.take());
@@ -1186,7 +1197,7 @@ pub fn ex_finally(eap: &mut exarg_T) {
 
     if eap.cstack.cs_flags[eap.cstack.cs_idx as usize] & CSF_TRY == 0 {
         eap.errmsg = Some(get_end_emsg(&eap.cstack)); // c:1468
-        // c:1472 Make this error pending so the finally clause can run.
+                                                      // c:1472 Make this error pending so the finally clause can run.
         pending = CSTP_ERROR;
     }
 
@@ -1225,10 +1236,22 @@ pub fn ex_finally(eap: &mut exarg_T) {
             if pending == CSTP_ERROR && did_emsg.with(|d| d.get()) == 0 {
                 pending |= if THROW_ON_ERROR { CSTP_THROW } else { 0 }; // c:1531
             } else {
-                pending |= if did_throw.with(|t| t.get()) { CSTP_THROW } else { 0 }; // c:1533
+                pending |= if did_throw.with(|t| t.get()) {
+                    CSTP_THROW
+                } else {
+                    0
+                }; // c:1533
             }
-            pending |= if did_emsg.with(|d| d.get()) != 0 { CSTP_ERROR } else { 0 }; // c:1535
-            pending |= if got_int.with(|g| g.get()) { CSTP_INTERRUPT } else { 0 }; // c:1536
+            pending |= if did_emsg.with(|d| d.get()) != 0 {
+                CSTP_ERROR
+            } else {
+                0
+            }; // c:1535
+            pending |= if got_int.with(|g| g.get()) {
+                CSTP_INTERRUPT
+            } else {
+                0
+            }; // c:1536
             eap.cstack.cs_pending[ci] = pending as i8; // c:1538
 
             // c:1547 The current exception must be the stored one.
@@ -1327,7 +1350,8 @@ pub fn ex_endtry(eap: &mut exarg_T) {
             rettv = eap.cstack.cs_pend.csp_rv[idx as usize].take(); // c:1659
         } else if pending & CSTP_THROW != 0 {
             current_exception
-                .with(|c| *c.borrow_mut() = eap.cstack.cs_pend.csp_ex[idx as usize].clone()); // c:1661
+                .with(|c| *c.borrow_mut() = eap.cstack.cs_pend.csp_ex[idx as usize].clone());
+            // c:1661
         }
     }
 
@@ -1391,10 +1415,23 @@ pub fn enter_cleanup(csp: &mut cleanup_T) {
         || did_throw.with(|t| t.get())
         || need_rethrow.with(|n| n.get())
     {
-        csp.pending = (if did_emsg.with(|d| d.get()) != 0 { CSTP_ERROR } else { 0 })
-            | (if got_int.with(|g| g.get()) { CSTP_INTERRUPT } else { 0 })
-            | (if did_throw.with(|t| t.get()) { CSTP_THROW } else { 0 })
-            | (if need_rethrow.with(|n| n.get()) { CSTP_THROW } else { 0 }); // c:1760
+        csp.pending = (if did_emsg.with(|d| d.get()) != 0 {
+            CSTP_ERROR
+        } else {
+            0
+        }) | (if got_int.with(|g| g.get()) {
+            CSTP_INTERRUPT
+        } else {
+            0
+        }) | (if did_throw.with(|t| t.get()) {
+            CSTP_THROW
+        } else {
+            0
+        }) | (if need_rethrow.with(|n| n.get()) {
+            CSTP_THROW
+        } else {
+            0
+        }); // c:1760
 
         if did_throw.with(|t| t.get()) || need_rethrow.with(|n| n.get()) {
             csp.exception = current_exception.with(|c| c.borrow().clone()); // c:1772
@@ -1682,7 +1719,10 @@ mod tests {
         use super::except_type_T::*;
         assert_eq!(get_exception_string("boom", ET_USER, None), "boom");
         assert_eq!(get_exception_string("boom", ET_USER, Some("catch")), "boom");
-        assert_eq!(get_exception_string("E492: msg", ET_ERROR, None), "Vim:E492: msg");
+        assert_eq!(
+            get_exception_string("E492: msg", ET_ERROR, None),
+            "Vim:E492: msg"
+        );
         assert_eq!(
             get_exception_string("E492: msg", ET_ERROR, Some("echo")),
             "Vim(echo):E492: msg"
@@ -1826,7 +1866,8 @@ mod tests {
             eap.arg = "42".to_string();
             ex_throw(&mut eap);
             assert!(did_throw.with(|t| t.get()));
-            let v = current_exception.with(|c| c.borrow().as_ref().map(|e| e.borrow().value.clone()));
+            let v =
+                current_exception.with(|c| c.borrow().as_ref().map(|e| e.borrow().value.clone()));
             assert_eq!(v.as_deref(), Some("42"));
             // The exception was stashed on the try conditional and THROWN set.
             assert_ne!(eap.cstack.cs_flags[0] & CSF_THROWN, 0);
