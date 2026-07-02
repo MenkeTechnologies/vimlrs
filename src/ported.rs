@@ -5,6 +5,16 @@
 //! parser, AST, bytecode compiler, fusevm bridge) lives in the crate-root
 //! carve-out modules instead, never here.
 
+// Faithful 1:1 C ports mirror Neovim's source structure line-for-line, so clippy
+// style lints (auto-deref, map_or, range patterns, …) and the unused-assignment /
+// unused-paren / private-interface warnings that would demand idiomatic-Rust
+// rewrites are relaxed for this subtree — the port must stay a match of `csrc/`,
+// not diverge to satisfy a style linter. Net-new synthesis modules keep full lints.
+#![allow(clippy::all)]
+#![allow(unused_assignments)]
+#![allow(unused_parens)]
+#![allow(private_interfaces)]
+
 /// Port of `src/nvim/charset.c` (extern: `vim_str2nr`).
 pub mod charset;
 /// Port of `src/nvim/eval.c` and its `eval/` subtree.

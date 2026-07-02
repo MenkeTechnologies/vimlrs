@@ -2932,6 +2932,7 @@ thread_local! {
     /// can mirror the mapping onto its own live keymap. EXTENSION — no `csrc/`
     /// counterpart; a bridge seam living in the carve-out, not `src/ported/`.
     /// Installed via [`install_map_hook`]; unset by default (no-op).
+    #[allow(clippy::type_complexity)]
     static MAP_HOST_HOOK: RefCell<Option<Box<dyn Fn(&str)>>> = const { RefCell::new(None) };
 }
 
