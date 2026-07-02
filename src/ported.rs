@@ -26,6 +26,8 @@ pub mod eval;
 pub mod eval_h;
 /// Port of `src/nvim/ex_eval.c` (abort/exception state predicates).
 pub mod ex_eval;
+/// Port of `src/nvim/grid_defs.h` (ScreenGrid) + `ui_compositor.c` (empty standalone).
+pub mod grid;
 /// Port of `src/nvim/strings.c` (the Vimscript string builtins `f_string`,
 /// `f_strlen`, `f_byteidx`, `f_tr`, …). Home file not under the vendored
 /// `csrc/eval/` tree; see `tests/data/fake_fn_allowlist.txt`.

@@ -31,6 +31,8 @@ pub mod list;
 pub mod typval;
 /// Port of `eval/typval_defs.h`.
 pub mod typval_defs_h;
+/// Port of `eval/typval_encode.h` (MPConvStack types behind conv_error).
+pub mod typval_encode_h;
 /// Port of `eval/userfunc.c` (function-name classification helpers).
 pub mod userfunc;
 /// Port of `eval/vars.c`.

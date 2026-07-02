@@ -355,8 +355,10 @@ thread_local! {
 // RUST-PORT NOTE: the live interpreter represents user functions in the bytecode
 // bridge, not here; this is a reduced `ufunc_T` (the `FuncScope`/reduced-
 // `funccall_T` precedent in `vars.rs`) carrying just the fields the pure
-// argument-count and name helpers below read. Function bodies, refcounts,
-// scoped closures, and the K_SPECIAL `<SNR>` name encoding are out of scope.
+// argument-count and name helpers below read, plus the `uf_refcount`/`uf_calls`/
+// `uf_luaref`/`uf_script_ctx` fields written by `register_luafunc`. Function
+// bodies, scoped closures, and the K_SPECIAL `<SNR>` name encoding are out of
+// scope.
 
 /// `FCERR_*` (`userfunc.h:47`) — internal-call result codes. Only the values
 /// the ported helpers return are modeled.
@@ -383,6 +385,31 @@ pub mod fc {
     pub const FC_DICT: i32 = 0x04;
     /// `FC_CLOSURE 0x08` — closure, captures the outer scope.
     pub const FC_CLOSURE: i32 = 0x08;
+    /// `FC_LUAREF 0x800` — luaref callback (`userfunc.h:31`).
+    pub const FC_LUAREF: i32 = 0x800;
+}
+
+/// Reduced `sctx_T` (`typval_defs.h:285`) — a script execution context.
+#[derive(Debug, Default, Clone)]
+pub struct sctx_T {
+    /// `scid_T sc_sid` — script ID.
+    pub sc_sid: i32,
+    /// `int sc_seq` — sourcing sequence number.
+    pub sc_seq: i32,
+    /// `linenr_T sc_lnum` — line number.
+    pub sc_lnum: i64,
+    /// `uint64_t sc_chan` — channel (only when `sc_sid == SID_API_CLIENT`).
+    pub sc_chan: u64,
+}
+
+thread_local! {
+    /// C `sctx_T current_sctx` (a global set by the sourcing/exec machinery) —
+    /// the script context of the code currently executing. RUST-PORT NOTE: the
+    /// standalone interpreter has a single, unnumbered script context, so this
+    /// stays at its `Default` (`sc_sid == 0`); it is copied into a function's
+    /// `uf_script_ctx` at definition time (see [`register_luafunc`]).
+    pub static current_sctx: std::cell::RefCell<sctx_T> =
+        std::cell::RefCell::new(sctx_T::default());
 }
 
 /// Reduced `ufunc_T` (`userfunc.h`) — one user function's metadata.
@@ -402,6 +429,15 @@ pub struct ufunc_T {
     pub uf_varargs: bool,
     /// `int uf_flags` — the `FC_*` bitmask.
     pub uf_flags: i32,
+    /// `int uf_calls` — number of active calls.
+    pub uf_calls: i32,
+    /// `int uf_refcount` — reference count, see [`func_name_refcount`].
+    pub uf_refcount: i32,
+    /// `LuaRef uf_luaref` — Lua callback, used when `uf_flags & FC_LUAREF`.
+    /// RUST-PORT NOTE: Neovim `typedef int LuaRef` (`types_defs.h:27`) → `i32`.
+    pub uf_luaref: i32,
+    /// `sctx_T uf_script_ctx` — script context where the function was defined.
+    pub uf_script_ctx: sctx_T,
 }
 
 /// "Look up a user function's metadata by name → reduced `ufunc_T`" hook,
@@ -611,6 +647,48 @@ pub fn get_lambda_name() -> String {
         n.set(next);
         format!("<lambda>{next}")
     })
+}
+
+thread_local! {
+    /// C `static hashtab_T func_hashtab;` (`userfunc.c:68`) — the module-static
+    /// table of defined user functions, keyed by `UF2HIKEY(fp)` (the `uf_name`).
+    /// RUST-PORT NOTE: modeled as an `IndexMap` keyed by `uf_name`. The live
+    /// interpreter's function *lookup* is bridge-owned (see [`FIND_FUNC_HOOK`]/
+    /// [`func_tbl_get`]); this table backs the faithful [`register_luafunc`]
+    /// `hash_add`.
+    static func_hashtab: std::cell::RefCell<indexmap::IndexMap<String, ufunc_T>> =
+        std::cell::RefCell::new(indexmap::IndexMap::new());
+}
+
+/// Port of `register_luafunc()` from `csrc/eval/userfunc.c:4199`.
+///
+/// Register a Lua callback `ref` as an anonymous lambda: allocate a [`ufunc_T`]
+/// under a fresh `<lambda>N` name ([`get_lambda_name`]/[`alloc_ufunc`]), mark it
+/// refcounted + varargs + `FC_LUAREF`, record the Lua ref and the defining
+/// script context, add it to [`func_hashtab`], and return its name.
+///
+/// RUST-PORT NOTE: `LuaRef` is Neovim's `typedef int LuaRef` (`types_defs.h:27`)
+/// → `i32`, and the C parameter name `ref` is a Rust keyword → `r#ref`. The
+/// registration is fully modeled; the stored ref can only be *invoked* with a
+/// Lua runtime (out of scope — the C dispatch in `call_user_func_check` routes an
+/// `FC_LUAREF` function to `typval_exec_lua_callable`, `userfunc.c:1409-1411`).
+pub fn register_luafunc(r#ref: i32) -> String {
+    let name = get_lambda_name(); // c:4201
+    let mut fp = alloc_ufunc(&name); // c:4202
+
+    fp.uf_refcount = 1; // c:4204
+    fp.uf_varargs = true; // c:4205
+    fp.uf_flags = fc::FC_LUAREF; // c:4206
+    fp.uf_calls = 0; // c:4207
+    fp.uf_script_ctx = current_sctx.with(|c| c.borrow().clone()); // c:4208
+    fp.uf_luaref = r#ref; // c:4209
+
+    // c:4211 hash_add(&func_hashtab, UF2HIKEY(fp)); — key is fp->uf_name.
+    let uf_name = fp.uf_name.clone();
+    func_hashtab.with(|h| h.borrow_mut().insert(uf_name.clone(), fp));
+
+    // c:4214 return fp->uf_name;
+    uf_name
 }
 
 /// Port of `get_func_tv()` from `Src/eval/userfunc.c:551`.
@@ -2987,5 +3065,29 @@ mod tests {
     fn find_hi_in_scoped_ht_is_none() {
         // No uf_scoped in the reduced model → always None.
         assert!(find_hi_in_scoped_ht("anything").is_none());
+    }
+
+    #[test]
+    fn register_luafunc_registers_a_lambda() {
+        // Registers under a fresh <lambda>N name and returns that name.
+        let name = register_luafunc(7);
+        assert!(name.starts_with("<lambda>"));
+
+        // The stored ufunc_T carries exactly the fields the C body sets.
+        let fp = func_hashtab
+            .with(|h| h.borrow().get(&name).cloned())
+            .expect("registered lambda present in func_hashtab");
+        assert_eq!(fp.uf_name, name);
+        assert_eq!(fp.uf_refcount, 1);
+        assert!(fp.uf_varargs);
+        assert_eq!(fp.uf_flags, fc::FC_LUAREF);
+        assert_eq!(fp.uf_calls, 0);
+        assert_eq!(fp.uf_luaref, 7);
+        // Single unnumbered script context → default sctx (sc_sid == 0).
+        assert_eq!(fp.uf_script_ctx.sc_sid, 0);
+
+        // A second registration gets a distinct, later name.
+        let name2 = register_luafunc(9);
+        assert_ne!(name, name2);
     }
 }

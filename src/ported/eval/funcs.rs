@@ -16,7 +16,7 @@ use crate::ported::eval::typval::tv_equal;
 use crate::ported::eval::typval::{
     callback_from_typval, tv_blob_get, tv_check_for_number_arg, tv_check_for_string_arg,
     tv_check_str_or_nr, tv_dict_watcher_add, tv_dict_watcher_remove, tv_get_number,
-    tv_get_string_buf, tv_get_string_chk, Callback, CALL_FUNC_HOOK,
+    tv_get_string_buf, tv_get_string_buf_chk, tv_get_string_chk, Callback, CALL_FUNC_HOOK,
 };
 use crate::ported::eval::typval::{
     tv_blob_alloc_ret, tv_blob_len, tv_dict_add_tv, tv_dict_find, tv_dict_len, tv_get_bool,
@@ -38,6 +38,8 @@ use crate::ported::eval::vars::{
     vv::{VV_EXCEPTION, VV_REG, VV_SHELL_ERROR},
 };
 use crate::ported::eval_h::{FAIL, OK};
+use crate::ported::ex_eval::emsg_silent;
+use crate::ported::grid::{ui_comp_get_grid_at_coord, ScreenGrid};
 use crate::ported::message::emsg;
 use crate::ported::ops::{
     format_reg_type, get_reg_contents, get_reg_type, get_yank_type, write_reg_contents,
@@ -8977,8 +8979,7 @@ use crate::ported::eval::typval::{
     tv_check_for_dict_arg, tv_check_for_list_arg, tv_check_for_opt_dict_arg,
     tv_check_for_opt_number_arg, tv_check_for_string_or_list_arg, tv_copy,
     tv_dict_add_allocated_str, tv_dict_extend, tv_dict_get_bool, tv_dict_get_string,
-    tv_dict_item_remove, tv_get_string_buf_chk, tv_list_append_allocated_string,
-    tv_list_append_owned_tv,
+    tv_dict_item_remove, tv_list_append_allocated_string, tv_list_append_owned_tv,
 };
 
 /// c: funcs.c:5585 — `search*()`/`searchpair*()` flag bits (`#define SP_*`).
@@ -10283,6 +10284,276 @@ fn lt(a: crate::ported::window::pos_T, b: crate::ported::window::pos_T) -> bool 
         a.col < b.col
     } else {
         a.coladd < b.coladd
+    }
+}
+
+/// "Run one Ex command line → captured message text" hook, installed by the
+/// bridge/tests. Backs `execute_common()`, which in C runs the command via
+/// `do_cmdline_cmd`/`do_cmdline` (ex_docmd.c) and reads the redirected output
+/// out of `capture_ga`.
+///
+/// RUST-PORT NOTE: `do_cmdline` is not ported (the runtime path is the fusevm
+/// bridge `b_execute`), and the message-redir plumbing that feeds `capture_ga`
+/// during a command run has no standalone analog. This hook stands in for both:
+/// the installer runs the command line and returns the text that `:redir` would
+/// have captured. Unset → the capture is empty (analogous to `EVAL_STRING_HOOK`).
+type DoCmdlineFn = fn(&str) -> String;
+
+thread_local! {
+    /// C global `int msg_silent` (`message.c`) — nesting count of `:silent`.
+    /// RUST-PORT NOTE: a per-thread `Cell` for the C global (single-threaded eval).
+    static msg_silent: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+
+    /// C global `int msg_col` (`message.c`) — current message-area column.
+    static msg_col: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+
+    /// C global `bool emsg_noredir` (`message.c`) — errors bypass `:redir`.
+    static emsg_noredir: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+
+    /// C global `bool redir_off` (`message.c`) — message redirection paused.
+    static redir_off: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+
+    /// C global `garray_T *capture_ga` (`message.c`) — the active `execute()`
+    /// capture buffer (NULL when not capturing).
+    ///
+    /// RUST-PORT NOTE: the `garray_T` byte buffer is modelled as a `String`;
+    /// `None` is the C `NULL` (not capturing).
+    static capture_ga: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+
+    /// Bridge/test-installed command runner backing `execute_common()`.
+    pub static DO_CMDLINE_HOOK: std::cell::RefCell<Option<DoCmdlineFn>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Port of `execute_common()` from `Src/eval/funcs.c:1278`.
+///
+/// Shared body of `execute()` (and, in C, `win_execute()`): run a command (or a
+/// list of command lines) with message output redirected into `capture_ga`, then
+/// return the captured text as a String in `rettv`.
+pub fn execute_common(argvars: &[typval_T], rettv: &mut typval_T, arg_off: usize) {
+    // Local closure standing in for `do_cmdline_cmd`/`do_cmdline` (ex_docmd.c,
+    // not ported): run the command line through the bridge-installed
+    // `DO_CMDLINE_HOOK` and return the text `:redir` would have captured. Unset
+    // → empty capture. Kept a closure (not a named fn) as it has no C name.
+    let do_cmdline_via_hook = |cmd: &str| -> String {
+        match DO_CMDLINE_HOOK.with(|h| *h.borrow()) {
+            Some(run) => run(cmd),
+            None => String::new(),
+        }
+    };
+    let save_msg_silent = msg_silent.with(|v| v.get()); // c:1280
+    let save_emsg_silent = emsg_silent.with(|v| v.get()); // c:1281
+    let save_emsg_noredir = emsg_noredir.with(|v| v.get()); // c:1282
+    let save_redir_off = redir_off.with(|v| v.get()); // c:1283
+    let save_capture_ga = capture_ga.with(|v| v.borrow().clone()); // c:1284
+    let save_msg_col = msg_col.with(|v| v.get()); // c:1285
+    let mut echo_output = false; // c:1286
+
+    // c:1288 check_secure() — 'secure'/sandbox not modelled (always allowed).
+
+    if argvars[arg_off + 1].v_type != VAR_UNKNOWN {
+        // c:1293 tv_get_string_buf_chk(&argvars[arg_off + 1], buf)
+        let s = match tv_get_string_buf_chk(&argvars[arg_off + 1]) {
+            Some(s) => s,
+            // c:1295 if (s == NULL) return;
+            None => return,
+        };
+        if s.is_empty() {
+            // c:1299 if (*s == NUL) echo_output = true;
+            echo_output = true;
+        }
+        if s.as_bytes().starts_with(b"silent") {
+            // c:1301 strncmp(s, "silent", 6) == 0
+            msg_silent.with(|v| v.set(v.get() + 1));
+        }
+        if s == "silent!" {
+            // c:1304 strcmp(s, "silent!") == 0
+            emsg_silent.with(|v| v.set(1));
+            emsg_noredir.with(|v| v.set(true));
+        }
+    } else {
+        // c:1308 msg_silent++;
+        msg_silent.with(|v| v.set(v.get() + 1));
+    }
+
+    // c:1312 ga_init(&capture_local, ...); capture_ga = &capture_local;
+    capture_ga.with(|v| *v.borrow_mut() = Some(String::new()));
+    redir_off.with(|v| v.set(false)); // c:1313
+    if !echo_output {
+        // c:1315 msg_col = 0;  // prevent leading spaces
+        msg_col.with(|v| v.set(0));
+    }
+
+    let output = if argvars[arg_off].v_type != VAR_LIST {
+        // c:1319 do_cmdline_cmd(tv_get_string(&argvars[arg_off]));
+        do_cmdline_via_hook(&tv_get_string(&argvars[arg_off]))
+    } else {
+        match &argvars[arg_off].vval {
+            // c:1320 else if (argvars[arg_off].vval.v_list != NULL)
+            v_list(Some(l)) => {
+                // c:1322 tv_list_ref(list);
+                tv_list_ref(&mut l.borrow_mut());
+                // c:1323 GetListLineCookie / do_cmdline(get_list_line, ...)
+                // RUST-PORT NOTE: the get_list_line cookie feeds one list item
+                // per command line; modelled by joining the items with newlines
+                // and running them through the single command hook.
+                let joined = l
+                    .borrow()
+                    .lv_items
+                    .iter()
+                    .map(|it| tv_get_string(&it.li_tv))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let out = do_cmdline_via_hook(&joined);
+                // c:1331 tv_list_unref(list); — refcount drops with the Rc.
+                l.borrow_mut().lv_refcount -= 1;
+                out
+            }
+            _ => String::new(),
+        }
+    };
+    // The command run above appends to `capture_ga` via the redir path in C;
+    // here the hook returns that text directly, so fold it into the buffer.
+    capture_ga.with(|v| {
+        if let Some(buf) = v.borrow_mut().as_mut() {
+            buf.push_str(&output);
+        }
+    });
+
+    msg_silent.with(|v| v.set(save_msg_silent)); // c:1333
+    emsg_silent.with(|v| v.set(save_emsg_silent)); // c:1334
+    emsg_noredir.with(|v| v.set(save_emsg_noredir)); // c:1335
+    redir_off.with(|v| v.set(save_redir_off)); // c:1336
+                                               // c:1337 "silent reg" or "silent echo x" leaves msg_col somewhere in line.
+    if echo_output {
+        // c:1341 msg_col = 0;
+        msg_col.with(|v| v.set(0));
+    } else {
+        // c:1345 msg_col = save_msg_col;
+        msg_col.with(|v| v.set(save_msg_col));
+    }
+
+    // c:1348 ga_append(capture_ga, NUL); — String is already NUL-free/terminated.
+    let captured = capture_ga
+        .with(|v| v.borrow_mut().take())
+        .unwrap_or_default();
+    rettv.v_type = VAR_STRING; // c:1349
+    rettv.vval = v_string(captured); // c:1350
+
+    // c:1352 capture_ga = save_capture_ga;
+    capture_ga.with(|v| *v.borrow_mut() = save_capture_ga);
+}
+
+/// Port of `f_execute()` from `Src/eval/funcs.c:1357`.
+///
+/// "execute(command)" function.
+pub fn f_execute(argvars: &[typval_T], rettv: &mut typval_T) {
+    // c:1359 execute_common(argvars, rettv, 0);
+    execute_common(argvars, rettv, 0);
+}
+
+/// Port of `screenchar_adjust()` from `Src/eval/funcs.c:5925`.
+///
+/// Look up the grid on top at screen coordinate (`row`, `col`) and make the
+/// coordinates relative to that grid, as `screenchar()`/`screenattr()`/
+/// `screenchars()`/`screenstring()` need before reading a cell.
+///
+/// RUST-PORT NOTE: `msg_scroll_flush()` (message.c) flushes pending scroll to
+/// the live UI — there is no UI standalone, so it is a no-op here. With no
+/// compositor, [`ui_comp_get_grid_at_coord`] returns `None` (see `grid.rs`); C
+/// always gets a non-NULL grid (the fallback `default_grid`) and reads
+/// `comp_row`/`comp_col` off it. With no grid the coordinates stay absolute and
+/// callers treat the `None` grid as off-screen.
+fn screenchar_adjust(grid: &mut Option<ScreenGrid>, row: &mut i32, col: &mut i32) {
+    // c:5931 msg_scroll_flush(); — no live UI (no-op).
+
+    // c:5933 *grid = ui_comp_get_grid_at_coord(*row, *col);
+    *grid = ui_comp_get_grid_at_coord(*row, *col);
+
+    // c:5936 Make `row` and `col` relative to the grid.
+    if let Some(g) = grid {
+        *row -= g.comp_row; // c:5937
+        *col -= g.comp_col; // c:5938
+    }
+}
+
+#[cfg(test)]
+mod execute_screen_reference_tests {
+    use super::*;
+    use crate::ported::eval::typval_defs_h::listitem_T;
+
+    #[test]
+    fn execute_returns_hook_captured_text() {
+        fn hook(cmd: &str) -> String {
+            format!("ran:{cmd}")
+        }
+        let saved = DO_CMDLINE_HOOK.with(|h| *h.borrow());
+        DO_CMDLINE_HOOK.with(|h| *h.borrow_mut() = Some(hook));
+        // execute("echo x") — argvars[1] absent (VAR_UNKNOWN) → silent path.
+        let args = vec![typval_T::from("echo x".to_string()), typval_T::default()];
+        let mut rettv = typval_T::default();
+        f_execute(&args, &mut rettv);
+        match &rettv.vval {
+            v_string(s) => assert_eq!(s, "ran:echo x"),
+            _ => panic!("expected VAR_STRING capture"),
+        }
+        assert!(matches!(rettv.v_type, VAR_STRING));
+        DO_CMDLINE_HOOK.with(|h| *h.borrow_mut() = saved);
+    }
+
+    #[test]
+    fn execute_list_joins_lines() {
+        fn hook(cmd: &str) -> String {
+            cmd.to_string()
+        }
+        let saved = DO_CMDLINE_HOOK.with(|h| *h.borrow());
+        DO_CMDLINE_HOOK.with(|h| *h.borrow_mut() = Some(hook));
+        let mut list = list_T::default();
+        list.lv_items.push(listitem_T {
+            li_tv: typval_T::from("one".to_string()),
+        });
+        list.lv_items.push(listitem_T {
+            li_tv: typval_T::from("two".to_string()),
+        });
+        list.lv_len = 2;
+        let cmds = typval_T {
+            v_type: VAR_LIST,
+            vval: v_list(Some(std::rc::Rc::new(std::cell::RefCell::new(list)))),
+            v_lock: Default::default(),
+        };
+        let args = vec![cmds, typval_T::default()];
+        let mut rettv = typval_T::default();
+        f_execute(&args, &mut rettv);
+        match &rettv.vval {
+            v_string(s) => assert_eq!(s, "one\ntwo"),
+            _ => panic!("expected VAR_STRING capture"),
+        }
+        DO_CMDLINE_HOOK.with(|h| *h.borrow_mut() = saved);
+    }
+
+    #[test]
+    fn execute_without_hook_is_empty() {
+        let saved = DO_CMDLINE_HOOK.with(|h| *h.borrow());
+        DO_CMDLINE_HOOK.with(|h| *h.borrow_mut() = None);
+        let args = vec![typval_T::from("echo x".to_string()), typval_T::default()];
+        let mut rettv = typval_T::default();
+        f_execute(&args, &mut rettv);
+        match &rettv.vval {
+            v_string(s) => assert!(s.is_empty()),
+            _ => panic!("expected VAR_STRING capture"),
+        }
+        DO_CMDLINE_HOOK.with(|h| *h.borrow_mut() = saved);
+    }
+
+    #[test]
+    fn screenchar_adjust_no_grid_leaves_coords() {
+        // No compositor → None grid → coords stay absolute (off-screen result).
+        let mut grid: Option<ScreenGrid> = None;
+        let mut row = 5;
+        let mut col = 7;
+        screenchar_adjust(&mut grid, &mut row, &mut col);
+        assert!(grid.is_none());
+        assert_eq!((row, col), (5, 7));
     }
 }
 

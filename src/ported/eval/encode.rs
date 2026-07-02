@@ -56,6 +56,191 @@ pub fn encode_blob_write(blob: &mut crate::ported::eval::typval_defs_h::blob_T, 
     buf.len() as i32
 }
 
+/// Port of `conv_error()` from `csrc/eval/encode.c:113`.
+///
+/// Show an error message when converting to a msgpack value, building the path
+/// to the failed value by walking `mpstack`. `msg` must contain exactly two
+/// `%s` (replaced with `objname` and the path). Returns
+/// [`FAIL`](crate::ported::eval_h::FAIL).
+///
+/// RUST-PORT NOTE: nothing in vimlrs builds an `MPConvStack` at runtime (the
+/// encoders recurse directly), so this is a faithful dead-reference port —
+/// exercised only by the `#[cfg(test)]` stack built by hand below. C's
+/// `garray_T msg_ga` byte buffer becomes a `String`; `vim_snprintf(IObuff, …,
+/// fmt, …)` becomes formatting the verbatim C `%s`/`%i` template via `replacen`;
+/// the variadic `semsg(msg, a, b)` becomes sequential `%s` substitution.
+pub fn conv_error(
+    msg: &str,
+    mpstack: &crate::ported::eval::typval_encode_h::MPConvStack,
+    objname: &str,
+) -> i32 {
+    use crate::ported::eval::typval_defs_h::VarLockStatus::VAR_UNLOCKED;
+    use crate::ported::eval::typval_encode_h::{
+        kv_A, kv_size, MPConvPartialStage::*, MPConvStackValData, MPConvStackValType::*,
+    };
+    use crate::ported::eval_h::FAIL;
+    use crate::ported::message::semsg;
+
+    // c:118 ga_init(&msg_ga, sizeof(char), 80) — the object-path accumulator.
+    let mut msg_ga = String::new();
+    // c:119-124 localized message templates (verbatim C printf formats).
+    let key_msg = "key %s";
+    let key_pair_msg = "key %s at index %i from special map";
+    let idx_msg = "index %i";
+    let partial_arg_msg = "partial";
+    let partial_arg_i_msg = "argument %i";
+    let partial_self_msg = "partial self dictionary";
+    // RUST-PORT NOTE: vim_snprintf(IObuff, IOSIZE, fmt, one-arg) — fill a single
+    // %s (string) or %i (int) in a C template.
+    let snprintf_s = |fmt: &str, s: &str| -> String { fmt.replacen("%s", s, 1) };
+    let snprintf_i = |fmt: &str, i: i32| -> String { fmt.replacen("%i", &i.to_string(), 1) };
+
+    // c:125 for (size_t i = 0; i < kv_size(*mpstack); i++)
+    for i in 0..kv_size(mpstack) {
+        // c:126-127 if (i != 0) { GA_CONCAT_LITERAL(&msg_ga, ", "); }
+        if i != 0 {
+            msg_ga.push_str(", ");
+        }
+        // c:129 MPConvStackVal v = kv_A(*mpstack, i);
+        let v = kv_A(mpstack, i);
+        // c:130 switch (v.type)
+        match v.r#type {
+            // c:131 case kMPConvDict:
+            kMPConvDict => {
+                let (dict, hi) = match &v.data {
+                    MPConvStackValData::d { dict, hi, .. } => (dict, *hi),
+                    _ => continue,
+                };
+                let dict = dict.borrow();
+                // c:132-138 key_tv.vval.v_string = (hi == NULL ? ht_array
+                //   : (hi - 1))->hi_key — first entry when not advanced, else the
+                //   entry preceding the next-to-process slot.
+                let key_idx = match hi {
+                    None => 0,
+                    Some(h) => h - 1,
+                };
+                let hi_key = dict
+                    .dv_hashtab
+                    .get_index(key_idx)
+                    .map(|(k, _)| k.clone())
+                    .unwrap_or_default();
+                let key_tv = typval_T {
+                    v_type: VAR_STRING,
+                    v_lock: VAR_UNLOCKED,
+                    vval: v_string(hi_key),
+                };
+                // c:139 char *const key = encode_tv2string(&key_tv, NULL);
+                let key = encode_tv2string(&key_tv);
+                // c:140-141 vim_snprintf(IObuff, IOSIZE, key_msg, key);
+                //   ga_concat(&msg_ga, IObuff);
+                msg_ga.push_str(&snprintf_s(key_msg, &key));
+            }
+            // c:145-146 case kMPConvPairs: case kMPConvList:
+            kMPConvPairs | kMPConvList => {
+                let (list, li) = match &v.data {
+                    MPConvStackValData::l { list, li } => (list, *li),
+                    _ => continue,
+                };
+                let list = list.borrow();
+                let len = list.lv_items.len() as i32;
+                // c:147-153 const int idx = (li == first ? 0 : (li == NULL ?
+                //   len-1 : tv_list_idx_of_item(list, PREV(li)))).
+                let idx = match li {
+                    Some(0) => 0,            // li == tv_list_first(list)
+                    None => len - 1,         // li == NULL
+                    Some(l) => l as i32 - 1, // idx of PREV(li)
+                };
+                // c:154-157 const listitem_T *const li = (li == NULL ? last
+                //   : PREV(li)).
+                let li_cur: Option<usize> = match li {
+                    None => {
+                        if len >= 1 {
+                            Some((len - 1) as usize)
+                        } else {
+                            None
+                        }
+                    }
+                    Some(0) => None, // PREV(first) == NULL
+                    Some(l) => Some(l - 1),
+                };
+                // c:158-174 idx_msg unless the current item is a non-empty pair
+                //   sublist, in which case its first item is the key.
+                // RUST-PORT NOTE: C reads `->vval.v_list` regardless of v_type;
+                // a non-VAR_LIST (or empty-list) item can only take the idx_msg
+                // branch here — the pair branch needs the first item of an actual
+                // sublist — so the combined `(v_type != VAR_LIST && len <= 0)`
+                // condition reduces to "not a non-empty VAR_LIST".
+                let pair_first: Option<typval_T> = if v.r#type == kMPConvList {
+                    None
+                } else {
+                    match li_cur {
+                        None => None,
+                        Some(ci) => match &list.lv_items[ci].li_tv.vval {
+                            v_list(Some(sub)) => {
+                                sub.borrow().lv_items.first().map(|it| it.li_tv.clone())
+                            }
+                            _ => None,
+                        },
+                    }
+                };
+                match pair_first {
+                    // c:162-163 vim_snprintf(IObuff, IOSIZE, idx_msg, idx);
+                    None => msg_ga.push_str(&snprintf_i(idx_msg, idx)),
+                    // c:165-173 key from the pair's first item; key_pair_msg.
+                    Some(key_tv) => {
+                        // c:170 char *const key = encode_tv2echo(&key_tv, NULL);
+                        let key = encode_tv2echo(&key_tv);
+                        // c:171 vim_snprintf(IObuff, IOSIZE, key_pair_msg, key, idx);
+                        msg_ga.push_str(&snprintf_i(&snprintf_s(key_pair_msg, &key), idx));
+                    }
+                }
+            }
+            // c:177 case kMPConvPartial:
+            kMPConvPartial => {
+                let stage = match &v.data {
+                    MPConvStackValData::p { stage, .. } => *stage,
+                    _ => continue,
+                };
+                // c:178 switch (v.data.p.stage)
+                match stage {
+                    // c:179-181 case kMPConvPartialArgs: abort();
+                    kMPConvPartialArgs => panic!("conv_error: kMPConvPartialArgs"),
+                    // c:182-184 case kMPConvPartialSelf: ga_concat(partial_arg_msg);
+                    kMPConvPartialSelf => msg_ga.push_str(partial_arg_msg),
+                    // c:185-187 case kMPConvPartialEnd: ga_concat(partial_self_msg);
+                    kMPConvPartialEnd => msg_ga.push_str(partial_self_msg),
+                }
+            }
+            // c:190 case kMPConvPartialList:
+            kMPConvPartialList => {
+                let arg = match &v.data {
+                    MPConvStackValData::a { arg, .. } => *arg,
+                    _ => continue,
+                };
+                // c:191 const int idx = (int)(v.data.a.arg - v.data.a.argv) - 1;
+                let idx = arg as i32 - 1;
+                // c:192-193 vim_snprintf(IObuff, IOSIZE, partial_arg_i_msg, idx);
+                msg_ga.push_str(&snprintf_i(partial_arg_i_msg, idx));
+            }
+        }
+    }
+    // c:198-200 semsg(msg, _(objname), (kv_size(*mpstack) == 0 ? _("itself")
+    //   : msg_ga.ga_data));
+    let path = if kv_size(mpstack) == 0 {
+        "itself"
+    } else {
+        msg_ga.as_str()
+    };
+    // RUST-PORT NOTE: variadic C semsg(fmt, a, b) → sequential %s substitution.
+    let out = {
+        let first = msg.replacen("%s", objname, 1);
+        first.replacen("%s", path, 1)
+    };
+    semsg(&out);
+    // c:202 return FAIL;
+    FAIL
+}
+
 /// Port of `encode_vim_list_to_buf()` from `Src/eval/encode.c:213`.
 ///
 /// Serialize a List of strings to the `writefile()` byte form: items joined by
@@ -577,6 +762,149 @@ mod encode_check_json_key_tests {
             vval: v_dict(Some(d)),
         };
         assert!(!encode_check_json_key(&tv));
+    }
+}
+
+#[cfg(test)]
+mod conv_error_tests {
+    use super::conv_error;
+    use crate::ported::eval::typval::{
+        tv_dict_add, tv_dict_alloc, tv_list_alloc, tv_list_append_number, tv_list_append_string,
+    };
+    use crate::ported::eval::typval_defs_h::{
+        list_T, typval_T, typval_vval_union::*, VarLockStatus::*, VarType::*,
+    };
+    use crate::ported::eval::typval_encode_h::{
+        kvi_push, MPConvPartialStage::*, MPConvStack, MPConvStackVal, MPConvStackValData,
+        MPConvStackValType::*,
+    };
+    use crate::ported::message::{capture_errors_begin, capture_errors_take};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    fn list_tv(l: Rc<RefCell<list_T>>) -> typval_T {
+        typval_T {
+            v_type: VAR_LIST,
+            v_lock: VAR_UNLOCKED,
+            vval: v_list(Some(l)),
+        }
+    }
+
+    #[test]
+    fn empty_stack_uses_itself() {
+        // c:198-200 kv_size == 0 → the path is _("itself").
+        let stack = MPConvStack::default();
+        capture_errors_begin();
+        assert_eq!(conv_error("E: %s, %s", &stack, "F"), 0);
+        let errs = capture_errors_take();
+        assert_eq!(errs, vec!["E: F, itself".to_string()]);
+    }
+
+    #[test]
+    fn walks_every_stack_variant() {
+        let mut stack = MPConvStack::default();
+
+        // kMPConvDict, hi == NULL → first key "foo" → "key 'foo'".
+        let d = tv_dict_alloc();
+        tv_dict_add(
+            &mut d.borrow_mut(),
+            "foo",
+            typval_T::from(1 as crate::ported::eval::typval_defs_h::varnumber_T),
+        );
+        kvi_push(
+            &mut stack,
+            MPConvStackVal {
+                r#type: kMPConvDict,
+                tv: None,
+                saved_copyID: 0,
+                data: MPConvStackValData::d {
+                    dict: d.clone(),
+                    dictp: d.clone(),
+                    hi: None,
+                    todo: 0,
+                },
+            },
+        );
+
+        // kMPConvList, li == Some(2) → idx = 1 → "index 1".
+        let l = tv_list_alloc(0);
+        tv_list_append_string(&mut l.borrow_mut(), "a");
+        tv_list_append_string(&mut l.borrow_mut(), "b");
+        tv_list_append_string(&mut l.borrow_mut(), "c");
+        kvi_push(
+            &mut stack,
+            MPConvStackVal {
+                r#type: kMPConvList,
+                tv: None,
+                saved_copyID: 0,
+                data: MPConvStackValData::l {
+                    list: l.clone(),
+                    li: Some(2),
+                },
+            },
+        );
+
+        // kMPConvPairs, li == NULL → idx = len-1 = 0, current = last pair whose
+        // first item is the key "k" → "key k at index 0 from special map".
+        let pair = tv_list_alloc(0);
+        tv_list_append_string(&mut pair.borrow_mut(), "k");
+        tv_list_append_number(&mut pair.borrow_mut(), 9);
+        let pairs = tv_list_alloc(0);
+        pairs
+            .borrow_mut()
+            .lv_items
+            .push(crate::ported::eval::typval_defs_h::listitem_T {
+                li_tv: list_tv(pair),
+            });
+        kvi_push(
+            &mut stack,
+            MPConvStackVal {
+                r#type: kMPConvPairs,
+                tv: None,
+                saved_copyID: 0,
+                data: MPConvStackValData::l {
+                    list: pairs,
+                    li: None,
+                },
+            },
+        );
+
+        // kMPConvPartial, stage kMPConvPartialSelf → "partial".
+        kvi_push(
+            &mut stack,
+            MPConvStackVal {
+                r#type: kMPConvPartial,
+                tv: None,
+                saved_copyID: 0,
+                data: MPConvStackValData::p {
+                    stage: kMPConvPartialSelf,
+                    pt: None,
+                },
+            },
+        );
+
+        // kMPConvPartialList, arg == 2 → idx = 1 → "argument 1".
+        kvi_push(
+            &mut stack,
+            MPConvStackVal {
+                r#type: kMPConvPartialList,
+                tv: None,
+                saved_copyID: 0,
+                data: MPConvStackValData::a {
+                    arg: 2,
+                    argv: Vec::new(),
+                    todo: 0,
+                },
+            },
+        );
+
+        capture_errors_begin();
+        assert_eq!(conv_error("dump %s at %s", &stack, "object"), 0);
+        let errs = capture_errors_take();
+        assert_eq!(
+            errs,
+            vec!["dump object at key 'foo', index 1, key k at index 0 from special map, partial, argument 1".to_string()]
+        );
     }
 }
 
