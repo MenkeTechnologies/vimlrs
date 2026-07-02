@@ -151,11 +151,12 @@ pub fn win_get_tabwin(id: handle_T, tabnr: &mut i32, winnr: &mut i32) {
 
     let mut tnum = 1; // c:54
     let mut wnum = 1; // c:55
-    // c:56 FOR_ALL_TABS(tp)
+                      // c:56 FOR_ALL_TABS(tp)
     let mut tp = first_tabpage.with(|c| c.borrow().clone());
     while let Some(tp_rc) = tp.clone() {
         // c:57 FOR_ALL_WINDOWS_IN_TAB(wp, tp): head is firstwin for curtab else tp_firstwin
-        let is_curtab = curtab.with(|c| c.borrow().as_ref().is_some_and(|ct| Rc::ptr_eq(ct, &tp_rc)));
+        let is_curtab =
+            curtab.with(|c| c.borrow().as_ref().is_some_and(|ct| Rc::ptr_eq(ct, &tp_rc)));
         let mut wp = if is_curtab {
             firstwin.with(|c| c.borrow().clone())
         } else {
@@ -186,15 +187,25 @@ mod tests {
 
     /// A one-tab, two-window layout: firstwin(handle 1000) -> win(handle 1001).
     /// Returns (tab, w0, w1).
-    fn build_two_windows() -> (Rc<RefCell<tabpage_T>>, Rc<RefCell<win_T>>, Rc<RefCell<win_T>>) {
+    fn build_two_windows() -> (
+        Rc<RefCell<tabpage_T>>,
+        Rc<RefCell<win_T>>,
+        Rc<RefCell<win_T>>,
+    ) {
         let w0 = Rc::new(RefCell::new(win_T {
             handle: 1000,
-            w_config: WinConfig { focusable: true, hide: false },
+            w_config: WinConfig {
+                focusable: true,
+                hide: false,
+            },
             ..Default::default()
         }));
         let w1 = Rc::new(RefCell::new(win_T {
             handle: 1001,
-            w_config: WinConfig { focusable: true, hide: false },
+            w_config: WinConfig {
+                focusable: true,
+                hide: false,
+            },
             ..Default::default()
         }));
         w0.borrow_mut().w_next = Some(w1.clone());

@@ -36,7 +36,10 @@ const LOWEST_WIN_ID: i32 = 1000;
 const e_invalwindow: &str = "E957: Invalid window number";
 
 /// Port of `win_has_winnr()` from `csrc/eval/window.c:42`.
-pub fn win_has_winnr(wp: &Rc<std::cell::RefCell<win_T>>, tp: &Rc<std::cell::RefCell<tabpage_T>>) -> bool {
+pub fn win_has_winnr(
+    wp: &Rc<std::cell::RefCell<win_T>>,
+    tp: &Rc<std::cell::RefCell<tabpage_T>>,
+) -> bool {
     // c:44 return (wp == (tp == curtab ? curwin : tp->tp_curwin))
     let twin = if curtab.with(|c| c.borrow().as_ref().is_some_and(|ct| Rc::ptr_eq(ct, tp))) {
         curwin.with(|c| c.borrow().clone())
@@ -52,7 +55,8 @@ pub fn win_has_winnr(wp: &Rc<std::cell::RefCell<win_T>>, tp: &Rc<std::cell::RefC
 pub fn win_getid(argvars: &[typval_T]) -> i32 {
     if argvars.first().map_or(true, |t| t.v_type == VAR_UNKNOWN) {
         // c:50
-        return curwin.with(|c| c.borrow().as_ref().map_or(0, |w| w.borrow().handle)); // c:51
+        return curwin.with(|c| c.borrow().as_ref().map_or(0, |w| w.borrow().handle));
+        // c:51
     }
     let mut winnr = tv_get_number(&argvars[0]) as i32; // c:53
     if winnr <= 0 {
@@ -68,7 +72,7 @@ pub fn win_getid(argvars: &[typval_T]) -> i32 {
         wp = firstwin.with(|c| c.borrow().clone()); // c:62
     } else {
         let mut tabnr = tv_get_number(&argvars[1]) as i32; // c:64
-        // c:65 FOR_ALL_TABS(tp2): first matching --tabnr == 0
+                                                           // c:65 FOR_ALL_TABS(tp2): first matching --tabnr == 0
         let mut found: Option<Rc<std::cell::RefCell<tabpage_T>>> = None;
         let mut tp2 = first_tabpage.with(|c| c.borrow().clone());
         while let Some(t) = tp2.clone() {
@@ -289,10 +293,7 @@ pub fn find_win_by_nr_or_id(vp: &typval_T) -> Option<Rc<std::cell::RefCell<win_T
 
 /// Port of `find_tabwin()` from `csrc/eval/window.c:197`.
 /// Find window specified by "wvp" in tabpage "tvp".
-pub fn find_tabwin(
-    wvp: &typval_T,
-    tvp: &typval_T,
-) -> Option<Rc<std::cell::RefCell<win_T>>> {
+pub fn find_tabwin(wvp: &typval_T, tvp: &typval_T) -> Option<Rc<std::cell::RefCell<win_T>>> {
     let mut wp: Option<Rc<std::cell::RefCell<win_T>>> = None; // c:199
     let mut tp: Option<Rc<std::cell::RefCell<tabpage_T>>> = None; // c:200
 
@@ -326,7 +327,10 @@ pub fn find_tabwin(
 /// argument to interpret as a window.
 ///
 /// RUST-PORT NOTE: `int idx` becomes `usize` (it only ever indexes `argvars`).
-pub fn get_optional_window(argvars: &[typval_T], idx: usize) -> Option<Rc<std::cell::RefCell<win_T>>> {
+pub fn get_optional_window(
+    argvars: &[typval_T],
+    idx: usize,
+) -> Option<Rc<std::cell::RefCell<win_T>>> {
     if argvars.get(idx).map_or(true, |t| t.v_type == VAR_UNKNOWN) {
         // c:771
         return curwin.with(|c| c.borrow().clone()); // c:772
@@ -401,13 +405,19 @@ mod tests {
         let w0 = Rc::new(RefCell::new(win_T {
             handle: 1000,
             w_buffer: Some(b7),
-            w_config: WinConfig { focusable: true, hide: false },
+            w_config: WinConfig {
+                focusable: true,
+                hide: false,
+            },
             ..Default::default()
         }));
         let w1 = Rc::new(RefCell::new(win_T {
             handle: 1001,
             w_buffer: Some(b9),
-            w_config: WinConfig { focusable: true, hide: false },
+            w_config: WinConfig {
+                focusable: true,
+                hide: false,
+            },
             ..Default::default()
         }));
         w0.borrow_mut().w_next = Some(w1.clone());
@@ -477,7 +487,10 @@ mod tests {
         // absent arg → curwin
         assert!(Rc::ptr_eq(&get_optional_window(&[], 0).unwrap(), &w0));
         // explicit id → that window
-        assert!(Rc::ptr_eq(&get_optional_window(&[num(1001)], 0).unwrap(), &w1));
+        assert!(Rc::ptr_eq(
+            &get_optional_window(&[num(1001)], 0).unwrap(),
+            &w1
+        ));
         // bad id → None
         assert!(get_optional_window(&[num(4242)], 0).is_none());
     }
@@ -488,7 +501,8 @@ mod tests {
         let mut rettv = typval_T::default();
         win_id2tabwin(&[num(1001)], &mut rettv);
         // rettv is a 2-element list [tabnr, winnr] = [1, 2]
-        if let crate::ported::eval::typval_defs_h::typval_vval_union::v_list(Some(l)) = &rettv.vval {
+        if let crate::ported::eval::typval_defs_h::typval_vval_union::v_list(Some(l)) = &rettv.vval
+        {
             let l = l.borrow();
             assert_eq!(l.lv_len, 2);
             assert_eq!(super::tv_get_number(&l.lv_items[0].li_tv), 1);

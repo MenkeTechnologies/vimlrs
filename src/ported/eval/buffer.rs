@@ -16,16 +16,14 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::ported::buffer::{
-    bt_nofilename, buf_get_changedtick, buflist_findlnum, buflist_findname_exp, buflist_findnr,
-    buf_T, curbuf, ml_get_buf, ml_get_buf_len,
+    bt_nofilename, buf_T, buf_get_changedtick, buflist_findlnum, buflist_findname_exp,
+    buflist_findnr, curbuf, ml_get_buf, ml_get_buf_len,
 };
 use crate::ported::eval::typval::{
     tv_dict_add_dict, tv_dict_add_list, tv_dict_add_nr, tv_dict_add_str, tv_list_alloc,
     tv_list_alloc_ret, tv_list_append_string,
 };
-use crate::ported::eval::typval_defs_h::{
-    dict_T, typval_T, typval_vval_union, VarType,
-};
+use crate::ported::eval::typval_defs_h::{dict_T, typval_T, typval_vval_union, VarType};
 
 /// Port of `path_with_url()` from `Src/path.c` (not vendored). Deferred: URL
 /// scheme detection isn't modeled, so the nofile/URL name fallback never fires
@@ -108,7 +106,11 @@ pub fn get_buffer_lines(
     rettv: &mut typval_T,
 ) {
     // c:681 rettv->v_type = (retlist ? VAR_LIST : VAR_STRING);
-    rettv.v_type = if retlist { VarType::VAR_LIST } else { VarType::VAR_STRING };
+    rettv.v_type = if retlist {
+        VarType::VAR_LIST
+    } else {
+        VarType::VAR_STRING
+    };
     rettv.vval = typval_vval_union::v_string(String::new());
 
     // c:684 if (buf == NULL || buf->b_ml.ml_mfp == NULL || start < 0 || end < start)
@@ -165,8 +167,7 @@ pub fn get_buffer_lines(
 pub fn get_buffer_info(buf: &Rc<RefCell<buf_T>>) -> Rc<RefCell<dict_T>> {
     // c:575 dict_T *const dict = tv_dict_alloc();
     let dict = crate::ported::eval::typval::tv_dict_alloc();
-    let is_curbuf =
-        curbuf.with(|c| c.borrow().as_ref().map_or(false, |cb| Rc::ptr_eq(cb, buf)));
+    let is_curbuf = curbuf.with(|c| c.borrow().as_ref().map_or(false, |cb| Rc::ptr_eq(cb, buf)));
     let b = buf.borrow();
 
     {
@@ -179,7 +180,11 @@ pub fn get_buffer_info(buf: &Rc<RefCell<buf_T>>) -> Rc<RefCell<dict_T>> {
         //                                                   : buflist_findlnum(buf));
         // RUST-PORT NOTE: no window/cursor model — both branches yield the
         // wininfo mark lnum (1).
-        let lnum = if is_curbuf { buflist_findlnum(&b) } else { buflist_findlnum(&b) };
+        let lnum = if is_curbuf {
+            buflist_findlnum(&b)
+        } else {
+            buflist_findlnum(&b)
+        };
         tv_dict_add_nr(&mut d, "lnum", lnum as i64);
         // c:581 tv_dict_add_nr(dict, "linecount", buf->b_ml.ml_line_count);
         tv_dict_add_nr(&mut d, "linecount", b.b_ml.ml_line_count as i64);
@@ -192,7 +197,11 @@ pub fn get_buffer_info(buf: &Rc<RefCell<buf_T>>) -> Rc<RefCell<dict_T>> {
         // c:585 tv_dict_add_nr(dict, "changedtick", buf_get_changedtick(buf));
         tv_dict_add_nr(&mut d, "changedtick", buf_get_changedtick(&b));
         // c:586 tv_dict_add_nr(dict, "hidden", ml_mfp != NULL && b_nwindows == 0);
-        tv_dict_add_nr(&mut d, "hidden", (b.b_ml.ml_mfp && b.b_nwindows == 0) as i64);
+        tv_dict_add_nr(
+            &mut d,
+            "hidden",
+            (b.b_ml.ml_mfp && b.b_nwindows == 0) as i64,
+        );
         // c:587 tv_dict_add_nr(dict, "command", buf == cmdwin_buf);
         // RUST-PORT NOTE: no command-line window, so cmdwin_buf is NULL → 0.
         tv_dict_add_nr(&mut d, "command", 0);

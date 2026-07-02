@@ -55,10 +55,10 @@ pub mod sha256;
 /// `f_strlen`, `f_byteidx`, `f_tr`, …). Home file not under the vendored
 /// `csrc/eval/` tree; see `tests/data/fake_fn_allowlist.txt`.
 pub mod strings;
-/// Port of `src/nvim/window.c` (subset: the `win_T`/`tabpage_T` model + window
-/// list behind `win_id2win`/`win_findbuf`/`getwinvar`/…).
-pub mod window;
 /// Generated not-yet-ported surface: one stub per vendored C function
 /// definition (real name + `csrc/<file>:<line>` citation). Regenerate with
 /// `scripts/gen_port_stubs.sh`; ported functions drop out automatically.
 pub mod stubs;
+/// Port of `src/nvim/window.c` (subset: the `win_T`/`tabpage_T` model + window
+/// list behind `win_id2win`/`win_findbuf`/`getwinvar`/…).
+pub mod window;

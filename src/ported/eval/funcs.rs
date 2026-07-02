@@ -38,8 +38,8 @@ use crate::ported::eval::vars::{
 use crate::ported::eval_h::{FAIL, OK};
 use crate::ported::message::emsg;
 use crate::ported::ops::{
-    format_reg_type, get_reg_contents, get_reg_type, get_yank_type, write_reg_contents, write_reg_contents_lst,
-    MotionType,
+    format_reg_type, get_reg_contents, get_reg_type, get_yank_type, write_reg_contents,
+    write_reg_contents_lst, MotionType,
 };
 use crate::ported::option::get_option_value;
 use crate::ported::os::env::os_get_pid;
@@ -2528,7 +2528,12 @@ pub fn f_setreg(argvars: &[typval_T], rettv: &mut typval_T) {
                 .iter()
                 .map(|it| tv_get_string(&it.li_tv))
                 .collect();
-            write_reg_contents_lst(regname, lines, yank_type.unwrap_or(MotionType::LineWise), append);
+            write_reg_contents_lst(
+                regname,
+                lines,
+                yank_type.unwrap_or(MotionType::LineWise),
+                append,
+            );
         }
         _ => {
             let sval = tv_get_string(&contents);

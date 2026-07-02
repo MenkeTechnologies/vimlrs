@@ -235,7 +235,13 @@ pub fn ml_get_buf_len(buf: &mut buf_T, lnum: linenr_T) -> colnr_T {
 /// RUST-PORT NOTE: replaces `ml_append_flush()`/`ml_append_int()`. Appends
 /// `line` after `lnum` (0 == before the first line) in the Vec store and keeps
 /// `ml_line_count` in sync. `len`/`newfile` are unused (no memfile).
-pub fn ml_append_buf(buf: &mut buf_T, lnum: linenr_T, line: &str, _len: colnr_T, _newfile: bool) -> i32 {
+pub fn ml_append_buf(
+    buf: &mut buf_T,
+    lnum: linenr_T,
+    line: &str,
+    _len: colnr_T,
+    _newfile: bool,
+) -> i32 {
     // c:158 if (buf->b_ml.ml_mfp == NULL) { return FAIL; }
     if !buf.b_ml.ml_mfp {
         return FAIL;
@@ -259,7 +265,13 @@ pub fn ml_append(lnum: linenr_T, line: &str, len: colnr_T, newfile: bool) -> i32
 ///
 /// RUST-PORT NOTE: replaces `ml_replace_buf_len()`. Replaces line `lnum`
 /// in-place in the Vec store. `copy`/`noalloc` are unused (owned `String`).
-pub fn ml_replace_buf(buf: &mut buf_T, lnum: linenr_T, line: &str, _copy: bool, _noalloc: bool) -> i32 {
+pub fn ml_replace_buf(
+    buf: &mut buf_T,
+    lnum: linenr_T,
+    line: &str,
+    _copy: bool,
+    _noalloc: bool,
+) -> i32 {
     // c: if (line == NULL) return FAIL;  (line is always present here)
     if lnum < 1 || lnum > buf.b_ml.ml_line_count {
         return FAIL;
@@ -376,12 +388,7 @@ pub fn buflist_findnr(mut nr: i32) -> Option<Rc<RefCell<buf_T>>> {
 /// vendored). The `%`/`#` special-buffer fast path is faithful; a plain
 /// pattern falls back to a substring match on the buffer name, honestly
 /// approximate. Returns the fnum of the found buffer, or `< 0` on error.
-pub fn buflist_findpat(
-    pattern: &str,
-    _unlisted: bool,
-    _diffmode: bool,
-    _curtab_only: bool,
-) -> i32 {
+pub fn buflist_findpat(pattern: &str, _unlisted: bool, _diffmode: bool, _curtab_only: bool) -> i32 {
     let mut r#match: i32 = -1;
 
     // c:296 if (pattern_end == pattern + 1 && (*pattern == '%' || '#'))
@@ -623,12 +630,16 @@ mod tests {
         assert_eq!(a.borrow().handle, 1);
         assert_eq!(b.borrow().handle, 2);
         // list links: first->next == b, b->prev == a
+        assert_eq!(a.borrow().b_next.as_ref().unwrap().borrow().handle, 2);
         assert_eq!(
-            a.borrow().b_next.as_ref().unwrap().borrow().handle,
-            2
-        );
-        assert_eq!(
-            b.borrow().b_prev.as_ref().unwrap().upgrade().unwrap().borrow().handle,
+            b.borrow()
+                .b_prev
+                .as_ref()
+                .unwrap()
+                .upgrade()
+                .unwrap()
+                .borrow()
+                .handle,
             1
         );
         // 'buflisted' set from BLN_LISTED

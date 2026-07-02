@@ -47,9 +47,7 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use crate::ported::eval::encode::encode_tv2string;
-use crate::ported::eval::typval::{
-    tv_get_bool_chk, tv_get_number_chk, tv_get_string_buf_chk,
-};
+use crate::ported::eval::typval::{tv_get_bool_chk, tv_get_number_chk, tv_get_string_buf_chk};
 use crate::ported::eval::typval_defs_h::{
     typval_T, typval_vval_union, varnumber_T, BoolVarValue, SpecialVarValue, VarLockStatus, VarType,
 };
@@ -701,13 +699,23 @@ mod tests {
 
         // Boolean option from a VAR_NUMBER (1 → kTrue).
         let ic = find_option("ignorecase");
-        let ov = tv_to_optval(&typval_T::from(1 as varnumber_T), ic, "ignorecase", &mut err);
+        let ov = tv_to_optval(
+            &typval_T::from(1 as varnumber_T),
+            ic,
+            "ignorecase",
+            &mut err,
+        );
         assert!(!err);
         assert_eq!(ov.data, OptValData::boolean(TriState::kTrue));
 
         // String option from a VAR_STRING.
         let ft = find_option("filetype");
-        let ov = tv_to_optval(&typval_T::from("rust".to_string()), ft, "filetype", &mut err);
+        let ov = tv_to_optval(
+            &typval_T::from("rust".to_string()),
+            ft,
+            "filetype",
+            &mut err,
+        );
         assert!(!err);
         assert_eq!(ov.data, OptValData::string("rust".to_string()));
     }

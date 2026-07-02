@@ -158,7 +158,11 @@ fn reg_empty(reg: &yankreg_T) -> bool {
         || reg.y_size == 0
         || (reg.y_size == 1
             && reg.y_type == MotionType::CharWise
-            && reg.y_array.as_ref().map(|a| a[0].is_empty()).unwrap_or(true))
+            && reg
+                .y_array
+                .as_ref()
+                .map(|a| a[0].is_empty())
+                .unwrap_or(true))
 }
 
 // ── register.c ──────────────────────────────────────────────────────────────
@@ -223,10 +227,7 @@ fn op_reg_get(name: char) -> Option<usize> {
 fn get_yank_register(regname: i32, mode: yreg_mode_t) -> usize {
     // c: get_clipboard(...) is a no-op here → skip the clipboard fast-paths.
     if mode != YREG_YANK
-        && (regname == 0
-            || regname == '"' as i32
-            || regname == '*' as i32
-            || regname == '+' as i32)
+        && (regname == 0 || regname == '"' as i32 || regname == '*' as i32 || regname == '+' as i32)
     {
         if let Some(prev) = Y_PREVIOUS.with(|p| p.get()) {
             // in case clipboard not available, paste from previous used register
@@ -515,9 +516,8 @@ fn str_to_reg(
                         *b = b'\n';
                     }
                 }
-                let line = String::from_utf8(buf).unwrap_or_else(|e| {
-                    String::from_utf8_lossy(e.as_bytes()).into_owned()
-                });
+                let line = String::from_utf8(buf)
+                    .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
                 if append {
                     pp[lnum] = line;
                     append = false; // only first line is appended
@@ -689,9 +689,8 @@ mod tests {
     use super::*;
 
     fn reset() {
-        Y_REGS.with(|r| {
-            *r.borrow_mut() = (0..NUM_REGISTERS).map(|_| yankreg_T::default()).collect()
-        });
+        Y_REGS
+            .with(|r| *r.borrow_mut() = (0..NUM_REGISTERS).map(|_| yankreg_T::default()).collect());
         Y_PREVIOUS.with(|p| p.set(None));
     }
 
@@ -703,7 +702,12 @@ mod tests {
         assert_eq!(format_reg_type(get_reg_type('a').0, 0), "v");
         assert_eq!(get_reg_contents('q'), None); // unset register
 
-        write_reg_contents_lst('b', vec!["x".into(), "y".into()], MotionType::LineWise, false);
+        write_reg_contents_lst(
+            'b',
+            vec!["x".into(), "y".into()],
+            MotionType::LineWise,
+            false,
+        );
         assert_eq!(
             get_reg_contents('b'),
             Some(vec!["x".to_string(), "y".to_string()])
@@ -742,7 +746,12 @@ mod tests {
     #[test]
     fn non_append_replaces() {
         reset();
-        write_reg_contents_lst('c', vec!["one".into(), "two".into()], MotionType::LineWise, false);
+        write_reg_contents_lst(
+            'c',
+            vec!["one".into(), "two".into()],
+            MotionType::LineWise,
+            false,
+        );
         write_reg_contents_lst('c', vec!["only".into()], MotionType::LineWise, false);
         assert_eq!(get_reg_contents('c'), Some(vec!["only".to_string()]));
     }
@@ -765,7 +774,12 @@ mod tests {
     #[test]
     fn blockwise_regtype() {
         reset();
-        write_reg_contents_lst('e', vec!["ab".into(), "cd".into()], MotionType::BlockWise(1), false);
+        write_reg_contents_lst(
+            'e',
+            vec!["ab".into(), "cd".into()],
+            MotionType::BlockWise(1),
+            false,
+        );
         let (t, w) = get_reg_type('e');
         assert_eq!(t, MotionType::BlockWise(1));
         assert_eq!(format_reg_type(t, w), "\u{16}2");
@@ -793,7 +807,7 @@ mod tests {
         assert_eq!(op_reg_get('*'), Some(STAR_REGISTER));
         assert_eq!(op_reg_get('"'), None); // no op_reg_index slot → NULL
         assert_eq!(op_reg_get('_'), None); // black hole is not in y_regs
-        // get_y_register is the identity on the index (pointer→index deviation).
+                                           // get_y_register is the identity on the index (pointer→index deviation).
         assert_eq!(get_y_register(10), 10);
     }
 

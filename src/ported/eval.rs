@@ -1576,7 +1576,10 @@ fn os_system(argv: &[String], input: Option<&str>) -> (i32, Option<String>) {
             if out.stdout.is_empty() {
                 (status, None)
             } else {
-                (status, Some(String::from_utf8_lossy(&out.stdout).into_owned()))
+                (
+                    status,
+                    Some(String::from_utf8_lossy(&out.stdout).into_owned()),
+                )
             }
         }
         Err(_) => (-1, None),
@@ -1722,9 +1725,7 @@ pub fn get_system_output_as_rettv(argvars: &[typval_T], rettv: &mut typval_T, re
 
     if retlist {
         let mut keepempty = false; // c:4782
-        if argvars.len() > 2
-            && argvars[1].v_type != VAR_UNKNOWN
-            && argvars[2].v_type != VAR_UNKNOWN
+        if argvars.len() > 2 && argvars[1].v_type != VAR_UNKNOWN && argvars[2].v_type != VAR_UNKNOWN
         {
             keepempty = tv_get_number(&argvars[2]) != 0; // c:4784
         }
@@ -2244,7 +2245,7 @@ pub fn eval_lambda(
         .as_deref()
         .map(|e| e.eval_flags & EVAL_EVALUATE != 0)
         .unwrap_or(false); // c:2918
-    // c:2920 Skip over the ->.
+                           // c:2920 Skip over the ->.
     {
         let s = *arg;
         *arg = &s[2..];
@@ -6092,7 +6093,10 @@ mod tests {
         let cmd = typval_T::from("echo hi".to_string());
         let mut name = String::new();
         let argv = tv_to_argv(&cmd, Some(&mut name), None).expect("argv");
-        assert_eq!(argv, vec!["sh".to_string(), "-c".to_string(), "echo hi".to_string()]);
+        assert_eq!(
+            argv,
+            vec!["sh".to_string(), "-c".to_string(), "echo hi".to_string()]
+        );
         assert_eq!(name, "echo hi");
     }
 
@@ -6127,6 +6131,10 @@ mod tests {
         let argvars = vec![typval_T::from("printf hi".to_string())];
         let mut rv = typval_T::default();
         get_system_output_as_rettv(&argvars, &mut rv, false);
-        assert!(matches!(&rv.vval, v_string(s) if s == "hi"), "got {:?}", rv.vval);
+        assert!(
+            matches!(&rv.vval, v_string(s) if s == "hi"),
+            "got {:?}",
+            rv.vval
+        );
     }
 }

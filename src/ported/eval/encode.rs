@@ -482,13 +482,21 @@ pub fn encode_check_json_key(tv: &typval_T) -> bool {
 mod encode_check_json_key_tests {
     use super::encode_check_json_key;
     use crate::ported::eval::decode::{eval_msgpack_type_lists, MessagePackType};
-    use crate::ported::eval::typval::{tv_dict_alloc, tv_dict_add, tv_list_alloc, tv_list_append_string};
+    use crate::ported::eval::typval::{
+        tv_dict_add, tv_dict_alloc, tv_list_alloc, tv_list_append_string,
+    };
     use crate::ported::eval::typval_defs_h::{
         typval_T, typval_vval_union::*, VarLockStatus::*, VarType::*,
     };
 
-    fn list_tv(rc: std::rc::Rc<std::cell::RefCell<crate::ported::eval::typval_defs_h::list_T>>) -> typval_T {
-        typval_T { v_type: VAR_LIST, v_lock: VAR_UNLOCKED, vval: v_list(Some(rc)) }
+    fn list_tv(
+        rc: std::rc::Rc<std::cell::RefCell<crate::ported::eval::typval_defs_h::list_T>>,
+    ) -> typval_T {
+        typval_T {
+            v_type: VAR_LIST,
+            v_lock: VAR_UNLOCKED,
+            vval: v_list(Some(rc)),
+        }
     }
 
     #[test]
@@ -500,7 +508,9 @@ mod encode_check_json_key_tests {
     #[test]
     fn number_key_is_invalid() {
         // c:787 — a non-String, non-Dict is rejected.
-        assert!(!encode_check_json_key(&typval_T::from(7 as crate::ported::eval::typval_defs_h::varnumber_T)));
+        assert!(!encode_check_json_key(&typval_T::from(
+            7 as crate::ported::eval::typval_defs_h::varnumber_T
+        )));
     }
 
     #[test]
@@ -508,7 +518,11 @@ mod encode_check_json_key_tests {
         // c:791 — a normal dict (wrong ht_used / not a special dict) is rejected.
         let d = tv_dict_alloc();
         tv_dict_add(&mut d.borrow_mut(), "a", typval_T::from("x".to_string()));
-        let tv = typval_T { v_type: VAR_DICT, v_lock: VAR_UNLOCKED, vval: v_dict(Some(d)) };
+        let tv = typval_T {
+            v_type: VAR_DICT,
+            v_lock: VAR_UNLOCKED,
+            vval: v_dict(Some(d)),
+        };
         assert!(!encode_check_json_key(&tv));
     }
 
@@ -522,7 +536,11 @@ mod encode_check_json_key_tests {
         let d = tv_dict_alloc();
         tv_dict_add(&mut d.borrow_mut(), "_TYPE", list_tv(type_list));
         tv_dict_add(&mut d.borrow_mut(), "_VAL", list_tv(val));
-        let tv = typval_T { v_type: VAR_DICT, v_lock: VAR_UNLOCKED, vval: v_dict(Some(d)) };
+        let tv = typval_T {
+            v_type: VAR_DICT,
+            v_lock: VAR_UNLOCKED,
+            vval: v_dict(Some(d)),
+        };
         assert!(encode_check_json_key(&tv));
     }
 
@@ -536,7 +554,11 @@ mod encode_check_json_key_tests {
         let d = tv_dict_alloc();
         tv_dict_add(&mut d.borrow_mut(), "_TYPE", list_tv(type_list));
         tv_dict_add(&mut d.borrow_mut(), "_VAL", list_tv(val));
-        let tv = typval_T { v_type: VAR_DICT, v_lock: VAR_UNLOCKED, vval: v_dict(Some(d)) };
+        let tv = typval_T {
+            v_type: VAR_DICT,
+            v_lock: VAR_UNLOCKED,
+            vval: v_dict(Some(d)),
+        };
         assert!(!encode_check_json_key(&tv));
     }
 
@@ -549,7 +571,11 @@ mod encode_check_json_key_tests {
         let d = tv_dict_alloc();
         tv_dict_add(&mut d.borrow_mut(), "_TYPE", list_tv(type_list));
         tv_dict_add(&mut d.borrow_mut(), "_VAL", list_tv(val));
-        let tv = typval_T { v_type: VAR_DICT, v_lock: VAR_UNLOCKED, vval: v_dict(Some(d)) };
+        let tv = typval_T {
+            v_type: VAR_DICT,
+            v_lock: VAR_UNLOCKED,
+            vval: v_dict(Some(d)),
+        };
         assert!(!encode_check_json_key(&tv));
     }
 }
