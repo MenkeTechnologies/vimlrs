@@ -10,6 +10,8 @@
 #![allow(non_snake_case)]
 
 // The `eval/` subtree (ports of `csrc/eval/*.c` + the header).
+/// Port of `eval/buffer.c` (the buffer-introspection eval builtins).
+pub mod buffer;
 /// Port of `eval/decode.c`.
 pub mod decode;
 /// Port of `eval/encode.c`.
@@ -682,9 +684,13 @@ pub fn get_echo_hl_id() -> i32 {
 }
 
 /// Port of `may_call_simple_func()` from `Src/eval.c` — the fast path for a bare
-/// function call; unused here (the bridge calls), so → FAIL (use the normal path).
+/// `Name(args)` call that skips the full expression parser.
+///
+/// RUST-PORT NOTE: the tree-walker fast path is not modeled standalone (the
+/// bridge compiles calls), so this always declines with `NOTDONE`, i.e. every
+/// caller ([`eval0_simple_funccal`]) falls through to the normal [`eval0`] path.
 pub fn may_call_simple_func() -> i32 {
-    FAIL
+    NOTDONE
 }
 
 /// Port of `free_for_info()` from `Src/eval.c` — free a `:for` loop iterator;
@@ -1484,6 +1490,255 @@ pub fn save_tv_as_string(tv: &typval_T, endnl: bool, crlf: bool) -> Option<Strin
     }
 }
 
+/// Port of `os_can_exe()` from `src/nvim/os/fs.c` (extern; not vendored under
+/// `csrc/`) — resolve `name` to an executable full path (a name containing a
+/// path separator is checked directly, else searched on `$PATH`), or `None`.
+///
+/// RUST-PORT NOTE: the same leaf is ported module-private in
+/// [`fs`](crate::ported::eval::fs) for `executable()`/`exepath()`; this copy
+/// keeps identical logic so [`tv_to_argv`] can resolve its `argv[0]` (the two
+/// should be deduplicated once one is made `pub`).
+fn os_can_exe(name: &str) -> Option<String> {
+    use std::path::Path;
+    let is_exe = |p: &Path| -> bool {
+        match std::fs::metadata(p) {
+            Ok(m) if m.is_file() => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    m.permissions().mode() & 0o111 != 0
+                }
+                #[cfg(not(unix))]
+                {
+                    true
+                }
+            }
+            _ => false,
+        }
+    };
+    if name.contains('/') {
+        return is_exe(Path::new(name)).then(|| name.to_string());
+    }
+    let paths = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&paths) {
+        let cand = dir.join(name);
+        if is_exe(&cand) {
+            return Some(cand.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
+/// Port of `shell_build_argv()` from `src/nvim/os/shell.c` (extern; not vendored
+/// under `csrc/`) — build the shell argv that runs command string `cmd`.
+///
+/// RUST-PORT NOTE: the C reads `'shell'`/`'shellcmdflag'`; standalone those
+/// options are not modeled, so the POSIX default `sh -c <cmd>` is used.
+fn shell_build_argv(cmd: &str) -> Vec<String> {
+    vec!["sh".to_string(), "-c".to_string(), cmd.to_string()]
+}
+
+/// Port of `os_system()` from `src/nvim/os/shell.c` (extern; not vendored under
+/// `csrc/`) — run `argv`, writing `input` to its stdin, and capture stdout.
+/// Returns `(exit_status, output)` with `output` `None` when the command
+/// produced no bytes, mirroring the C `*output == NULL` case.
+///
+/// RUST-PORT NOTE: the C drives its libuv process loop; here `std::process` runs
+/// the child. stderr is inherited (shown), as Vim does by default. The status is
+/// `-1` when the process could not be started.
+fn os_system(argv: &[String], input: Option<&str>) -> (i32, Option<String>) {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    if argv.is_empty() {
+        return (-1, None);
+    }
+    let mut command = Command::new(&argv[0]);
+    command.args(&argv[1..]).stdout(Stdio::piped());
+    command.stdin(if input.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
+
+    let mut child = match command.spawn() {
+        Ok(c) => c,
+        Err(_) => return (-1, None),
+    };
+    if let Some(text) = input {
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(text.as_bytes());
+        }
+    }
+    match child.wait_with_output() {
+        Ok(out) => {
+            let status = out.status.code().unwrap_or(-1);
+            if out.stdout.is_empty() {
+                (status, None)
+            } else {
+                (status, Some(String::from_utf8_lossy(&out.stdout).into_owned()))
+            }
+        }
+        Err(_) => (-1, None),
+    }
+}
+
+/// Builds a process argument vector from a Vimscript object (`typval_T`).
+/// Port of `tv_to_argv()` from `csrc/eval.c:4644`.
+///
+/// @param cmd_tv      Vimscript object
+/// @param cmd         Returns the command or executable name.
+/// @param executable  Set to `false` if argv[0] is not executable.
+///
+/// @return  the shell argv when `cmd_tv` is a String; else the List's string
+///          values with argv[0] resolved to a full path, or `None` on error.
+pub fn tv_to_argv(
+    cmd_tv: &typval_T,
+    mut cmd: Option<&mut String>,
+    mut executable: Option<&mut bool>,
+) -> Option<Vec<String>> {
+    use crate::ported::eval::typval::{tv_get_string_chk, tv_list_len};
+
+    if cmd_tv.v_type == VAR_STRING {
+        // c:4646 String => "shell semantics".
+        let cmd_str = tv_get_string(cmd_tv);
+        if let Some(c) = cmd.as_deref_mut() {
+            *c = cmd_str.clone(); // c:4649
+        }
+        return Some(shell_build_argv(&cmd_str)); // c:4651
+    }
+
+    if cmd_tv.v_type != VAR_LIST {
+        crate::ported::message::semsg(&format!(
+            "E475: Invalid argument: {}",
+            "expected String or List"
+        )); // c:4655 e_invarg2
+        return None;
+    }
+
+    let argl = match &cmd_tv.vval {
+        v_list(Some(l)) => l.clone(),
+        _ => return None,
+    }; // c:4659
+    let argc = tv_list_len(&argl.borrow()); // c:4660
+    if argc == 0 {
+        crate::ported::message::emsg("E474: Invalid argument"); // c:4662 e_invarg
+        return None;
+    }
+
+    // c:4666 Resolve argv[0] to a full executable path.
+    let arg0 = tv_get_string_chk(&argl.borrow().lv_items[0].li_tv);
+    let exe_resolved = arg0.as_deref().and_then(os_can_exe);
+    let exe_resolved = match (arg0.as_deref(), exe_resolved) {
+        (Some(_), Some(r)) => r,
+        (a0, _) => {
+            // c:4668 !arg0 || !os_can_exe(...)
+            if let (Some(a0), Some(exe)) = (a0, executable.as_deref_mut()) {
+                crate::ported::message::semsg(&format!(
+                    "E475: Invalid value for argument {}: {}",
+                    "cmd",
+                    format!("'{a0}' is not executable")
+                )); // c:4672 e_invargNval
+                *exe = false; // c:4673
+            }
+            return None;
+        }
+    };
+
+    if let Some(c) = cmd.as_deref_mut() {
+        *c = exe_resolved.clone(); // c:4679
+    }
+
+    // c:4682 Build the argument vector.
+    let mut argv: Vec<String> = Vec::with_capacity(argc as usize);
+    for item in argl.borrow().lv_items.iter() {
+        match tv_get_string_chk(&item.li_tv) {
+            Some(a) => argv.push(a), // c:4693
+            None => return None,     // c:4688 emsg already done in tv_get_string_chk
+        }
+    }
+    // c:4695 Replace argv[0] with the absolute path.
+    if let Some(first) = argv.first_mut() {
+        *first = exe_resolved;
+    }
+
+    Some(argv)
+}
+
+/// os_system wrapper. Handles `v:shell_error`.
+/// Port of `get_system_output_as_rettv()` from `csrc/eval.c:4714`.
+///
+/// RUST-PORT NOTE: `check_secure()` (restricted mode), `:profile`, and the
+/// `'verbose' > 3` echo are editor state not modeled standalone and are dropped.
+/// The `USE_CRNL` <CR><NL> translation is Windows-only and omitted.
+pub fn get_system_output_as_rettv(argvars: &[typval_T], rettv: &mut typval_T, retlist: bool) {
+    use crate::ported::eval::typval::{tv_get_number, tv_list_ref};
+    use crate::ported::eval::vars::{set_vim_var_nr, vv::VV_SHELL_ERROR};
+
+    rettv.v_type = VAR_STRING; // c:4719
+    rettv.vval = v_string(String::new()); // c:4720 v_string = NULL
+
+    // c:4726 get input to the shell command (if any).
+    let has_input = argvars.len() > 1 && argvars[1].v_type != VAR_UNKNOWN;
+    let input = if has_input {
+        match save_tv_as_string(&argvars[1], false, false) {
+            Some(s) => Some(s),
+            None => return, // c:4729 input_len < 0
+        }
+    } else {
+        None
+    };
+
+    // c:4734 get shell command to execute.
+    let mut executable = true;
+    let argv = match tv_to_argv(&argvars[0], None, Some(&mut executable)) {
+        Some(a) => a,
+        None => {
+            // c:4737 Already did emsg.
+            if !executable {
+                set_vim_var_nr(VV_SHELL_ERROR, -1); // c:4739
+            }
+            return;
+        }
+    };
+
+    // c:4758 execute the command.
+    let (status, res) = os_system(&argv, input.as_deref()); // c:4761
+
+    set_vim_var_nr(VV_SHELL_ERROR, status as varnumber_T); // c:4769
+
+    let res = match res {
+        Some(r) => r,
+        None => {
+            // c:4771 res == NULL
+            if retlist {
+                crate::ported::eval::typval::tv_list_alloc_ret(rettv, 0); // c:4774
+            } else {
+                rettv.vval = v_string(String::new()); // c:4776 xstrdup("")
+            }
+            return;
+        }
+    };
+
+    if retlist {
+        let mut keepempty = false; // c:4782
+        if argvars.len() > 2
+            && argvars[1].v_type != VAR_UNKNOWN
+            && argvars[2].v_type != VAR_UNKNOWN
+        {
+            keepempty = tv_get_number(&argvars[2]) != 0; // c:4784
+        }
+        let list = string_to_list(&res, keepempty); // c:4786
+        tv_list_ref(&mut list.borrow_mut()); // c:4787
+        rettv.v_type = VAR_LIST; // c:4788
+        rettv.vval = v_list(Some(list));
+    } else {
+        // c:4792 res may contain several NULs; replace with SOH (1) to avoid
+        // truncation, like get_cmd_output().
+        rettv.vval = v_string(res.replace('\0', "\u{1}")); // c:4794 memchrsub
+    }
+}
+
 /// Port of `eval_index()` from `Src/eval.c:3092`.
 ///
 /// Apply one subscript `subscript` (`.name`, `[expr]`, or `[a:b]`) to `rettv`.
@@ -1963,6 +2218,121 @@ pub fn eval_method(method: &str, args: &str, basetv: &typval_T, rettv: &mut typv
         }
         _ => FAIL,
     }
+}
+
+/// Evaluate "->method()" when the method is a lambda: `base->{...}(args)`.
+/// Port of `eval_lambda()` from `csrc/eval.c:2914`.
+///
+/// `*arg` points to the `-` of the `->`; on OK it is advanced to after the `)`.
+/// `rettv` holds the base value on entry and the call result on return.
+///
+/// RUST-PORT NOTE: the C `call_func_rettv(arg, evalarg, rettv, evaluate, NULL,
+/// &base, NULL)` threads the parse pointer through the callee; here the callee is
+/// the [`get_lambda_tv`](crate::ported::eval::userfunc::get_lambda_tv) result
+/// (always a `VAR_PARTIAL`), the parenthesised argument text is isolated and run
+/// through [`get_func_arguments`](crate::ported::eval::userfunc::get_func_arguments),
+/// the base is prepended (method-base semantics), and the call is dispatched via
+/// [`eval_expr_partial`]. In skip mode (`!evaluate`) the arguments are only
+/// consumed, matching the C fast path.
+pub fn eval_lambda(
+    arg: &mut &str,
+    rettv: &mut typval_T,
+    mut evalarg: Option<&mut evalarg_T>,
+    verbose: bool,
+) -> i32 {
+    let evaluate = evalarg
+        .as_deref()
+        .map(|e| e.eval_flags & EVAL_EVALUATE != 0)
+        .unwrap_or(false); // c:2918
+    // c:2920 Skip over the ->.
+    {
+        let s = *arg;
+        *arg = &s[2..];
+    }
+    let mut base = rettv.clone(); // c:2921 typval_T base = *rettv
+    *rettv = typval_T::default(); // c:2922 rettv->v_type = VAR_UNKNOWN
+
+    let mut ret = crate::ported::eval::userfunc::get_lambda_tv(arg, rettv, evalarg.as_deref()); // c:2924
+    if ret != OK {
+        return FAIL; // c:2926
+    } else if (*arg).as_bytes().first() != Some(&b'(') {
+        // c:2927 **arg != '('
+        if verbose {
+            if skipwhite(*arg).as_bytes().first() == Some(&b'(') {
+                emsg("E274: No white space allowed before parenthesis"); // c:2930 e_nowhitespace
+            } else {
+                crate::ported::message::semsg(&format!("E107: Missing parentheses: {}", "lambda"));
+                // c:2932 e_missingparen
+            }
+        }
+        crate::ported::eval::typval::tv_clear(rettv);
+        ret = FAIL; // c:2936
+    } else {
+        // c:2938 call_func_rettv(arg, evalarg, rettv, evaluate, NULL, &base, NULL)
+        // Isolate the balanced "( … )" argument text, advancing *arg past ')'.
+        let src = *arg;
+        let b = src.as_bytes();
+        let (mut depth, mut i, mut endp) = (0i32, 0usize, None);
+        while i < b.len() {
+            match b[i] {
+                b'\'' => {
+                    i += 1;
+                    while i < b.len() && b[i] != b'\'' {
+                        i += 1;
+                    }
+                }
+                b'"' => {
+                    i += 1;
+                    while i < b.len() && b[i] != b'"' {
+                        if b[i] == b'\\' && i + 1 < b.len() {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                }
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        endp = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        match endp {
+            Some(end) => {
+                let inner = &src[1..end];
+                *arg = &src[end + 1..];
+                if evaluate {
+                    let callee = rettv.clone();
+                    match crate::ported::eval::userfunc::get_func_arguments(inner) {
+                        Some(argvars) => {
+                            let mut full = Vec::with_capacity(argvars.len() + 1);
+                            full.push(base.clone());
+                            full.extend(argvars);
+                            ret = eval_expr_partial(&callee, &full, rettv);
+                        }
+                        None => ret = FAIL,
+                    }
+                } else {
+                    // Skip mode: arguments consumed, nothing called.
+                    ret = OK;
+                }
+            }
+            None => ret = FAIL,
+        }
+    }
+
+    // c:2941 Clear the funcref afterwards, so that deleting it while
+    // evaluating the arguments is possible (see test55).
+    if evaluate {
+        crate::ported::eval::typval::tv_clear(&mut base); // c:2944
+    }
+
+    ret // c:2947
 }
 
 /// Port of `eval_expr_partial()` from `Src/eval.c:319`.
@@ -3132,6 +3502,29 @@ pub fn hex2nr(c: u8) -> u8 {
     }
 }
 
+/// Skip over an expression at "*pp".
+/// Port of `skip_expr()` from `csrc/eval.c:461`.
+///
+/// @return  FAIL for an error, OK otherwise.
+pub fn skip_expr(pp: &mut &str, mut evalarg: Option<&mut evalarg_T>) -> i32 {
+    let save_flags = evalarg.as_deref().map_or(0, |e| e.eval_flags); // c:463
+
+    // c:465 Don't evaluate the expression.
+    if let Some(e) = evalarg.as_deref_mut() {
+        e.eval_flags &= !EVAL_EVALUATE; // c:467
+    }
+
+    *pp = skipwhite(pp); // c:470
+    let mut rettv = typval_T::default(); // c:471
+    let res = eval1(pp, &mut rettv, None); // c:472 eval1(pp, &rettv, NULL)
+
+    if let Some(e) = evalarg.as_deref_mut() {
+        e.eval_flags = save_flags; // c:475
+    }
+
+    res // c:478
+}
+
 /// Handle zero level expression. This calls [`eval1`] and handles the error
 /// message. Puts the result in `rettv` when returning OK and "evaluate" is true.
 /// Port of `eval0()` from `csrc/eval.c:1787`.
@@ -3160,6 +3553,26 @@ pub fn eval0(arg: &str, rettv: &mut typval_T, mut evalarg: Option<&mut evalarg_T
         return FAIL;
     }
     ret
+}
+
+/// Handle zero level expression with optimization for a simple function call.
+/// Same arguments and return value as [`eval0`].
+/// Port of `eval0_simple_funccal()` from `csrc/eval.c:1862`.
+///
+/// RUST-PORT NOTE: the C `exarg_T *eap` is editor state not modeled standalone
+/// and is dropped, matching [`eval0`]'s signature. [`may_call_simple_func`]
+/// always returns `NOTDONE` here, so this is a straight delegation to [`eval0`].
+pub fn eval0_simple_funccal(
+    arg: &str,
+    rettv: &mut typval_T,
+    evalarg: Option<&mut evalarg_T>,
+) -> i32 {
+    let mut r = may_call_simple_func(); // c:1864
+
+    if r == NOTDONE {
+        r = eval0(arg, rettv, evalarg); // c:1867
+    }
+    r // c:1869
 }
 
 /// Handle top level expression: `expr2 ? expr1 : expr1` / `expr2 ?? expr1`.
@@ -4568,6 +4981,62 @@ pub fn eval_option(arg: &mut &str, rettv: &mut typval_T, evaluate: bool) -> i32 
     OK
 }
 
+/// `OPT_GLOBAL` (`src/nvim/option.h:26`) — `find_option_var_end` scope flag: use
+/// the option's global value.
+pub const OPT_GLOBAL: i32 = 0x01;
+/// `OPT_LOCAL` (`src/nvim/option.h:27`) — scope flag: use the option's local value.
+pub const OPT_LOCAL: i32 = 0x02;
+
+/// Skip over the name of an option variable: `&option`, `&g:option` or
+/// `&l:option`.
+/// Port of `find_option_var_end()` from `csrc/eval.c:6297`.
+///
+/// `*arg` points to the `&`/`+` on entry; on a found name it is advanced to the
+/// option name (past any `g:`/`l:` scope prefix) and `opt_flags` is set to
+/// [`OPT_GLOBAL`]/[`OPT_LOCAL`]/`0`. Returns the option name length (the offset of
+/// the char after the name in the advanced `*arg`), or `None` when no name found.
+///
+/// RUST-PORT NOTE: the C tail `find_option_end()` also sets an `OptIndex`; the
+/// option-index table is not modeled standalone (see [`eval_option`]), so the
+/// ASCII-alpha name span is scanned inline and no index is returned.
+pub fn find_option_var_end(arg: &mut &str, opt_flags: &mut i32) -> Option<usize> {
+    let src = *arg;
+    let b = src.as_bytes();
+
+    let mut p = 1usize; // c:6302 p++ (past '&'/'+')
+    if b.get(p) == Some(&b'g') && b.get(p + 1) == Some(&b':') {
+        *opt_flags = OPT_GLOBAL; // c:6304
+        p += 2;
+    } else if b.get(p) == Some(&b'l') && b.get(p + 1) == Some(&b':') {
+        *opt_flags = OPT_LOCAL; // c:6307
+        p += 2;
+    } else {
+        *opt_flags = 0; // c:6310
+    }
+
+    // c:6313 end = find_option_end(p, opt_idxp): the name is the ASCII-alpha run.
+    let name_start = p;
+    while p < b.len() && b[p].is_ascii_alphabetic() {
+        p += 1;
+    }
+    if p == name_start {
+        return None; // c:6314 end == NULL → *arg unchanged, return NULL
+    }
+    *arg = &src[name_start..]; // c:6314 *arg = p
+    Some(p - name_start)
+}
+
+/// Writes "<sourcing_name>:<sourcing_lnum>".
+/// Port of `eval_fmt_source_name_line()` from `csrc/eval.c:6659`.
+///
+/// RUST-PORT NOTE: the C writes into a caller buffer; here the formatted string
+/// is returned. There is no execution stack standalone (no `SOURCING_NAME`), so
+/// this always yields `"?"`.
+pub fn eval_fmt_source_name_line() -> String {
+    // c:6661 SOURCING_NAME is NULL standalone.
+    "?".to_string() // c:6664
+}
+
 #[cfg(test)]
 mod tests {
     use super::string2float;
@@ -5515,5 +5984,149 @@ mod tests {
         clear_lval(&mut lp);
         assert!(lp.ll_exp_name.is_none());
         assert!(lp.ll_newkey.is_none());
+    }
+
+    #[test]
+    fn skip_expr_advances_and_restores_flags() {
+        use super::{evalarg_T, skip_expr, EVAL_EVALUATE};
+        use crate::ported::eval_h::OK;
+        // No evalarg: the expression is skipped and *pp advances past it.
+        let mut p: &str = "1 + 2 | rest";
+        assert_eq!(skip_expr(&mut p, None), OK);
+        assert!(p.starts_with('|'), "pp not advanced past expr: {p:?}");
+        // With an evalarg the eval_flags are cleared while skipping and restored.
+        let mut ea = evalarg_T {
+            eval_flags: EVAL_EVALUATE,
+        };
+        let mut q: &str = "3 * 4";
+        assert_eq!(skip_expr(&mut q, Some(&mut ea)), OK);
+        assert_eq!(ea.eval_flags, EVAL_EVALUATE);
+    }
+
+    #[test]
+    fn eval0_simple_funccal_falls_through_to_eval0() {
+        use super::{eval0_simple_funccal, evalarg_T, EVAL_EVALUATE};
+        use crate::ported::eval_h::OK;
+        // may_call_simple_func() declines (NOTDONE), so eval0 evaluates "1 + 2".
+        let mut ea = evalarg_T {
+            eval_flags: EVAL_EVALUATE,
+        };
+        let mut rv = typval_T::default();
+        assert_eq!(eval0_simple_funccal("1 + 2", &mut rv, Some(&mut ea)), OK);
+        assert!(matches!(rv.vval, v_number(3)));
+    }
+
+    #[test]
+    fn find_option_var_end_scopes() {
+        use super::{find_option_var_end, OPT_GLOBAL, OPT_LOCAL};
+        let mut flags = -1;
+        let mut a: &str = "&g:number";
+        assert_eq!(find_option_var_end(&mut a, &mut flags), Some(6));
+        assert_eq!(a, "number");
+        assert_eq!(flags, OPT_GLOBAL);
+
+        let mut b: &str = "&l:ai=1";
+        assert_eq!(find_option_var_end(&mut b, &mut flags), Some(2));
+        assert_eq!(b, "ai=1"); // *arg at the name; char after name is '='
+        assert_eq!(flags, OPT_LOCAL);
+
+        let mut c: &str = "&wrap";
+        assert_eq!(find_option_var_end(&mut c, &mut flags), Some(4));
+        assert_eq!(c, "wrap");
+        assert_eq!(flags, 0);
+
+        // No option name after '&': NULL, *arg unchanged.
+        let mut d: &str = "&123";
+        assert_eq!(find_option_var_end(&mut d, &mut flags), None);
+        assert_eq!(d, "&123");
+    }
+
+    #[test]
+    fn eval_fmt_source_name_line_no_stack() {
+        use super::eval_fmt_source_name_line;
+        assert_eq!(eval_fmt_source_name_line(), "?");
+    }
+
+    #[test]
+    fn eval_lambda_prepends_base_and_calls() {
+        use super::{eval_lambda, evalarg_T, EVAL_EVALUATE};
+        use crate::ported::eval::typval::{CALL_FUNC_HOOK, EVAL_STRING_HOOK};
+        use crate::ported::eval_h::OK;
+        fn eval_hook(e: &str) -> Option<typval_T> {
+            e.trim().parse::<i64>().ok().map(typval_T::from)
+        }
+        // Sum the argument values so we can observe the base was prepended.
+        fn call_hook(_c: &typval_T, args: &[typval_T]) -> Option<typval_T> {
+            let sum: i64 = args
+                .iter()
+                .map(|a| match a.vval {
+                    v_number(n) => n,
+                    _ => 0,
+                })
+                .sum();
+            Some(typval_T::from(sum))
+        }
+        let saved_e = EVAL_STRING_HOOK.with(|h| *h.borrow());
+        let saved_c = CALL_FUNC_HOOK.with(|h| *h.borrow());
+        EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = Some(eval_hook));
+        CALL_FUNC_HOOK.with(|h| *h.borrow_mut() = Some(call_hook));
+
+        let mut ea = evalarg_T {
+            eval_flags: EVAL_EVALUATE,
+        };
+        // base = 7; base->{x, y -> x}(2, 3) → call with [7, 2, 3] → 12.
+        let mut rv = typval_T::from(7);
+        let mut arg: &str = "->{x, y -> x}(2, 3) tail";
+        assert_eq!(eval_lambda(&mut arg, &mut rv, Some(&mut ea), true), OK);
+        assert!(matches!(rv.vval, v_number(12)), "got {:?}", rv.vval);
+        assert_eq!(arg, " tail");
+
+        EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = saved_e);
+        CALL_FUNC_HOOK.with(|h| *h.borrow_mut() = saved_c);
+    }
+
+    #[test]
+    fn tv_to_argv_string_uses_shell() {
+        use super::tv_to_argv;
+        // A String uses shell semantics: sh -c <cmd>.
+        let cmd = typval_T::from("echo hi".to_string());
+        let mut name = String::new();
+        let argv = tv_to_argv(&cmd, Some(&mut name), None).expect("argv");
+        assert_eq!(argv, vec!["sh".to_string(), "-c".to_string(), "echo hi".to_string()]);
+        assert_eq!(name, "echo hi");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tv_to_argv_list_resolves_argv0() {
+        use super::tv_to_argv;
+        use crate::ported::eval::typval::{tv_list_alloc, tv_list_append_string};
+        let l = tv_list_alloc(-1);
+        {
+            let mut lb = l.borrow_mut();
+            tv_list_append_string(&mut lb, "/bin/echo");
+            tv_list_append_string(&mut lb, "hi");
+        }
+        let cmd = typval_T {
+            v_type: VAR_LIST,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_list(Some(l)),
+        };
+        let mut exe = true;
+        let argv = tv_to_argv(&cmd, None, Some(&mut exe)).expect("argv");
+        assert!(exe);
+        assert_eq!(argv[0], "/bin/echo"); // path-containing arg0 resolves to itself
+        assert_eq!(argv[1], "hi");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn get_system_output_as_rettv_captures_stdout() {
+        use super::get_system_output_as_rettv;
+        // system("printf hi") → "hi" (no trailing newline from printf).
+        let argvars = vec![typval_T::from("printf hi".to_string())];
+        let mut rv = typval_T::default();
+        get_system_output_as_rettv(&argvars, &mut rv, false);
+        assert!(matches!(&rv.vval, v_string(s) if s == "hi"), "got {:?}", rv.vval);
     }
 }

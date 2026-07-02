@@ -2974,6 +2974,49 @@ pub fn tv_dict_item_copy(tv: &typval_T) -> typval_T {
     out
 }
 
+/// Port of `tv_dict_item_alloc_len()` from `csrc/eval/typval.c:2059`.
+///
+/// Allocate a dictionary item.
+///
+/// @note that the type and value of the item (->di_tv) still needs to
+///       be initialized.
+///
+/// @param[in]  key  Key, is copied to the new item.
+/// @param[in]  key_len  Key length.
+///
+/// @return [allocated] new dictionary item.
+///
+/// RUST-PORT NOTE: this model has no `dictitem_T` struct — dictitems are
+/// `(String, typval_T)` entries in `dict_T::dv_hashtab`. The allocator therefore
+/// returns the `(di_key, di_tv)` pair a caller inserts. The C `di_flags =
+/// DI_FLAGS_ALLOC` has no home in the entry model (there is no `di_flags` field)
+/// and is dropped; `di_key` is the key copied to `key_len` bytes (the C
+/// `memcpy(di->di_key, key, key_len)` + trailing NUL), and `di_tv` is the
+/// `TV_INITIAL_VALUE` default (`VAR_UNKNOWN`/`VAR_UNLOCKED`).
+pub fn tv_dict_item_alloc_len(key: &str, key_len: usize) -> (String, typval_T) {
+    // c: memcpy(di->di_key, key, key_len); di->di_key[key_len] = NUL;
+    let di_key = String::from_utf8_lossy(&key.as_bytes()[..key_len]).into_owned();
+    // c: di->di_flags = DI_FLAGS_ALLOC;  (no di_flags field in the entry model)
+    // c: di->di_tv.v_lock = VAR_UNLOCKED; di->di_tv.v_type = VAR_UNKNOWN;
+    let di_tv = typval_T::default();
+    (di_key, di_tv)
+}
+
+/// Port of `tv_dict_item_alloc()` from `csrc/eval/typval.c:2082`.
+///
+/// Allocate a dictionary item.
+///
+/// @note that the type and value of the item (->di_tv) still needs to
+///       be initialized.
+///
+/// @param[in]  key  Key, is copied to the new item.
+///
+/// @return [allocated] new dictionary item.
+pub fn tv_dict_item_alloc(key: &str) -> (String, typval_T) {
+    // c: return tv_dict_item_alloc_len(key, strlen(key));
+    tv_dict_item_alloc_len(key, key.len())
+}
+
 /// Port of `tv_dict_item_free()` — freeing is handled by `Drop`; no-op.
 pub fn tv_dict_item_free() {}
 
@@ -3110,6 +3153,28 @@ mod tests {
         let src = nr(7);
         let cp = tv_dict_item_copy(&src);
         assert!(tv_equal(&src, &cp, false));
+    }
+
+    #[test]
+    fn dict_item_alloc_copies_key_and_defaults_tv() {
+        // tv_dict_item_alloc copies the whole key; di_tv is VAR_UNKNOWN/UNLOCKED.
+        let (key, tv) = tv_dict_item_alloc("colors");
+        assert_eq!(key, "colors");
+        assert_eq!(tv.v_type, VAR_UNKNOWN);
+        assert_eq!(tv.v_lock, VarLockStatus::VAR_UNLOCKED);
+        assert!(matches!(tv.vval, v_unknown));
+
+        // tv_dict_item_alloc_len truncates the key to key_len bytes.
+        let (key, _) = tv_dict_item_alloc_len("colorscheme", 6);
+        assert_eq!(key, "colors");
+
+        // The allocated pair inserts into a dict as a normal entry.
+        let mut d = dict_T::default();
+        let (key, mut tv) = tv_dict_item_alloc("n");
+        tv.v_type = VAR_NUMBER;
+        tv.vval = v_number(42);
+        assert_eq!(tv_dict_add(&mut d, &key, tv), OK);
+        assert_eq!(tv_dict_get_number(&d, "n"), 42);
     }
 
     #[test]

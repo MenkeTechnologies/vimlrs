@@ -108,7 +108,7 @@ thread_local! {
     /// shares the same lists with `v:msgpack_types`. Here the decode path keeps
     /// its own lazily-created empty lists so the module is self-contained; the
     /// observable JSON/`string()` result is identical (an empty `_TYPE` list).
-    static eval_msgpack_type_lists: [Rc<RefCell<list_T>>; NUM_MSGPACK_TYPES] =
+    pub static eval_msgpack_type_lists: [Rc<RefCell<list_T>>; NUM_MSGPACK_TYPES] =
         std::array::from_fn(|_| tv_list_alloc(0));
 }
 

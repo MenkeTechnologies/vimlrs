@@ -38,7 +38,7 @@ use crate::ported::eval::vars::{
 use crate::ported::eval_h::{FAIL, OK};
 use crate::ported::message::emsg;
 use crate::ported::ops::{
-    format_reg_type, get_reg_contents, get_reg_type, get_yank_type, write_reg_contents_lst,
+    format_reg_type, get_reg_contents, get_reg_type, get_yank_type, write_reg_contents, write_reg_contents_lst,
     MotionType,
 };
 use crate::ported::option::get_option_value;
@@ -2516,33 +2516,34 @@ pub fn f_setreg(argvars: &[typval_T], rettv: &mut typval_T) {
         }
     }
 
-    // Build the lines + the default motion type from the value's shape.
-    let (lines, default_type) = match (contents.v_type, &contents.vval) {
-        (VAR_LIST, v_list(Some(l))) => (
-            l.borrow()
+    // Faithful f_setreg routing (funcs.c): a List value goes through the list
+    // path (each element a line, no last-line append); a String value goes
+    // through the str path (str_to_reg splits on '\n' AND continues the last
+    // line when appending to a charwise register), so `setreg(r,x,'a')` joins.
+    match (contents.v_type, &contents.vval) {
+        (VAR_LIST, v_list(Some(l))) => {
+            let lines: Vec<String> = l
+                .borrow()
                 .lv_items
                 .iter()
                 .map(|it| tv_get_string(&it.li_tv))
-                .collect::<Vec<_>>(),
-            MotionType::LineWise,
-        ),
-        _ => {
-            let s = tv_get_string(&contents);
-            // A trailing newline makes a string register linewise (Vim).
-            if let Some(stripped) = s.strip_suffix('\n') {
-                (
-                    stripped.split('\n').map(str::to_string).collect(),
-                    MotionType::LineWise,
-                )
-            } else {
-                (
-                    s.split('\n').map(str::to_string).collect(),
-                    MotionType::CharWise,
-                )
-            }
+                .collect();
+            write_reg_contents_lst(regname, lines, yank_type.unwrap_or(MotionType::LineWise), append);
         }
-    };
-    write_reg_contents_lst(regname, lines, yank_type.unwrap_or(default_type), append);
+        _ => {
+            let sval = tv_get_string(&contents);
+            // C passes kMTUnknown when no type option; str_to_reg then auto-detects
+            // (trailing '\n' -> linewise, else charwise). Mirror that default.
+            let mtype = yank_type.unwrap_or_else(|| {
+                if sval.ends_with('\n') {
+                    MotionType::LineWise
+                } else {
+                    MotionType::CharWise
+                }
+            });
+            write_reg_contents(regname, &sval, mtype, append);
+        }
+    }
     *rettv = typval_T::from(0 as varnumber_T);
 }
 

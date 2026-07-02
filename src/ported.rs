@@ -15,6 +15,9 @@
 #![allow(unused_parens)]
 #![allow(private_interfaces)]
 
+/// Port of `src/nvim/buffer.c` + `memline.c` (subset: the `buf_T` model, buffer
+/// list `buflist_*`, and the `ml_*` line store behind `getbufline`/`bufnr`/…).
+pub mod buffer;
 /// Port of `src/nvim/charset.c` (extern: `vim_str2nr`).
 pub mod charset;
 /// Port of `src/nvim/eval.c` and its `eval/` subtree.
@@ -36,6 +39,9 @@ pub mod mpack;
 pub mod ops;
 /// Port of `src/nvim/option.c` (subset: the option table, `&opt`, `:set`).
 pub mod option;
+/// Port of `src/nvim/option.c` OptVal layer (`OptVal`/`OptValType`,
+/// `get_option_value`/`set_option_value`, `tv_to_optval`) alongside `option`.
+pub mod option_optval;
 /// Port of `src/nvim/os/` (subset: `os/time.c`'s `os_hrtime`).
 pub mod os;
 /// Port of `src/nvim/path.c` (subset: the path-component helpers behind
@@ -49,6 +55,9 @@ pub mod sha256;
 /// `f_strlen`, `f_byteidx`, `f_tr`, …). Home file not under the vendored
 /// `csrc/eval/` tree; see `tests/data/fake_fn_allowlist.txt`.
 pub mod strings;
+/// Port of `src/nvim/window.c` (subset: the `win_T`/`tabpage_T` model + window
+/// list behind `win_id2win`/`win_findbuf`/`getwinvar`/…).
+pub mod window;
 /// Generated not-yet-ported surface: one stub per vendored C function
 /// definition (real name + `csrc/<file>:<line>` citation). Regenerate with
 /// `scripts/gen_port_stubs.sh`; ported functions drop out automatically.

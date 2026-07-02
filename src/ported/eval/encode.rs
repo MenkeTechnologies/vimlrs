@@ -398,6 +398,162 @@ pub fn encode_vim_to_json(tv: &typval_T) -> String {
     }
 }
 
+/// Port of `encode_check_json_key()` from `csrc/eval/encode.c:781`.
+///
+/// Check whether given key can be used in `json_encode()`: either a plain
+/// String, or a MessagePack string special dictionary
+/// (`{'_TYPE': v:msgpack_types.string, '_VAL': [strings]}`).
+///
+/// RUST-PORT NOTE: the special-dict `_TYPE` identity check (`c:798`) compares
+/// against `eval_msgpack_type_lists[kMPString]`. In C that array is the single
+/// global shared with the decoder (`vars.c` `evalvars_init()`); in the vimlrs
+/// port it lives in [`crate::ported::eval::decode`], so this reads the same
+/// per-run lists the decoder's `create_special_dict()` stamped into the `_TYPE`
+/// value — pointer identity via [`Rc::ptr_eq`].
+pub fn encode_check_json_key(tv: &typval_T) -> bool {
+    use crate::ported::eval::decode::{eval_msgpack_type_lists, MessagePackType};
+    use crate::ported::eval::typval::tv_dict_find;
+    use std::rc::Rc;
+    // c:784  if (tv->v_type == VAR_STRING) { return true; }
+    if tv.v_type == VAR_STRING {
+        return true;
+    }
+    // c:787  if (tv->v_type != VAR_DICT) { return false; }
+    if tv.v_type != VAR_DICT {
+        return false;
+    }
+    // c:790  const dict_T *const spdict = tv->vval.v_dict;
+    let spdict = match &tv.vval {
+        // c: a NULL dict has ht_used 0 != 2, so it falls through to false below.
+        v_dict(Some(d)) => d,
+        _ => return false,
+    };
+    let spdict = spdict.borrow();
+    // c:791  if (spdict->dv_hashtab.ht_used != 2) { return false; }
+    if spdict.dv_hashtab.len() != 2 {
+        return false;
+    }
+    // c:794-798  type_di = tv_dict_find(spdict, S_LEN("_TYPE")) ...
+    let type_tv = match tv_dict_find(&spdict, "_TYPE") {
+        // c:796  || type_di == NULL
+        None => return false,
+        Some(t) => t,
+    };
+    // c:797  || type_di->di_tv.v_type != VAR_LIST
+    if type_tv.v_type != VAR_LIST {
+        return false;
+    }
+    // c:798  || type_di->di_tv.vval.v_list != eval_msgpack_type_lists[kMPString]
+    let type_list = match &type_tv.vval {
+        // A NULL list can never equal the (non-NULL) string type list.
+        v_list(Some(l)) => l,
+        _ => return false,
+    };
+    if !eval_msgpack_type_lists
+        .with(|arr| Rc::ptr_eq(type_list, &arr[MessagePackType::kMPString as usize]))
+    {
+        return false;
+    }
+    // c:799  || (val_di = tv_dict_find(spdict, S_LEN("_VAL"))) == NULL
+    let val_tv = match tv_dict_find(&spdict, "_VAL") {
+        None => return false,
+        Some(v) => v,
+    };
+    // c:800  || val_di->di_tv.v_type != VAR_LIST
+    if val_tv.v_type != VAR_LIST {
+        return false;
+    }
+    // c:803  if (val_di->di_tv.vval.v_list == NULL) { return true; }
+    let val_list = match &val_tv.vval {
+        v_list(Some(l)) => l.clone(),
+        _ => return true,
+    };
+    // c:806-810  TV_LIST_ITER_CONST(...): every item must be a String.
+    for li in &val_list.borrow().lv_items {
+        if li.li_tv.v_type != VAR_STRING {
+            return false;
+        }
+    }
+    // c:811  return true;
+    true
+}
+
+#[cfg(test)]
+mod encode_check_json_key_tests {
+    use super::encode_check_json_key;
+    use crate::ported::eval::decode::{eval_msgpack_type_lists, MessagePackType};
+    use crate::ported::eval::typval::{tv_dict_alloc, tv_dict_add, tv_list_alloc, tv_list_append_string};
+    use crate::ported::eval::typval_defs_h::{
+        typval_T, typval_vval_union::*, VarLockStatus::*, VarType::*,
+    };
+
+    fn list_tv(rc: std::rc::Rc<std::cell::RefCell<crate::ported::eval::typval_defs_h::list_T>>) -> typval_T {
+        typval_T { v_type: VAR_LIST, v_lock: VAR_UNLOCKED, vval: v_list(Some(rc)) }
+    }
+
+    #[test]
+    fn plain_string_key_is_valid() {
+        // c:784 — a plain String is always a valid json key.
+        assert!(encode_check_json_key(&typval_T::from("k".to_string())));
+    }
+
+    #[test]
+    fn number_key_is_invalid() {
+        // c:787 — a non-String, non-Dict is rejected.
+        assert!(!encode_check_json_key(&typval_T::from(7 as crate::ported::eval::typval_defs_h::varnumber_T)));
+    }
+
+    #[test]
+    fn plain_dict_is_invalid() {
+        // c:791 — a normal dict (wrong ht_used / not a special dict) is rejected.
+        let d = tv_dict_alloc();
+        tv_dict_add(&mut d.borrow_mut(), "a", typval_T::from("x".to_string()));
+        let tv = typval_T { v_type: VAR_DICT, v_lock: VAR_UNLOCKED, vval: v_dict(Some(d)) };
+        assert!(!encode_check_json_key(&tv));
+    }
+
+    #[test]
+    fn string_special_dict_of_strings_is_valid() {
+        // c:796-811 — {_TYPE: msgpack string list, _VAL: [strings]} is valid.
+        let type_list =
+            eval_msgpack_type_lists.with(|a| a[MessagePackType::kMPString as usize].clone());
+        let val = tv_list_alloc(0);
+        tv_list_append_string(&mut val.borrow_mut(), "abc");
+        let d = tv_dict_alloc();
+        tv_dict_add(&mut d.borrow_mut(), "_TYPE", list_tv(type_list));
+        tv_dict_add(&mut d.borrow_mut(), "_VAL", list_tv(val));
+        let tv = typval_T { v_type: VAR_DICT, v_lock: VAR_UNLOCKED, vval: v_dict(Some(d)) };
+        assert!(encode_check_json_key(&tv));
+    }
+
+    #[test]
+    fn special_dict_with_nonstring_val_item_is_invalid() {
+        // c:807 — a _VAL item that is not a String rejects the key.
+        let type_list =
+            eval_msgpack_type_lists.with(|a| a[MessagePackType::kMPString as usize].clone());
+        let val = tv_list_alloc(0);
+        crate::ported::eval::typval::tv_list_append_number(&mut val.borrow_mut(), 3);
+        let d = tv_dict_alloc();
+        tv_dict_add(&mut d.borrow_mut(), "_TYPE", list_tv(type_list));
+        tv_dict_add(&mut d.borrow_mut(), "_VAL", list_tv(val));
+        let tv = typval_T { v_type: VAR_DICT, v_lock: VAR_UNLOCKED, vval: v_dict(Some(d)) };
+        assert!(!encode_check_json_key(&tv));
+    }
+
+    #[test]
+    fn special_dict_wrong_type_list_is_invalid() {
+        // c:798 — a fresh (non-shared) _TYPE list fails pointer identity.
+        let type_list = tv_list_alloc(0);
+        let val = tv_list_alloc(0);
+        tv_list_append_string(&mut val.borrow_mut(), "abc");
+        let d = tv_dict_alloc();
+        tv_dict_add(&mut d.borrow_mut(), "_TYPE", list_tv(type_list));
+        tv_dict_add(&mut d.borrow_mut(), "_VAL", list_tv(val));
+        let tv = typval_T { v_type: VAR_DICT, v_lock: VAR_UNLOCKED, vval: v_dict(Some(d)) };
+        assert!(!encode_check_json_key(&tv));
+    }
+}
+
 #[cfg(test)]
 mod encode_io_tests {
     use super::{encode_blob_write, encode_vim_list_to_buf};
