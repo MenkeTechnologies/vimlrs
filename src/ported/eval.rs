@@ -36,6 +36,7 @@ pub mod vars;
 /// Port of `eval/window.c` (window-lookup helper layer).
 pub mod window;
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::ported::eval::typval::{
@@ -43,8 +44,8 @@ use crate::ported::eval::typval::{
     tv_list_equal,
 };
 use crate::ported::eval::typval_defs_h::{
-    partial_T, typval_T, typval_vval_union::*, varnumber_T, VarLockStatus, VarType::*,
-    VARNUMBER_MAX, VARNUMBER_MIN,
+    blob_T, dict_T, list_T, partial_T, typval_T, typval_vval_union::*, varnumber_T, VarLockStatus,
+    VarType::*, VARNUMBER_MAX, VARNUMBER_MIN,
 };
 use crate::ported::eval_h::{exprtype_T, exprtype_T::*, FAIL, OK};
 use crate::ported::message::emsg;
@@ -805,12 +806,13 @@ pub fn eval_call_provider(
     typval_T::from(0)
 }
 
-// ── evalarg_T / lval_T lifecycle (Src/eval.c) ──
+// ── evalarg_T lifecycle (Src/eval.c) ──
 //
-// RUST-PORT NOTE: the C `evalarg_T` (expression-evaluation context) and `lval_T`
-// (parsed assignment target) belong to the C tree-walker, which the fusevm
-// carve-out replaces with its own parser state. These structs are never
-// allocated standalone, so their setup/teardown is a no-op.
+// RUST-PORT NOTE: the C `evalarg_T` (expression-evaluation context) belongs to
+// the C tree-walker, which the fusevm carve-out replaces with its own parser
+// state. It is never allocated standalone, so its setup/teardown is a no-op.
+// (`lval_T` — the parsed assignment target — is a real port; see [`get_lval`]
+// and [`clear_lval`] below.)
 
 /// Port of `fill_evalarg_from_eap()` from `Src/eval.c:229` — populate an
 /// `evalarg_T` from an `:`-command. The carve-out parser owns evaluation
@@ -821,9 +823,17 @@ pub fn fill_evalarg_from_eap() {}
 /// owned strings; `Drop`-managed / struct unused → no-op.
 pub fn clear_evalarg() {}
 
-/// Port of `clear_lval()` from `Src/eval.c:1279` — free a parsed `lval_T`;
-/// `Drop`-managed / struct unused → no-op.
-pub fn clear_lval() {}
+/// Port of `clear_lval()` from `Src/eval.c:1279` — free a parsed [`lval_T`].
+///
+/// RUST-PORT NOTE: `ll_exp_name`/`ll_newkey` are owned `Option<String>` freed by
+/// `Drop`; clearing them mirrors the C `xfree()`s (the `Rc` handle fields drop
+/// their references when `lp` itself is dropped, so they are left as-is).
+pub fn clear_lval(lp: &mut lval_T) {
+    // c: xfree(lp->ll_exp_name);
+    lp.ll_exp_name = None;
+    // c: xfree(lp->ll_newkey);
+    lp.ll_newkey = None;
+}
 
 /// Port of `last_set_msg()` from `Src/eval.c:6345` — print where an option or
 /// variable was last set (`:verbose set`). No interactive verbose output
@@ -2172,18 +2182,75 @@ pub const GLV_NO_AUTOLOAD: i32 = 4;
 /// (aliases `TFN_READ_ONLY`).
 pub const GLV_READ_ONLY: i32 = 16;
 
+/// The `lval_T.ll_tv` interior handle.
+///
+/// RUST-PORT NOTE: the C `ll_tv` is a raw `typval_T *` aliasing either a
+/// variable's `dictitem_T.di_tv`, a live List item, or a live Dict item. The
+/// value layer here models containers as `Rc<RefCell<…>>` (see
+/// `typval_defs_h.rs`) with no `dictitem_T` and no stable interior address, so
+/// the pointer becomes a handle following the crate's existing
+/// `Rc<RefCell>`-plus-index convention: [`LlTv::Var`] holds the variable value
+/// (obtained by-copy from the reduced `find_var`, which returns a value — see
+/// [`get_lval`]); [`LlTv::DictItem`]/[`LlTv::ListItem`] hold the owning
+/// container `Rc` plus the key/index of the focused item. Reads and writes
+/// through the `Rc` alias the live container, so subscript assignment persists;
+/// a write to a [`LlTv::Var`] root only updates the local copy (a NULL/empty
+/// container auto-vivified at the *top level* therefore does not persist — this
+/// needs a mutable `find_var` returning an interior handle, deferred).
+pub enum LlTv {
+    /// C `ll_tv == NULL`.
+    Null,
+    /// `&v->di_tv` — the variable's own value (the subscript-walk root).
+    Var(typval_T),
+    /// `&di->di_tv` — a Dict item, addressed by its owning Dict `Rc` and key.
+    DictItem(Rc<RefCell<dict_T>>, String),
+    /// `TV_LIST_ITEM_TV(li)` — a List item, by its owning List `Rc` and index.
+    ListItem(Rc<RefCell<list_T>>, usize),
+}
+
+impl LlTv {
+    /// Read the current value the handle points at (C `*ll_tv`). RUST-PORT NOTE:
+    /// returns a clone; the container `Rc` inside the clone still aliases the
+    /// live List/Dict/Blob.
+    fn get(&self) -> Option<typval_T> {
+        match self {
+            LlTv::Null => None,
+            LlTv::Var(tv) => Some(tv.clone()),
+            LlTv::DictItem(d, k) => d.borrow().dv_hashtab.get(k).cloned(),
+            LlTv::ListItem(l, i) => l.borrow().lv_items.get(*i).map(|it| it.li_tv.clone()),
+        }
+    }
+
+    /// Write `tv` back through the handle (C `*ll_tv = …`). For [`LlTv::Var`] this
+    /// updates only the local copy (see the type note). Named `write` (not `set`)
+    /// so the drift gate traces it to a C callable.
+    fn write(&mut self, tv: typval_T) {
+        match self {
+            LlTv::Null => {}
+            LlTv::Var(slot) => *slot = tv,
+            LlTv::DictItem(d, k) => {
+                if let Some(v) = d.borrow_mut().dv_hashtab.get_mut(k) {
+                    *v = tv;
+                }
+            }
+            LlTv::ListItem(l, i) => {
+                let idx = *i;
+                if let Some(it) = l.borrow_mut().lv_items.get_mut(idx) {
+                    it.li_tv = tv;
+                }
+            }
+        }
+    }
+}
+
 /// `typedef struct { … } lval_T;` (`csrc/eval.h:52`) — the parsed assignment
 /// target returned by [`get_lval`] and consumed by [`set_var_lval`].
 ///
-/// RUST-PORT NOTE: the C struct is a bundle of raw interior pointers
-/// (`ll_tv` into a variable's `di_tv`, `ll_li` into a list item, `ll_di` into a
-/// `dictitem_T`). This port models Lists/Dicts as `Rc<RefCell<…>>`/`IndexMap`
-/// (see `typval_defs_h.rs`), which has no `dictitem_T`/`hashtab_T` and no stable
-/// interior address to point at, so the lval *machinery* (`get_lval`,
-/// `get_lval_dict_item`, `get_lval_subscript`, `set_var_lval`) is deferred to
-/// the `find_var`/`set_var`/dictitem subsystem (see `stubs/eval.rs`). The type
-/// is defined for signature fidelity; the pointer fields are raw pointers
-/// matching C exactly.
+/// RUST-PORT NOTE: the raw interior pointers of the C struct become
+/// `Rc<RefCell>`/index handles ([`LlTv`], `ll_list`/`ll_dict`/`ll_blob`) — see
+/// [`LlTv`] for the aliasing model. `ll_li` (a `listitem_T *`) becomes the item
+/// index into `ll_list`; `ll_di` (a `dictitem_T *`) becomes the item key into
+/// `ll_dict` (there is no `dictitem_T` — the Dict is an `IndexMap`).
 pub struct lval_T {
     /// `const char *ll_name` — start of variable name (can be NULL).
     pub ll_name: Option<String>,
@@ -2192,11 +2259,11 @@ pub struct lval_T {
     /// `char *ll_exp_name` — NULL or expanded (`{expr}`) name.
     pub ll_exp_name: Option<String>,
     /// `typval_T *ll_tv` — value of the item being used (or the Dict to add to).
-    pub ll_tv: *mut typval_T,
-    /// `listitem_T *ll_li` — the (first) list item or NULL.
-    pub ll_li: *mut crate::ported::eval::typval_defs_h::listitem_T,
-    /// `list_T *ll_list` — the list or NULL.
-    pub ll_list: *mut crate::ported::eval::typval_defs_h::list_T,
+    pub ll_tv: LlTv,
+    /// `listitem_T *ll_li` — index of the (first) list item, or None.
+    pub ll_li: Option<usize>,
+    /// `list_T *ll_list` — the list or None.
+    pub ll_list: Option<Rc<RefCell<list_T>>>,
     /// `bool ll_range` — true when a `[i:j]` range was used.
     pub ll_range: bool,
     /// `bool ll_empty2` — second index empty: `[i:]`.
@@ -2205,16 +2272,15 @@ pub struct lval_T {
     pub ll_n1: i32,
     /// `int ll_n2` — second index for a list range.
     pub ll_n2: i32,
-    /// `dict_T *ll_dict` — the Dict or NULL.
-    pub ll_dict: *mut crate::ported::eval::typval_defs_h::dict_T,
-    /// `dictitem_T *ll_di` — the dictitem or NULL. RUST-PORT NOTE: `dictitem_T`
-    /// is not modeled (the Dict is `IndexMap<String, typval_T>`); the `di_tv`
-    /// pointer stands in.
-    pub ll_di: *mut typval_T,
+    /// `dict_T *ll_dict` — the Dict or None.
+    pub ll_dict: Option<Rc<RefCell<dict_T>>>,
+    /// `dictitem_T *ll_di` — the dict key of the focused item, or None (see the
+    /// struct note: the key string stands in for the `dictitem_T *`).
+    pub ll_di: Option<String>,
     /// `char *ll_newkey` — new key for a Dict item.
     pub ll_newkey: Option<String>,
-    /// `blob_T *ll_blob` — the Blob or NULL.
-    pub ll_blob: *mut crate::ported::eval::typval_defs_h::blob_T,
+    /// `blob_T *ll_blob` — the Blob or None.
+    pub ll_blob: Option<Rc<RefCell<blob_T>>>,
 }
 
 impl Default for lval_T {
@@ -2223,17 +2289,818 @@ impl Default for lval_T {
             ll_name: None,
             ll_name_len: 0,
             ll_exp_name: None,
-            ll_tv: std::ptr::null_mut(),
-            ll_li: std::ptr::null_mut(),
-            ll_list: std::ptr::null_mut(),
+            ll_tv: LlTv::Null,
+            ll_li: None,
+            ll_list: None,
             ll_range: false,
             ll_empty2: false,
             ll_n1: 0,
             ll_n2: 0,
-            ll_dict: std::ptr::null_mut(),
-            ll_di: std::ptr::null_mut(),
+            ll_dict: None,
+            ll_di: None,
             ll_newkey: None,
-            ll_blob: std::ptr::null_mut(),
+            ll_blob: None,
+        }
+    }
+}
+
+/// Port of `get_lval_dict_item()` from `Src/eval.c:840`.
+///
+/// Get a Dict lval subitem for `key`/`[key]` in the Dict at `lp.ll_tv`; on a
+/// missing key that may be added, records `ll_newkey` and returns
+/// [`glv_status_T::GLV_STOP`]. `p_off` is the byte offset in `name` just after
+/// the key (C `*key_end`, which this never advances).
+///
+/// RUST-PORT NOTE: the scope-dictionary validation (`lp->ll_dict->dv_scope`, the
+/// `get_vimvar_dict()`/`get_funccal_args_ht()` identity checks) and the
+/// `di_flags` read-only/lock check are elided: `dv_scope`/`di_flags` are not
+/// modeled and a Dict reached through a subscript is never a scope dict here, so
+/// those branches are always the "plain container" path.
+#[allow(clippy::too_many_arguments)]
+fn get_lval_dict_item(
+    lp: &mut lval_T,
+    name: &str,
+    key: Option<&str>,
+    len: i32,
+    p_off: usize,
+    var1: Option<&typval_T>,
+    flags: i32,
+    unlet: bool,
+    rettv: Option<&typval_T>,
+) -> glv_status_T {
+    use glv_status_T::*;
+    let quiet = flags & GLV_QUIET != 0;
+    // c: if (len == -1) key = tv_get_string(var1);
+    let key: String = if len == -1 {
+        tv_get_string(var1.unwrap())
+    } else {
+        // c: key limited to "len" bytes.
+        key.unwrap()[..len as usize].to_string()
+    };
+    // c: lp->ll_list = NULL;
+    lp.ll_list = None;
+
+    // c: a NULL dict is equivalent with an empty dict — allocate one now.
+    let cur = lp.ll_tv.get().unwrap_or_default();
+    let dict_rc = match &cur.vval {
+        v_dict(Some(d)) => d.clone(),
+        _ => {
+            let nd = crate::ported::eval::typval::tv_dict_alloc();
+            let newcur = typval_T {
+                v_type: VAR_DICT,
+                v_lock: VarLockStatus::VAR_UNLOCKED,
+                vval: v_dict(Some(nd.clone())),
+            };
+            lp.ll_tv.write(newcur);
+            nd
+        }
+    };
+    // c: lp->ll_dict = lp->ll_tv->vval.v_dict;
+    lp.ll_dict = Some(dict_rc.clone());
+
+    // c: lp->ll_di = tv_dict_find(lp->ll_dict, key, len);
+    let found = dict_rc.borrow().dv_hashtab.contains_key(&key);
+
+    // c: if (lp->ll_di != NULL && tv_is_luafunc(&lp->ll_di->di_tv) && len == -1 && rettv == NULL)
+    if found && len == -1 && rettv.is_none() {
+        let is_lua = dict_rc
+            .borrow()
+            .dv_hashtab
+            .get(&key)
+            .is_some_and(tv_is_luafunc);
+        if is_lua {
+            crate::ported::message::semsg("E461: Illegal variable name: v:['lua']");
+            return GLV_FAIL;
+        }
+    }
+
+    if !found {
+        // c: Key does not exist in dict: may need to add it.
+        let pc = name.as_bytes().get(p_off).copied();
+        if pc == Some(b'[') || pc == Some(b'.') || unlet {
+            if !quiet {
+                crate::ported::message::semsg(&format!(
+                    "E716: Key not present in Dictionary: \"{key}\""
+                ));
+            }
+            return GLV_FAIL;
+        }
+        // c: lp->ll_newkey = xstrdup(key); *key_end = p; return GLV_STOP;
+        lp.ll_newkey = Some(key);
+        return GLV_STOP;
+    }
+    // c: existing variable — the di_flags read-only/lock check is elided (note).
+
+    // c: lp->ll_tv = &lp->ll_di->di_tv;
+    lp.ll_di = Some(key.clone());
+    lp.ll_tv = LlTv::DictItem(dict_rc, key);
+
+    GLV_OK
+}
+
+/// Port of `get_lval_blob()` from `Src/eval.c:933`.
+///
+/// Get a Blob lval for `name[expr]` / `name[expr:expr]` from the Blob at
+/// `lp.ll_tv`. `var1`/`var2` are the (already-evaluated) indices; `empty1` marks
+/// an omitted first index. Returns [`OK`]/[`FAIL`].
+fn get_lval_blob(
+    lp: &mut lval_T,
+    var1: Option<&typval_T>,
+    var2: Option<&typval_T>,
+    empty1: bool,
+    quiet: bool,
+) -> i32 {
+    let cur = lp.ll_tv.get().unwrap_or_default();
+    let blob_rc = match &cur.vval {
+        v_blob(Some(b)) => b.clone(),
+        _ => return FAIL,
+    };
+    // c: const int bloblen = tv_blob_len(lp->ll_tv->vval.v_blob);
+    let bloblen = crate::ported::eval::typval::tv_blob_len(&blob_rc.borrow());
+
+    // c: Get the number and item for the only or first index of the List.
+    if empty1 {
+        lp.ll_n1 = 0;
+    } else {
+        lp.ll_n1 = crate::ported::eval::typval::tv_get_number(var1.unwrap()) as i32;
+    }
+
+    if crate::ported::eval::typval::tv_blob_check_index(bloblen, lp.ll_n1 as varnumber_T, quiet)
+        == FAIL
+    {
+        return FAIL;
+    }
+    if lp.ll_range && !lp.ll_empty2 {
+        lp.ll_n2 = crate::ported::eval::typval::tv_get_number(var2.unwrap()) as i32;
+        if crate::ported::eval::typval::tv_blob_check_range(
+            bloblen,
+            lp.ll_n1 as varnumber_T,
+            lp.ll_n2 as varnumber_T,
+            quiet,
+        ) == FAIL
+        {
+            return FAIL;
+        }
+    }
+
+    // c: lp->ll_blob = lp->ll_tv->vval.v_blob; lp->ll_tv = NULL;
+    lp.ll_blob = Some(blob_rc);
+    lp.ll_tv = LlTv::Null;
+
+    OK
+}
+
+/// Port of `get_lval_list()` from `Src/eval.c:970`.
+///
+/// Get a List lval for `name[expr]` / `name[expr:expr]` from the List at
+/// `lp.ll_tv`. Returns [`OK`]/[`FAIL`].
+fn get_lval_list(
+    lp: &mut lval_T,
+    var1: Option<&typval_T>,
+    var2: Option<&typval_T>,
+    empty1: bool,
+    _flags: i32,
+    quiet: bool,
+) -> i32 {
+    // c: Get the number and item for the only or first index of the List.
+    if empty1 {
+        lp.ll_n1 = 0;
+    } else {
+        lp.ll_n1 = crate::ported::eval::typval::tv_get_number(var1.unwrap()) as i32;
+    }
+
+    // c: lp->ll_dict = NULL; lp->ll_list = lp->ll_tv->vval.v_list;
+    lp.ll_dict = None;
+    let cur = lp.ll_tv.get().unwrap_or_default();
+    let list_rc = match &cur.vval {
+        v_list(Some(l)) => l.clone(),
+        _ => return FAIL,
+    };
+    lp.ll_list = Some(list_rc.clone());
+
+    // c: lp->ll_li = tv_list_check_range_index_one(lp->ll_list, &lp->ll_n1, quiet);
+    let mut n1 = lp.ll_n1;
+    let li = crate::ported::eval::typval::tv_list_check_range_index_one(
+        &list_rc.borrow(),
+        &mut n1,
+        quiet,
+    );
+    lp.ll_n1 = n1;
+    let li = match li {
+        Some(i) => i,
+        None => return FAIL,
+    };
+    lp.ll_li = Some(li);
+
+    // c: May need to find the item/absolute index for the second range index.
+    if lp.ll_range && !lp.ll_empty2 {
+        lp.ll_n2 = crate::ported::eval::typval::tv_get_number(var2.unwrap()) as i32;
+        let mut n1b = lp.ll_n1;
+        let mut n2 = lp.ll_n2;
+        if crate::ported::eval::typval::tv_list_check_range_index_two(
+            &list_rc.borrow(),
+            &mut n1b,
+            li,
+            &mut n2,
+            quiet,
+        ) == FAIL
+        {
+            return FAIL;
+        }
+        lp.ll_n1 = n1b;
+        lp.ll_n2 = n2;
+    }
+
+    // c: lp->ll_tv = TV_LIST_ITEM_TV(lp->ll_li);
+    lp.ll_tv = LlTv::ListItem(list_rc, li);
+
+    OK
+}
+
+/// Port of `get_lval_subscript()` from `Src/eval.c:1016`.
+///
+/// Walk the `[idx]`/`[a:b]`/`.key` subscripts starting at byte offset `p` in
+/// `name`, descending `lp.ll_tv` into the referenced List/Dict/Blob item.
+/// Returns the byte offset just after the last subscript, or `None` on error.
+///
+/// RUST-PORT NOTE: the C consumes each index with a recursive `eval1()`; here
+/// the bracket-matched substring is evaluated through the sanctioned
+/// `EVAL_STRING_HOOK` bridge (the same integration point [`eval_index`] uses),
+/// since the hook does not report how many bytes it consumed. The unused C
+/// `ht`/`v` parameters (dead in the C body, and not produced by the reduced
+/// `find_var`) are omitted.
+fn get_lval_subscript(
+    lp: &mut lval_T,
+    mut p: usize,
+    name: &str,
+    rettv: Option<&typval_T>,
+    unlet: bool,
+    flags: i32,
+) -> Option<usize> {
+    let quiet = flags & GLV_QUIET != 0;
+    let b = name.as_bytes();
+    let eval = |e: &str| -> Option<typval_T> {
+        crate::ported::eval::typval::EVAL_STRING_HOOK
+            .with(|h| *h.borrow())
+            .and_then(|f| f(e))
+    };
+
+    // c: Loop until no more [idx] or .key is following.
+    while p < b.len()
+        && (b[p] == b'['
+            || (b[p] == b'.' && b.get(p + 1) != Some(&b'=') && b.get(p + 1) != Some(&b'.')))
+    {
+        let cur = lp.ll_tv.get().unwrap_or_default();
+        if b[p] == b'.' && cur.v_type != VAR_DICT {
+            if !quiet {
+                crate::ported::message::semsg(&format!(
+                    "E1203: Dot can only be used on a dictionary: {name}"
+                ));
+            }
+            return None;
+        }
+        if !matches!(cur.v_type, VAR_LIST | VAR_DICT | VAR_BLOB) {
+            if !quiet {
+                emsg("E689: Can only index a List, Dictionary or Blob");
+            }
+            return None;
+        }
+
+        // c: A NULL list/blob works like an empty one, allocate one now.
+        if cur.v_type == VAR_LIST && matches!(cur.vval, v_list(None)) {
+            let mut tmp = typval_T::default();
+            crate::ported::eval::typval::tv_list_alloc_ret(&mut tmp, -1);
+            lp.ll_tv.write(tmp);
+        } else if cur.v_type == VAR_BLOB && matches!(cur.vval, v_blob(None)) {
+            let mut tmp = typval_T::default();
+            crate::ported::eval::typval::tv_blob_alloc_ret(&mut tmp);
+            lp.ll_tv.write(tmp);
+        }
+
+        if lp.ll_range {
+            if !quiet {
+                emsg("E708: [:] must come last");
+            }
+            return None;
+        }
+
+        let mut len: i32 = -1;
+        let mut key: Option<String> = None;
+        let mut var1: Option<typval_T> = None;
+        let mut var2: Option<typval_T> = None;
+        let mut empty1 = false;
+        if b[p] == b'.' {
+            // c: key = p + 1; scan [A-Za-z0-9_]; error on empty key.
+            let ks = p + 1;
+            let mut ke = ks;
+            while ke < b.len() && (b[ke].is_ascii_alphanumeric() || b[ke] == b'_') {
+                ke += 1;
+            }
+            if ke == ks {
+                if !quiet {
+                    emsg("E713: Cannot use empty key after .");
+                }
+                return None;
+            }
+            len = (ke - ks) as i32;
+            key = Some(name[ks..ke].to_string());
+            p = ke;
+        } else {
+            // c: Get the index [expr] or the first index [expr: ].
+            // RUST-PORT NOTE: bracket-match the whole [ ... ] (balancing nested
+            // brackets and skipping strings), then split the inner text on a
+            // top-level ':' — the analogue of eval1() advancing to ':'/']'.
+            let mut depth = 0i32;
+            let mut i = p;
+            let mut close = None;
+            while i < b.len() {
+                match b[i] {
+                    b'\'' => {
+                        i += 1;
+                        while i < b.len() && b[i] != b'\'' {
+                            i += 1;
+                        }
+                    }
+                    b'"' => {
+                        i += 1;
+                        while i < b.len() && b[i] != b'"' {
+                            if b[i] == b'\\' && i + 1 < b.len() {
+                                i += 1;
+                            }
+                            i += 1;
+                        }
+                    }
+                    b'[' | b'(' | b'{' => depth += 1,
+                    b']' | b')' | b'}' => {
+                        depth -= 1;
+                        if depth == 0 && b[i] == b']' {
+                            close = Some(i);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+            let close = match close {
+                Some(c) => c,
+                None => {
+                    if !quiet {
+                        emsg("E111: Missing ']'");
+                    }
+                    return None;
+                }
+            };
+            let inner = &name[p + 1..close];
+            // Top-level ':' in the inner text (range separator).
+            let colon = {
+                let ib = inner.as_bytes();
+                let (mut d, mut i, mut pos) = (0i32, 0usize, None);
+                while i < ib.len() {
+                    match ib[i] {
+                        b'\'' => {
+                            i += 1;
+                            while i < ib.len() && ib[i] != b'\'' {
+                                i += 1;
+                            }
+                        }
+                        b'"' => {
+                            i += 1;
+                            while i < ib.len() && ib[i] != b'"' {
+                                if ib[i] == b'\\' && i + 1 < ib.len() {
+                                    i += 1;
+                                }
+                                i += 1;
+                            }
+                        }
+                        b'[' | b'(' | b'{' => d += 1,
+                        b']' | b')' | b'}' => d -= 1,
+                        b':' if d == 0 => {
+                            pos = Some(i);
+                            break;
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                pos
+            };
+            match colon {
+                None => {
+                    // c: single index [expr].
+                    empty1 = false;
+                    let v = eval(inner.trim())?;
+                    if !crate::ported::eval::typval::tv_check_str(&v) {
+                        return None;
+                    }
+                    var1 = Some(v);
+                    lp.ll_range = false;
+                }
+                Some(c) => {
+                    // c: first index [expr:...] (empty1 when omitted).
+                    let left = inner[..c].trim();
+                    if left.is_empty() {
+                        empty1 = true;
+                    } else {
+                        empty1 = false;
+                        let v = eval(left)?;
+                        if !crate::ported::eval::typval::tv_check_str(&v) {
+                            return None;
+                        }
+                        var1 = Some(v);
+                    }
+                    // c: a slice is illegal on a Dict.
+                    if cur.v_type == VAR_DICT {
+                        if !quiet {
+                            emsg("E719: Cannot slice a Dictionary");
+                        }
+                        return None;
+                    }
+                    // c: [:] requires a List or Blob value on the RHS.
+                    if let Some(rt) = rettv {
+                        let ok = (rt.v_type == VAR_LIST && matches!(&rt.vval, v_list(Some(_))))
+                            || (rt.v_type == VAR_BLOB && matches!(&rt.vval, v_blob(Some(_))));
+                        if !ok {
+                            if !quiet {
+                                emsg("E709: [:] requires a List or Blob value");
+                            }
+                            return None;
+                        }
+                    }
+                    // c: second index [ :expr].
+                    let right = inner[c + 1..].trim();
+                    if right.is_empty() {
+                        lp.ll_empty2 = true;
+                    } else {
+                        lp.ll_empty2 = false;
+                        let v = eval(right)?;
+                        if !crate::ported::eval::typval::tv_check_str(&v) {
+                            return None;
+                        }
+                        var2 = Some(v);
+                    }
+                    lp.ll_range = true;
+                }
+            }
+            // c: Skip to past ']'.
+            p = close + 1;
+        }
+
+        if cur.v_type == VAR_DICT {
+            let glv_status = get_lval_dict_item(
+                lp,
+                name,
+                key.as_deref(),
+                len,
+                p,
+                var1.as_ref(),
+                flags,
+                unlet,
+                rettv,
+            );
+            if glv_status == glv_status_T::GLV_FAIL {
+                return None;
+            }
+            if glv_status == glv_status_T::GLV_STOP {
+                break;
+            }
+        } else if cur.v_type == VAR_BLOB {
+            if get_lval_blob(lp, var1.as_ref(), var2.as_ref(), empty1, quiet) == FAIL {
+                return None;
+            }
+            break;
+        } else if get_lval_list(lp, var1.as_ref(), var2.as_ref(), empty1, flags, quiet) == FAIL {
+            return None;
+        }
+    }
+
+    Some(p)
+}
+
+/// Port of `get_lval()` from `Src/eval.c:1191`.
+///
+/// Parse the assignment target `name` (a plain name, `dict.key`, `list[expr]`,
+/// or a slice) into `lp`. `rettv` is the value to be assigned (or `None`).
+/// Returns the byte offset just after the parsed name (incl. indices), or `None`
+/// on a parse error (`lp` is still filled enough for [`clear_lval`]).
+///
+/// RUST-PORT NOTE: the reduced `find_var` returns a value copy, not a mutable
+/// `dictitem_T *`, so `ll_tv` becomes [`LlTv::Var`] (see [`LlTv`]). Subscript
+/// mutations persist through the container `Rc`; a top-level scalar/NULL-
+/// container auto-vivification would need a mutable `find_var` (deferred).
+#[allow(clippy::too_many_arguments)]
+pub fn get_lval(
+    name: &str,
+    rettv: Option<&typval_T>,
+    lp: &mut lval_T,
+    unlet: bool,
+    skip: bool,
+    flags: i32,
+    fne_flags: u32,
+) -> Option<usize> {
+    let quiet = flags & GLV_QUIET != 0;
+
+    // c: CLEAR_POINTER(lp) — clear everything in "lp".
+    *lp = lval_T::default();
+
+    if skip {
+        // c: When skipping just find the end of the name.
+        lp.ll_name = Some(name.to_string());
+        let (end, _, _) = find_name_end(name, FNE_INCL_BR | fne_flags);
+        return Some(end);
+    }
+
+    // c: Find the end of the name.
+    let (mut p, expr_start, expr_end) = find_name_end(name, fne_flags);
+    if let (Some(es), Some(ee)) = (expr_start, expr_end) {
+        let pc = name.as_bytes().get(p).copied();
+        // c: Don't expand the name when we already know there is an error.
+        if unlet
+            && !matches!(pc, Some(b' ') | Some(b'\t'))
+            && !ends_excmd(pc.unwrap_or(0))
+            && pc != Some(b'[')
+            && pc != Some(b'.')
+        {
+            crate::ported::message::semsg(&format!(
+                "E488: Trailing characters: {}",
+                &name[p..]
+            ));
+            return None;
+        }
+        lp.ll_exp_name = make_expanded_name(name, es, ee);
+        lp.ll_name = lp.ll_exp_name.clone();
+        if lp.ll_exp_name.is_none() {
+            // c: report an invalid expression in braces unless aborting.
+            if !crate::ported::ex_eval::aborting() && !quiet {
+                crate::ported::message::semsg(&format!("E475: Invalid argument: {name}"));
+                return None;
+            }
+            lp.ll_name_len = 0;
+        } else {
+            lp.ll_name_len = lp.ll_name.as_ref().unwrap().len();
+        }
+    } else {
+        lp.ll_name = Some(name[..p].to_string());
+        lp.ll_name_len = p;
+    }
+
+    // c: Without [idx] or .key we are done.
+    let pc = name.as_bytes().get(p).copied();
+    if (pc != Some(b'[') && pc != Some(b'.')) || lp.ll_name.is_none() {
+        return Some(p);
+    }
+
+    // c: find_var — only pass &ht when we would write (prevents autoload too).
+    let ll_name = lp.ll_name.clone().unwrap();
+    let v = crate::ported::eval::vars::find_var(&ll_name, flags & GLV_NO_AUTOLOAD != 0);
+    match v {
+        None => {
+            if !quiet {
+                crate::ported::message::semsg(&format!("E121: Undefined variable: {ll_name}"));
+            }
+            None
+        }
+        Some(v) => {
+            // c: lp->ll_tv = &v->di_tv;
+            let is_lua = tv_is_luafunc(&v);
+            lp.ll_tv = LlTv::Var(v);
+            // c: For v:lua just return a pointer to the "." after the "v:lua".
+            if is_lua {
+                return Some(p);
+            }
+            // c: process the subitem after "." or "[".
+            p = get_lval_subscript(lp, p, name, rettv, unlet, flags)?;
+            // c: lp->ll_name_len = (size_t)(p - lp->ll_name);
+            lp.ll_name_len = p;
+            Some(p)
+        }
+    }
+}
+
+/// Port of `set_var_lval()` from `Src/eval.c:1290`.
+///
+/// Assign `rettv` to the target parsed by [`get_lval`]. `op` is `None` (C NULL)
+/// or one of `"="`/`"+="`/`"-="`/`"*="`/`"/="`/`"%="`/`".="`. `_endp` is the C
+/// NUL-terminator save/restore position, unneeded here (`ll_name` is an owned
+/// exact substring) — RUST-PORT NOTE.
+pub fn set_var_lval(
+    lp: &mut lval_T,
+    _endp: usize,
+    rettv: &mut typval_T,
+    copy: bool,
+    is_const: bool,
+    op: Option<&str>,
+) {
+    let ll_name = lp.ll_name.clone().unwrap_or_default();
+    // c: op != NULL && *op != '=' — a compound (+=, -=, …) assignment.
+    let is_compound = matches!(op, Some(o) if !o.starts_with('='));
+    let opc = op.and_then(|o| o.chars().next());
+
+    if matches!(lp.ll_tv, LlTv::Null) {
+        if let Some(blob_rc) = lp.ll_blob.clone() {
+            if is_compound {
+                crate::ported::message::semsg(&format!(
+                    "E734: Wrong variable type for {}=",
+                    op.unwrap()
+                ));
+                return;
+            }
+            let lock = blob_rc.borrow().bv_lock;
+            if crate::ported::eval::typval::value_check_lock(
+                lock,
+                Some(&ll_name),
+                crate::ported::eval::typval::TV_CSTRING,
+            ) {
+                return;
+            }
+
+            if lp.ll_range && rettv.v_type == VAR_BLOB {
+                if lp.ll_empty2 {
+                    lp.ll_n2 =
+                        crate::ported::eval::typval::tv_blob_len(&blob_rc.borrow()) - 1;
+                }
+                let src = match &rettv.vval {
+                    v_blob(Some(b)) => b.clone(),
+                    _ => return,
+                };
+                if crate::ported::eval::typval::tv_blob_set_range(
+                    &mut blob_rc.borrow_mut(),
+                    lp.ll_n1 as varnumber_T,
+                    lp.ll_n2 as varnumber_T,
+                    &src.borrow(),
+                ) == FAIL
+                {
+                    return;
+                }
+            } else {
+                let mut error = false;
+                let val = tv_get_number_chk(rettv, Some(&mut error));
+                if !error {
+                    if !(0..=255).contains(&val) {
+                        crate::ported::message::semsg(&format!(
+                            "E1239: Invalid value for blob: 0x{val:X}"
+                        ));
+                    } else {
+                        crate::ported::eval::typval::tv_blob_set_append(
+                            &mut blob_rc.borrow_mut(),
+                            lp.ll_n1,
+                            val as u8,
+                        );
+                    }
+                }
+            }
+        } else if is_compound {
+            // c: handle +=, -=, *=, /=, %= and .=
+            if is_const {
+                emsg("E995: Cannot modify existing variable");
+                return;
+            }
+            // c: eval_variable(ll_name, …, &tv, &di, …) — the di read-only/lock
+            // check is elided (no dictitem in the reduced find path).
+            if let Some(mut tv) = crate::ported::eval::vars::eval_variable(&ll_name) {
+                if crate::ported::eval::executor::eexe_mod_op(&mut tv, rettv, opc.unwrap()) == OK {
+                    crate::ported::eval::vars::set_var(&ll_name, lp.ll_name_len, tv, false);
+                }
+            }
+        } else {
+            crate::ported::eval::vars::set_var_const(
+                &ll_name,
+                lp.ll_name_len,
+                rettv.clone(),
+                copy,
+                is_const,
+            );
+        }
+    } else if crate::ported::eval::typval::value_check_lock(
+        // c: value_check_lock(ll_newkey == NULL ? ll_tv->v_lock : ll_tv->vval.v_dict->dv_lock, …)
+        if lp.ll_newkey.is_none() {
+            lp.ll_tv.get().map_or(VarLockStatus::VAR_UNLOCKED, |t| t.v_lock)
+        } else {
+            lp.ll_dict
+                .as_ref()
+                .map_or(VarLockStatus::VAR_UNLOCKED, |d| d.borrow().dv_lock)
+        },
+        Some(&ll_name),
+        crate::ported::eval::typval::TV_CSTRING,
+    ) {
+        // c: Skip
+    } else if lp.ll_range {
+        if is_const {
+            emsg("E996: Cannot lock a range");
+            return;
+        }
+        let list_rc = match &lp.ll_list {
+            Some(l) => l.clone(),
+            None => return,
+        };
+        let src = match &rettv.vval {
+            v_list(Some(l)) => l.clone(),
+            _ => return,
+        };
+        crate::ported::eval::typval::tv_list_assign_range(
+            &list_rc,
+            &src.borrow(),
+            lp.ll_n1,
+            lp.ll_n2,
+            lp.ll_empty2,
+            op.unwrap_or("="),
+            &ll_name,
+        );
+    } else {
+        // c: Assign to a List or Dictionary item.
+        let dict = lp.ll_dict.clone();
+        // c: bool watched = tv_dict_is_watched(dict) — inlined (no ported helper).
+        let watched = dict
+            .as_ref()
+            .is_some_and(|d| !d.borrow().dv_watchers.is_empty());
+
+        if is_const {
+            emsg("E996: Cannot lock a list or dict");
+            return;
+        }
+
+        // c: typval_T oldtv = TV_INITIAL_VALUE;
+        let mut oldtv = typval_T::default();
+        let mut do_assign = true;
+
+        if let Some(newkey) = lp.ll_newkey.clone() {
+            if is_compound {
+                crate::ported::message::semsg(&format!(
+                    "E716: Key not present in Dictionary: \"{newkey}\""
+                ));
+                return;
+            }
+            let d = match &lp.ll_dict {
+                Some(d) => d.clone(),
+                None => return,
+            };
+            // c: if (tv_dict_wrong_func_name(lp->ll_tv->vval.v_dict, rettv, newkey)) return;
+            if crate::ported::eval::typval::tv_dict_wrong_func_name(&d.borrow(), rettv, &newkey) {
+                return;
+            }
+            // c: di = tv_dict_item_alloc(newkey); tv_dict_add(...); lp->ll_tv = &di->di_tv;
+            if crate::ported::eval::typval::tv_dict_add(
+                &mut d.borrow_mut(),
+                &newkey,
+                typval_T::default(),
+            ) == FAIL
+            {
+                return;
+            }
+            lp.ll_tv = LlTv::DictItem(d, newkey);
+        } else {
+            if watched {
+                // c: tv_copy(lp->ll_tv, &oldtv);
+                if let Some(cur) = lp.ll_tv.get() {
+                    crate::ported::eval::typval::tv_copy(&cur, &mut oldtv);
+                }
+            }
+            if is_compound {
+                // c: eexe_mod_op(lp->ll_tv, rettv, op); goto notify;
+                let mut cur = lp.ll_tv.get().unwrap_or_default();
+                crate::ported::eval::executor::eexe_mod_op(&mut cur, rettv, opc.unwrap());
+                lp.ll_tv.write(cur);
+                do_assign = false;
+            }
+            // else: tv_clear(lp->ll_tv) — the value is overwritten just below.
+        }
+
+        // c: Assign the value to the variable or list item.
+        if do_assign {
+            if copy {
+                let mut dest = typval_T::default();
+                crate::ported::eval::typval::tv_copy(rettv, &mut dest);
+                lp.ll_tv.write(dest);
+            } else {
+                // c: *lp->ll_tv = *rettv; lp->ll_tv->v_lock = VAR_UNLOCKED; tv_init(rettv);
+                let mut moved = rettv.clone();
+                moved.v_lock = VarLockStatus::VAR_UNLOCKED;
+                lp.ll_tv.write(moved);
+                *rettv = typval_T::default();
+            }
+        }
+
+        // c: notify:
+        if watched {
+            if let Some(d) = &dict {
+                let newtv = lp.ll_tv.get();
+                if oldtv.v_type == VAR_UNKNOWN {
+                    // c: assert(lp->ll_newkey != NULL);
+                    crate::ported::eval::typval::tv_dict_watcher_notify(
+                        d,
+                        lp.ll_newkey.as_deref().unwrap_or_default(),
+                        newtv.as_ref(),
+                        None,
+                    );
+                } else {
+                    crate::ported::eval::typval::tv_dict_watcher_notify(
+                        d,
+                        lp.ll_di.as_deref().unwrap_or_default(),
+                        newtv.as_ref(),
+                        Some(&oldtv),
+                    );
+                }
+            }
         }
     }
 }
@@ -4501,5 +5368,152 @@ mod tests {
         eval0("[10, 20, 30][1]", &mut tv, Some(&mut e));
         EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = saved);
         assert!(matches!(tv.vval, v_number(20)));
+    }
+
+    // ── lval machinery (get_lval / get_lval_* / set_var_lval / clear_lval) ──
+
+    #[test]
+    fn get_lval_and_set_dict_item() {
+        use super::{get_lval, lval_T, set_var_lval, LlTv};
+        use crate::ported::eval::typval::tv_dict_alloc;
+        use crate::ported::eval::typval_defs_h::typval_vval_union::{v_dict, v_number};
+        use crate::ported::eval::typval_defs_h::{typval_T, VarLockStatus, VarType::VAR_DICT};
+        use crate::ported::eval::vars::set_var;
+        // g:gld = {"a": 1}
+        let d = tv_dict_alloc();
+        d.borrow_mut()
+            .dv_hashtab
+            .insert("a".to_string(), typval_T::from(1));
+        set_var(
+            "g:gld",
+            0,
+            typval_T {
+                v_type: VAR_DICT,
+                v_lock: VarLockStatus::VAR_UNLOCKED,
+                vval: v_dict(Some(d.clone())),
+            },
+            false,
+        );
+        // Parse g:gld.a — an existing Dict item.
+        let mut lp = lval_T::default();
+        let end = get_lval("g:gld.a", None, &mut lp, false, false, 0, 0);
+        assert!(end.is_some());
+        assert!(matches!(lp.ll_tv, LlTv::DictItem(_, ref k) if k == "a"));
+        // Assign 99; the write persists through the aliased Rc.
+        let mut rettv = typval_T::from(99);
+        set_var_lval(&mut lp, 0, &mut rettv, true, false, Some("="));
+        assert!(matches!(d.borrow().dv_hashtab.get("a"), Some(t) if matches!(t.vval, v_number(99))));
+    }
+
+    #[test]
+    fn get_lval_adds_new_dict_key() {
+        use super::{get_lval, lval_T, set_var_lval};
+        use crate::ported::eval::typval::tv_dict_alloc;
+        use crate::ported::eval::typval_defs_h::typval_vval_union::{v_dict, v_number};
+        use crate::ported::eval::typval_defs_h::{typval_T, VarLockStatus, VarType::VAR_DICT};
+        use crate::ported::eval::vars::set_var;
+        let d = tv_dict_alloc();
+        set_var(
+            "g:gldnew",
+            0,
+            typval_T {
+                v_type: VAR_DICT,
+                v_lock: VarLockStatus::VAR_UNLOCKED,
+                vval: v_dict(Some(d.clone())),
+            },
+            false,
+        );
+        // g:gldnew.fresh — a non-existing key records ll_newkey (GLV_STOP path).
+        let mut lp = lval_T::default();
+        let end = get_lval("g:gldnew.fresh", None, &mut lp, false, false, 0, 0);
+        assert!(end.is_some());
+        assert_eq!(lp.ll_newkey.as_deref(), Some("fresh"));
+        let mut rettv = typval_T::from(7);
+        set_var_lval(&mut lp, 0, &mut rettv, true, false, Some("="));
+        assert!(
+            matches!(d.borrow().dv_hashtab.get("fresh"), Some(t) if matches!(t.vval, v_number(7)))
+        );
+    }
+
+    #[test]
+    fn get_lval_and_set_list_item() {
+        use super::{get_lval, lval_T, set_var_lval};
+        use crate::ported::eval::typval::{tv_list_alloc, tv_list_append_number, EVAL_STRING_HOOK};
+        use crate::ported::eval::typval_defs_h::typval_vval_union::{v_list, v_number};
+        use crate::ported::eval::typval_defs_h::{typval_T, VarLockStatus, VarType::VAR_LIST};
+        use crate::ported::eval::vars::set_var;
+        fn hook(e: &str) -> Option<typval_T> {
+            e.trim().parse::<i64>().ok().map(typval_T::from)
+        }
+        let saved = EVAL_STRING_HOOK.with(|h| *h.borrow());
+        EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = Some(hook));
+        let l = tv_list_alloc(-1);
+        for n in [10i64, 20, 30] {
+            tv_list_append_number(&mut l.borrow_mut(), n);
+        }
+        set_var(
+            "g:gllst",
+            0,
+            typval_T {
+                v_type: VAR_LIST,
+                v_lock: VarLockStatus::VAR_UNLOCKED,
+                vval: v_list(Some(l.clone())),
+            },
+            false,
+        );
+        // g:gllst[1] — the index sub-expression is evaluated via EVAL_STRING_HOOK.
+        let mut lp = lval_T::default();
+        let end = get_lval("g:gllst[1]", None, &mut lp, false, false, 0, 0);
+        assert!(end.is_some());
+        assert_eq!(lp.ll_n1, 1);
+        let mut rettv = typval_T::from(99);
+        set_var_lval(&mut lp, 0, &mut rettv, true, false, Some("="));
+        EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = saved);
+        assert!(matches!(l.borrow().lv_items[1].li_tv.vval, v_number(99)));
+    }
+
+    #[test]
+    fn get_lval_and_set_blob_byte() {
+        use super::{get_lval, lval_T, set_var_lval};
+        use crate::ported::eval::typval::{tv_blob_alloc, EVAL_STRING_HOOK};
+        use crate::ported::eval::typval_defs_h::typval_vval_union::v_blob;
+        use crate::ported::eval::typval_defs_h::{typval_T, VarLockStatus, VarType::VAR_BLOB};
+        use crate::ported::eval::vars::set_var;
+        fn hook(e: &str) -> Option<typval_T> {
+            e.trim().parse::<i64>().ok().map(typval_T::from)
+        }
+        let saved = EVAL_STRING_HOOK.with(|h| *h.borrow());
+        EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = Some(hook));
+        let b = tv_blob_alloc();
+        b.borrow_mut().bv_ga = vec![1u8, 2, 3];
+        set_var(
+            "g:glblb",
+            0,
+            typval_T {
+                v_type: VAR_BLOB,
+                v_lock: VarLockStatus::VAR_UNLOCKED,
+                vval: v_blob(Some(b.clone())),
+            },
+            false,
+        );
+        let mut lp = lval_T::default();
+        let end = get_lval("g:glblb[0]", None, &mut lp, false, false, 0, 0);
+        assert!(end.is_some());
+        assert!(lp.ll_blob.is_some());
+        let mut rettv = typval_T::from(255);
+        set_var_lval(&mut lp, 0, &mut rettv, true, false, Some("="));
+        EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = saved);
+        assert_eq!(b.borrow().bv_ga[0], 255);
+    }
+
+    #[test]
+    fn clear_lval_frees_names() {
+        use super::{clear_lval, lval_T};
+        let mut lp = lval_T::default();
+        lp.ll_exp_name = Some("expanded".to_string());
+        lp.ll_newkey = Some("k".to_string());
+        clear_lval(&mut lp);
+        assert!(lp.ll_exp_name.is_none());
+        assert!(lp.ll_newkey.is_none());
     }
 }

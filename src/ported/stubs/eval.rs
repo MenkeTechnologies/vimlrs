@@ -5,30 +5,6 @@
 /// C: `int skip_expr(char **pp, evalarg_T *const evalarg)`
 pub fn skip_expr() { unimplemented!("STUB skip_expr — csrc/eval.c:461") }
 
-/// Port of `get_lval_dict_item()` — `csrc/eval.c:840`. STUB: not yet ported.
-/// C: `static glv_status_T get_lval_dict_item(lval_T *lp, char *name, char *key, int len, char **key_end,`
-pub fn get_lval_dict_item() { unimplemented!("STUB get_lval_dict_item — csrc/eval.c:840") }
-
-/// Port of `get_lval_blob()` — `csrc/eval.c:933`. STUB: not yet ported.
-/// C: `static int get_lval_blob(lval_T *lp, typval_T *var1, typval_T *var2, bool empty1, bool quiet)`
-pub fn get_lval_blob() { unimplemented!("STUB get_lval_blob — csrc/eval.c:933") }
-
-/// Port of `get_lval_list()` — `csrc/eval.c:970`. STUB: not yet ported.
-/// C: `static int get_lval_list(lval_T *lp, typval_T *var1, typval_T *var2, bool empty1, int flags,`
-pub fn get_lval_list() { unimplemented!("STUB get_lval_list — csrc/eval.c:970") }
-
-/// Port of `get_lval_subscript()` — `csrc/eval.c:1016`. STUB: not yet ported.
-/// C: `static char *get_lval_subscript(lval_T *lp, char *p, char *name, typval_T *rettv, hashtab_T *ht,`
-pub fn get_lval_subscript() { unimplemented!("STUB get_lval_subscript — csrc/eval.c:1016") }
-
-/// Port of `get_lval()` — `csrc/eval.c:1191`. STUB: not yet ported.
-/// C: `char *get_lval(char *const name, typval_T *const rettv, lval_T *const lp, const bool unlet,`
-pub fn get_lval() { unimplemented!("STUB get_lval — csrc/eval.c:1191") }
-
-/// Port of `set_var_lval()` — `csrc/eval.c:1290`. STUB: not yet ported.
-/// C: `void set_var_lval(lval_T *lp, char *endp, typval_T *rettv, bool copy, const bool is_const,`
-pub fn set_var_lval() { unimplemented!("STUB set_var_lval — csrc/eval.c:1290") }
-
 /// Port of `eval_for_line()` — `csrc/eval.c:1435`. STUB: not yet ported.
 /// C: `void *eval_for_line(const char *arg, bool *errp, exarg_T *eap, evalarg_T *const evalarg)`
 pub fn eval_for_line() { unimplemented!("STUB eval_for_line — csrc/eval.c:1435") }
