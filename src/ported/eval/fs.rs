@@ -3,18 +3,46 @@
 //! Filesystem-related Vimscript builtins. The pure path-string builtins plus the
 //! filesystem-touching ones whose C leaf calls (`os_*`, `path.c`) map cleanly to
 //! Rust `std::fs`/`std::env` — the same os-layer adaptation as `os/time.rs`.
-#![allow(non_snake_case)]
+#![allow(non_snake_case, non_upper_case_globals)]
 
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 use crate::ported::eval::typval::{
-    tv_check_for_nonempty_string_arg, tv_check_for_string_arg, tv_get_bool, tv_get_number,
-    tv_get_string, tv_get_string_chk, tv_list_alloc_ret, tv_list_append_string,
+    tv_blob_alloc_ret, tv_blob_free, tv_blob_len, tv_check_for_nonempty_string_arg,
+    tv_check_for_string_arg, tv_check_str_or_nr, tv_get_bool, tv_get_number, tv_get_number_chk,
+    tv_get_string, tv_get_string_buf_chk, tv_get_string_chk, tv_list_alloc_ret,
+    tv_list_append_owned_tv, tv_list_append_string, tv_list_item_remove,
 };
-use crate::ported::eval::typval_defs_h::{typval_T, typval_vval_union::*, varnumber_T, VarType::*};
-use crate::ported::eval_h::FAIL;
+use crate::ported::eval::typval_defs_h::{
+    blob_T, list_T, typval_T, typval_vval_union::*, varnumber_T, VarLockStatus, VarType::*,
+};
+use crate::ported::eval_h::{FAIL, OK};
 use crate::ported::message::{emsg, semsg};
+use crate::ported::os::fileio::{
+    file_close, file_flush, file_open, file_write, os_strerror, kFileAppend, kFileCreate,
+    kFileMkDir, kFileTruncate, FileDescriptor,
+};
 use crate::ported::path::shorten_dir_len;
+
+/// `static const char e_error_while_writing_str[]` (`csrc/eval/fs.c:53`).
+const e_error_while_writing_str: &str = "E80: Error while writing: ";
+
+/// `kListLenUnknown = -1` (`eval/typval_defs.h:28`).
+const kListLenUnknown: isize = -1;
+
+// ── FINDFILE_* (`file_search.h:11`) ──
+/// only files
+const FINDFILE_FILE: i32 = 0;
+/// only directories
+const FINDFILE_DIR: i32 = 1;
+
+/// `#define MAXLNUM 0x7fffffff` (`pos_defs.h:15`).
+const MAXLNUM: i64 = 0x7fffffff;
+
+/// stdio buffer size `char buf[(IOSIZE/256) * 256]`, `IOSIZE == 1024 + 1`
+/// (`globals.h:21`) → 1024.
+const READ_BUF_SIZE: usize = (1025 / 256) * 256;
 
 /// Port of `f_pathshorten()` from `Src/eval/fs.c` (`pathshorten()`).
 ///
@@ -451,94 +479,517 @@ pub fn f_rename(argvars: &[typval_T], rettv: &mut typval_T) {
     );
 }
 
-/// Port of `f_readfile()` from `Src/eval/fs.c` — read a file into a List of
-/// lines. RUST-PORT NOTE: text mode (default) — split on `\n`, strip a trailing
-/// `\r`, and drop the empty element after a final newline. The `b`/`B`/`maxline`
-/// options and NUL handling are not modeled (text-line subset).
-pub fn f_readfile(argvars: &[typval_T], rettv: &mut typval_T) {
-    let l = tv_list_alloc_ret(rettv, 0);
-    let fname = tv_get_string(&argvars[0]);
-    if Path::new(&fname).is_dir() {
-        semsg(&format!("E17: {fname} is a directory"));
-        return;
-    }
-    let data = match std::fs::read(&fname) {
-        Ok(d) => d,
-        Err(_) => {
-            semsg(&format!("E484: Can't open file {fname}"));
-            return;
+/// Port of `fread()` (stdio) as used by [`read_file_or_blob`]/[`read_blob`] —
+/// `fread(ptr, 1, n, fd)`: read up to `buf.len()` bytes (element size 1),
+/// returning the count read (short at EOF/error). RUST-PORT NOTE: `os_fopen`'s
+/// `FILE *` is modelled as `std::fs::File`; this fills `buf` like stdio `fread`.
+fn fread(fd: &mut std::fs::File, buf: &mut [u8]) -> i32 {
+    let mut total = 0usize;
+    while total < buf.len() {
+        match fd.read(&mut buf[total..]) {
+            Ok(0) => break,
+            Ok(n) => total += n,
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
         }
-    };
-    let text = String::from_utf8_lossy(&data);
-    let mut s = text.as_ref();
-    // A single trailing newline does not yield a trailing empty line.
-    if let Some(stripped) = s.strip_suffix('\n') {
-        s = stripped;
     }
-    if data.is_empty() {
-        return;
-    }
-    for line in s.split('\n') {
-        let line = line.strip_suffix('\r').unwrap_or(line);
-        tv_list_append_string(&mut l.borrow_mut(), line);
-    }
+    total as i32
 }
 
-/// Port of `f_writefile()` from `Src/eval/fs.c` — write a List of lines to a
-/// file. Flags: `a` append, `b` binary (no trailing newline). Returns 0/−1.
-pub fn f_writefile(argvars: &[typval_T], rettv: &mut typval_T) {
-    use std::io::Write;
-    ret_nr!(rettv, -1);
-    let lines = match &argvars[0].vval {
-        v_list(Some(l)) => l.clone(),
-        _ => {
-            emsg("E475: Invalid argument: writefile() requires a List");
-            return;
+/// Read blob from file "fd". Caller has allocated a blob in "rettv".
+///
+/// Port of `read_blob()` from `csrc/eval/fs.c:1232`.
+///
+/// @param[in]  fd  File to read from.
+/// @param[in,out]  rettv  Blob to write to.
+/// @param[in]  offset  Read the file from the specified offset.
+/// @param[in]  size  Read the specified size, or -1 if no limit.
+///
+/// @return  OK on success, or FAIL on failure.
+fn read_blob(fd: &mut std::fs::File, rettv: &mut typval_T, offset: i64, size_arg: i64) -> i32 {
+    // blob_T *const blob = rettv->vval.v_blob;
+    let blob = match &rettv.vval {
+        v_blob(Some(b)) => b.clone(),
+        _ => return FAIL,
+    };
+    // FileInfo file_info; if (!os_fileinfo_fd(fileno(fd), &file_info)) return FAIL;
+    let file_info = match fd.metadata() {
+        Ok(m) => m,
+        Err(_) => return FAIL, // can't read the file, error
+    };
+    // S_ISCHR(file_info.stat.st_mode)
+    let is_chr = {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileTypeExt;
+            file_info.file_type().is_char_device()
+        }
+        #[cfg(not(unix))]
+        {
+            false
         }
     };
-    let fname = tv_get_string(&argvars[1]);
-    let flags = if argvars.len() > 2 {
-        tv_get_string(&argvars[2])
-    } else {
-        String::new()
-    };
-    let append = flags.contains('a');
-    let binary = flags.contains('b');
 
-    let items: Vec<String> = lines
-        .borrow()
-        .lv_items
-        .iter()
-        .map(|it| tv_get_string(&it.li_tv))
-        .collect();
-    let mut buf = items.join("\n");
-    // Append a trailing newline unless writing binary: either the joined text is
-    // non-empty, or it is empty only because the list held empty item(s).
-    if !binary && (!buf.is_empty() || !items.is_empty()) {
-        buf.push('\n');
+    let whence;
+    let mut offset = offset;
+    let mut size = size_arg;
+    let file_size = file_info.len() as i64; // (off_T)os_fileinfo_size(&file_info)
+    if offset >= 0 {
+        // The size defaults to the whole file.  If a size is given it is
+        // limited to not go past the end of the file.
+        if size == -1 || (size > file_size - offset && !is_chr) {
+            // size may become negative, checked below
+            size = file_size - offset;
+        }
+        whence = SeekFrom::Start(offset as u64); // SEEK_SET
+    } else {
+        // limit the offset to not go before the start of the file
+        if -offset > file_size && !is_chr {
+            offset = -file_size;
+        }
+        // Size defaults to reading until the end of the file.
+        if size == -1 || size > -offset {
+            size = -offset;
+        }
+        whence = SeekFrom::End(offset); // SEEK_END
+    }
+    if size <= 0 {
+        return OK;
+    }
+    if offset != 0 && fd.seek(whence).is_err() {
+        return OK;
     }
 
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .append(append)
-        .truncate(!append)
-        .open(&fname);
-    let mut f = match file {
+    // ga_grow(&blob->bv_ga, size); blob->bv_ga.ga_len = size;
+    let mut data = vec![0u8; size as usize];
+    if (fread(fd, &mut data) as i64) < size {
+        // An empty blob is returned on error.
+        tv_blob_free(&mut blob.borrow_mut());
+        rettv.vval = v_blob(None);
+        return FAIL;
+    }
+    blob.borrow_mut().bv_ga.extend_from_slice(&data);
+    OK
+}
+
+/// Port of `read_file_or_blob()` from `csrc/eval/fs.c:1283` — the shared body of
+/// "readfile()" and "readblob()".
+///
+/// RUST-PORT NOTE: `os_fopen(fname, READBIN)` → `std::fs::File::open` (binary
+/// mode is a no-op on unix); the `prev` partial-line buffer is a `Vec<u8>` whose
+/// length is `prevlen` (the C `prevsize`/`xrealloc` growth heuristic is an
+/// allocation optimization with no observable effect, dropped). Line bytes
+/// become Rust `String`s via lossy UTF-8 (Vim stores the raw bytes).
+fn read_file_or_blob(argvars: &[typval_T], rettv: &mut typval_T, always_blob: bool) {
+    let mut binary = false;
+    let mut blob = always_blob;
+    let io_size = READ_BUF_SIZE;
+    let mut buf = vec![0u8; io_size]; // char buf[(IOSIZE/256) * 256];
+    let mut prev: Vec<u8> = Vec::new(); // previously read bytes, if any (prevlen == prev.len())
+    let mut maxline: i64 = MAXLNUM;
+    let mut offset: i64 = 0;
+    let mut size: i64 = -1;
+
+    if argvars.len() > 1 && argvars[1].v_type != VAR_UNKNOWN {
+        if always_blob {
+            offset = tv_get_number(&argvars[1]);
+            if argvars.len() > 2 && argvars[2].v_type != VAR_UNKNOWN {
+                size = tv_get_number(&argvars[2]);
+            }
+        } else {
+            if tv_get_string(&argvars[1]) == "b" {
+                binary = true;
+            } else if tv_get_string(&argvars[1]) == "B" {
+                blob = true;
+            }
+            if argvars.len() > 2 && argvars[2].v_type != VAR_UNKNOWN {
+                maxline = tv_get_number(&argvars[2]);
+            }
+        }
+    }
+
+    if blob {
+        tv_blob_alloc_ret(rettv);
+    } else {
+        tv_list_alloc_ret(rettv, kListLenUnknown);
+    }
+
+    // Always open the file in binary mode, library functions have a mind of
+    // their own about CR-LF conversion.
+    let fname = tv_get_string(&argvars[0]);
+
+    if Path::new(&fname).is_dir() {
+        semsg(&format!("E17: \"{fname}\" is a directory"));
+        return;
+    }
+    let mut fd = match if fname.is_empty() {
+        Err(())
+    } else {
+        std::fs::File::open(&fname).map_err(|_| ())
+    } {
         Ok(f) => f,
-        Err(_) => {
-            semsg(&format!("E482: Can't create file {fname}"));
+        Err(()) => {
+            semsg(&format!(
+                "E484: Can't open file {}",
+                if fname.is_empty() {
+                    "<empty>"
+                } else {
+                    fname.as_str()
+                }
+            ));
             return;
         }
     };
-    ret_nr!(
-        rettv,
-        if f.write_all(buf.as_bytes()).is_ok() {
-            0
-        } else {
-            -1
+
+    if blob {
+        if read_blob(&mut fd, rettv, offset, size) == FAIL {
+            semsg(&format!("E485: Can't read file {fname}"));
         }
-    );
+        return; // fclose on drop
+    }
+
+    // list_T *const l = rettv->vval.v_list;
+    let l = match &rettv.vval {
+        v_list(Some(l)) => l.clone(),
+        _ => return,
+    };
+
+    while maxline < 0 || (l.borrow().lv_len as i64) < maxline {
+        let mut readlen = fread(&mut fd, &mut buf) as i64;
+
+        // This for loop processes what was read, but is also entered at end
+        // of file so that either:
+        // - an incomplete line gets written
+        // - a "binary" file gets an empty line at the end if it ends in a
+        //   newline.
+        let mut start = 0usize; // Start of current line.
+        let mut p = 0usize; // Position in buf.
+        while (readlen > 0 && p < readlen as usize) || (readlen <= 0 && (!prev.is_empty() || binary))
+        {
+            if readlen <= 0 || buf[p] == b'\n' {
+                let at_eof = readlen <= 0;
+                let mut len = p - start; // size_t len = (size_t)(p - start);
+
+                // Finished a line.  Remove CRs before NL.
+                if readlen > 0 && !binary {
+                    while len > 0 && buf[start + len - 1] == b'\r' {
+                        len -= 1;
+                    }
+                    // removal may cross back to the "prev" string
+                    if len == 0 {
+                        while !prev.is_empty() && *prev.last().unwrap() == b'\r' {
+                            prev.pop();
+                        }
+                    }
+                }
+                let s: String = if prev.is_empty() {
+                    String::from_utf8_lossy(&buf[start..start + len]).into_owned()
+                } else {
+                    // Change "prev" buffer to be the right size.
+                    prev.extend_from_slice(&buf[start..start + len]);
+                    let s = String::from_utf8_lossy(&prev).into_owned();
+                    prev = Vec::new(); // the list will own the string
+                    s
+                };
+
+                tv_list_append_owned_tv(
+                    &mut l.borrow_mut(),
+                    typval_T {
+                        v_type: VAR_STRING,
+                        v_lock: VarLockStatus::VAR_UNLOCKED,
+                        vval: v_string(s),
+                    },
+                );
+
+                start = p + 1; // Step over newline.
+                if maxline < 0 {
+                    if (l.borrow().lv_len as i64) > -maxline {
+                        tv_list_item_remove(&mut l.borrow_mut(), 0);
+                    }
+                } else if (l.borrow().lv_len as i64) >= maxline {
+                    break;
+                }
+                if at_eof {
+                    break;
+                }
+            } else if buf[p] == 0 {
+                // *p == NUL
+                buf[p] = b'\n';
+                // Check for utf8 "bom"; U+FEFF is encoded as EF BB BF.  Do this
+                // when finding the BF and check the previous two bytes.
+            } else if buf[p] == 0xbf && !binary {
+                // Find the two bytes before the 0xbf.  If p is at buf, or buf + 1,
+                // these may be in the "prev" string.
+                let back1 = if p >= 1 {
+                    buf[p - 1]
+                } else if !prev.is_empty() {
+                    prev[prev.len() - 1]
+                } else {
+                    0
+                };
+                let back2 = if p >= 2 {
+                    buf[p - 2]
+                } else if p == 1 && !prev.is_empty() {
+                    prev[prev.len() - 1]
+                } else if prev.len() >= 2 {
+                    prev[prev.len() - 2]
+                } else {
+                    0
+                };
+
+                if back2 == 0xef && back1 == 0xbb {
+                    let mut dest: isize = p as isize - 2; // char *dest = p - 2;
+
+                    // Usually a BOM is at the beginning of a file, and so at
+                    // the beginning of a line; then we can just step over it.
+                    if start as isize == dest {
+                        start = p + 1;
+                    } else {
+                        // have to shuffle buf to close gap
+                        let mut adjust_prevlen: usize = 0;
+
+                        if dest < 0 {
+                            // adjust_prevlen must be 1 or 2.
+                            adjust_prevlen = (-dest) as usize;
+                            dest = 0;
+                        }
+                        if readlen > p as i64 + 1 {
+                            buf.copy_within((p + 1)..(readlen as usize), dest as usize);
+                        }
+                        readlen -= 3 - adjust_prevlen as i64;
+                        let newlen = prev.len() - adjust_prevlen;
+                        prev.truncate(newlen);
+                        p = dest as usize; // c: p = dest - 1; (loop increment skipped below)
+                        continue;
+                    }
+                }
+            }
+            p += 1;
+        } // for
+
+        if (maxline >= 0 && (l.borrow().lv_len as i64) >= maxline) || readlen <= 0 {
+            break;
+        }
+        if start < p {
+            // There's part of a line in buf, store it in "prev".
+            prev.extend_from_slice(&buf[start..p]);
+        }
+    } // while
+      // fclose on drop
+}
+
+/// Port of `f_readfile()` from `csrc/eval/fs.c:1487`.
+pub fn f_readfile(argvars: &[typval_T], rettv: &mut typval_T) {
+    // c: if (check_secure()) return;  (no sandbox standalone)
+    read_file_or_blob(argvars, rettv, false);
+}
+
+/// Port of `f_readblob()` from `csrc/eval/fs.c:1477`.
+pub fn f_readblob(argvars: &[typval_T], rettv: &mut typval_T) {
+    // c: if (check_secure()) return;  (no sandbox standalone)
+    read_file_or_blob(argvars, rettv, true);
+}
+
+/// Write "list" of strings to file "fp".
+///
+/// Port of `write_list()` from `csrc/eval/fs.c:1698`.
+///
+/// @param  fp  File to write to.
+/// @param[in]  list  List to write.
+/// @param[in]  binary  Whether to write in binary mode.
+///
+/// @return true in case of success, false otherwise.
+fn write_list(fp: &mut FileDescriptor, list: &list_T, binary: bool) -> bool {
+    let mut error: i32 = 0;
+    let n = list.lv_items.len();
+    'write_list_error: {
+        // TV_LIST_ITER_CONST(list, li, { … })
+        for (idx, li) in list.lv_items.iter().enumerate() {
+            let s = match tv_get_string_chk(&li.li_tv) {
+                Some(s) => s,
+                None => return false,
+            };
+            let sb = s.as_bytes();
+            let mut hunk_start = 0usize;
+            let mut p = 0usize;
+            loop {
+                // for (const char *p = hunk_start;; p++)
+                let at_nul = p >= sb.len();
+                if at_nul || sb[p] == b'\n' {
+                    // *p == NUL || *p == NL
+                    if p != hunk_start {
+                        let written = file_write(fp, &sb[hunk_start..p], p - hunk_start);
+                        if written < 0 {
+                            error = written as i32;
+                            break 'write_list_error;
+                        }
+                    }
+                    if at_nul {
+                        break;
+                    } else {
+                        hunk_start = p + 1;
+                        let written = file_write(fp, &[0u8], 1);
+                        if written < 0 {
+                            error = written as i32;
+                            break; // c: break (inner loop), NOT goto
+                        }
+                    }
+                }
+                p += 1;
+            }
+            if !binary || idx + 1 != n {
+                // !binary || TV_LIST_ITEM_NEXT(list, li) != NULL
+                let written = file_write(fp, b"\n", 1);
+                if written < 0 {
+                    error = written as i32;
+                    break 'write_list_error;
+                }
+            }
+        }
+        error = file_flush(fp);
+        if error != 0 {
+            break 'write_list_error;
+        }
+        return true;
+    }
+    // write_list_error:
+    semsg(&format!("{}{}", e_error_while_writing_str, os_strerror(error)));
+    false
+}
+
+/// Write data to file with descriptor `fp`.
+///
+/// Port of `write_data()` from `csrc/eval/fs.c:1753`.
+///
+/// @return true on success, or false on failure.
+fn write_data(fp: &mut FileDescriptor, data: &[u8], len: usize) -> bool {
+    let mut error: i32 = 0;
+    'write_blob_error: {
+        if len > 0 {
+            let written = file_write(fp, data, len);
+            if written < len as isize {
+                error = written as i32;
+                break 'write_blob_error;
+            }
+        }
+        error = file_flush(fp);
+        if error != 0 {
+            break 'write_blob_error;
+        }
+        return true;
+    }
+    // write_blob_error:
+    semsg(&format!("{}{}", e_error_while_writing_str, os_strerror(error)));
+    false
+}
+
+/// Port of `write_blob()` from `csrc/eval/fs.c:1774`.
+fn write_blob(fp: &mut FileDescriptor, blob: &blob_T) -> bool {
+    write_data(fp, &blob.bv_ga, tv_blob_len(blob) as usize)
+}
+
+/// Port of `write_string()` from `csrc/eval/fs.c:1780`.
+fn write_string(fp: &mut FileDescriptor, data: &str) -> bool {
+    write_data(fp, data.as_bytes(), data.len())
+}
+
+/// Port of `f_writefile()` from `csrc/eval/fs.c:1787` — write a List, Blob or
+/// String to a file. Flags: `a` append, `b` binary, `p` mkdir parents, `s`/`S`
+/// fsync toggle. Returns 0 on success, -1 on failure.
+///
+/// RUST-PORT NOTE: the `D` defer flag needs `can_add_defer`/`add_defer` (the
+/// deferred-function stack, runtime.c), which the standalone interpreter lacks;
+/// `script_is_lua`/`current_sctx` (Lua string → Blob) has no counterpart either.
+pub fn f_writefile(argvars: &[typval_T], rettv: &mut typval_T) {
+    ret_nr!(rettv, -1);
+    // c: if (check_secure()) return;  (no sandbox standalone)
+
+    if argvars[0].v_type == VAR_LIST {
+        if let v_list(Some(l)) = &argvars[0].vval {
+            for li in &l.borrow().lv_items {
+                if !tv_check_str_or_nr(&li.li_tv) {
+                    return;
+                }
+            }
+        }
+    } else if argvars[0].v_type != VAR_BLOB && argvars[0].v_type != VAR_STRING {
+        semsg("E475: Invalid argument: writefile() first argument must be a List or a Blob");
+        return;
+    }
+
+    let mut binary = false;
+    let mut append = false;
+    let mut do_fsync = false; // c: !!p_fs — 'fsync' option, off standalone
+    let mut mkdir_p = false;
+    if argvars.len() > 2 && argvars[2].v_type != VAR_UNKNOWN {
+        let flags = match tv_get_string_chk(&argvars[2]) {
+            Some(f) => f,
+            None => return,
+        };
+        for c in flags.chars() {
+            match c {
+                'b' => binary = true,
+                'a' => append = true,
+                'D' => {} // c: defer — needs the deferred-function stack (unsupported)
+                's' => do_fsync = true,
+                'S' => do_fsync = false,
+                'p' => mkdir_p = true,
+                _ => {
+                    semsg(&format!("E5060: Unknown flag: {c}"));
+                    return;
+                }
+            }
+        }
+    }
+
+    let fname = match tv_get_string_buf_chk(&argvars[1]) {
+        Some(f) => f,
+        None => return,
+    };
+
+    let mut fp = FileDescriptor::default();
+    if fname.is_empty() {
+        emsg("E482: Can't open file with an empty name");
+    } else {
+        let error = file_open(
+            &mut fp,
+            &fname,
+            (if append { kFileAppend } else { kFileTruncate })
+                | (if mkdir_p { kFileMkDir } else { kFileCreate })
+                | kFileCreate,
+            0o666,
+        );
+        if error != 0 {
+            semsg(&format!(
+                "E482: Can't open file {fname} for writing: {}",
+                os_strerror(error)
+            ));
+        } else {
+            let write_ok = if argvars[0].v_type == VAR_BLOB {
+                match &argvars[0].vval {
+                    v_blob(Some(b)) => write_blob(&mut fp, &b.borrow()),
+                    _ => true, // argvars[0].vval.v_blob == NULL
+                }
+            } else if argvars[0].v_type == VAR_STRING {
+                write_string(&mut fp, &tv_get_string(&argvars[0]))
+            } else {
+                match &argvars[0].vval {
+                    v_list(Some(l)) => write_list(&mut fp, &l.borrow(), binary),
+                    _ => true,
+                }
+            };
+            if write_ok {
+                ret_nr!(rettv, 0);
+            }
+            let close_error = file_close(&mut fp, do_fsync);
+            if close_error != 0 {
+                semsg(&format!(
+                    "E80: Error when closing file {fname}: {}",
+                    os_strerror(close_error)
+                ));
+            }
+        }
+    }
 }
 
 // ── fnamemodify / glob / readdir / blob IO (eval/fs.c) ───────────────────────
@@ -844,77 +1295,95 @@ pub fn f_glob2regpat(argvars: &[typval_T], rettv: &mut typval_T) {
     );
 }
 
-/// Port of `f_readdir()` from `Src/eval/fs.c` — directory entries (sorted), with
-/// an optional filter expr (`{name -> 1 keep / 0 skip / -1 stop}` via `v:val`).
-pub fn f_readdir(argvars: &[typval_T], rettv: &mut typval_T) {
-    let l = tv_list_alloc_ret(rettv, 0);
-    let path = tv_get_string(&argvars[0]);
-    let mut names: Vec<String> = match std::fs::read_dir(&path) {
-        Ok(rd) => rd
-            .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
-            .collect(),
-        Err(_) => return,
-    };
-    names.sort();
-    let has_filter = argvars.len() > 1 && argvars[1].v_type != VAR_UNKNOWN;
-    for name in names {
-        if has_filter {
-            // c: readdir_checkitem — set v:val=name, eval expr; 1 keep / 0 skip / -1 stop.
-            let key = typval_T::from(0 as varnumber_T);
-            let val = typval_T::from(name.clone());
-            let r = crate::ported::eval::list::FILTER_MAP_EVAL_HOOK
-                .with(|h| *h.borrow())
-                .and_then(|f| f(&argvars[1], &key, &val));
-            match r.map(|tv| tv_get_number(&tv)) {
-                Some(0) => continue,
-                Some(n) if n < 0 => break,
-                _ => {}
-            }
-        }
-        tv_list_append_string(&mut l.borrow_mut(), &name);
+/// Evaluate "expr" (= "context") for readdir().
+///
+/// Port of `readdir_checkitem()` from `csrc/eval/fs.c:1166`.
+///
+/// RUST-PORT NOTE: `eval_expr_typval()` plus the `v:val` bookkeeping
+/// (`prepare_vimvar`/`set_vim_var_string`/`restore_vimvar` for `VV_VAL`) are the
+/// bridge's `FILTER_MAP_EVAL_HOOK`, which sets `v:val` to the item and evaluates
+/// the expr/funcref.
+fn readdir_checkitem(context: &typval_T, name: &str) -> varnumber_T {
+    // typval_T *expr = (typval_T *)context;
+    let expr = context;
+    let mut retval: varnumber_T = 0;
+    let mut error = false;
+
+    if expr.v_type == VAR_UNKNOWN {
+        return 1;
     }
+
+    // prepare_vimvar(VV_VAL, &save_val); set_vim_var_string(VV_VAL, name, -1);
+    // argv[0] = { VAR_STRING, name }; eval_expr_typval(expr, false, argv, 1, &rettv)
+    let key = typval_T::from(0 as varnumber_T);
+    let val = typval_T::from(name.to_string());
+    let hook = crate::ported::eval::list::FILTER_MAP_EVAL_HOOK.with(|h| *h.borrow());
+    let rettv = match hook.and_then(|f| f(expr, &key, &val)) {
+        Some(tv) => tv,
+        None => return retval, // goto theend (retval == 0)
+    };
+
+    retval = tv_get_number_chk(&rettv, Some(&mut error));
+    if error {
+        retval = -1;
+    }
+    // tv_clear(&rettv); (Rust drops)
+    retval
 }
 
-/// Port of `read_file_or_blob()`/`read_blob()`/`f_readblob()` from `Src/eval/fs.c`
-/// — read a file's bytes into a Blob, honoring `[offset [, size]]`.
-pub fn f_readblob(argvars: &[typval_T], rettv: &mut typval_T) {
-    use crate::ported::eval::typval::tv_blob_alloc_ret;
-    let b = tv_blob_alloc_ret(rettv);
-    let fname = tv_get_string(&argvars[0]);
-    let data = match std::fs::read(&fname) {
-        Ok(d) => d,
+/// "readdir()" function.
+///
+/// Port of `f_readdir()` from `csrc/eval/fs.c:1203`.
+pub fn f_readdir(argvars: &[typval_T], rettv: &mut typval_T) {
+    let l = tv_list_alloc_ret(rettv, kListLenUnknown);
+    // c: if (check_secure()) return;  (no sandbox standalone)
+
+    let path = tv_get_string(&argvars[0]);
+    // typval_T *expr = &argvars[1];
+    let expr_unknown = typval_T {
+        v_type: VAR_UNKNOWN,
+        v_lock: VarLockStatus::VAR_UNLOCKED,
+        vval: v_number(0),
+    };
+    let expr = argvars.get(1).unwrap_or(&expr_unknown);
+
+    // int ret = readdir_core(&ga, path, (void *)expr, readdir_checkitem);
+    // RUST-PORT NOTE: readdir_core (fileio.c) scans the dir (os_scandir), ignores
+    //   "."/"..", filters via readdir_checkitem, then sorts. Inlined here over
+    //   std::fs::read_dir (which already omits "."/"..").
+    let mut ga: Vec<String> = Vec::new();
+    let rd = match std::fs::read_dir(&path) {
+        Ok(rd) => rd,
         Err(_) => {
-            semsg(&format!("E484: Can't open file {fname}"));
+            // c: smsg(0, _(e_notopen), path); return FAIL; → f_readdir does nothing
+            semsg(&format!("E484: Can't open file {path}"));
             return;
         }
     };
-    // c: offset (negative → from EOF), then size.
-    let len = data.len() as i64;
-    let mut off = if argvars.len() > 1 {
-        tv_get_number(&argvars[1])
-    } else {
-        0
-    };
-    if off < 0 {
-        off += len;
-        if off < 0 {
-            off = 0;
+    for e in rd {
+        let p = match e {
+            Ok(e) => e.file_name().to_string_lossy().into_owned(),
+            Err(_) => continue,
+        };
+        let mut ignore = p == "." || p == "..";
+        if !ignore {
+            let r = readdir_checkitem(expr, &p);
+            if r < 0 {
+                break;
+            }
+            if r == 0 {
+                ignore = true;
+            }
+        }
+        if !ignore {
+            ga.push(p);
         }
     }
-    let off = (off.min(len)) as usize;
-    let size = if argvars.len() > 2 {
-        let s = tv_get_number(&argvars[2]);
-        if s < 0 {
-            (len as usize).saturating_sub(off)
-        } else {
-            (s as usize).min(data.len() - off)
-        }
-    } else {
-        data.len() - off
-    };
-    b.borrow_mut()
-        .bv_ga
-        .extend_from_slice(&data[off..off + size]);
+    ga.sort();
+    // if (ret == OK && ga.ga_len > 0) { append each }
+    for p in &ga {
+        tv_list_append_string(&mut l.borrow_mut(), p);
+    }
 }
 
 /// Expand a leading `~`/`~/` to `$HOME` and `$VAR`/`${VAR}` references in a
@@ -1147,15 +1616,64 @@ pub fn f_browsedir(_argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.v_type = VAR_STRING;
     rettv.vval = v_string(String::new());
 }
-/// Port of `f_finddir()` (fs.c) — no `'path'` to search standalone → "".
-pub fn f_finddir(_argvars: &[typval_T], rettv: &mut typval_T) {
+/// Port of `findfilendir()` from `csrc/eval/fs.c:536`.
+///
+/// RUST-PORT NOTE: the search backend is editor state — `curbuf->b_p_path`/
+/// `p_path` (the `'path'` option), `find_file_in_path_option()` (file_search.c),
+/// `vim_findfile_cleanup()`, and `curbuf->b_ffname`/`b_p_sua` — none of which the
+/// standalone interpreter has. The argument parsing is ported faithfully; the
+/// `find_file_in_path_option` search loop is a deferred stub (see deferred_deps),
+/// so `fresult` stays NULL → the result is "" (or an empty List when count < 0).
+fn findfilendir(argvars: &[typval_T], rettv: &mut typval_T, _find_what: i32) {
+    let fresult: Option<String> = None;
+    // char *path = *curbuf->b_p_path == NUL ? p_path : curbuf->b_p_path;
+    let mut count = 1;
+    let mut error = false;
+
+    rettv.vval = v_string(String::new()); // rettv->vval.v_string = NULL;
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(String::new());
+
+    let fname = tv_get_string(&argvars[0]);
+
+    if argvars.len() > 1 && argvars[1].v_type != VAR_UNKNOWN {
+        match tv_get_string_buf_chk(&argvars[1]) {
+            None => error = true,
+            Some(_p) => {
+                // if (*p != NUL) { path = p; }  (path unused without a search backend)
+                if argvars.len() > 2 && argvars[2].v_type != VAR_UNKNOWN {
+                    count = tv_get_number_chk(&argvars[2], Some(&mut error)) as i32;
+                }
+            }
+        }
+    }
+
+    if count < 0 {
+        tv_list_alloc_ret(rettv, kListLenUnknown);
+    }
+
+    if !fname.is_empty() && !error {
+        // do { fresult = find_file_in_path_option(…); … } while (…);
+        // DEFERRED: find_file_in_path_option()/vim_findfile_cleanup() (file_search.c)
+        //   + curbuf->b_ffname/b_p_sua need the editor core; no file is found here.
+    }
+
+    if rettv.v_type == VAR_STRING {
+        rettv.vval = v_string(fresult.unwrap_or_default());
+    }
 }
-/// Port of `f_findfile()` (fs.c) — no `'path'` to search standalone → "".
-pub fn f_findfile(_argvars: &[typval_T], rettv: &mut typval_T) {
-    rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(String::new());
+
+/// "finddir({fname}[, {path}[, {count}]])" function.
+///
+/// Port of `f_finddir()` from `csrc/eval/fs.c:602`.
+pub fn f_finddir(argvars: &[typval_T], rettv: &mut typval_T) {
+    findfilendir(argvars, rettv, FINDFILE_DIR);
+}
+
+/// "findfile({fname}[, {path}[, {count}]])" function.
+///
+/// Port of `f_findfile()` from `csrc/eval/fs.c:608`.
+pub fn f_findfile(argvars: &[typval_T], rettv: &mut typval_T) {
+    findfilendir(argvars, rettv, FINDFILE_FILE);
 }
 
 #[cfg(test)]
@@ -1187,5 +1705,136 @@ mod tests {
             assert_eq!(perm_string!(0o755u32), "rwxr-xr-x");
             assert_eq!(perm_string!(0o000u32), "---------");
         }
+    }
+
+    fn tmp(tag: &str) -> String {
+        std::env::temp_dir()
+            .join(format!("vimlrs_fs_{}_{}.tmp", tag, std::process::id()))
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    // write_list writes list items joined by '\n' with a trailing '\n' (text mode).
+    #[test]
+    fn write_list_roundtrip() {
+        let path = tmp("wl");
+        let mut list = list_T::default();
+        tv_list_append_string(&mut list, "hello");
+        tv_list_append_string(&mut list, "world");
+
+        let mut fp = FileDescriptor::default();
+        assert_eq!(
+            file_open(&mut fp, &path, kFileCreate | kFileTruncate, 0o644),
+            0
+        );
+        assert!(write_list(&mut fp, &list, false));
+        assert_eq!(file_close(&mut fp, false), 0);
+        assert_eq!(std::fs::read(&path).unwrap(), b"hello\nworld\n");
+
+        // Binary mode: no trailing newline after the last item.
+        let mut fp = FileDescriptor::default();
+        assert_eq!(
+            file_open(&mut fp, &path, kFileCreate | kFileTruncate, 0o644),
+            0
+        );
+        assert!(write_list(&mut fp, &list, true));
+        assert_eq!(file_close(&mut fp, false), 0);
+        assert_eq!(std::fs::read(&path).unwrap(), b"hello\nworld");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // f_writefile(List) then f_readfile round-trips the lines.
+    #[test]
+    fn writefile_readfile_roundtrip() {
+        let path = tmp("wrf");
+        let mut list = list_T::default();
+        tv_list_append_string(&mut list, "alpha");
+        tv_list_append_string(&mut list, "beta");
+        let list_tv = typval_T {
+            v_type: VAR_LIST,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_list(Some(std::rc::Rc::new(std::cell::RefCell::new(list)))),
+        };
+
+        let argw = [list_tv, typval_T::from(path.clone())];
+        let mut rw = typval_T::default();
+        f_writefile(&argw, &mut rw);
+        assert!(matches!(rw.vval, v_number(0)), "writefile returned 0");
+
+        let argr = [typval_T::from(path.clone())];
+        let mut rr = typval_T::default();
+        f_readfile(&argr, &mut rr);
+        let l = match &rr.vval {
+            v_list(Some(l)) => l.clone(),
+            _ => panic!("readfile must return a list"),
+        };
+        assert_eq!(l.borrow().lv_len, 2);
+        assert_eq!(tv_get_string(&l.borrow().lv_items[0].li_tv), "alpha");
+        assert_eq!(tv_get_string(&l.borrow().lv_items[1].li_tv), "beta");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // readfile strips a trailing CR and does not yield a trailing empty line.
+    #[test]
+    fn readfile_crlf_and_trailing_newline() {
+        let path = tmp("crlf");
+        std::fs::write(&path, b"a\r\nb\r\n").unwrap();
+        let argr = [typval_T::from(path.clone())];
+        let mut rr = typval_T::default();
+        f_readfile(&argr, &mut rr);
+        let l = match &rr.vval {
+            v_list(Some(l)) => l.clone(),
+            _ => panic!(),
+        };
+        assert_eq!(l.borrow().lv_len, 2);
+        assert_eq!(tv_get_string(&l.borrow().lv_items[0].li_tv), "a");
+        assert_eq!(tv_get_string(&l.borrow().lv_items[1].li_tv), "b");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // f_readblob with [offset, size] extracts a byte window.
+    #[test]
+    fn readblob_offset_size() {
+        let path = tmp("rb");
+        std::fs::write(&path, [0u8, 1, 2, 3, 4, 5]).unwrap();
+        let argr = [
+            typval_T::from(path.clone()),
+            typval_T::from(2 as varnumber_T),
+            typval_T::from(3 as varnumber_T),
+        ];
+        let mut rr = typval_T::default();
+        f_readblob(&argr, &mut rr);
+        let b = match &rr.vval {
+            v_blob(Some(b)) => b.clone(),
+            _ => panic!("readblob must return a blob"),
+        };
+        assert_eq!(b.borrow().bv_ga, vec![2u8, 3, 4]);
+
+        // Negative offset reads from EOF.
+        let argr = [typval_T::from(path.clone()), typval_T::from(-2 as varnumber_T)];
+        let mut rr = typval_T::default();
+        f_readblob(&argr, &mut rr);
+        let b = match &rr.vval {
+            v_blob(Some(b)) => b.clone(),
+            _ => panic!(),
+        };
+        assert_eq!(b.borrow().bv_ga, vec![4u8, 5]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // readdir_checkitem keeps every entry when the filter expr is absent.
+    #[test]
+    fn readdir_checkitem_unknown_keeps() {
+        let unknown = typval_T::default(); // VAR_UNKNOWN
+        assert_eq!(readdir_checkitem(&unknown, "anything"), 1);
+    }
+
+    // findfile/finddir have no search path standalone → "".
+    #[test]
+    fn findfile_returns_empty() {
+        let argv = [typval_T::from("nonesuch.txt".to_string())];
+        let mut rv = typval_T::default();
+        f_findfile(&argv, &mut rv);
+        assert_eq!(tv_get_string(&rv), "");
     }
 }

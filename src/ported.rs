@@ -13,6 +13,9 @@ pub mod eval;
 pub mod eval_h;
 /// Port of `src/nvim/ex_eval.c` (abort/exception state predicates).
 pub mod ex_eval;
+/// Port of `src/nvim/mbyte.c` (subset: the UTF-8 codec helpers `utf_ptr2char`,
+/// `utf_ptr2len`, `utf_char2len`, `utf_char2bytes` behind the JSON decoder).
+pub mod mbyte;
 /// Port of `src/nvim/message.c` (extern: `emsg`/`did_emsg`).
 pub mod message;
 /// Port of `src/nvim/ops.c` (subset: the yank-register store for `getreg`/`setreg`).

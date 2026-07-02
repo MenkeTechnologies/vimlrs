@@ -2110,6 +2110,1599 @@ pub fn tv_is_luafunc(tv: &typval_T) -> bool {
     matches!((tv.v_type, &tv.vval), (VAR_PARTIAL, v_partial(Some(p))) if is_luafunc(p))
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Expression tree-walker (`eval0`…`eval7`) + leaf parsers, ported from
+// `csrc/eval.c`.
+//
+// PORT.md classes these as strict reference ports: faithful C control flow with
+// verbatim C names, cited `// c:NNN`. The bytecode frontend (viml_parser.rs /
+// compile_viml.rs) is the RUNTIME path — these tree-walkers are dead code here,
+// which is allowed per-file (see PORT.md §"strict 1:1 ports"). They document
+// the exact grammar the frontend must reproduce.
+//
+// RUST-PORT NOTE (cursor model): the C walkers advance a `char **arg` pointer
+// into a NUL-terminated buffer. The Rust ports model that cursor as
+// `&mut &str`: `**arg` (the first byte) is `arg.as_bytes().first()...unwrap_or(0)`
+// (an empty slice reads as the C NUL sentinel), and `*arg = skipwhite(*arg + n)`
+// becomes `*arg = skipwhite(&s[n..])` (copying `*arg` out first, since `&str`
+// is `Copy`). Wide chars advance by `char::len_utf8`, matching `MB_PTR_ADV`.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// `EVAL_EVALUATE` (`csrc/eval.h:140`) — `evalarg_T.eval_flags` bit: when unset,
+/// the argument is only parsed, not executed.
+pub const EVAL_EVALUATE: i32 = 1;
+
+/// `NOTDONE` (`src/nvim/vim_defs.h`, extern) — a third return code besides
+/// OK/FAIL, used by parsers that decline to handle the input (e.g. `{...}` that
+/// turns out to be a `{expr}` name rather than a Dict/lambda).
+pub const NOTDONE: i32 = 2;
+
+/// `typedef struct { int eval_flags; … } evalarg_T;`
+/// (`src/nvim/eval_defs.h:20`) — context passed through the `eval*` functions.
+///
+/// RUST-PORT NOTE: `eval_getline`/`eval_cookie`/`eval_tofree` are the
+/// `:source`-line reader used when an expression spans continuation lines; the
+/// standalone evaluator has no source-line getter, so only `eval_flags` is
+/// modeled.
+#[derive(Debug, Default, Clone)]
+pub struct evalarg_T {
+    /// `int eval_flags` — `EVAL_` flag values (`EVAL_EVALUATE`).
+    pub eval_flags: i32,
+}
+
+/// `typedef enum { GLV_FAIL, GLV_OK, GLV_STOP } glv_status_T;`
+/// (`csrc/eval.c:134`) — result of `get_lval_dict_item()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum glv_status_T {
+    /// Evaluation error.
+    GLV_FAIL,
+    /// Success.
+    GLV_OK,
+    /// Stop processing characters after the key.
+    GLV_STOP,
+}
+
+/// `GLV_QUIET` (`csrc/eval.h:94`) — `get_lval()` flag: do not emit error
+/// messages (aliases `TFN_QUIET`).
+pub const GLV_QUIET: i32 = 2;
+/// `GLV_NO_AUTOLOAD` (`csrc/eval.h:95`) — do not use script autoloading
+/// (aliases `TFN_NO_AUTOLOAD`).
+pub const GLV_NO_AUTOLOAD: i32 = 4;
+/// `GLV_READ_ONLY` (`csrc/eval.h:96`) — caller will not change the value
+/// (aliases `TFN_READ_ONLY`).
+pub const GLV_READ_ONLY: i32 = 16;
+
+/// `typedef struct { … } lval_T;` (`csrc/eval.h:52`) — the parsed assignment
+/// target returned by [`get_lval`] and consumed by [`set_var_lval`].
+///
+/// RUST-PORT NOTE: the C struct is a bundle of raw interior pointers
+/// (`ll_tv` into a variable's `di_tv`, `ll_li` into a list item, `ll_di` into a
+/// `dictitem_T`). This port models Lists/Dicts as `Rc<RefCell<…>>`/`IndexMap`
+/// (see `typval_defs_h.rs`), which has no `dictitem_T`/`hashtab_T` and no stable
+/// interior address to point at, so the lval *machinery* (`get_lval`,
+/// `get_lval_dict_item`, `get_lval_subscript`, `set_var_lval`) is deferred to
+/// the `find_var`/`set_var`/dictitem subsystem (see `stubs/eval.rs`). The type
+/// is defined for signature fidelity; the pointer fields are raw pointers
+/// matching C exactly.
+pub struct lval_T {
+    /// `const char *ll_name` — start of variable name (can be NULL).
+    pub ll_name: Option<String>,
+    /// `size_t ll_name_len` — length of `.ll_name`.
+    pub ll_name_len: usize,
+    /// `char *ll_exp_name` — NULL or expanded (`{expr}`) name.
+    pub ll_exp_name: Option<String>,
+    /// `typval_T *ll_tv` — value of the item being used (or the Dict to add to).
+    pub ll_tv: *mut typval_T,
+    /// `listitem_T *ll_li` — the (first) list item or NULL.
+    pub ll_li: *mut crate::ported::eval::typval_defs_h::listitem_T,
+    /// `list_T *ll_list` — the list or NULL.
+    pub ll_list: *mut crate::ported::eval::typval_defs_h::list_T,
+    /// `bool ll_range` — true when a `[i:j]` range was used.
+    pub ll_range: bool,
+    /// `bool ll_empty2` — second index empty: `[i:]`.
+    pub ll_empty2: bool,
+    /// `int ll_n1` — first index for a list.
+    pub ll_n1: i32,
+    /// `int ll_n2` — second index for a list range.
+    pub ll_n2: i32,
+    /// `dict_T *ll_dict` — the Dict or NULL.
+    pub ll_dict: *mut crate::ported::eval::typval_defs_h::dict_T,
+    /// `dictitem_T *ll_di` — the dictitem or NULL. RUST-PORT NOTE: `dictitem_T`
+    /// is not modeled (the Dict is `IndexMap<String, typval_T>`); the `di_tv`
+    /// pointer stands in.
+    pub ll_di: *mut typval_T,
+    /// `char *ll_newkey` — new key for a Dict item.
+    pub ll_newkey: Option<String>,
+    /// `blob_T *ll_blob` — the Blob or NULL.
+    pub ll_blob: *mut crate::ported::eval::typval_defs_h::blob_T,
+}
+
+impl Default for lval_T {
+    fn default() -> Self {
+        lval_T {
+            ll_name: None,
+            ll_name_len: 0,
+            ll_exp_name: None,
+            ll_tv: std::ptr::null_mut(),
+            ll_li: std::ptr::null_mut(),
+            ll_list: std::ptr::null_mut(),
+            ll_range: false,
+            ll_empty2: false,
+            ll_n1: 0,
+            ll_n2: 0,
+            ll_dict: std::ptr::null_mut(),
+            ll_di: std::ptr::null_mut(),
+            ll_newkey: None,
+            ll_blob: std::ptr::null_mut(),
+        }
+    }
+}
+
+// ── small scanner helpers (extern, ported against their home C files) ──
+
+/// Port of `skipwhite()` from `src/nvim/charset.c` (extern; not vendored under
+/// `csrc/`) — skip leading spaces and tabs.
+pub fn skipwhite(s: &str) -> &str {
+    s.trim_start_matches([' ', '\t'])
+}
+
+/// Port of `skipdigits()` from `src/nvim/charset.c` (extern) — skip leading
+/// ASCII decimal digits.
+pub fn skipdigits(s: &str) -> &str {
+    s.trim_start_matches(|c: char| c.is_ascii_digit())
+}
+
+/// Port of `ends_excmd()` from `src/nvim/ex_docmd.h` (macro, extern) — true when
+/// `c` ends an Ex command: NUL, `|`, `"` or newline.
+pub fn ends_excmd(c: u8) -> bool {
+    c == 0 || c == b'|' || c == b'"' || c == b'\n'
+}
+
+/// Port of `hex2nr()` from `src/nvim/charset.c` (extern) — value of a hex digit.
+pub fn hex2nr(c: u8) -> u8 {
+    if c.is_ascii_digit() {
+        c - b'0'
+    } else {
+        (c | 0x20) - b'a' + 10
+    }
+}
+
+/// Handle zero level expression. This calls [`eval1`] and handles the error
+/// message. Puts the result in `rettv` when returning OK and "evaluate" is true.
+/// Port of `eval0()` from `csrc/eval.c:1787`.
+///
+/// RUST-PORT NOTE: the C `exarg_T *eap` (for `eap->nextcmd`) and the
+/// `did_emsg`/`called_emsg`/`aborting()` guards are editor state not modeled
+/// standalone; the invalid-expression / trailing-arg errors are always emitted.
+pub fn eval0(arg: &str, rettv: &mut typval_T, mut evalarg: Option<&mut evalarg_T>) -> i32 {
+    let mut p = skipwhite(arg); // c:1793
+    let ret = eval1(&mut p, rettv, evalarg.as_deref_mut()); // c:1794
+
+    let mut end_error = false;
+    if ret != FAIL {
+        end_error = !ends_excmd(p.as_bytes().first().copied().unwrap_or(0)); // c:1797
+    }
+    if ret == FAIL || end_error {
+        if ret != FAIL {
+            crate::ported::eval::typval::tv_clear(rettv); // c:1801
+        }
+        // c:1810 report the invalid expression / trailing argument.
+        if end_error {
+            crate::ported::message::semsg(&format!("E488: Trailing characters: {p}"));
+        } else {
+            crate::ported::message::semsg(&format!("E15: Invalid expression: \"{arg}\""));
+        }
+        return FAIL;
+    }
+    ret
+}
+
+/// Handle top level expression: `expr2 ? expr1 : expr1` / `expr2 ?? expr1`.
+/// Port of `eval1()` from `csrc/eval.c:1880`.
+pub fn eval1(arg: &mut &str, rettv: &mut typval_T, mut evalarg: Option<&mut evalarg_T>) -> i32 {
+    let at = |s: &str, i: usize| s.as_bytes().get(i).copied().unwrap_or(0);
+    *rettv = typval_T::default(); // c:1882 CLEAR_POINTER(rettv)
+
+    // c:1885 Get the first variable.
+    if eval2(arg, rettv, evalarg.as_deref_mut()) == FAIL {
+        return FAIL;
+    }
+
+    if at(*arg, 0) == b'?' {
+        let op_falsy = at(*arg, 1) == b'?'; // c:1891
+        let mut local_evalarg = evalarg_T::default();
+        let ea: &mut evalarg_T = match evalarg.as_deref_mut() {
+            Some(e) => e,
+            None => &mut local_evalarg,
+        };
+        let orig_flags = ea.eval_flags; // c:1898
+        let evaluate = ea.eval_flags & EVAL_EVALUATE != 0; // c:1899
+
+        let mut result = false;
+        if evaluate {
+            let mut error = false;
+            if op_falsy {
+                result = crate::ported::eval::typval::tv2bool(rettv); // c:1906
+            } else if tv_get_number_chk(rettv, Some(&mut error)) != 0 {
+                result = true; // c:1908
+            }
+            if error || !op_falsy || !result {
+                crate::ported::eval::typval::tv_clear(rettv); // c:1911
+            }
+            if error {
+                return FAIL;
+            }
+        }
+
+        // c:1918 Get the second variable. Recursive!
+        if op_falsy {
+            let s = *arg;
+            *arg = &s[1..]; // c:1920 (*arg)++
+        }
+        {
+            let s = *arg;
+            *arg = skipwhite(&s[1..]); // c:1922
+        }
+        ea.eval_flags = if (if op_falsy { !result } else { result }) {
+            orig_flags
+        } else {
+            orig_flags & !EVAL_EVALUATE
+        }; // c:1923
+        let mut var2 = typval_T::default();
+        if eval1(arg, &mut var2, Some(&mut *ea)) == FAIL {
+            ea.eval_flags = orig_flags;
+            return FAIL;
+        }
+        if !op_falsy || !result {
+            *rettv = var2; // c:1931
+        }
+
+        if !op_falsy {
+            // c:1935 Check for the ":".
+            if at(*arg, 0) != b':' {
+                emsg("E109: Missing ':' after '?'");
+                if evaluate && result {
+                    crate::ported::eval::typval::tv_clear(rettv);
+                }
+                ea.eval_flags = orig_flags;
+                return FAIL;
+            }
+
+            // c:1946 Get the third variable. Recursive!
+            {
+                let s = *arg;
+                *arg = skipwhite(&s[1..]);
+            }
+            ea.eval_flags = if !result {
+                orig_flags
+            } else {
+                orig_flags & !EVAL_EVALUATE
+            }; // c:1948
+            let mut var3 = typval_T::default();
+            if eval1(arg, &mut var3, Some(&mut *ea)) == FAIL {
+                if evaluate && result {
+                    crate::ported::eval::typval::tv_clear(rettv);
+                }
+                ea.eval_flags = orig_flags;
+                return FAIL;
+            }
+            if evaluate && !result {
+                *rettv = var3; // c:1957
+            }
+        }
+
+        ea.eval_flags = orig_flags; // c:1964
+    }
+
+    OK
+}
+
+/// Handle first level expression: `expr2 || expr2` (logical OR).
+/// Port of `eval2()` from `csrc/eval.c:1978`.
+pub fn eval2(arg: &mut &str, rettv: &mut typval_T, mut evalarg: Option<&mut evalarg_T>) -> i32 {
+    let at = |s: &str, i: usize| s.as_bytes().get(i).copied().unwrap_or(0);
+    // c:1981 Get the first variable.
+    if eval3(arg, rettv, evalarg.as_deref_mut()) == FAIL {
+        return FAIL;
+    }
+
+    // c:1987 Handle the "||" operator.
+    if at(*arg, 0) == b'|' && at(*arg, 1) == b'|' {
+        let mut local_evalarg = evalarg_T::default();
+        let ea: &mut evalarg_T = match evalarg.as_deref_mut() {
+            Some(e) => e,
+            None => &mut local_evalarg,
+        };
+        let orig_flags = ea.eval_flags;
+        let evaluate = ea.eval_flags & EVAL_EVALUATE != 0;
+
+        let mut result = false;
+        if evaluate {
+            let mut error = false;
+            if tv_get_number_chk(rettv, Some(&mut error)) != 0 {
+                result = true;
+            }
+            crate::ported::eval::typval::tv_clear(rettv);
+            if error {
+                return FAIL;
+            }
+        }
+
+        // c:2011 Repeat until there is no following "||".
+        while at(*arg, 0) == b'|' && at(*arg, 1) == b'|' {
+            {
+                let s = *arg;
+                *arg = skipwhite(&s[2..]); // c:2013
+            }
+            ea.eval_flags = if !result {
+                orig_flags
+            } else {
+                orig_flags & !EVAL_EVALUATE
+            };
+            let mut var2 = typval_T::default();
+            if eval3(arg, &mut var2, Some(&mut *ea)) == FAIL {
+                return FAIL;
+            }
+
+            // c:2020 Compute the result.
+            if evaluate && !result {
+                let mut error = false;
+                if tv_get_number_chk(&var2, Some(&mut error)) != 0 {
+                    result = true;
+                }
+                crate::ported::eval::typval::tv_clear(&mut var2);
+                if error {
+                    return FAIL;
+                }
+            }
+            if evaluate {
+                *rettv = typval_T::from(result as varnumber_T); // c:2032
+            }
+        }
+
+        ea.eval_flags = orig_flags;
+    }
+
+    OK
+}
+
+/// Handle second level expression: `expr3 && expr3` (logical AND).
+/// Port of `eval3()` from `csrc/eval.c:2056`.
+pub fn eval3(arg: &mut &str, rettv: &mut typval_T, mut evalarg: Option<&mut evalarg_T>) -> i32 {
+    let at = |s: &str, i: usize| s.as_bytes().get(i).copied().unwrap_or(0);
+    // c:2059 Get the first variable.
+    if eval4(arg, rettv, evalarg.as_deref_mut()) == FAIL {
+        return FAIL;
+    }
+
+    // c:2065 Handle the "&&" operator.
+    if at(*arg, 0) == b'&' && at(*arg, 1) == b'&' {
+        let mut local_evalarg = evalarg_T::default();
+        let ea: &mut evalarg_T = match evalarg.as_deref_mut() {
+            Some(e) => e,
+            None => &mut local_evalarg,
+        };
+        let orig_flags = ea.eval_flags;
+        let evaluate = ea.eval_flags & EVAL_EVALUATE != 0;
+
+        let mut result = true;
+        if evaluate {
+            let mut error = false;
+            if tv_get_number_chk(rettv, Some(&mut error)) == 0 {
+                result = false;
+            }
+            crate::ported::eval::typval::tv_clear(rettv);
+            if error {
+                return FAIL;
+            }
+        }
+
+        // c:2089 Repeat until there is no following "&&".
+        while at(*arg, 0) == b'&' && at(*arg, 1) == b'&' {
+            {
+                let s = *arg;
+                *arg = skipwhite(&s[2..]);
+            }
+            ea.eval_flags = if result {
+                orig_flags
+            } else {
+                orig_flags & !EVAL_EVALUATE
+            };
+            let mut var2 = typval_T::default();
+            if eval4(arg, &mut var2, Some(&mut *ea)) == FAIL {
+                return FAIL;
+            }
+
+            // c:2098 Compute the result.
+            if evaluate && result {
+                let mut error = false;
+                if tv_get_number_chk(&var2, Some(&mut error)) == 0 {
+                    result = false;
+                }
+                crate::ported::eval::typval::tv_clear(&mut var2);
+                if error {
+                    return FAIL;
+                }
+            }
+            if evaluate {
+                *rettv = typval_T::from(result as varnumber_T);
+            }
+        }
+
+        ea.eval_flags = orig_flags;
+    }
+
+    OK
+}
+
+/// Handle third level expression: the comparison operators
+/// (`==` `!=` `>` `>=` `<` `<=` `=~` `!~` `is` `isnot`).
+/// Port of `eval4()` from `csrc/eval.c:2143`.
+pub fn eval4(arg: &mut &str, rettv: &mut typval_T, mut evalarg: Option<&mut evalarg_T>) -> i32 {
+    let at = |s: &str, i: usize| s.as_bytes().get(i).copied().unwrap_or(0);
+    let mut r#type = EXPR_UNKNOWN; // c:2146
+    let mut len = 2usize; // c:2147
+
+    // c:2150 Get the first variable.
+    if eval5(arg, rettv, evalarg.as_deref_mut()) == FAIL {
+        return FAIL;
+    }
+
+    let p = *arg; // c:2154
+    match at(p, 0) {
+        b'=' => {
+            if at(p, 1) == b'=' {
+                r#type = EXPR_EQUAL;
+            } else if at(p, 1) == b'~' {
+                r#type = EXPR_MATCH;
+            }
+        }
+        b'!' => {
+            if at(p, 1) == b'=' {
+                r#type = EXPR_NEQUAL;
+            } else if at(p, 1) == b'~' {
+                r#type = EXPR_NOMATCH;
+            }
+        }
+        b'>' => {
+            if at(p, 1) != b'=' {
+                r#type = EXPR_GREATER;
+                len = 1;
+            } else {
+                r#type = EXPR_GEQUAL;
+            }
+        }
+        b'<' => {
+            if at(p, 1) != b'=' {
+                r#type = EXPR_SMALLER;
+                len = 1;
+            } else {
+                r#type = EXPR_SEQUAL;
+            }
+        }
+        b'i' => {
+            if at(p, 1) == b's' {
+                if at(p, 2) == b'n' && at(p, 3) == b'o' && at(p, 4) == b't' {
+                    len = 5; // c:2189
+                }
+                let c = at(p, len);
+                if !c.is_ascii_alphanumeric() && c != b'_' {
+                    r#type = if len == 2 { EXPR_IS } else { EXPR_ISNOT }; // c:2192
+                }
+            }
+        }
+        _ => {}
+    }
+
+    // c:2199 If there is a comparative operator, use it.
+    if r#type != EXPR_UNKNOWN {
+        let ic;
+        // c:2202 extra `?` = ignore case, extra `#` = match case, else 'ignorecase'.
+        if at(p, len) == b'?' {
+            ic = true;
+            len += 1;
+        } else if at(p, len) == b'#' {
+            ic = false;
+            len += 1;
+        } else {
+            ic = crate::ported::eval::typval::tv_get_bool(
+                &crate::ported::option::get_option_value("ignorecase"),
+            ) != 0; // c:2209 p_ic
+        }
+
+        // c:2213 Get the second variable.
+        *arg = skipwhite(&p[len..]);
+        let mut var2 = typval_T::default();
+        if eval5(arg, &mut var2, evalarg.as_deref_mut()) == FAIL {
+            crate::ported::eval::typval::tv_clear(rettv);
+            return FAIL;
+        }
+        let evaluate = evalarg
+            .as_deref()
+            .map_or(false, |e| e.eval_flags & EVAL_EVALUATE != 0);
+        if evaluate {
+            let ret = typval_compare(rettv, &var2, r#type, ic); // c:2219
+            return ret;
+        }
+    }
+
+    OK
+}
+
+/// Handle fourth level expression: `+` (number add / list-blob concat), `-`
+/// (subtract), `.`/`..` (string concat). Port of `eval5()` from
+/// `csrc/eval.c:2389`. Arithmetic is delegated to the leaf helpers
+/// [`eval_concat_str`]/[`eval_addblob`]/[`eval_addlist`]/[`eval_addsub_number`].
+pub fn eval5(arg: &mut &str, rettv: &mut typval_T, mut evalarg: Option<&mut evalarg_T>) -> i32 {
+    let at = |s: &str, i: usize| s.as_bytes().get(i).copied().unwrap_or(0);
+    // c:2392 Get the first variable.
+    if eval6(arg, rettv, evalarg.as_deref_mut(), false) == FAIL {
+        return FAIL;
+    }
+
+    // c:2397 Repeat computing, until no '+', '-' or '.' is following.
+    loop {
+        let op = at(*arg, 0);
+        let concat = op == b'.';
+        if op != b'+' && op != b'-' && !concat {
+            break;
+        }
+
+        let evaluate = evalarg
+            .as_deref()
+            .map_or(false, |e| e.eval_flags & EVAL_EVALUATE != 0); // c:2404
+        if (op != b'+' || (rettv.v_type != VAR_LIST && rettv.v_type != VAR_BLOB))
+            && (op == b'.' || rettv.v_type != VAR_FLOAT)
+            && evaluate
+        {
+            // c:2414 Check the first operand's type before evaluating the 2nd.
+            if (op == b'.' && !crate::ported::eval::typval::tv_check_str(rettv))
+                || (op != b'.' && !crate::ported::eval::typval::tv_check_num(rettv))
+            {
+                crate::ported::eval::typval::tv_clear(rettv);
+                return FAIL;
+            }
+        }
+
+        // c:2420 Get the second variable.
+        {
+            let s = *arg;
+            if op == b'.' && at(s, 1) == b'.' {
+                *arg = &s[1..]; // c:2422 ..string concatenation
+            }
+        }
+        {
+            let s = *arg;
+            *arg = skipwhite(&s[1..]); // c:2424
+        }
+        let mut var2 = typval_T::default();
+        if eval6(arg, &mut var2, evalarg.as_deref_mut(), op == b'.') == FAIL {
+            crate::ported::eval::typval::tv_clear(rettv);
+            return FAIL;
+        }
+
+        if evaluate {
+            // c:2432 Compute the result.
+            if op == b'.' {
+                if eval_concat_str(rettv, &var2) == FAIL {
+                    return FAIL;
+                }
+            } else if op == b'+' && rettv.v_type == VAR_BLOB && var2.v_type == VAR_BLOB {
+                eval_addblob(rettv, &var2);
+            } else if op == b'+' && rettv.v_type == VAR_LIST && var2.v_type == VAR_LIST {
+                if eval_addlist(rettv, &var2) == FAIL {
+                    return FAIL;
+                }
+            } else if eval_addsub_number(rettv, &var2, op) == FAIL {
+                return FAIL;
+            }
+        }
+    }
+    OK
+}
+
+/// Handle fifth level expression: `*` (multiply), `/` (divide), `%` (modulo).
+/// Port of `eval6()` from `csrc/eval.c:2545`. Arithmetic delegates to
+/// [`eval_multdiv_number`].
+pub fn eval6(
+    arg: &mut &str,
+    rettv: &mut typval_T,
+    mut evalarg: Option<&mut evalarg_T>,
+    want_string: bool,
+) -> i32 {
+    let at = |s: &str, i: usize| s.as_bytes().get(i).copied().unwrap_or(0);
+    // c:2548 Get the first variable.
+    if eval7(arg, rettv, evalarg.as_deref_mut(), want_string) == FAIL {
+        return FAIL;
+    }
+
+    // c:2553 Repeat computing, until no '*', '/' or '%' is following.
+    loop {
+        let op = at(*arg, 0);
+        if op != b'*' && op != b'/' && op != b'%' {
+            break;
+        }
+
+        let evaluate = evalarg
+            .as_deref()
+            .map_or(false, |e| e.eval_flags & EVAL_EVALUATE != 0); // c:2559
+
+        // c:2561 Get the second variable.
+        {
+            let s = *arg;
+            *arg = skipwhite(&s[1..]);
+        }
+        let mut var2 = typval_T::default();
+        if eval7(arg, &mut var2, evalarg.as_deref_mut(), false) == FAIL {
+            return FAIL;
+        }
+
+        if evaluate {
+            // c:2569 Compute the result.
+            if eval_multdiv_number(rettv, &var2, op) == FAIL {
+                return FAIL;
+            }
+        }
+    }
+
+    OK
+}
+
+/// Handle sixth level expression: constants, variables, function calls, nested
+/// expressions, Lists/Dicts, options, environment vars, registers, plus leading
+/// `!`/`-`/`+` and trailing subscripts/method-calls. Port of `eval7()` from
+/// `csrc/eval.c:2608`.
+///
+/// RUST-PORT NOTE: several `eval7` branches call editor/userfunc subsystems that
+/// the standalone evaluator resolves through already-ported adapters or leaves
+/// deferred: the register case routes through [`get_reg_contents`]
+/// (crate::ported::eval::…), variable lookup through
+/// [`eval_variable`](crate::ported::eval::vars::eval_variable), function calls
+/// and method calls through the ported [`eval_func`]/[`handle_subscript`]
+/// (with the `(args)`/`[idx]`/`.key`/`->m()` chain scanned off the cursor here),
+/// the recursion counter is dropped, and lambda `{a -> expr}` (C `get_lambda_tv`,
+/// userfunc) and curly-brace `{expr}` names are deferred.
+pub fn eval7(
+    arg: &mut &str,
+    rettv: &mut typval_T,
+    mut evalarg: Option<&mut evalarg_T>,
+    want_string: bool,
+) -> i32 {
+    let at = |s: &str, i: usize| s.as_bytes().get(i).copied().unwrap_or(0);
+    let evaluate = evalarg
+        .as_deref()
+        .map_or(false, |e| e.eval_flags & EVAL_EVALUATE != 0); // c:2610
+    let verbose = true;
+
+    rettv.v_type = VAR_UNKNOWN; // c:2616
+    rettv.vval = crate::ported::eval::typval_defs_h::typval_vval_union::v_unknown;
+
+    // c:2618 Skip '!', '-' and '+' characters. They are handled later.
+    let start_leader = *arg;
+    let mut p: &str = *arg;
+    while matches!(at(p, 0), b'!' | b'-' | b'+') {
+        let s = p;
+        p = skipwhite(&s[1..]);
+    }
+    let leaders = &start_leader[..start_leader.len() - p.len()]; // c:2623 [start,end)
+
+    // Balanced-group finder for scanning subscript/call chains off the cursor.
+    let find_close = |s: &str, open: u8, close: u8| -> Option<usize> {
+        let b = s.as_bytes();
+        let mut depth = 0i32;
+        let mut i = 0usize;
+        while i < b.len() {
+            let c = b[i];
+            if c == b'\'' {
+                i += 1;
+                while i < b.len() && b[i] != b'\'' {
+                    i += 1;
+                }
+            } else if c == b'"' {
+                i += 1;
+                while i < b.len() && b[i] != b'"' {
+                    if b[i] == b'\\' && i + 1 < b.len() {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            } else if c == open {
+                depth += 1;
+            } else if c == close {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            i += 1;
+        }
+        None
+    };
+
+    let mut ret;
+    let mut did_numeric = false;
+    match at(p, 0) {
+        // c:2641 Number constant.
+        b'0'..=b'9' => {
+            let mut pp = p;
+            ret = eval_number(&mut pp, rettv, evaluate, want_string);
+            p = pp;
+            did_numeric = true;
+            // c:2655 Apply prefixed "-" and "+" now (matters when "->" follows).
+            if ret == OK && evaluate && !leaders.is_empty() {
+                eval7_leader(rettv, true, leaders);
+            }
+        }
+        // c:2661 String constant.
+        b'"' => {
+            let mut pp = p;
+            ret = eval_string(&mut pp, rettv, evaluate, false);
+            p = pp;
+        }
+        // c:2666 Literal string constant.
+        b'\'' => {
+            let mut pp = p;
+            ret = eval_lit_string(&mut pp, rettv, evaluate, false);
+            p = pp;
+        }
+        // c:2671 List.
+        b'[' => {
+            let mut pp = p;
+            ret = eval_list(&mut pp, rettv, evalarg.as_deref_mut());
+            p = pp;
+        }
+        // c:2676 Literal Dictionary: #{...}
+        b'#' => {
+            let mut pp = p;
+            ret = eval_lit_dict(&mut pp, rettv, evalarg.as_deref_mut());
+            p = pp;
+        }
+        // c:2682 Lambda / Dictionary.
+        b'{' => {
+            // RUST-PORT NOTE: get_lambda_tv() (userfunc) is deferred; a plain
+            // Dict or a NOTDONE {expr}-name falls through to name resolution.
+            let mut pp = p;
+            ret = eval_dict(&mut pp, rettv, evalarg.as_deref_mut(), false);
+            p = pp;
+        }
+        // c:2690 Option value: &name
+        b'&' => {
+            let mut pp = p;
+            ret = eval_option(&mut pp, rettv, evaluate);
+            p = pp;
+        }
+        // c:2695 Environment variable / interpolated string.
+        b'$' => {
+            let mut pp = p;
+            if at(pp, 1) == b'"' || at(pp, 1) == b'\'' {
+                ret = eval_interp_string(&mut pp, rettv, evaluate, evalarg.as_deref_mut());
+            } else {
+                ret = eval_env_var(&mut pp, rettv, evaluate);
+            }
+            p = pp;
+        }
+        // c:2704 Register contents: @r.
+        b'@' => {
+            {
+                let s = p;
+                p = &s[1..]; // (*arg)++
+            }
+            if evaluate {
+                let name = at(p, 0) as char;
+                let s = crate::ported::ops::get_reg_contents(name)
+                    .map(|v| v.join("\n"))
+                    .unwrap_or_default();
+                *rettv = typval_T::from(s);
+            }
+            if at(p, 0) != 0 {
+                let s = p;
+                p = &s[1..];
+            }
+            ret = OK;
+        }
+        // c:2716 nested expression: (expression).
+        b'(' => {
+            {
+                let s = p;
+                p = skipwhite(&s[1..]);
+            }
+            let mut pp = p;
+            ret = eval1(&mut pp, rettv, evalarg.as_deref_mut()); // recursive!
+            p = pp;
+            if at(p, 0) == b')' {
+                let s = p;
+                p = &s[1..];
+            } else if ret == OK {
+                emsg("E110: Missing ')'");
+                crate::ported::eval::typval::tv_clear(rettv);
+                ret = FAIL;
+            }
+        }
+        _ => {
+            ret = NOTDONE; // c:2730
+        }
+    }
+
+    if ret == NOTDONE {
+        // c:2734 Must be a variable or function name.
+        let name_at = p;
+        let len = get_name_len(name_at); // c:2739 (RUST-PORT: no curly/alias)
+        if len <= 0 {
+            ret = FAIL; // c:2745
+        } else {
+            let name = &name_at[..len as usize];
+            p = &name_at[len as usize..];
+            let after = skipwhite(p);
+            if at(after, 0) == b'(' {
+                // c:2748 "name(..."  recursive!
+                if let Some(cl) = find_close(after, b'(', b')') {
+                    let inner = &after[1..cl];
+                    ret = eval_func(name, inner, None, rettv);
+                    let s = after;
+                    p = &s[cl + 1..];
+                } else {
+                    ret = FAIL;
+                }
+            } else if evaluate {
+                // c:2753 get value of variable
+                match crate::ported::eval::vars::eval_variable(name) {
+                    Some(v) => {
+                        *rettv = v;
+                        ret = OK;
+                    }
+                    None => {
+                        crate::ported::message::semsg(&format!("E121: Undefined variable: {name}"));
+                        ret = FAIL;
+                    }
+                }
+            } else {
+                ret = OK; // c:2765 skip the name
+            }
+        }
+    }
+
+    {
+        let s = p;
+        p = skipwhite(s); // c:2771
+    }
+
+    // c:2775 Handle following '[', '(', '.' and '->' subscripts/method-calls.
+    if ret == OK {
+        let mut subs: Vec<String> = Vec::new();
+        loop {
+            let c0 = at(p, 0);
+            if c0 == b'[' {
+                if let Some(cl) = find_close(p, b'[', b']') {
+                    subs.push(p[..=cl].to_string());
+                    let s = p;
+                    p = &s[cl + 1..];
+                } else {
+                    break;
+                }
+            } else if c0 == b'.' && eval_isdictc(at(p, 1)) {
+                let mut e = 1usize;
+                while eval_isdictc(at(p, e)) {
+                    e += 1;
+                }
+                subs.push(p[..e].to_string());
+                let s = p;
+                p = &s[e..];
+            } else if c0 == b'(' {
+                if let Some(cl) = find_close(p, b'(', b')') {
+                    subs.push(p[..=cl].to_string());
+                    let s = p;
+                    p = &s[cl + 1..];
+                } else {
+                    break;
+                }
+            } else if c0 == b'-' && at(p, 1) == b'>' {
+                let mut e = 2usize;
+                while eval_isnamec(at(p, e)) {
+                    e += 1;
+                }
+                if at(p, e) == b'(' {
+                    if let Some(cl) = find_close(&p[e..], b'(', b')') {
+                        let total = e + cl + 1;
+                        subs.push(p[..total].to_string());
+                        let s = p;
+                        p = &s[total..];
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        if !subs.is_empty() {
+            let refs: Vec<&str> = subs.iter().map(|x| x.as_str()).collect();
+            ret = handle_subscript(rettv, &refs, verbose);
+        }
+    }
+
+    // c:2779 Apply logical NOT and unary '-', right to left (final pass).
+    if ret == OK && evaluate && !leaders.is_empty() {
+        // The number branch already ran the numeric (trailing +/-) pass; only
+        // the '!' and leaders left of it remain for the non-numeric pass.
+        let rem: &str = if did_numeric {
+            match leaders.rfind('!') {
+                Some(i) => &leaders[..=i],
+                None => "",
+            }
+        } else {
+            leaders
+        };
+        if !rem.is_empty() {
+            eval7_leader(rettv, false, rem);
+        }
+    }
+
+    *arg = p;
+    ret
+}
+
+/// Allocate a variable for a number constant. Also deals with "0z" for a Blob.
+/// Port of `eval_number()` from `csrc/eval.c:3424`.
+pub fn eval_number(arg: &mut &str, rettv: &mut typval_T, evaluate: bool, want_string: bool) -> i32 {
+    let src = *arg;
+    let at = |s: &str, i: usize| s.as_bytes().get(i).copied().unwrap_or(0);
+    let mut p = skipdigits(&src[1..]); // c:3426
+    let mut get_float = false;
+
+    // c:3434 Accept a float when the format matches; not after the "." operator.
+    if !want_string && at(p, 0) == b'.' && at(p, 1).is_ascii_digit() {
+        get_float = true;
+        p = skipdigits(&p[2..]);
+        if at(p, 0) == b'e' || at(p, 0) == b'E' {
+            let mut q = &p[1..];
+            if at(q, 0) == b'-' || at(q, 0) == b'+' {
+                q = &q[1..];
+            }
+            if !at(q, 0).is_ascii_digit() {
+                get_float = false;
+            } else {
+                p = skipdigits(&q[1..]);
+            }
+        }
+        if at(p, 0).is_ascii_alphabetic() || at(p, 0) == b'.' {
+            get_float = false; // c:3448
+        }
+    }
+    if get_float {
+        let (f, consumed) = string2float(src); // c:3454
+        *arg = &src[consumed..];
+        if evaluate {
+            *rettv = typval_T {
+                v_type: VAR_FLOAT,
+                v_lock: VarLockStatus::VAR_UNLOCKED,
+                vval: v_float(f),
+            };
+        }
+    } else if at(src, 0) == b'0' && (at(src, 1) == b'z' || at(src, 1) == b'Z') {
+        // c:3459 Blob constant: 0z0123456789abcdef
+        let blob = if evaluate {
+            Some(crate::ported::eval::typval::tv_blob_alloc())
+        } else {
+            None
+        };
+        let b = src.as_bytes();
+        let mut bp = 2usize; // c: bp = *arg + 2
+        while bp < b.len() && b[bp].is_ascii_hexdigit() {
+            if !(bp + 1 < b.len() && b[bp + 1].is_ascii_hexdigit()) {
+                if blob.is_some() {
+                    emsg("E973: Blob literal should have an even number of hex characters");
+                }
+                return FAIL;
+            }
+            if let Some(ref bl) = blob {
+                bl.borrow_mut()
+                    .bv_ga
+                    .push((hex2nr(b[bp]) << 4) + hex2nr(b[bp + 1]));
+            }
+            if bp + 3 < b.len() && b[bp + 2] == b'.' && b[bp + 3].is_ascii_hexdigit() {
+                bp += 1; // c:3479
+            }
+            bp += 2;
+        }
+        if let Some(bl) = blob {
+            crate::ported::eval::typval::tv_blob_set_ret(rettv, bl);
+        }
+        *arg = &src[bp..];
+    } else {
+        // c:3487 decimal, hex or octal number
+        let mut len = 0i32;
+        let mut n: varnumber_T = 0;
+        crate::ported::charset::vim_str2nr(
+            src,
+            None,
+            Some(&mut len),
+            crate::ported::charset::STR2NR_ALL,
+            Some(&mut n),
+            None,
+            0,
+            true,
+            None,
+        );
+        if len == 0 {
+            if evaluate {
+                crate::ported::message::semsg(&format!("E15: Invalid expression: \"{src}\""));
+            }
+            return FAIL;
+        }
+        *arg = &src[len as usize..];
+        if evaluate {
+            *rettv = typval_T::from(n);
+        }
+    }
+    OK
+}
+
+/// Evaluate a `"string"` constant. When "interpolate" is true reduce `{{`→`{`,
+/// `}}`→`}` and stop at a single `{`. Port of `eval_string()` from
+/// `csrc/eval.c:3512`.
+///
+/// RUST-PORT NOTE: the C two-pass (measure, then copy) is folded into one pass
+/// building a `String` (byte values 0x80–0xFF become the matching Latin-1
+/// codepoint, consistent with the crate's String-as-byte-string model). The
+/// `\<Key>` special-key escape (C `trans_special`/`find_special_key`, the
+/// keycodes subsystem) is deferred: the `<` is copied literally.
+pub fn eval_string(arg: &mut &str, rettv: &mut typval_T, evaluate: bool, interpolate: bool) -> i32 {
+    let src = *arg;
+    let b = src.as_bytes();
+    let off = if interpolate { 0usize } else { 1 };
+    let mut out = String::new();
+    let mut i = off;
+    let mut term: u8 = 0;
+
+    while i < b.len() {
+        let c = b[i];
+        if c == b'"' {
+            term = b'"'; // c:3520 found the closing quote
+            break;
+        }
+        if c == b'\\' && i + 1 < b.len() {
+            i += 1;
+            let nc = b[i];
+            match nc {
+                b'b' => {
+                    out.push('\u{08}');
+                    i += 1;
+                } // c:3576 BS
+                b'e' => {
+                    out.push('\u{1b}');
+                    i += 1;
+                } // ESC
+                b'f' => {
+                    out.push('\u{0c}');
+                    i += 1;
+                } // FF
+                b'n' => {
+                    out.push('\n');
+                    i += 1;
+                } // NL
+                b'r' => {
+                    out.push('\r');
+                    i += 1;
+                } // CAR
+                b't' => {
+                    out.push('\t');
+                    i += 1;
+                } // TAB
+                // c:3589 hex "\x1", unicode "#", "\U..."
+                b'X' | b'x' | b'u' | b'U' => {
+                    if i + 1 < b.len() && b[i + 1].is_ascii_hexdigit() {
+                        let up = nc & !0x20; // toupper
+                        let mut n = if up == b'X' {
+                            2
+                        } else if nc == b'u' {
+                            4
+                        } else {
+                            8
+                        };
+                        let mut nr: u32 = 0;
+                        while n > 0 && i + 1 < b.len() && b[i + 1].is_ascii_hexdigit() {
+                            i += 1;
+                            nr = (nr << 4) + hex2nr(b[i]) as u32;
+                            n -= 1;
+                        }
+                        i += 1;
+                        if up != b'X' {
+                            if let Some(ch) = char::from_u32(nr) {
+                                out.push(ch); // c:3613 utf_char2bytes
+                            }
+                        } else {
+                            out.push(char::from(nr as u8)); // c:3615
+                        }
+                    }
+                }
+                // c:3620 octal "\1", "\12", "\123"
+                b'0'..=b'7' => {
+                    let mut val = (b[i] - b'0') as u32;
+                    i += 1;
+                    if i < b.len() && (b'0'..=b'7').contains(&b[i]) {
+                        val = (val << 3) + (b[i] - b'0') as u32;
+                        i += 1;
+                        if i < b.len() && (b'0'..=b'7').contains(&b[i]) {
+                            val = (val << 3) + (b[i] - b'0') as u32;
+                            i += 1;
+                        }
+                    }
+                    out.push(char::from(val as u8));
+                }
+                // c:3640 special key "\<C-W>" — deferred (keycodes subsystem)
+                b'<' => {
+                    out.push('<');
+                    i += 1;
+                }
+                _ => {
+                    // c:3659 mb_copy_char
+                    let ch = src[i..].chars().next().unwrap();
+                    out.push(ch);
+                    i += ch.len_utf8();
+                }
+            }
+            continue;
+        } else if interpolate && (c == b'{' || c == b'}') {
+            if c == b'{' && b.get(i + 1) != Some(&b'{') {
+                term = b'{'; // c:3664 start of expression
+                break;
+            }
+            i += 1; // c:3667 reduce "{{"→"{", "}}"→"}"
+            if i < b.len() {
+                let ch = src[i..].chars().next().unwrap();
+                out.push(ch);
+                i += ch.len_utf8();
+            }
+            continue;
+        } else {
+            let ch = src[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+
+    if term != b'"' && !(interpolate && term == b'{') {
+        crate::ported::message::semsg(&format!("E114: Missing quote: {src}")); // c:3556
+        return FAIL;
+    }
+
+    if !evaluate {
+        *arg = &src[i + off..]; // c:3562
+        return OK;
+    }
+
+    *rettv = typval_T::from(out); // c:3568
+    let mut end = i;
+    if term == b'"' && !interpolate {
+        end += 1; // c:3674
+    }
+    *arg = &src[end..];
+    OK
+}
+
+/// Evaluate a `'str''ing'` literal-string constant. When "interpolate" is true
+/// reduce `{{`→`{` and stop at a single `{`. Port of `eval_lit_string()` from
+/// `csrc/eval.c:3686`.
+pub fn eval_lit_string(
+    arg: &mut &str,
+    rettv: &mut typval_T,
+    evaluate: bool,
+    interpolate: bool,
+) -> i32 {
+    let src = *arg;
+    let b = src.as_bytes();
+    let off = if interpolate { 0usize } else { 1 };
+    let mut out = String::new();
+    let mut i = off;
+    let mut term: u8 = 0;
+
+    while i < b.len() {
+        let c = b[i];
+        if c == b'\'' {
+            if b.get(i + 1) != Some(&b'\'') {
+                term = b'\''; // c:3695
+                break;
+            }
+            out.push('\''); // c:3698 '' → '
+            i += 2;
+            continue;
+        } else if interpolate && c == b'{' {
+            if b.get(i + 1) != Some(&b'{') {
+                term = b'{'; // c:3703
+                break;
+            }
+            out.push('{'); // c:3705 {{ → {
+            i += 2;
+            continue;
+        } else if interpolate && c == b'}' {
+            i += 1; // c:3708
+            if b.get(i) != Some(&b'}') {
+                crate::ported::message::semsg(&format!(
+                    "E1278: Stray '}}' without a matching '{{': {src}"
+                ));
+                return FAIL;
+            }
+            out.push('}');
+            i += 1;
+            continue;
+        } else {
+            let ch = src[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+
+    if term != b'\'' && !(interpolate && term == b'{') {
+        crate::ported::message::semsg(&format!("E115: Missing quote: {src}")); // c:3719
+        return FAIL;
+    }
+
+    if !evaluate {
+        *arg = &src[i + off..]; // c:3725
+        return OK;
+    }
+
+    *rettv = typval_T::from(out); // c:3732
+    *arg = &src[i + off..]; // c:3750
+    OK
+}
+
+/// Evaluate a single/double quoted string that may contain `{expr}` groups.
+/// "arg" points to the `$`. Port of `eval_interp_string()` from
+/// `csrc/eval.c:3759`.
+///
+/// RUST-PORT NOTE: the C `eval_one_expr_in_str()` helper (which parses one
+/// expression from the string, evaluates it, and appends its string form) is
+/// inlined here as a direct [`eval1`] over the `{…}` body, which is why this
+/// port carries the `evalarg` the C signature threads through the helper.
+pub fn eval_interp_string(
+    arg: &mut &str,
+    rettv: &mut typval_T,
+    evaluate: bool,
+    mut evalarg: Option<&mut evalarg_T>,
+) -> i32 {
+    let at = |s: &str, i: usize| s.as_bytes().get(i).copied().unwrap_or(0);
+    let mut ga = String::new();
+
+    // c:3767 *arg is on the '$', move to the first string char, then past quote.
+    {
+        let s = *arg;
+        *arg = &s[1..];
+    }
+    let quote = at(*arg, 0);
+    {
+        let s = *arg;
+        *arg = &s[1..];
+    }
+
+    let mut ret;
+    loop {
+        let mut tv = typval_T::default();
+        // c:3775 Get the string up to the matching quote or a single '{'.
+        if quote == b'"' {
+            ret = eval_string(arg, &mut tv, evaluate, true);
+        } else {
+            ret = eval_lit_string(arg, &mut tv, evaluate, true);
+        }
+        if ret == FAIL {
+            break;
+        }
+        if evaluate {
+            ga.push_str(&crate::ported::eval::typval::tv_get_string(&tv)); // c:3784
+        }
+
+        if at(*arg, 0) != b'{' {
+            // c:3788 found terminating quote
+            let s = *arg;
+            *arg = &s[1..];
+            break;
+        }
+
+        // c:3793 eval_one_expr_in_str: at '{', evaluate the body up to '}'.
+        {
+            let s = *arg;
+            *arg = &s[1..];
+        }
+        let mut etv = typval_T::default();
+        if eval1(arg, &mut etv, evalarg.as_deref_mut()) == FAIL {
+            ret = FAIL;
+            break;
+        }
+        {
+            let s = *arg;
+            *arg = skipwhite(s);
+        }
+        if at(*arg, 0) != b'}' {
+            crate::ported::message::semsg(&format!("E1279: Missing '}}': {}", *arg));
+            ret = FAIL;
+            break;
+        }
+        {
+            let s = *arg;
+            *arg = &s[1..];
+        }
+        if evaluate {
+            ga.push_str(&crate::ported::eval::typval::tv_get_string(&etv));
+        }
+    }
+
+    // c:3801 Always returns OK with whatever was collected.
+    let _ = ret;
+    *rettv = typval_T::from(ga);
+    OK
+}
+
+/// Allocate a variable for a List and fill it from `*arg` (points to the `[`).
+/// Port of `eval_list()` from `csrc/eval.c:3857`.
+pub fn eval_list(arg: &mut &str, rettv: &mut typval_T, mut evalarg: Option<&mut evalarg_T>) -> i32 {
+    let at = |s: &str, i: usize| s.as_bytes().get(i).copied().unwrap_or(0);
+    let evaluate = evalarg
+        .as_deref()
+        .map_or(false, |e| e.eval_flags & EVAL_EVALUATE != 0); // c:3859
+    let l = if evaluate {
+        Some(crate::ported::eval::typval::tv_list_alloc(-1))
+    } else {
+        None
+    };
+
+    {
+        let s = *arg;
+        *arg = skipwhite(&s[1..]); // c:3866
+    }
+    while at(*arg, 0) != b']' && at(*arg, 0) != 0 {
+        let mut tv = typval_T::default();
+        if eval1(arg, &mut tv, evalarg.as_deref_mut()) == FAIL {
+            // c:3870 failret (Rc drops the partial list)
+            return FAIL;
+        }
+        if evaluate {
+            tv.v_lock = VarLockStatus::VAR_UNLOCKED;
+            if let Some(ref l) = l {
+                crate::ported::eval::typval::tv_list_append_owned_tv(&mut l.borrow_mut(), tv);
+            }
+        }
+
+        // c:3878 the comma must come after the value
+        let had_comma = at(*arg, 0) == b',';
+        if had_comma {
+            let s = *arg;
+            *arg = skipwhite(&s[1..]);
+        }
+
+        if at(*arg, 0) == b']' {
+            break;
+        }
+        if !had_comma {
+            crate::ported::message::semsg(&format!("E696: Missing comma in List: {}", *arg));
+            return FAIL;
+        }
+    }
+
+    if at(*arg, 0) != b']' {
+        crate::ported::message::semsg(&format!("E697: Missing end of List ']': {}", *arg)); // c:3894
+        return FAIL;
+    }
+
+    {
+        let s = *arg;
+        *arg = skipwhite(&s[1..]); // c:3902
+    }
+    if evaluate {
+        if let Some(l) = l {
+            *rettv = typval_T {
+                v_type: VAR_LIST,
+                v_lock: VarLockStatus::VAR_UNLOCKED,
+                vval: v_list(Some(l)),
+            };
+        }
+    }
+    OK
+}
+
+/// Allocate a variable for a Dictionary and fill it from `*arg` (points to the
+/// `{` or, for a literal `#{...}` dict, the char after `#`). Returns NOTDONE for
+/// a curly-braces `{expr}` name. Port of `eval_dict()` from `csrc/eval.c:4444`.
+pub fn eval_dict(
+    arg: &mut &str,
+    rettv: &mut typval_T,
+    mut evalarg: Option<&mut evalarg_T>,
+    literal: bool,
+) -> i32 {
+    let at = |s: &str, i: usize| s.as_bytes().get(i).copied().unwrap_or(0);
+    let evaluate = evalarg
+        .as_deref()
+        .map_or(false, |e| e.eval_flags & EVAL_EVALUATE != 0); // c:4446
+    let src = *arg;
+
+    // c:4452 First check it's not a curly-braces expression {expr} (no eval).
+    let curly = skipwhite(&src[1..]);
+    if at(curly, 0) != b'}' && !literal {
+        let mut cp = curly;
+        let mut tv = typval_T::default();
+        if eval1(&mut cp, &mut tv, None) == OK && at(skipwhite(cp), 0) == b'}' {
+            return NOTDONE; // c:4462
+        }
+    }
+
+    let d = if evaluate {
+        Some(crate::ported::eval::typval::tv_dict_alloc())
+    } else {
+        None
+    };
+
+    {
+        let s = *arg;
+        *arg = skipwhite(&s[1..]); // c:4473
+    }
+    while at(*arg, 0) != b'}' && at(*arg, 0) != 0 {
+        let mut tvkey = typval_T::default();
+        // c:4475 recursive! (literal key vs an expression key)
+        let keyok = if literal {
+            match get_literal_key(*arg) {
+                Some((k, rest)) => {
+                    tvkey = typval_T::from(k);
+                    *arg = rest;
+                    true
+                }
+                None => false,
+            }
+        } else {
+            eval1(arg, &mut tvkey, evalarg.as_deref_mut()) == OK
+        };
+        if !keyok {
+            return FAIL;
+        }
+        if at(*arg, 0) != b':' {
+            crate::ported::message::semsg(&format!("E720: Missing colon in Dictionary: {}", *arg));
+            return FAIL;
+        }
+        let key = if evaluate {
+            match crate::ported::eval::typval::tv_get_string_buf_chk(&tvkey) {
+                Some(k) => k,
+                None => return FAIL, // c:4487 errmsg already given
+            }
+        } else {
+            String::new()
+        };
+
+        {
+            let s = *arg;
+            *arg = skipwhite(&s[1..]); // c:4494
+        }
+        let mut tv = typval_T::default();
+        if eval1(arg, &mut tv, evalarg.as_deref_mut()) == FAIL {
+            return FAIL;
+        }
+        if evaluate {
+            if let Some(ref d) = d {
+                if crate::ported::eval::typval::tv_dict_find(&d.borrow(), &key).is_some() {
+                    crate::ported::message::semsg(&format!(
+                        "E721: Duplicate key in Dictionary: \"{key}\""
+                    )); // c:4502
+                    return FAIL;
+                }
+                tv.v_lock = VarLockStatus::VAR_UNLOCKED;
+                crate::ported::eval::typval::tv_dict_add(&mut d.borrow_mut(), &key, tv);
+            }
+        }
+
+        // c:4516 the comma must come after the value
+        let had_comma = at(*arg, 0) == b',';
+        if had_comma {
+            let s = *arg;
+            *arg = skipwhite(&s[1..]);
+        }
+        if at(*arg, 0) == b'}' {
+            break;
+        }
+        if !had_comma {
+            crate::ported::message::semsg(&format!("E722: Missing comma in Dictionary: {}", *arg));
+            return FAIL;
+        }
+    }
+
+    if at(*arg, 0) != b'}' {
+        crate::ported::message::semsg(&format!("E723: Missing end of Dictionary '}}': {}", *arg)); // c:4532
+        return FAIL;
+    }
+
+    {
+        let s = *arg;
+        *arg = skipwhite(&s[1..]); // c:4540
+    }
+    if evaluate {
+        if let Some(d) = d {
+            *rettv = typval_T {
+                v_type: VAR_DICT,
+                v_lock: VarLockStatus::VAR_UNLOCKED,
+                vval: v_dict(Some(d)),
+            };
+        }
+    }
+    OK
+}
+
+/// Evaluate a literal dictionary `#{key: val, …}`. "*arg" points to the `#`.
+/// Returns NOTDONE for `{expr}`. Port of `eval_lit_dict()` from
+/// `csrc/eval.c:4552`.
+pub fn eval_lit_dict(arg: &mut &str, rettv: &mut typval_T, evalarg: Option<&mut evalarg_T>) -> i32 {
+    let at = |s: &str, i: usize| s.as_bytes().get(i).copied().unwrap_or(0);
+    if at(*arg, 1) == b'{' {
+        {
+            let s = *arg;
+            *arg = &s[1..]; // c:4557 (*arg)++
+        }
+        eval_dict(arg, rettv, evalarg, true)
+    } else {
+        NOTDONE // c:4560
+    }
+}
+
+/// Get the value of an environment variable. "arg" points to the `$`.
+/// Port of `eval_env_var()` from `csrc/eval.c:4603`.
+///
+/// RUST-PORT NOTE: `vim_getenv()` is `std::env::var`; the `expand_env_save`
+/// fallback for `$VIM`/`${HOME}` (the runtime-path expansion subsystem) is
+/// deferred, so an unset variable is simply the empty string.
+pub fn eval_env_var(arg: &mut &str, rettv: &mut typval_T, evaluate: bool) -> i32 {
+    {
+        let s = *arg;
+        *arg = &s[1..]; // c:4605 (*arg)++
+    }
+    let name_full = *arg;
+    let len = get_env_len(name_full) as usize; // c:4607
+
+    if evaluate && len == 0 {
+        return FAIL; // c:4611 Invalid empty name.
+    }
+    if evaluate {
+        let name = &name_full[..len];
+        let string = std::env::var(name).unwrap_or_default(); // c:4616 vim_getenv
+        *rettv = typval_T::from(string);
+    }
+    *arg = &name_full[len..];
+    OK
+}
+
+/// Evaluate an option value `&name`. "*arg" points to the `&`.
+/// Port of `eval_option()` from `csrc/eval.c:3371`.
+///
+/// RUST-PORT NOTE: `find_option_var_end()`/`OptIndex`/`is_tty_option()` (the
+/// option-table subsystem) are not modeled; the option name is scanned inline
+/// after any `&+`/`&<`/`&g:`/`&l:` prefix and looked up via
+/// [`get_option_value`](crate::ported::option::get_option_value), which returns
+/// an empty value for an unknown name (the C `E113` check is deferred).
+pub fn eval_option(arg: &mut &str, rettv: &mut typval_T, evaluate: bool) -> i32 {
+    let src = *arg;
+    let b = src.as_bytes();
+    let mut i = 1usize; // past '&'
+    if b.get(i) == Some(&b'+') || b.get(i) == Some(&b'<') {
+        i += 1; // has("+opt") / &<opt
+    }
+    if (b.get(i) == Some(&b'g') || b.get(i) == Some(&b'l')) && b.get(i + 1) == Some(&b':') {
+        i += 2; // &g: / &l: scope prefix
+    }
+    let name_start = i;
+    while i < b.len() && b[i].is_ascii_alphabetic() {
+        i += 1;
+    }
+    if i == name_start {
+        if evaluate {
+            crate::ported::message::semsg(&format!("E112: Option name missing: {src}"));
+            // c:3383
+        }
+        return FAIL;
+    }
+    let name = &src[name_start..i];
+    *arg = &src[i..];
+    if evaluate {
+        *rettv = crate::ported::option::get_option_value(name); // c:3407
+    }
+    OK
+}
+
 #[cfg(test)]
 mod tests {
     use super::string2float;
@@ -2726,5 +4319,187 @@ mod tests {
         assert!(string2float("nan").0.is_nan());
         // A bare exponent marker is not consumed (strtod stops before "e").
         assert_eq!(string2float("5e"), (5.0, 1));
+    }
+
+    fn ev() -> super::evalarg_T {
+        super::evalarg_T {
+            eval_flags: super::EVAL_EVALUATE,
+        }
+    }
+
+    #[test]
+    fn eval0_arithmetic_precedence() {
+        use super::eval0;
+        use crate::ported::eval_h::OK;
+        let run = |src: &str| -> typval_T {
+            let mut tv = typval_T::default();
+            let mut e = ev();
+            assert_eq!(eval0(src, &mut tv, Some(&mut e)), OK, "eval0 {src}");
+            tv
+        };
+        // precedence: * binds tighter than +
+        assert!(matches!(run("1 + 2 * 3").vval, v_number(7)));
+        // nested parens
+        assert!(matches!(run("2 * (3 + 4)").vval, v_number(14)));
+        // subtraction / division / modulo
+        assert!(matches!(run("17 - 5").vval, v_number(12)));
+        assert!(matches!(run("17 / 5").vval, v_number(3)));
+        assert!(matches!(run("17 % 5").vval, v_number(2)));
+    }
+
+    #[test]
+    fn eval0_comparisons_and_logic() {
+        use super::eval0;
+        let n = |src: &str| -> i64 {
+            let mut tv = typval_T::default();
+            let mut e = ev();
+            super::eval0(src, &mut tv, Some(&mut e));
+            match tv.vval {
+                v_number(x) => x,
+                _ => -999,
+            }
+        };
+        let _ = eval0;
+        assert_eq!(n("1 < 2"), 1);
+        assert_eq!(n("2 <= 2"), 1);
+        assert_eq!(n("3 > 5"), 0);
+        assert_eq!(n("1 == 1"), 1);
+        assert_eq!(n("1 != 1"), 0);
+        // logical && / || short-circuit result
+        assert_eq!(n("1 && 0"), 0);
+        assert_eq!(n("0 || 5"), 1);
+        // ternary
+        assert_eq!(n("1 ? 10 : 20"), 10);
+        assert_eq!(n("0 ? 10 : 20"), 20);
+        // falsy operator
+        assert_eq!(n("0 ?? 7"), 7);
+        // unary leaders
+        assert_eq!(n("!0"), 1);
+        assert_eq!(n("!5"), 0);
+        assert_eq!(n("--3"), 3);
+    }
+
+    #[test]
+    fn eval0_string_concat() {
+        use super::eval0;
+        let mut tv = typval_T::default();
+        let mut e = ev();
+        eval0(r#"'ab' . 'cd'"#, &mut tv, Some(&mut e));
+        assert!(matches!(&tv.vval, v_string(s) if s == "abcd"));
+        // .. operator too
+        let mut tv2 = typval_T::default();
+        let mut e2 = ev();
+        eval0(r#"'x' .. 'y'"#, &mut tv2, Some(&mut e2));
+        assert!(matches!(&tv2.vval, v_string(s) if s == "xy"));
+    }
+
+    #[test]
+    fn eval_number_forms() {
+        use super::eval_number;
+        use crate::ported::eval_h::OK;
+        // decimal
+        let mut s = "42 rest";
+        let mut tv = typval_T::default();
+        assert_eq!(eval_number(&mut s, &mut tv, true, false), OK);
+        assert!(matches!(tv.vval, v_number(42)));
+        assert_eq!(s, " rest");
+        // hex
+        let mut s = "0x1f";
+        let mut tv = typval_T::default();
+        eval_number(&mut s, &mut tv, true, false);
+        assert!(matches!(tv.vval, v_number(31)));
+        // float
+        let mut s = "3.5";
+        let mut tv = typval_T::default();
+        eval_number(&mut s, &mut tv, true, false);
+        assert!(matches!(tv.vval, v_float(x) if (x - 3.5).abs() < 1e-9));
+        // blob 0z...
+        let mut s = "0zDEADBEEF";
+        let mut tv = typval_T::default();
+        eval_number(&mut s, &mut tv, true, false);
+        match &tv.vval {
+            v_blob(Some(b)) => assert_eq!(b.borrow().bv_ga, vec![0xDE, 0xAD, 0xBE, 0xEF]),
+            _ => panic!("expected blob"),
+        }
+    }
+
+    #[test]
+    fn eval_string_escapes() {
+        use super::eval_string;
+        let s = |src: &str| -> String {
+            let mut a = src;
+            let mut tv = typval_T::default();
+            eval_string(&mut a, &mut tv, true, false);
+            match tv.vval {
+                v_string(x) => x,
+                _ => String::new(),
+            }
+        };
+        assert_eq!(s(r#""a\tb""#), "a\tb");
+        assert_eq!(s(r#""x\ny""#), "x\ny");
+        assert_eq!(s(r#""\x41""#), "A"); // hex escape
+        assert_eq!(s(r#""\101""#), "A"); // octal escape
+        assert_eq!(s(r#""plain""#), "plain");
+    }
+
+    #[test]
+    fn eval_lit_string_reduces_quotes() {
+        use super::eval_lit_string;
+        let mut a = r#"'it''s'"#;
+        let mut tv = typval_T::default();
+        eval_lit_string(&mut a, &mut tv, true, false);
+        assert!(matches!(&tv.vval, v_string(x) if x == "it's"));
+    }
+
+    #[test]
+    fn eval_list_and_dict_literals() {
+        use super::{eval_dict, eval_list};
+        use crate::ported::eval::typval::tv_dict_find;
+        // list
+        let mut a = "[1, 2, 3]";
+        let mut tv = typval_T::default();
+        let mut e = ev();
+        eval_list(&mut a, &mut tv, Some(&mut e));
+        match &tv.vval {
+            v_list(Some(l)) => assert_eq!(l.borrow().lv_items.len(), 3),
+            _ => panic!("expected list"),
+        }
+        // dict
+        let mut a = r#"{'a': 1, 'b': 2}"#;
+        let mut tv = typval_T::default();
+        let mut e = ev();
+        eval_dict(&mut a, &mut tv, Some(&mut e), false);
+        match &tv.vval {
+            v_dict(Some(d)) => {
+                let d = d.borrow();
+                assert!(matches!(tv_dict_find(&d, "a"), Some(v) if matches!(v.vval, v_number(1))));
+                assert!(matches!(tv_dict_find(&d, "b"), Some(v) if matches!(v.vval, v_number(2))));
+            }
+            _ => panic!("expected dict"),
+        }
+    }
+
+    #[test]
+    fn eval7_full_stack_number_with_subscript() {
+        use super::eval0;
+        use crate::ported::eval::typval::EVAL_STRING_HOOK;
+        // The index sub-expression ("1") is evaluated through EVAL_STRING_HOOK,
+        // the bridge integration point the ported eval helpers delegate to (see
+        // eval_index / handle_subscript). Install a literal hook like the sibling
+        // tests so the eval0..eval7 + handle_subscript + eval_index chain runs.
+        fn hook(expr: &str) -> Option<typval_T> {
+            match expr.trim() {
+                "1" => Some(typval_T::from(1)),
+                _ => None,
+            }
+        }
+        let saved = EVAL_STRING_HOOK.with(|h| *h.borrow());
+        EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = Some(hook));
+        // list index through the whole eval0..eval7 + handle_subscript chain
+        let mut tv = typval_T::default();
+        let mut e = ev();
+        eval0("[10, 20, 30][1]", &mut tv, Some(&mut e));
+        EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = saved);
+        assert!(matches!(tv.vval, v_number(20)));
     }
 }

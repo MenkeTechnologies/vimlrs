@@ -5,7 +5,7 @@
 //! function-*name* classification helpers `userfunc.c` exposes — telling apart
 //! builtin names, script-local (`s:`/`<SID>`) names, lambda/refcounted names,
 //! and emitting a function-name error.
-#![allow(non_snake_case)]
+#![allow(non_snake_case, non_upper_case_globals)]
 
 use crate::ported::message::semsg;
 
@@ -1141,6 +1141,146 @@ pub fn deref_func_name(name: &str, _no_autoload: bool) -> DerefedFunc {
     }
 }
 
+// ── funccall_T pointer chain (userfunc.c) ──
+//
+// RUST-PORT NOTE: the C `funccall_T` is an intrusive, heap-allocated node linked
+// through `fc_caller` and pointed at by the file-static `current_funccal`
+// (userfunc.c). The port maps the intrusive `funccall_T*` chain to
+// `Rc<RefCell<funccall_T>>` links and the `current_funccal` file-static to a
+// `thread_local`, the same convention `list_T`/`dict_T` and the other
+// `src/ported` refcounted-pointer ports use. This chain is the faithful port of
+// the C call-activation stack the bridge maintains for `:return`/backtrace; it
+// is distinct from `vars::funccal_stack` (the reduced `FuncScope` model that
+// backs `l:`/`a:` variable *resolution*). Only the fields the ported call
+// machinery reads are modeled; profiling, defer, GC copyIDs, `fc_fixvar`, the
+// `a:000` list, breakpoint/level bookkeeping, and refcounts are omitted (the
+// last three are `Rc`/`Drop`-managed — see the `free_funccal`/`funccal_unref`
+// no-ops above).
+
+/// Reduced `struct funccall_S` (`typval_defs.h:299`) — one user-function call
+/// activation.
+#[derive(Debug, Default, Clone)]
+pub struct funccall_T {
+    /// `ufunc_T *fc_func` — function being called.
+    pub fc_func: ufunc_T,
+    /// `int fc_returned` — `":return"` used. RUST-PORT NOTE: `bool` here.
+    pub fc_returned: bool,
+    /// `dict_T fc_l_vars` — `l:` local function variables.
+    pub fc_l_vars: crate::ported::eval::typval_defs_h::dict_T,
+    /// `dict_T fc_l_avars` — `a:` argument variables.
+    pub fc_l_avars: crate::ported::eval::typval_defs_h::dict_T,
+    /// `typval_T *fc_rettv` — return value (`None` until set by [`do_return`]).
+    pub fc_rettv: Option<crate::ported::eval::typval_defs_h::typval_T>,
+    /// `funccall_T *fc_caller` — calling function or `None`.
+    pub fc_caller: Option<std::rc::Rc<std::cell::RefCell<funccall_T>>>,
+}
+
+thread_local! {
+    /// C `funccall_T *current_funccal` (`userfunc.c`) — the innermost active
+    /// call activation, head of the `fc_caller` chain.
+    static current_funccal: std::cell::RefCell<Option<std::rc::Rc<std::cell::RefCell<funccall_T>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Port of `create_funccal()` from `Src/eval/userfunc.c:966`.
+///
+/// Allocate a `funccall_T`, link it in `current_funccal` and fill in `fp` and
+/// `rettv`. Must be followed by one call to
+/// [`remove_funccal`]/`cleanup_function_call`.
+pub fn create_funccal(
+    fp: &ufunc_T,
+    rettv: Option<crate::ported::eval::typval_defs_h::typval_T>,
+) -> std::rc::Rc<std::cell::RefCell<funccall_T>> {
+    let fc = std::rc::Rc::new(std::cell::RefCell::new(funccall_T {
+        fc_caller: current_funccal.with(|c| c.borrow().clone()), // c:969
+        fc_func: fp.clone(),                                     // c:971
+        fc_rettv: rettv,                                         // c:973
+        ..Default::default()
+    }));
+    current_funccal.with(|c| *c.borrow_mut() = Some(fc.clone())); // c:970
+    func_ptr_ref(); // c:972 (Rc-managed no-op)
+    fc
+}
+
+/// Port of `get_current_funccal()` from `Src/eval/userfunc.c:1453`.
+pub fn get_current_funccal() -> Option<std::rc::Rc<std::cell::RefCell<funccall_T>>> {
+    current_funccal.with(|c| c.borrow().clone())
+}
+
+/// Port of `get_funccal()` from `Src/eval/userfunc.c:3929`.
+///
+/// Get function call environment based on backtrace debug level. RUST-PORT NOTE:
+/// there is no debugger standalone, so `debug_backtrace_level == 0` and the
+/// `fc_caller` walk is skipped — the current funccall is returned.
+pub fn get_funccal() -> Option<std::rc::Rc<std::cell::RefCell<funccall_T>>> {
+    let funccal = current_funccal.with(|c| c.borrow().clone()); // c:3931
+    // c:3932 debug_backtrace_level is always 0 here (no debugger).
+    funccal
+}
+
+/// Port of `get_current_funccal_dict()` from `Src/eval/userfunc.c:4014`.
+///
+/// If `ht` is the hashtable for local variables in the current funccal, return
+/// the dict that contains it, otherwise `None`. RUST-PORT NOTE: the C compares
+/// `ht` by pointer identity against `&current_funccal->fc_l_vars.dv_hashtab`;
+/// the `IndexMap`-backed dict has no stable address to compare, so the current
+/// funccal's `l:` dict (read-snapshot) is returned whenever inside a function
+/// (its sole caller passes the `l:` ht).
+pub fn get_current_funccal_dict(
+    _ht: &indexmap::IndexMap<String, crate::ported::eval::typval_defs_h::typval_T>,
+) -> Option<crate::ported::eval::typval_defs_h::dict_T> {
+    current_funccal.with(|c| c.borrow().as_ref().map(|fc| fc.borrow().fc_l_vars.clone()))
+}
+
+/// Port of `do_return()` from `Src/eval/userfunc.c:3641`.
+///
+/// Return from a function. Sets `fc_returned` on the current funccall and stores
+/// the return value. Returns `true` when the return can be carried out.
+/// RUST-PORT NOTE: the pending-return path uses `cstack_T`/`cleanup_conditionals`
+/// (the `:try` conditional stack from `ex_eval.c`) reached via `exarg_T` — the
+/// ex-command dispatch subsystem, not present in the standalone interpreter. With
+/// no `cstack`, `cleanup_conditionals()` yields `idx < 0` (no pending return), so
+/// the return is always carried out immediately; `eap`/`is_cmd` are dropped from
+/// the signature and `reanimate` is kept for fidelity.
+pub fn do_return(
+    reanimate: bool,
+    _is_cmd: bool,
+    rettv: Option<crate::ported::eval::typval_defs_h::typval_T>,
+) -> bool {
+    current_funccal.with(|c| {
+        if let Some(fc) = c.borrow().as_ref() {
+            let mut fc = fc.borrow_mut();
+            if reanimate {
+                fc.fc_returned = false; // c:3647 Undo the return.
+            }
+            // c:3654 cleanup_conditionals() -> idx < 0 (no cstack): else branch.
+            fc.fc_returned = true; // c:3689
+            // c:3694 store the return value.
+            if !reanimate {
+                if let Some(v) = rettv {
+                    fc.fc_rettv = Some(v);
+                }
+            }
+        }
+    });
+    // c:3703 return idx < 0 (always true here).
+    true
+}
+
+/// Port of `find_hi_in_scoped_ht()` from `Src/eval/userfunc.c:4023`.
+///
+/// Search a hashitem in a lambda's captured parent scope. RUST-PORT NOTE: the C
+/// walks `current_funccal->fc_func->uf_scoped`, the closure's runtime
+/// parent-`funccall_T` chain; the reduced `ufunc_T` does not model `uf_scoped`
+/// (closures capture their enclosing scope at compile time in the bridge), so
+/// `fc_func->uf_scoped` is always absent → `None` (mirrors [`find_var_in_scoped_ht`]).
+pub fn find_hi_in_scoped_ht(
+    _name: &str,
+) -> Option<crate::ported::eval::typval_defs_h::typval_T> {
+    // c:4025 current_funccal == NULL || fc_func->uf_scoped == NULL -> return NULL.
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1527,5 +1667,102 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(printable_func_name(&g), "plain");
+    }
+
+    #[test]
+    fn create_funccal_links_chain() {
+        use crate::ported::eval::typval_defs_h::typval_T;
+        // Reset the chain.
+        current_funccal.with(|c| *c.borrow_mut() = None);
+        assert!(get_current_funccal().is_none());
+
+        let outer = ufunc_T {
+            uf_name: "Outer".into(),
+            ..Default::default()
+        };
+        let inner = ufunc_T {
+            uf_name: "Inner".into(),
+            ..Default::default()
+        };
+        let fc_outer = create_funccal(&outer, Some(typval_T::from(0)));
+        assert_eq!(fc_outer.borrow().fc_func.uf_name, "Outer");
+        assert!(fc_outer.borrow().fc_caller.is_none());
+
+        let fc_inner = create_funccal(&inner, Some(typval_T::from(0)));
+        // current_funccal is now the inner frame.
+        assert_eq!(
+            get_current_funccal().unwrap().borrow().fc_func.uf_name,
+            "Inner"
+        );
+        // get_funccal() == current_funccal (no debugger).
+        assert_eq!(get_funccal().unwrap().borrow().fc_func.uf_name, "Inner");
+        // fc_caller links back to the outer frame.
+        assert_eq!(
+            fc_inner
+                .borrow()
+                .fc_caller
+                .as_ref()
+                .unwrap()
+                .borrow()
+                .fc_func
+                .uf_name,
+            "Outer"
+        );
+        current_funccal.with(|c| *c.borrow_mut() = None);
+    }
+
+    #[test]
+    fn do_return_sets_returned_and_rettv() {
+        use crate::ported::eval::typval_defs_h::{typval_T, typval_vval_union::v_number};
+        current_funccal.with(|c| *c.borrow_mut() = None);
+        // No active funccal → carries out, no panic.
+        assert!(do_return(false, true, Some(typval_T::from(1))));
+
+        let fp = ufunc_T {
+            uf_name: "F".into(),
+            ..Default::default()
+        };
+        let fc = create_funccal(&fp, Some(typval_T::from(0)));
+        assert!(!fc.borrow().fc_returned);
+        // A :return 42 carries out and records the value.
+        assert!(do_return(false, true, Some(typval_T::from(42))));
+        assert!(fc.borrow().fc_returned);
+        assert!(matches!(
+            fc.borrow().fc_rettv.as_ref().unwrap().vval,
+            v_number(42)
+        ));
+        // reanimate does not overwrite the stored rettv.
+        assert!(do_return(true, false, Some(typval_T::from(7))));
+        assert!(matches!(
+            fc.borrow().fc_rettv.as_ref().unwrap().vval,
+            v_number(42)
+        ));
+        current_funccal.with(|c| *c.borrow_mut() = None);
+    }
+
+    #[test]
+    fn get_current_funccal_dict_reads_l_vars() {
+        use crate::ported::eval::typval::tv_dict_add_nr;
+        use indexmap::IndexMap;
+        current_funccal.with(|c| *c.borrow_mut() = None);
+        // No active funccal → None regardless of the ht passed.
+        let empty: IndexMap<String, crate::ported::eval::typval_defs_h::typval_T> = IndexMap::new();
+        assert!(get_current_funccal_dict(&empty).is_none());
+
+        let fp = ufunc_T {
+            uf_name: "F".into(),
+            ..Default::default()
+        };
+        let fc = create_funccal(&fp, None);
+        tv_dict_add_nr(&mut fc.borrow_mut().fc_l_vars, "x", 5);
+        let d = get_current_funccal_dict(&empty).unwrap();
+        assert!(d.dv_hashtab.contains_key("x"));
+        current_funccal.with(|c| *c.borrow_mut() = None);
+    }
+
+    #[test]
+    fn find_hi_in_scoped_ht_is_none() {
+        // No uf_scoped in the reduced model → always None.
+        assert!(find_hi_in_scoped_ht("anything").is_none());
     }
 }
