@@ -123,6 +123,51 @@ fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
 
 /// Extract the name from a `fn <name>(` line (handles `pub`, `pub(crate)`,
 /// lifetimes like `tv_dict_find<'d>`). Returns `None` if the line isn't a fn def.
+/// Return a copy of `line` with the *contents* of string literals, char
+/// literals, and a trailing `//` line comment removed, so only real code braces
+/// remain. Used for depth tracking; not a full Rust lexer (raw strings and
+/// block comments are rare in these files and don't carry stray braces), just
+/// enough to keep `{`/`}` counting honest across brace-bearing literals.
+fn strip_noncode(line: &str) -> String {
+    let b = line.as_bytes();
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'/' if i + 1 < b.len() && b[i + 1] == b'/' => break, // line comment
+            b'"' => {
+                i += 1;
+                while i < b.len() && b[i] != b'"' {
+                    if b[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            b'\'' => {
+                // char literal 'x' / '\n' / '\'' — skip to the closing quote.
+                // (A lone ' e.g. in a lifetime has no close on the same token,
+                // so bail the scan at end-of-line if unmatched.)
+                let mut j = i + 1;
+                while j < b.len() && b[j] != b'\'' {
+                    if b[j] == b'\\' {
+                        j += 1;
+                    }
+                    j += 1;
+                }
+                if j < b.len() {
+                    i = j; // landed on closing quote; drop the literal body
+                } else {
+                    out.push('\''); // unmatched (lifetime etc.) — keep as-is
+                }
+            }
+            c => out.push(c as char),
+        }
+        i += 1;
+    }
+    out
+}
+
 fn fn_name(line: &str) -> Option<String> {
     let t = line.trim_start();
     let rest = t
@@ -185,9 +230,14 @@ fn ported_fn_names_exist_in_c_or_allowlist() {
             }
             prev_was_test_attr = trimmed == "#[test]";
 
-            // Update brace depth and test-module bracketing.
-            let opens = line.matches('{').count() as i32;
-            let closes = line.matches('}').count() as i32;
+            // Update brace depth and test-module bracketing. Count braces on a
+            // code-only view of the line: braces inside string/char literals and
+            // line comments (e.g. a lambda test string "{a -> a}" or a `'}'` in a
+            // comment) must not perturb depth tracking, or the `#[cfg(test)]`
+            // region would end early and legitimately test-exempt fns get flagged.
+            let code = strip_noncode(line);
+            let opens = code.matches('{').count() as i32;
+            let closes = code.matches('}').count() as i32;
             if pending_test_mod && opens > 0 {
                 test_base = Some(depth);
                 pending_test_mod = false;
