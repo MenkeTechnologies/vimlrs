@@ -91,8 +91,8 @@ is enumerated and the drift gate covers it. Functions drop out of the stub tree
 as they are faithfully ported.
 
 Porting discipline (exact C names, `// c:NNN` citations, two-zone `src/ported/`
-vs crate-root carve-out layout, the stub surface) is documented in
-[`docs/PORT.md`](docs/PORT.md).
+vs crate-root carve-out layout, the stub surface) is documented in the
+Port methodology section of [`docs/report.html`](docs/report.html).
 
 ## Building
 
