@@ -42,15 +42,24 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::ported::eval::typval::{
-    tv_blob_equal, tv_dict_equal, tv_equal, tv_get_float, tv_get_number_chk, tv_get_string,
-    tv_list_equal,
+    tv_blob_copy, tv_blob_equal, tv_clear, tv_dict_equal, tv_equal, tv_get_float,
+    tv_get_number_chk, tv_get_string, tv_get_string_chk, tv_list_equal, tv_list_find,
+    tv_list_find_nr, tv_list_len, tv_list_watch_add,
 };
 use crate::ported::eval::typval_defs_h::{
     blob_T, dict_T, list_T, partial_T, typval_T, typval_vval_union::*, varnumber_T, VarLockStatus,
     VarType::*, VARNUMBER_MAX, VARNUMBER_MIN,
 };
+use crate::ported::eval::vars::skip_var_list;
 use crate::ported::eval_h::{exprtype_T, exprtype_T::*, FAIL, OK};
 use crate::ported::message::emsg;
+
+// Editor-substrate imports for the position/index leaves ported below
+// (`var2fpos`, `list2fpos`, `buf_byteidx_to_charidx`, `buf_charidx_to_byteidx`,
+// `eval_for_line`). See the module-level docs in each substrate file.
+use crate::ported::buffer::{buf_T, buflist_findnr, curbuf, ml_get_buf, ml_get_buf_len};
+use crate::ported::mbyte::utf_ptr2len;
+use crate::ported::window::{colnr_T, curwin, linenr_T, pos_T, win_T};
 
 /// Port of `num_divide()` from `Src/eval.c:171`.
 ///
@@ -5038,6 +5047,512 @@ pub fn eval_fmt_source_name_line() -> String {
     "?".to_string() // c:6664
 }
 
+/// `typedef struct { … } forinfo_T;` — info used by a ":for" loop
+/// (`csrc/eval.c:123`).
+///
+/// RUST-PORT NOTE: the C `listwatch_T fi_lw` field is omitted. List watchers
+/// are not modeled anywhere in this port (`tv_list_watch_add`/`tv_list_watch_*`
+/// are no-ops in `eval/typval.rs`), and `fi_lw.lw_item` is a raw `listitem_T *`
+/// cursor into the watched list — not expressible over the `Rc<RefCell<list_T>>`
+/// + `Vec<listitem_T>` representation. `fi_list` holds the list handle instead;
+/// `next_for_item()` (deferred) iterates it.
+#[derive(Debug, Default)]
+pub struct forinfo_T {
+    /// `int fi_semicolon` — true if ending in '; var]'.
+    pub fi_semicolon: i32,
+    /// `int fi_varcount` — nr of variables in the list.
+    pub fi_varcount: i32,
+    /// `list_T *fi_list` — list being used.
+    pub fi_list: Option<Rc<RefCell<list_T>>>,
+    /// `int fi_bi` — index of blob.
+    pub fi_bi: i32,
+    /// `blob_T *fi_blob` — blob being used.
+    pub fi_blob: Option<Rc<RefCell<blob_T>>>,
+    /// `char *fi_string` — copy of string being used.
+    pub fi_string: Option<String>,
+    /// `int fi_byte_idx` — byte index in fi_string.
+    pub fi_byte_idx: i32,
+}
+
+/// Port of `eval_for_line()` from `csrc/eval.c:1435`.
+///
+/// Set up a ":for" loop iterator from `arg` (`for {var} in {expr}`): parse the
+/// loop-variable lvalue, require the "in" keyword, then evaluate the source
+/// expression into the iterator (List / Blob / String). `*errp` is cleared on a
+/// successfully parsed expression.
+///
+/// RUST-PORT NOTE: the C `exarg_T *eap` argument is dropped — the ported `eval0`
+/// signature has no `eap`. `evalarg` is passed by `&mut` (C: pointer). The
+/// C `emsg_skip++/--` bracketing (which suppresses errors while only parsing)
+/// is not modeled: `emsg_skip` is a global editor counter with no standalone
+/// analog (matching `ex_let_vars`'s handling in `eval/vars.rs`).
+pub fn eval_for_line(arg: &str, errp: &mut bool, evalarg: &mut evalarg_T) -> forinfo_T {
+    let mut fi = forinfo_T::default(); // c:1437 xcalloc
+    let mut tv = typval_T::default(); // c:1438
+    let skip = evalarg.eval_flags & EVAL_EVALUATE == 0; // c:1440
+
+    *errp = true; // c:1442 Default: there is an error.
+
+    // c:1444 expr = skip_var_list(arg, &fi->fi_varcount, &fi->fi_semicolon, false);
+    let (consumed, varcount, semicolon) = match skip_var_list(arg, false) {
+        Some(t) => t,
+        None => return fi, // c:1446
+    };
+    fi.fi_varcount = varcount;
+    fi.fi_semicolon = i32::from(semicolon);
+    let expr = &arg[consumed..];
+
+    let expr = skipwhite(expr); // c:1449
+    let eb = expr.as_bytes();
+    // c:1450 expr[0] != 'i' || expr[1] != 'n' || !(expr[2] == NUL || ascii_iswhite(expr[2]))
+    let c2 = eb.get(2).copied().unwrap_or(0);
+    if eb.first().copied().unwrap_or(0) != b'i'
+        || eb.get(1).copied().unwrap_or(0) != b'n'
+        || !(c2 == 0 || c2 == b' ' || c2 == b'\t')
+    {
+        emsg("E690: Missing \"in\" after :for"); // c:1452
+        return fi;
+    }
+
+    // c:1456 if (skip) emsg_skip++;  — RUST-PORT NOTE: emsg_skip not modeled.
+    let expr = skipwhite(&expr[2..]); // c:1459
+    if eval0(expr, &mut tv, Some(evalarg)) == OK {
+        // c:1460
+        *errp = false; // c:1461
+        if !skip {
+            // c:1462
+            match tv.v_type {
+                VAR_LIST => {
+                    // c:1463
+                    let l = if let v_list(l) = &tv.vval {
+                        l.clone()
+                    } else {
+                        None
+                    };
+                    match l {
+                        // c:1465 a null list is like an empty list: do nothing
+                        None => tv_clear(&mut tv), // c:1467
+                        Some(lst) => {
+                            // c:1469 No need to increment the refcount, it's already
+                            // set for the list being used in "tv".
+                            tv_list_watch_add(&mut lst.borrow_mut()); // c:1472 (no-op)
+                            fi.fi_list = Some(lst); // c:1471
+                        }
+                    }
+                }
+                VAR_BLOB => {
+                    // c:1475
+                    fi.fi_bi = 0; // c:1476
+                    let b = if let v_blob(b) = &tv.vval {
+                        b.clone()
+                    } else {
+                        None
+                    };
+                    if let Some(bb) = b {
+                        // c:1477
+                        // c:1480 Make a copy, so that the iteration still works when
+                        // the blob is changed.
+                        let mut btv = typval_T::default(); // c:1478
+                        tv_blob_copy(Some(&bb), &mut btv); // c:1482
+                        if let v_blob(nb) = btv.vval {
+                            fi.fi_blob = nb; // c:1483
+                        }
+                    }
+                    tv_clear(&mut tv); // c:1485
+                }
+                VAR_STRING => {
+                    // c:1486
+                    fi.fi_byte_idx = 0; // c:1487
+                    let s = if let v_string(s) = &tv.vval {
+                        Some(s.clone())
+                    } else {
+                        None
+                    };
+                    fi.fi_string = s; // c:1488
+                                      // c:1489 tv.vval.v_string = NULL — steal the string so `tv_clear`
+                                      // (elsewhere) would not double-free it.
+                    tv.vval = v_unknown;
+                    tv.v_type = VAR_UNKNOWN;
+                    if fi.fi_string.is_none() {
+                        // c:1490
+                        fi.fi_string = Some(String::new()); // c:1491 xstrdup("")
+                    }
+                }
+                _ => {
+                    // c:1493
+                    emsg("E1098: String, List or Blob required"); // c:1494
+                    tv_clear(&mut tv); // c:1495
+                }
+            }
+        }
+    }
+    // c:1499 if (skip) emsg_skip--;  — RUST-PORT NOTE: emsg_skip not modeled.
+
+    fi // c:1503
+}
+
+/// Port of `buf_byteidx_to_charidx()` from `csrc/eval.c:5228`.
+///
+/// Convert byte index `byteidx` of line `lnum` in `buf` to a character index
+/// (both zero-based). Works only for loaded buffers; returns -1 on failure.
+///
+/// RUST-PORT NOTE: `buf_T *buf` (nullable) becomes `Option<&Rc<RefCell<buf_T>>>`.
+/// C's `utfc_ptr2len` (which folds trailing composing characters into one
+/// grapheme) collapses to [`utf_ptr2len`] here — the composing-character /
+/// grapheme machinery (`utf_composinglike`, `GraphemeState`) is not yet ported
+/// in `mbyte.rs`, so combining sequences count per code point.
+pub fn buf_byteidx_to_charidx(
+    buf: Option<&Rc<RefCell<buf_T>>>,
+    mut lnum: linenr_T,
+    byteidx: i32,
+) -> i32 {
+    // c:5230 if (buf == NULL || buf->b_ml.ml_mfp == NULL) return -1;
+    let buf = match buf {
+        Some(b) if b.borrow().b_ml.ml_mfp => b,
+        _ => return -1,
+    };
+    let mut b = buf.borrow_mut();
+
+    // c:5234 if (lnum > buf->b_ml.ml_line_count) lnum = buf->b_ml.ml_line_count;
+    if lnum > b.b_ml.ml_line_count {
+        lnum = b.b_ml.ml_line_count;
+    }
+
+    let str = ml_get_buf(&mut b, lnum); // c:5238
+    let sb = str.as_bytes();
+
+    // c:5240 if (*str == NUL) return 0;
+    if sb.is_empty() {
+        return 0;
+    }
+
+    // c:5245 count the number of characters
+    let mut t = 0usize; // c: t = str
+    let mut count = 0i32;
+    // c:5247 for (count = 0; *t != NUL && t <= str + byteidx; count++) t += utfc_ptr2len(t);
+    while t < sb.len() && (t as i32) <= byteidx {
+        count += 1;
+        t += utf_ptr2len(&sb[t..]) as usize;
+    }
+
+    // c:5251 In insert mode, when the cursor is at the end of a non-empty line,
+    // byteidx points to the NUL past the end of the string: add one.
+    // c:5254 if (*t == NUL && byteidx != 0 && t == str + byteidx) count++;
+    if t >= sb.len() && byteidx != 0 && t as i32 == byteidx {
+        count += 1;
+    }
+
+    count - 1 // c:5258
+}
+
+/// Port of `buf_charidx_to_byteidx()` from `csrc/eval.c:5266`.
+///
+/// Convert character index `charidx` of line `lnum` in `buf` to a byte index
+/// (both zero-based). Works only for loaded buffers; returns -1 on failure.
+///
+/// RUST-PORT NOTE: nullable `buf_T *` → `Option<&Rc<RefCell<buf_T>>>`, and
+/// `utfc_ptr2len` collapses to [`utf_ptr2len`] (see `buf_byteidx_to_charidx`).
+pub fn buf_charidx_to_byteidx(
+    buf: Option<&Rc<RefCell<buf_T>>>,
+    mut lnum: linenr_T,
+    mut charidx: i32,
+) -> i32 {
+    // c:5268 if (buf == NULL || buf->b_ml.ml_mfp == NULL) return -1;
+    let buf = match buf {
+        Some(b) if b.borrow().b_ml.ml_mfp => b,
+        _ => return -1,
+    };
+    let mut b = buf.borrow_mut();
+
+    // c:5272 if (lnum > buf->b_ml.ml_line_count) lnum = buf->b_ml.ml_line_count;
+    if lnum > b.b_ml.ml_line_count {
+        lnum = b.b_ml.ml_line_count;
+    }
+
+    let str = ml_get_buf(&mut b, lnum); // c:5276
+    let sb = str.as_bytes();
+
+    // c:5279 Convert the character offset to a byte offset
+    let mut t = 0usize; // c: t = str
+                        // c:5280 while (*t != NUL && --charidx > 0) t += utfc_ptr2len(t);
+    while t < sb.len() && {
+        charidx -= 1;
+        charidx > 0
+    } {
+        t += utf_ptr2len(&sb[t..]) as usize;
+    }
+
+    t as i32 // c:5284 return (int)(t - str);
+}
+
+/// Port of `var2fpos()` from `csrc/eval.c:5299`.
+///
+/// Translate a Vimscript object into a buffer/window position. Accepts a
+/// `VAR_LIST` (`[lnum, col, coladd]`) or a `VAR_STRING` name (`"."`, `"v"`,
+/// `"$"`, `"'m"`, `"w0"`, `"w$"`). Returns the resolved position or `None`
+/// (C `NULL`) on error; `ret_fnum` receives the file number for global marks.
+///
+/// RUST-PORT NOTE: C returns a pointer to a `static pos_T`; here the position
+/// is returned by value as `Option<pos_T>`. `win_T *wp` becomes
+/// `&Rc<RefCell<win_T>>`, and `wp->w_buffer` (a raw always-non-NULL pointer in
+/// C) is modeled as an `Option`, so a bufferless window yields `None`.
+///
+/// DEFERRED: the `"'m"` named-mark case (`mark_get`/`fmark_T`/`kMarkAll`) and
+/// the `"w0"`/`"w$"` visible-line cases (`update_topline`/`validate_botline_win`
+/// and the `w_topline`/`w_botline` fields) need the mark and screen/topline
+/// subsystems, which are not modeled — those names fall through to `None`. The
+/// `"v"` Visual-start case has no `VIsual_active`/`VIsual` globals here, so it
+/// resolves to the cursor (the C fallback when Visual is inactive).
+pub fn var2fpos(
+    tv: &typval_T,
+    dollar_lnum: bool,
+    ret_fnum: &mut i32,
+    charcol: bool,
+    wp: &Rc<RefCell<win_T>>,
+) -> Option<pos_T> {
+    let mut pos = pos_T::default(); // c:5303 static pos_T pos;
+
+    // c:5305 buf_T *bp = wp->w_buffer;
+    let bp = wp.borrow().w_buffer.clone()?;
+
+    // c:5307 Argument can be [lnum, col, coladd].
+    if tv.v_type == VAR_LIST {
+        let mut error = false; // c:5309
+
+        // c:5311 list_T *l = tv->vval.v_list;
+        let l = match &tv.vval {
+            v_list(Some(l)) => l.clone(),
+            _ => return None, // c:5313 (NULL list)
+        };
+        let lb = l.borrow();
+
+        // c:5317 Get the line number.
+        pos.lnum = tv_list_find_nr(&lb, 0, Some(&mut error)) as linenr_T;
+        if error || pos.lnum <= 0 || pos.lnum > bp.borrow().b_ml.ml_line_count {
+            // c:5319 Invalid line number.
+            return None;
+        }
+
+        // c:5323 Get the column number.
+        pos.col = tv_list_find_nr(&lb, 1, Some(&mut error)) as colnr_T;
+        if error {
+            return None; // c:5326
+        }
+        let len: i32;
+        if charcol {
+            // c:5330 len = mb_charlen(ml_get_buf(bp, pos.lnum));
+            // RUST-PORT NOTE: mb_charlen() is not yet ported in mbyte.rs; inline
+            // its `utf_ptr2len` code-point walk (composing chars per code point).
+            let line = ml_get_buf(&mut bp.borrow_mut(), pos.lnum);
+            let lbytes = line.as_bytes();
+            let mut i = 0usize;
+            let mut cnt = 0i32;
+            while i < lbytes.len() {
+                cnt += 1;
+                i += utf_ptr2len(&lbytes[i..]) as usize;
+            }
+            len = cnt;
+        } else {
+            // c:5332 len = ml_get_buf_len(bp, pos.lnum);
+            len = ml_get_buf_len(&mut bp.borrow_mut(), pos.lnum);
+        }
+
+        // c:5335 We accept "$" for the column number: last column.
+        // c:5336 listitem_T *li = tv_list_find(l, 1);
+        let is_dollar = match tv_list_find(&lb, 1) {
+            Some(li) => matches!(&li.li_tv.vval, v_string(s) if s == "$"),
+            None => false,
+        };
+        if is_dollar {
+            pos.col = len + 1; // c:5340
+        }
+
+        // c:5343 Accept a position up to the NUL after the line.
+        if pos.col == 0 || pos.col > len + 1 {
+            // c:5344 Invalid column number.
+            return None;
+        }
+        pos.col -= 1; // c:5348
+
+        // c:5350 Get the virtual offset.  Defaults to zero.
+        pos.coladd = tv_list_find_nr(&lb, 2, Some(&mut error)) as colnr_T;
+        if error {
+            pos.coladd = 0; // c:5353
+        }
+
+        return Some(pos); // c:5356
+    }
+
+    // c:5359 const char *const name = tv_get_string_chk(tv);
+    let name = tv_get_string_chk(tv)?;
+    let nb = name.as_bytes();
+
+    pos.lnum = 0; // c:5364
+    if nb.first() == Some(&b'.') {
+        // c:5365 cursor
+        pos = wp.borrow().w_cursor; // c:5367
+    } else if nb.first() == Some(&b'v') && nb.get(1).copied().unwrap_or(0) == 0 {
+        // c:5368 Visual start.
+        // RUST-PORT NOTE: no VIsual_active/VIsual globals — resolve to the
+        // cursor (the C branch taken when Visual mode is inactive). c:5373
+        pos = wp.borrow().w_cursor;
+    } else if nb.first() == Some(&b'\'') {
+        // c:5375 mark — DEFERRED: the mark subsystem (mark_get/fmark_T/kMarkAll)
+        // is not modeled; leave pos.lnum == 0 so this falls through to `None`.
+    }
+    if pos.lnum != 0 {
+        // c:5386
+        if charcol {
+            // c:5388 pos.col = buf_byteidx_to_charidx(bp, pos.lnum, pos.col);
+            pos.col = buf_byteidx_to_charidx(Some(&bp), pos.lnum, pos.col);
+        }
+        return Some(pos); // c:5390
+    }
+
+    pos.coladd = 0; // c:5393
+
+    if nb.first() == Some(&b'w') && dollar_lnum {
+        // c:5395 "w0"/"w$" — DEFERRED: update_topline/validate_botline_win and
+        // the w_topline/w_botline fields (screen/topline subsystem) are not
+        // modeled; fall through to `None`.
+    } else if nb.first() == Some(&b'$') {
+        // c:5413 last column or line
+        if dollar_lnum {
+            pos.lnum = bp.borrow().b_ml.ml_line_count; // c:5415
+            pos.col = 0; // c:5416
+        } else {
+            let cursor_lnum = wp.borrow().w_cursor.lnum;
+            pos.lnum = cursor_lnum; // c:5418
+            if charcol {
+                // c:5420 pos.col = mb_charlen(ml_get_buf(bp, wp->w_cursor.lnum));
+                // RUST-PORT NOTE: inline mb_charlen (not ported); see above.
+                let line = ml_get_buf(&mut bp.borrow_mut(), cursor_lnum);
+                let lbytes = line.as_bytes();
+                let mut i = 0usize;
+                let mut cnt = 0i32;
+                while i < lbytes.len() {
+                    cnt += 1;
+                    i += utf_ptr2len(&lbytes[i..]) as usize;
+                }
+                pos.col = cnt;
+            } else {
+                // c:5422 pos.col = ml_get_buf_len(bp, wp->w_cursor.lnum);
+                pos.col = ml_get_buf_len(&mut bp.borrow_mut(), cursor_lnum);
+            }
+        }
+        return Some(pos); // c:5425
+    }
+    None // c:5427
+}
+
+/// Port of `list2fpos()` from `csrc/eval.c:5440`.
+///
+/// Convert list in `arg` into position `posp` and optional file number `fnump`.
+/// When `fnump` is `None` there is no file number, only 3 items:
+/// `[lnum, col, off]`. The column is passed on as-is (the caller may decrement
+/// it). Returns `FAIL` when conversion is not possible (does not validate the
+/// resulting position). If `charcol`, the column is a character index.
+///
+/// RUST-PORT NOTE: the out-parameters `int *fnump`/`colnr_T *curswantp` become
+/// `Option<&mut …>`; C's `curbuf->b_fnum` reads the `.handle` alias.
+pub fn list2fpos(
+    arg: &typval_T,
+    posp: &mut pos_T,
+    mut fnump: Option<&mut i32>,
+    curswantp: Option<&mut colnr_T>,
+    charcol: bool,
+) -> i32 {
+    // c:5444 List must be: [fnum, lnum, col, coladd, curswant], where "fnum" is
+    // only there when "fnump" isn't NULL; "coladd"/"curswant" are optional.
+    let l = match &arg.vval {
+        v_list(Some(l)) if arg.v_type == VAR_LIST => l.clone(),
+        _ => return FAIL, // c:5450
+    };
+    {
+        let lb = l.borrow();
+        let n = tv_list_len(&lb);
+        // c:5448 tv_list_len(l) < (fnump == NULL ? 2 : 3) || > (fnump == NULL ? 4 : 5)
+        let (lo, hi) = if fnump.is_none() { (2, 4) } else { (3, 5) };
+        if n < lo || n > hi {
+            return FAIL;
+        }
+    }
+
+    let lb = l.borrow();
+    let mut i = 0; // c:5453
+    if let Some(fp) = fnump.as_deref_mut() {
+        let mut n = tv_list_find_nr(&lb, i, None) as i32; // c:5456 fnum
+        i += 1;
+        if n < 0 {
+            return FAIL; // c:5458
+        }
+        if n == 0 {
+            // c:5460 Current buffer.
+            n = curbuf
+                .with(|c| c.borrow().clone())
+                .map(|b| b.borrow().handle)
+                .unwrap_or(0); // c:5461 curbuf->b_fnum
+        }
+        *fp = n; // c:5463
+    }
+
+    let mut n = tv_list_find_nr(&lb, i, None) as i32; // c:5466 lnum
+    i += 1;
+    if n < 0 {
+        return FAIL; // c:5468
+    }
+    posp.lnum = n; // c:5470
+
+    n = tv_list_find_nr(&lb, i, None) as i32; // c:5472 col
+    i += 1;
+    if n < 0 {
+        return FAIL; // c:5474
+    }
+    // c:5476 If character position is specified, convert to byte position; if the
+    // line number is zero use the cursor line.
+    if charcol {
+        // c:5480 Get the text for the specified line in a loaded buffer.
+        let fnum = match fnump.as_deref() {
+            None => curbuf
+                .with(|c| c.borrow().clone())
+                .map(|b| b.borrow().handle)
+                .unwrap_or(0),
+            Some(fp) => *fp,
+        };
+        let buf = buflist_findnr(fnum);
+        // c:5481 if (buf == NULL || buf->b_ml.ml_mfp == NULL) return FAIL;
+        match &buf {
+            Some(b) if b.borrow().b_ml.ml_mfp => {}
+            _ => return FAIL,
+        }
+        let lnum = if posp.lnum == 0 {
+            // c:5485 curwin->w_cursor.lnum
+            curwin
+                .with(|c| c.borrow().clone())
+                .map(|w| w.borrow().w_cursor.lnum)
+                .unwrap_or(0)
+        } else {
+            posp.lnum
+        };
+        n = buf_charidx_to_byteidx(buf.as_ref(), lnum, n) + 1; // c:5484
+    }
+    posp.col = n; // c:5488
+
+    n = tv_list_find_nr(&lb, i, None) as i32; // c:5490 off
+    if n < 0 {
+        posp.coladd = 0; // c:5492
+    } else {
+        posp.coladd = n; // c:5494
+    }
+
+    if let Some(cw) = curswantp {
+        // c:5498 *curswantp = tv_list_find_nr(l, i + 1, NULL);
+        *cw = tv_list_find_nr(&lb, i + 1, None) as colnr_T;
+    }
+
+    OK // c:5501
+}
+
 #[cfg(test)]
 mod tests {
     use super::string2float;
@@ -6136,5 +6651,232 @@ mod tests {
             "got {:?}",
             rv.vval
         );
+    }
+
+    // ── position/index leaves: var2fpos / list2fpos / byteidx conversions ──
+
+    use crate::ported::buffer::{buflist_new, curbuf, firstbuf, lastbuf, top_file_num, BLN_LISTED};
+    use crate::ported::eval_h::{FAIL, OK};
+    use crate::ported::window::{curwin, win_T};
+    use std::cell::RefCell;
+
+    /// Reset the buffer + window thread_local roots (Rust reuses test threads).
+    fn reset_editor() {
+        firstbuf.with(|f| *f.borrow_mut() = None);
+        lastbuf.with(|l| *l.borrow_mut() = None);
+        curbuf.with(|c| *c.borrow_mut() = None);
+        top_file_num.with(|t| t.set(1));
+        curwin.with(|c| *c.borrow_mut() = None);
+    }
+
+    /// Load `lines` into a buffer as a loaded memline.
+    fn load_lines(buf: &Rc<RefCell<crate::ported::buffer::buf_T>>, lines: &[&str]) {
+        let mut b = buf.borrow_mut();
+        b.b_ml.ml_mfp = true;
+        b.b_ml.ml_lines = lines.iter().map(|s| s.to_string()).collect();
+        b.b_ml.ml_line_count = lines.len() as i32;
+    }
+
+    /// Build a window over `buf` with the cursor at `(lnum, col)` and make it
+    /// `curwin`.
+    fn make_curwin(
+        buf: &Rc<RefCell<crate::ported::buffer::buf_T>>,
+        lnum: i32,
+        col: i32,
+    ) -> Rc<RefCell<win_T>> {
+        let w = Rc::new(RefCell::new(win_T {
+            w_buffer: Some(buf.clone()),
+            ..Default::default()
+        }));
+        w.borrow_mut().w_cursor = super::pos_T {
+            lnum,
+            col,
+            coladd: 0,
+        };
+        curwin.with(|c| *c.borrow_mut() = Some(w.clone()));
+        w
+    }
+
+    #[test]
+    fn byteidx_charidx_conversions_utf8() {
+        use super::{buf_byteidx_to_charidx, buf_charidx_to_byteidx};
+        reset_editor();
+        // "héllo" = h(1) é(2) l l o → 6 bytes, 5 code points.
+        let buf = buflist_new(Some("/tmp/mb".into()), None, 0, BLN_LISTED).unwrap();
+        load_lines(&buf, &["héllo"]);
+
+        // byte 3 (start of first 'l') → char index 2.
+        assert_eq!(buf_byteidx_to_charidx(Some(&buf), 1, 3), 2);
+        // char index 3 → byte offset 3 (per the C --charidx>0 walk).
+        assert_eq!(buf_charidx_to_byteidx(Some(&buf), 1, 3), 3);
+
+        // NULL buffer / unloaded → -1.
+        assert_eq!(buf_byteidx_to_charidx(None, 1, 0), -1);
+        assert_eq!(buf_charidx_to_byteidx(None, 1, 0), -1);
+
+        // Empty line → 0.
+        let buf2 = buflist_new(Some("/tmp/empty".into()), None, 0, BLN_LISTED).unwrap();
+        load_lines(&buf2, &[""]);
+        assert_eq!(buf_byteidx_to_charidx(Some(&buf2), 1, 5), 0);
+    }
+
+    #[test]
+    fn var2fpos_list_and_names() {
+        use super::var2fpos;
+        use crate::ported::eval::typval::{tv_list_alloc, tv_list_append_number};
+        reset_editor();
+        let buf = buflist_new(Some("/tmp/vf".into()), None, 0, BLN_LISTED).unwrap();
+        load_lines(&buf, &["hello", "world"]);
+        let wp = make_curwin(&buf, 2, 3);
+        let mut fnum = 0;
+
+        // [lnum, col] list: col is 1-based on input, decremented on output.
+        let l = tv_list_alloc(-1);
+        {
+            let mut lb = l.borrow_mut();
+            tv_list_append_number(&mut lb, 1);
+            tv_list_append_number(&mut lb, 2);
+        }
+        let tv = typval_T {
+            v_type: VAR_LIST,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_list(Some(l)),
+        };
+        let p = var2fpos(&tv, false, &mut fnum, false, &wp).expect("list pos");
+        assert_eq!(p.lnum, 1);
+        assert_eq!(p.col, 1);
+
+        // "." → cursor position (2, 3).
+        let dot = typval_T::from(".".to_string());
+        let p = var2fpos(&dot, false, &mut fnum, false, &wp).expect("cursor");
+        assert_eq!(p.lnum, 2);
+        assert_eq!(p.col, 3);
+
+        // "$" with dollar_lnum → last line, col 0.
+        let dollar = typval_T::from("$".to_string());
+        let p = var2fpos(&dollar, true, &mut fnum, false, &wp).expect("last line");
+        assert_eq!(p.lnum, 2);
+        assert_eq!(p.col, 0);
+
+        // "$" without dollar_lnum → cursor line, last byte column.
+        let p = var2fpos(&dollar, false, &mut fnum, false, &wp).expect("last col");
+        assert_eq!(p.lnum, 2);
+        assert_eq!(p.col, 5); // len("world")
+
+        // deferred named-mark case falls through to None.
+        let mark = typval_T::from("'a".to_string());
+        assert!(var2fpos(&mark, false, &mut fnum, false, &wp).is_none());
+    }
+
+    #[test]
+    fn list2fpos_with_and_without_fnum() {
+        use super::list2fpos;
+        use crate::ported::eval::typval::{tv_list_alloc, tv_list_append_number};
+        reset_editor();
+        let buf = buflist_new(Some("/tmp/l2".into()), None, 0, BLN_LISTED).unwrap();
+        load_lines(&buf, &["a", "b"]);
+        curbuf.with(|c| *c.borrow_mut() = Some(buf.clone()));
+
+        // No fnum: [lnum, col, off].
+        let l = tv_list_alloc(-1);
+        {
+            let mut lb = l.borrow_mut();
+            tv_list_append_number(&mut lb, 1);
+            tv_list_append_number(&mut lb, 2);
+            tv_list_append_number(&mut lb, 3);
+        }
+        let arg = typval_T {
+            v_type: VAR_LIST,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_list(Some(l)),
+        };
+        let mut posp = super::pos_T::default();
+        assert_eq!(list2fpos(&arg, &mut posp, None, None, false), OK);
+        assert_eq!(posp.lnum, 1);
+        assert_eq!(posp.col, 2);
+        assert_eq!(posp.coladd, 3);
+
+        // With fnum 0 → resolves to curbuf handle.
+        let l2 = tv_list_alloc(-1);
+        {
+            let mut lb = l2.borrow_mut();
+            tv_list_append_number(&mut lb, 0);
+            tv_list_append_number(&mut lb, 5);
+            tv_list_append_number(&mut lb, 2);
+        }
+        let arg2 = typval_T {
+            v_type: VAR_LIST,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_list(Some(l2)),
+        };
+        let mut posp2 = super::pos_T::default();
+        let mut fnum = -1;
+        assert_eq!(
+            list2fpos(&arg2, &mut posp2, Some(&mut fnum), None, false),
+            OK
+        );
+        let curbuf_handle = curbuf
+            .with(|c| c.borrow().clone())
+            .map(|b| b.borrow().handle)
+            .unwrap();
+        assert_eq!(fnum, curbuf_handle);
+        assert_eq!(posp2.lnum, 5);
+        assert_eq!(posp2.col, 2);
+
+        // Too-short list → FAIL.
+        let short = tv_list_alloc(-1);
+        tv_list_append_number(&mut short.borrow_mut(), 1);
+        let args = typval_T {
+            v_type: VAR_LIST,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_list(Some(short)),
+        };
+        let mut p3 = super::pos_T::default();
+        assert_eq!(list2fpos(&args, &mut p3, None, None, false), FAIL);
+    }
+
+    #[test]
+    fn eval_for_line_list_and_errors() {
+        use super::{eval_for_line, evalarg_T};
+        use crate::ported::eval::typval::EVAL_STRING_HOOK;
+        // Install the eval0 sub-expression hook (task convention): number
+        // literals resolve to themselves.
+        fn hook(expr: &str) -> Option<typval_T> {
+            expr.trim().parse::<i64>().ok().map(typval_T::from)
+        }
+        let saved = EVAL_STRING_HOOK.with(|h| *h.borrow());
+        EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = Some(hook));
+
+        // `for x in [1, 2, 3]` → fi_list with 3 items, errp cleared.
+        let mut errp = true;
+        let mut ea = evalarg_T {
+            eval_flags: super::EVAL_EVALUATE,
+        };
+        let fi = eval_for_line("x in [1, 2, 3]", &mut errp, &mut ea);
+        assert!(!errp);
+        assert_eq!(fi.fi_varcount, 1);
+        assert_eq!(fi.fi_semicolon, 0);
+        let l = fi.fi_list.expect("fi_list");
+        assert_eq!(crate::ported::eval::typval::tv_list_len(&l.borrow()), 3);
+
+        // Missing "in" → E690, errp stays true, no list.
+        let mut errp2 = true;
+        let mut ea2 = evalarg_T {
+            eval_flags: super::EVAL_EVALUATE,
+        };
+        let fi2 = eval_for_line("x [1]", &mut errp2, &mut ea2);
+        assert!(errp2);
+        assert!(fi2.fi_list.is_none());
+
+        // String source → fi_string set.
+        let mut errp3 = true;
+        let mut ea3 = evalarg_T {
+            eval_flags: super::EVAL_EVALUATE,
+        };
+        let fi3 = eval_for_line("c in \"abc\"", &mut errp3, &mut ea3);
+        assert!(!errp3);
+        assert_eq!(fi3.fi_string.as_deref(), Some("abc"));
+
+        EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = saved);
     }
 }

@@ -400,8 +400,14 @@ mod tests {
     /// return the two windows. w0 handle 1000 (buffer 7), w1 handle 1001
     /// (buffer 9).
     fn setup() -> (Rc<RefCell<win_T>>, Rc<RefCell<win_T>>) {
-        let b7 = Rc::new(RefCell::new(buf_T { handle: 7, ..Default::default() }));
-        let b9 = Rc::new(RefCell::new(buf_T { handle: 9, ..Default::default() }));
+        let b7 = Rc::new(RefCell::new(buf_T {
+            handle: 7,
+            ..Default::default()
+        }));
+        let b9 = Rc::new(RefCell::new(buf_T {
+            handle: 9,
+            ..Default::default()
+        }));
         let w0 = Rc::new(RefCell::new(win_T {
             handle: 1000,
             w_buffer: Some(b7),

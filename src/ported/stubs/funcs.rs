@@ -1,24 +1,6 @@
 //! STUB surface for `csrc/eval/funcs.c` — generated, do not edit.
 #![allow(dead_code, unused_variables, non_snake_case, clippy::all)]
 
-/// Port of `tv_get_buf()` — `csrc/eval/funcs.c:471`. STUB: not yet ported.
-/// C: `buf_T *tv_get_buf(typval_T *tv, int curtab_only)`
-pub fn tv_get_buf() {
-    unimplemented!("STUB tv_get_buf — csrc/eval/funcs.c:471")
-}
-
-/// Port of `tv_get_buf_from_arg()` — `csrc/eval/funcs.c:510`. STUB: not yet ported.
-/// C: `buf_T *tv_get_buf_from_arg(typval_T *const tv) FUNC_ATTR_NONNULL_ALL`
-pub fn tv_get_buf_from_arg() {
-    unimplemented!("STUB tv_get_buf_from_arg — csrc/eval/funcs.c:510")
-}
-
-/// Port of `get_buf_arg()` — `csrc/eval/funcs.c:523`. STUB: not yet ported.
-/// C: `buf_T *get_buf_arg(typval_T *arg)`
-pub fn get_buf_arg() {
-    unimplemented!("STUB get_buf_arg — csrc/eval/funcs.c:523")
-}
-
 /// Port of `f_call()` — `csrc/eval/funcs.c:547`. STUB: not yet ported.
 pub fn f_call(
     _argvars: &[crate::ported::eval::typval_defs_h::typval_T],

@@ -2164,46 +2164,207 @@ fn ex_let_env(
 
 /// Port of `ex_let_option()` from `Src/eval/vars.c:1346`.
 ///
-/// Set an option, part of [`ex_let_one`]. RUST-PORT NOTE: the option substrate
-/// (`find_option_var_end`, `get_option_value`, `set_option_value_handle_tty`,
-/// `tv_to_optval` — all `option.c`, not vendored) is absent standalone, so only
-/// the `:const` guard is ported; the assignment itself is a deferred dependency.
+/// Set an option, part of [`ex_let_one`]. Ports the assignment through the
+/// OptVal-typed layer in [`crate::ported::option_optval`]: isolate the name with
+/// `find_option_var_end`, read the current value with `get_option_value`, then
+/// apply the new value with `set_option_from_tv`.
+///
+/// RUST-PORT NOTE: `tv_to_optval` and the `NUMBER_OPTVAL`/`BOOLEAN_OPTVAL`
+/// constructors (and the `newval` OptVal that C's `+=`/`-=`/… arithmetic and the
+/// final `set_option_value_handle_tty` operate on) are file-private to
+/// `option_optval`. The public boundary exposes `set_option_from_tv`
+/// (= `tv_to_optval` + `set_option_value_handle_tty`), so the compound-op result
+/// is assembled as a `typval_T` — the arithmetic ported verbatim from
+/// c:1399-1428 at `OptInt`/`varnumber_T` = i64 — and applied via
+/// `set_option_from_tv`; the net stored value matches the C control flow. The
+/// operand-conversion error path (`tv_to_optval`'s E521/E928, c:1387-1390) is
+/// carried by `set_option_from_tv` for `=` but not re-derived for the compound
+/// operand. `is_option_hidden`/`get_tty_option` are not modelled: `hidden` is
+/// treated as false and tty options (`is_tty_option`) are accepted silently
+/// (c:1432 fails silently for them).
+/// RUST-PORT NOTE: the `option_optval` `find_option_var_end` returns
+/// `(name, opt_idx, opt_flags)` without the C `end` pointer, so the offset `p`
+/// just past the option name is recomputed from the sigil + optional `g:`/`l:`
+/// scope prefix + name length.
 fn ex_let_option(
-    _arg: &str,
-    _tv: &mut typval_T,
+    arg: &str,
+    tv: &mut typval_T,
     is_const: bool,
-    _endchars: Option<&str>,
-    _op: Option<&str>,
+    endchars: Option<&str>,
+    op: Option<&str>,
 ) -> Option<usize> {
+    use crate::ported::eval::skipwhite;
+    use crate::ported::option_optval::{
+        find_option_var_end, get_option_value, is_tty_option, set_option_from_tv, OptValData,
+        OptValType,
+    };
     if is_const {
         crate::ported::message::emsg("E996: Cannot lock an option"); // c:1351
         return None;
     }
-    // DEFERRED: find_option_var_end / get_option_value / set_option_value_handle_tty
-    // / tv_to_optval (option.c) not vendored — `:let &opt = …` cannot apply here.
-    None
+
+    // c:1360 find_option_var_end(&arg, &opt_idx, &opt_flags)
+    let (name, opt_idx, opt_flags) = find_option_var_end(arg);
+    // c:1360 recompute the end offset `p` (see RUST-PORT NOTE).
+    let b = arg.as_bytes();
+    let prefix = if b.len() >= 3 && (b[1] == b'g' || b[1] == b'l') && b[2] == b':' {
+        2
+    } else {
+        0
+    };
+    // c:1362 p == NULL || endchars check → e_letunexp.
+    let Some(name) = name else {
+        crate::ported::message::emsg("E18: Unexpected characters in :let"); // c:1363
+        return None;
+    };
+    let p = 1 + prefix + name.len();
+    let nc = skipwhite(&arg[p.min(arg.len())..])
+        .as_bytes()
+        .first()
+        .copied()
+        .unwrap_or(0);
+    let end_ok = match endchars {
+        None => true,
+        Some(ec) => nc == 0 || ec.as_bytes().contains(&nc),
+    };
+    if !end_ok {
+        crate::ported::message::emsg("E18: Unexpected characters in :let"); // c:1363
+        return None;
+    }
+
+    // c:1370 is_tty_opt: tty options have no store standalone — accept silently
+    // (c:1432 set_option_value_handle_tty returns NULL for them). RUST-PORT NOTE.
+    if is_tty_option(&name) {
+        return Some(p);
+    }
+
+    // c:1372 curval = get_option_value(opt_idx, opt_flags)
+    let curval = get_option_value(opt_idx, opt_flags);
+    // c:1375 if (curval.type == kOptValTypeNil) → unknown option.
+    if curval.r#type == OptValType::kOptValTypeNil {
+        // e_unknown_option2 c:1376
+        crate::ported::message::semsg(&format!("E355: Unknown option: {name}"));
+        return None;
+    }
+    // c:1379 op type must match curval type ('.' only for strings).
+    if let Some(o) = op {
+        let oc = o.as_bytes().first().copied().unwrap_or(0);
+        let is_string = curval.r#type == OptValType::kOptValTypeString;
+        if oc != b'=' && ((!is_string && oc == b'.') || (is_string && oc != b'.')) {
+            // e_letwrong c:1382
+            crate::ported::message::semsg(&format!("E734: Wrong variable type for {o}="));
+            return None;
+        }
+    }
+
+    // c:1387 newval = tv_to_optval(tv, …); c:1397-1429 apply the compound op.
+    let combined: typval_T = match op {
+        Some(o) if o.as_bytes().first().copied().unwrap_or(0) != b'=' => {
+            let oc = o.as_bytes()[0];
+            if curval.r#type == OptValType::kOptValTypeString {
+                // c:1420 string: concat curval + newval.
+                let cur_s = match &curval.data {
+                    OptValData::string(s) => s.clone(),
+                    _ => String::new(),
+                };
+                typval_T::from(format!("{cur_s}{}", tv_get_string(tv))) // c:1426 concat_str
+            } else {
+                // c:1398 number or bool.
+                let cur_n = match &curval.data {
+                    OptValData::number(n) => *n as varnumber_T, // c:1399
+                    OptValData::boolean(t) => *t as i64 as varnumber_T,
+                    _ => 0,
+                };
+                let new_n = crate::ported::eval::typval::tv_get_number_chk(tv, None); // c:1400
+                let r = match oc {
+                    b'+' => cur_n + new_n,                                  // c:1404
+                    b'-' => cur_n - new_n,                                  // c:1406
+                    b'*' => cur_n * new_n,                                  // c:1408
+                    b'/' => crate::ported::eval::num_divide(cur_n, new_n),  // c:1410
+                    b'%' => crate::ported::eval::num_modulus(cur_n, new_n), // c:1412
+                    _ => new_n,
+                };
+                // c:1416 NUMBER_OPTVAL / c:1418 BOOLEAN_OPTVAL(TRISTATE_FROM_INT).
+                typval_T::from(r as varnumber_T)
+            }
+        }
+        // c:1387 plain '=' / no op: the value is `tv` itself.
+        _ => tv.clone(),
+    };
+    // c:1432 set_option_value_handle_tty(arg, opt_idx, newval, opt_flags) via the
+    // public set_option_from_tv (tv_to_optval + set).
+    set_option_from_tv(&name, &combined);
+    Some(p) // c:1433 arg_end = p
 }
 
 /// Port of `ex_let_register()` from `Src/eval/vars.c:1446`.
 ///
-/// Set a register, part of [`ex_let_one`]. RUST-PORT NOTE: the register substrate
-/// (`get_reg_contents` / `write_reg_contents` — `ops.c`, not vendored) is absent
-/// standalone, so only the `:const` guard is ported; writing the register is a
-/// deferred dependency.
+/// Set a register, part of [`ex_let_one`]. Writes the register through
+/// [`crate::ported::ops`] (`get_reg_contents` for the `.=` append, then
+/// `write_reg_contents`). Returns the byte offset (into `arg`) just past the
+/// register name, or `None` on error.
+///
+/// RUST-PORT NOTE: the reduced `write_reg_contents(name, value, mtype, append)`
+/// takes an explicit `MotionType` where C passes the `kMTUnknown` auto-detect
+/// sentinel; charwise is used (the common `:let @r = "text"` case). The reduced
+/// `get_reg_contents` returns the register lines (C's `kGRegExprSrc` joined
+/// string), joined with `\n` for the `.=` concat.
 fn ex_let_register(
-    _arg: &str,
-    _tv: &mut typval_T,
+    arg: &str,
+    tv: &mut typval_T,
     is_const: bool,
-    _endchars: Option<&str>,
-    _op: Option<&str>,
+    endchars: Option<&str>,
+    op: Option<&str>,
 ) -> Option<usize> {
+    use crate::ported::eval::skipwhite;
+    use crate::ported::eval::typval::tv_get_string_chk;
+    use crate::ported::ops::{get_reg_contents, write_reg_contents, MotionType};
     if is_const {
         crate::ported::message::emsg("E996: Cannot lock a register"); // c:1451
         return None;
     }
-    // DEFERRED: get_reg_contents / write_reg_contents (ops.c) not vendored —
-    // `:let @r = …` cannot apply here.
-    None
+    let mut arg_end = None; // c:1455
+                            // c:1456 arg++ → the register char is arg[1].
+    let b = arg.as_bytes();
+    let regbyte = b.get(1).copied().unwrap_or(0);
+    let opc = op.and_then(|o| o.as_bytes().first().copied());
+    if op.is_some() && matches!(opc, Some(c) if b"+-*/%".contains(&c)) {
+        // c:1458 semsg(e_letwrong, op)
+        crate::ported::message::semsg(&format!("E734: Wrong variable type for {}=", op.unwrap()));
+    } else if endchars.is_some() && {
+        // c:1460 vim_strchr(endchars, *skipwhite(arg + 1)) == NULL
+        let nc = skipwhite(arg.get(2..).unwrap_or(""))
+            .as_bytes()
+            .first()
+            .copied()
+            .unwrap_or(0);
+        !(nc == 0 || endchars.unwrap().as_bytes().contains(&nc))
+    } {
+        crate::ported::message::emsg("E18: Unexpected characters in :let"); // c:1461
+    } else {
+        // c:1463 ptofree = NULL
+        let mut p = tv_get_string_chk(tv); // c:1464
+                                           // c:1466/1474 *arg == '@' ? '"' : *arg
+        let regname = if regbyte == b'@' {
+            '"'
+        } else {
+            regbyte as char
+        };
+        if let (Some(pv), Some(b'.')) = (&p, opc) {
+            // c:1465 op == '.' : append to the current register contents.
+            if let Some(lines) = get_reg_contents(regname) {
+                // c:1468 concat_str(s, p)
+                let s = lines.join("\n");
+                p = Some(format!("{s}{pv}"));
+            }
+        }
+        if let Some(pv) = p {
+            // c:1474 write_reg_contents(reg, p, strlen(p), false)
+            write_reg_contents(regname, &pv, MotionType::CharWise, false);
+            arg_end = Some(2); // c:1475 arg_end = arg + 1 (sigil + register char)
+        }
+    }
+    arg_end
 }
 
 /// Port of `ex_let_one()` from `Src/eval/vars.c:1493`.
@@ -2540,6 +2701,168 @@ fn do_lock_var(
     }
 
     ret // c:1839
+}
+
+// ── window / tab-page scoped variables (getwinvar / setwinvar) ───────────────
+
+/// Port of `get_var_from()` from `Src/eval/vars.c:3081`.
+///
+/// Read a scoped variable (`htname` = `'w'`/`'t'`) for window `win` in tab `tp`
+/// into `rettv`, falling back to `deftv` when the variable does not exist.
+///
+/// RUST-PORT NOTE: C reads `win->w_vars`/`tp->tp_vars` after switching to the
+/// target window; the reduced model has no per-window/-tab dict — the `w:`/`t:`
+/// scope is the thread-local [`window_vars`]/[`tabpage_vars`] resolved through
+/// [`eval_variable`] (as [`set_var`] already models those scopes). The
+/// `need_switch_win`/`switch_win` gate is ported faithfully: `switch_win`
+/// (window.rs) fails for a non-current window, so only the current window's `w:`
+/// scope is readable. The `htname == 'b'` (buffer) branch, `do_change_curbuf`,
+/// and `get_winbuf_options` (the whole-options dict for `&`) are not modelled;
+/// the `emsg_off` counter has no analog. The `option_optval` split store means a
+/// `&opt` read here goes through [`crate::ported::eval::eval_option`] (the
+/// `option.rs` store), matching C's `eval_option` call.
+fn get_var_from(
+    varname: Option<String>,
+    rettv: &mut typval_T,
+    deftv: Option<&typval_T>,
+    htname: char,
+    tp: Option<Rc<RefCell<crate::ported::window::tabpage_T>>>,
+    win: Option<Rc<RefCell<crate::ported::window::win_T>>>,
+) {
+    let mut done = false; // c:3084
+                          // c:3089 rettv->v_type = VAR_STRING; v_string = NULL → "".
+    *rettv = typval_T::from(String::new());
+
+    // c:3092 varname != NULL && tp != NULL && win != NULL (htname != 'b' here).
+    if let (Some(varname), Some(tp), Some(win)) = (varname.as_deref(), tp.as_ref(), win.as_ref()) {
+        // c:3098 need_switch_win = !(tp == curtab && win == curwin).
+        let is_cur_tab = crate::ported::window::curtab
+            .with(|c| c.borrow().as_ref().is_some_and(|ct| Rc::ptr_eq(ct, tp)));
+        let is_cur_win = crate::ported::window::curwin
+            .with(|c| c.borrow().as_ref().is_some_and(|cw| Rc::ptr_eq(cw, win)));
+        let need_switch_win = !(is_cur_tab && is_cur_win);
+        // c:3100 !need_switch_win || switch_win(...) == OK
+        if !need_switch_win
+            || crate::ported::eval::window::switch_win() == crate::ported::eval_h::OK
+        {
+            if varname.starts_with('&') && htname != 't' {
+                // c:3101 option value.
+                if varname.len() == 1 {
+                    // c:3109 whole window-local options dict (get_winbuf_options)
+                    // is not modelled — leave `done` false → falls to default.
+                } else {
+                    // c:3117 eval_option(&varname, rettv, true) == OK → local option.
+                    let mut vp: &str = varname;
+                    if crate::ported::eval::eval_option(&mut vp, rettv, true)
+                        == crate::ported::eval_h::OK
+                    {
+                        done = true;
+                    }
+                }
+            } else if varname.is_empty() {
+                // c:3123 empty string: the whole scope dict (w:/t:).
+                if let Some(tv) = eval_variable(&format!("{htname}:")) {
+                    *rettv = tv; // c:3133 tv_copy
+                    done = true;
+                }
+            } else {
+                // c:3135 look up the variable in the scope hashtable.
+                if let Some(tv) = eval_variable(&format!("{htname}:{varname}")) {
+                    *rettv = tv; // c:3149 tv_copy
+                    done = true;
+                }
+            }
+        }
+        // c:3155 restore_win: switch_win never succeeds standalone → nothing to
+        // restore.
+    }
+
+    // c:3161 if (!done && deftv->v_type != VAR_UNKNOWN) tv_copy(deftv, rettv).
+    if !done {
+        if let Some(d) = deftv {
+            if d.v_type != VAR_UNKNOWN {
+                *rettv = d.clone();
+            }
+        }
+    }
+}
+
+/// Port of `getwinvar()` from `Src/eval/vars.c:3172` — the `getwinvar()` and
+/// `gettabwinvar()` builtins (`off == 1` for `gettabwinvar()`).
+pub fn getwinvar(argvars: &[typval_T], rettv: &mut typval_T, off: usize) {
+    // c:3176 off == 1 → gettabwinvar(): resolve the tab page.
+    let tp = if off == 1 {
+        crate::ported::window::find_tabpage(crate::ported::eval::typval::tv_get_number_chk(
+            &argvars[0],
+            None,
+        ) as i32)
+    } else {
+        crate::ported::window::curtab.with(|c| c.borrow().clone()) // c:3179 tp = curtab
+    };
+    // c:3181 win = find_win_by_nr(&argvars[off], tp)
+    let win = crate::ported::eval::window::find_win_by_nr(&argvars[off], tp.clone());
+    // c:3182 varname = tv_get_string_chk(&argvars[off + 1])
+    let varname = crate::ported::eval::typval::tv_get_string_chk(&argvars[off + 1]);
+    // c:3184 get_var_from(varname, rettv, &argvars[off + 2], 'w', tp, win, NULL)
+    get_var_from(varname, rettv, argvars.get(off + 2), 'w', tp, win);
+}
+
+/// Port of `setwinvar()` from `Src/eval/vars.c:3308` — the `setwinvar()` and
+/// `settabwinvar()` builtins (`off == 1` for `settabwinvar()`).
+///
+/// RUST-PORT NOTE: `check_secure()` is not modelled (always allowed). The
+/// `need_switch_win`/`switch_win` gate is faithful: `switch_win` fails for a
+/// non-current window, so only the current window's `w:` scope (the thread-local
+/// [`window_vars`]) is writable. A `&opt` write goes through
+/// [`crate::ported::option_optval::set_option_from_tv`] as in C.
+pub fn setwinvar(argvars: &[typval_T], off: usize) {
+    // c:3310 check_secure() — not modelled.
+    // c:3314 off == 1 → settabwinvar(): resolve the tab page.
+    let tp = if off == 1 {
+        crate::ported::window::find_tabpage(crate::ported::eval::typval::tv_get_number_chk(
+            &argvars[0],
+            None,
+        ) as i32)
+    } else {
+        crate::ported::window::curtab.with(|c| c.borrow().clone()) // c:3318 tp = curtab
+    };
+    // c:3320 win = find_win_by_nr(&argvars[off], tp)
+    let win = crate::ported::eval::window::find_win_by_nr(&argvars[off], tp.clone());
+    // c:3321 varname = tv_get_string_chk(&argvars[off + 1])
+    let varname = crate::ported::eval::typval::tv_get_string_chk(&argvars[off + 1]);
+    // c:3322 varp = &argvars[off + 2]
+    let varp = match argvars.get(off + 2) {
+        Some(v) => v,
+        None => return,
+    };
+
+    // c:3324 if (win == NULL || varname == NULL) return
+    let (Some(win), Some(varname)) = (win, varname) else {
+        return;
+    };
+
+    // c:3328 need_switch_win = !(tp == curtab && win == curwin).
+    let is_cur_tab = crate::ported::window::curtab.with(|c| {
+        c.borrow()
+            .as_ref()
+            .is_some_and(|ct| tp.as_ref().is_some_and(|t| Rc::ptr_eq(ct, t)))
+    });
+    let is_cur_win = crate::ported::window::curwin
+        .with(|c| c.borrow().as_ref().is_some_and(|cw| Rc::ptr_eq(cw, &win)));
+    let need_switch_win = !(is_cur_tab && is_cur_win);
+    // c:3330 !need_switch_win || switch_win(...) == OK
+    if !need_switch_win || crate::ported::eval::window::switch_win() == crate::ported::eval_h::OK {
+        if let Some(optname) = varname.strip_prefix('&') {
+            // c:3332 set_option_from_tv(varname + 1, varp)
+            crate::ported::option_optval::set_option_from_tv(optname, varp);
+        } else {
+            // c:3334 winvarname = "w:" + varname; set_var(winvarname, len, varp, true)
+            let winvarname = format!("w:{varname}");
+            set_var(&winvarname, winvarname.len(), varp.clone(), true);
+        }
+    }
+    // c:3342 restore_win: switch_win never succeeds standalone → nothing to
+    // restore.
 }
 
 #[cfg(test)]
@@ -2965,5 +3288,111 @@ mod let_driver_tests {
             .map(|it| tv_get_string(&it.li_tv))
             .collect();
         assert_eq!(items, vec!["one".to_string(), "two".to_string()]);
+    }
+
+    #[test]
+    fn ex_let_option_sets_and_compounds() {
+        install_eval_hook();
+        use crate::ported::option_optval::{find_option, get_option_value, OptValData};
+        // ":let &tabstop = 4" → the option store holds 4.
+        ex_let(&mut let_eap("&tabstop = 4"));
+        let ts = find_option("tabstop");
+        assert_eq!(get_option_value(ts, 0).data, OptValData::number(4));
+        // ":let &tabstop += 3" → 7 (compound arithmetic ported from c:1404).
+        ex_let(&mut let_eap("&tabstop += 3"));
+        assert_eq!(get_option_value(ts, 0).data, OptValData::number(7));
+        // ":let &filetype = 'rust'" then ".=" concat.
+        ex_let(&mut let_eap("&filetype = 'rust'"));
+        let ft = find_option("filetype");
+        assert_eq!(
+            get_option_value(ft, 0).data,
+            OptValData::string("rust".to_string())
+        );
+        ex_let(&mut let_eap("&filetype .= 'y'"));
+        assert_eq!(
+            get_option_value(ft, 0).data,
+            OptValData::string("rusty".to_string())
+        );
+    }
+
+    #[test]
+    fn ex_let_register_writes_and_appends() {
+        install_eval_hook();
+        // ":let @a = 'hello'" writes the register.
+        ex_let(&mut let_eap("@a = 'hello'"));
+        assert_eq!(
+            crate::ported::ops::get_reg_contents('a'),
+            Some(vec!["hello".to_string()])
+        );
+        // ":let @a .= 'X'" appends to the current contents.
+        ex_let(&mut let_eap("@a .= 'X'"));
+        assert_eq!(
+            crate::ported::ops::get_reg_contents('a')
+                .unwrap()
+                .join("\n"),
+            "helloX"
+        );
+    }
+
+    #[test]
+    fn setwinvar_getwinvar_roundtrip() {
+        use crate::ported::option_optval::{find_option, get_option_value, OptValData};
+        use crate::ported::window::{
+            curtab, curwin, first_tabpage, firstwin, lastwin, tabpage_T, win_T,
+        };
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        // A single window that is curwin/curtab so the switch_win gate passes.
+        let w = Rc::new(RefCell::new(win_T {
+            handle: 1000,
+            ..Default::default()
+        }));
+        let tab = Rc::new(RefCell::new(tabpage_T {
+            handle: 1,
+            tp_firstwin: Some(w.clone()),
+            tp_curwin: Some(w.clone()),
+            ..Default::default()
+        }));
+        firstwin.with(|c| *c.borrow_mut() = Some(w.clone()));
+        lastwin.with(|c| *c.borrow_mut() = Some(w.clone()));
+        curwin.with(|c| *c.borrow_mut() = Some(w.clone()));
+        first_tabpage.with(|c| *c.borrow_mut() = Some(tab.clone()));
+        curtab.with(|c| *c.borrow_mut() = Some(tab.clone()));
+
+        // setwinvar(win 0 = current, 'wv_x', 42) → getwinvar reads it back.
+        let set_args = [
+            typval_T::from(0 as varnumber_T),
+            typval_T::from("wv_x".to_string()),
+            typval_T::from(42 as varnumber_T),
+        ];
+        setwinvar(&set_args, 0);
+        let get_args = [
+            typval_T::from(0 as varnumber_T),
+            typval_T::from("wv_x".to_string()),
+            typval_T::from("def".to_string()),
+        ];
+        let mut rettv = typval_T::default();
+        getwinvar(&get_args, &mut rettv, 0);
+        assert_eq!(tv_get_string(&rettv), "42");
+
+        // A missing window variable falls back to the default argument.
+        let miss_args = [
+            typval_T::from(0 as varnumber_T),
+            typval_T::from("wv_absent".to_string()),
+            typval_T::from("fallback".to_string()),
+        ];
+        let mut rettv2 = typval_T::default();
+        getwinvar(&miss_args, &mut rettv2, 0);
+        assert_eq!(tv_get_string(&rettv2), "fallback");
+
+        // A '&opt' write routes to the option_optval store (c:3332).
+        let opt_args = [
+            typval_T::from(0 as varnumber_T),
+            typval_T::from("&shiftwidth".to_string()),
+            typval_T::from(3 as varnumber_T),
+        ];
+        setwinvar(&opt_args, 0);
+        let sw = find_option("shiftwidth");
+        assert_eq!(get_option_value(sw, 0).data, OptValData::number(3));
     }
 }

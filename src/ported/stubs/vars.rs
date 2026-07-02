@@ -18,15 +18,3 @@ pub fn find_var_ht_dict() {
 pub fn find_var_ht() {
     unimplemented!("STUB find_var_ht — csrc/eval/vars.c:2577")
 }
-
-/// Port of `getwinvar()` — `csrc/eval/vars.c:3172`. STUB: not yet ported.
-/// C: `static void getwinvar(typval_T *argvars, typval_T *rettv, int off)`
-pub fn getwinvar() {
-    unimplemented!("STUB getwinvar — csrc/eval/vars.c:3172")
-}
-
-/// Port of `setwinvar()` — `csrc/eval/vars.c:3308`. STUB: not yet ported.
-/// C: `static void setwinvar(typval_T *argvars, int off)`
-pub fn setwinvar() {
-    unimplemented!("STUB setwinvar — csrc/eval/vars.c:3308")
-}

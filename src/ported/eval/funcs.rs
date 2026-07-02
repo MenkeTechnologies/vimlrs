@@ -8,13 +8,15 @@
 //! functions returning another type set `v_type`. Phase 3 ports a subset.
 #![allow(non_snake_case)]
 
+use crate::ported::buffer::{buf_T, buflist_findnr, buflist_findpat, curbuf, lastbuf};
+use crate::ported::eval::buffer::find_buffer;
 use crate::ported::eval::encode::{encode_tv2echo, encode_tv2string};
 use crate::ported::eval::list::FILTER_MAP_EVAL_HOOK;
 use crate::ported::eval::typval::tv_equal;
 use crate::ported::eval::typval::{
     callback_from_typval, tv_blob_get, tv_check_for_number_arg, tv_check_for_string_arg,
-    tv_dict_watcher_add, tv_dict_watcher_remove, tv_get_number, tv_get_string_buf,
-    tv_get_string_chk, Callback, CALL_FUNC_HOOK,
+    tv_check_str_or_nr, tv_dict_watcher_add, tv_dict_watcher_remove, tv_get_number,
+    tv_get_string_buf, tv_get_string_chk, Callback, CALL_FUNC_HOOK,
 };
 use crate::ported::eval::typval::{
     tv_blob_alloc_ret, tv_blob_len, tv_dict_add_tv, tv_dict_find, tv_dict_len, tv_get_bool,
@@ -593,13 +595,95 @@ pub fn dummy_timer_due_cb() {}
 /// close callback for `wait()`'s timer; never fires, no-op.
 pub fn dummy_timer_close_cb() {}
 
-/// Port of `find_buffer()` from `Src/eval/buffer.c:47`.
+/// Port of `tv_get_buf()` from `csrc/eval/funcs.c:471`.
 ///
-/// Resolve a buffer reference (`{buf}` number or name) to its buffer number.
-/// RUST-PORT NOTE: no buffers are listed standalone (`f_bufnr` → -1,
-/// `f_bufexists` → 0), so a reference never resolves → `None`.
-pub fn find_buffer(_avar: &typval_T) -> Option<varnumber_T> {
-    None
+/// Get buffer by number or pattern.
+///
+/// RUST-PORT NOTE: the C return `buf_T *` becomes `Option<Rc<RefCell<buf_T>>>`
+/// (the pointer→handle map, matching `buflist_findnr`/`find_buffer`). The
+/// `p_magic`/`p_cpo` save/set/restore around `buflist_findpat` (c:489-495,
+/// c:499-500) is elided: `buflist_findpat`'s regexp path is deferred to a
+/// substring match, so 'magic'/'cpoptions' have no bearing on the lookup here.
+pub fn tv_get_buf(
+    tv: &typval_T,
+    curtab_only: bool,
+) -> Option<std::rc::Rc<std::cell::RefCell<buf_T>>> {
+    // c:473 if (tv->v_type == VAR_NUMBER)
+    if tv.v_type == VAR_NUMBER {
+        if let v_number(n) = &tv.vval {
+            // c:474 return buflist_findnr((int)tv->vval.v_number);
+            return buflist_findnr(*n as i32);
+        }
+    }
+    // c:476 if (tv->v_type != VAR_STRING) return NULL;
+    if tv.v_type != VAR_STRING {
+        return None; // c:477
+    }
+
+    // c:480 char *name = tv->vval.v_string;
+    let name = match &tv.vval {
+        v_string(s) => s,
+        _ => return None,
+    };
+
+    // c:482 if (name == NULL || *name == NUL) return curbuf;
+    if name.is_empty() {
+        return curbuf.with(|c| c.borrow().clone());
+    }
+    // c:485 if (name[0] == '$' && name[1] == NUL) return lastbuf;
+    if name == "$" {
+        return lastbuf.with(|c| c.borrow().clone());
+    }
+
+    // c:497 buf = buflist_findnr(buflist_findpat(name, name + strlen(name),
+    // c:498                                       true, false, curtab_only));
+    let mut buf = buflist_findnr(buflist_findpat(name, true, false, curtab_only));
+
+    // c:503 if (buf == NULL) buf = find_buffer(tv);
+    if buf.is_none() {
+        buf = find_buffer(tv); // c:504
+    }
+
+    buf // c:506
+}
+
+/// Port of `tv_get_buf_from_arg()` from `csrc/eval/funcs.c:510`.
+///
+/// Like [`tv_get_buf`] but give an error message if the type is wrong.
+///
+/// RUST-PORT NOTE: the `emsg_off++`/`emsg_off--` guard (c:515, c:517) is elided:
+/// `emsg_off` is a private counter in `ex_eval.rs` and `emsg()` does not consult
+/// it in this port, so the suppression is a no-op (and `tv_get_buf` emits no
+/// errors of its own on the lookup path).
+pub fn tv_get_buf_from_arg(tv: &typval_T) -> Option<std::rc::Rc<std::cell::RefCell<buf_T>>> {
+    // c:512 if (!tv_check_str_or_nr(tv)) return NULL;
+    if !tv_check_str_or_nr(tv) {
+        return None; // c:513
+    }
+    // c:516 buf_T *const buf = tv_get_buf(tv, false);
+    let buf = tv_get_buf(tv, false);
+    buf // c:518
+}
+
+/// Port of `get_buf_arg()` from `csrc/eval/funcs.c:523`.
+///
+/// Get the buffer from "arg" and give an error and return NULL if it is not
+/// valid.
+///
+/// RUST-PORT NOTE: the `emsg_off++`/`emsg_off--` guard (c:525, c:527) is elided
+/// for the same reason as [`tv_get_buf_from_arg`].
+pub fn get_buf_arg(arg: &typval_T) -> Option<std::rc::Rc<std::cell::RefCell<buf_T>>> {
+    // c:526 buf_T *buf = tv_get_buf(arg, false);
+    let buf = tv_get_buf(arg, false);
+    // c:528 if (buf == NULL)
+    if buf.is_none() {
+        // c:529 semsg(_("E158: Invalid buffer name: %s"), tv_get_string(arg));
+        crate::ported::message::semsg(&format!(
+            "E158: Invalid buffer name: {}",
+            tv_get_string(arg)
+        ));
+    }
+    buf // c:531
 }
 
 // ── buffer-switching helpers (Src/eval/buffer.c) ──
@@ -8994,5 +9078,69 @@ mod helper_tests {
             may_add_state_char(&mut some, Some("mx"), c);
         }
         assert_eq!(some, "mx");
+    }
+
+    #[test]
+    fn tv_get_buf_number_name_and_specials() {
+        use super::{get_buf_arg, tv_get_buf, tv_get_buf_from_arg};
+        use crate::ported::buffer::{
+            buflist_new, curbuf, firstbuf, lastbuf, top_file_num, BLN_LISTED,
+        };
+        use crate::ported::eval::typval_defs_h::{
+            typval_T, typval_vval_union::v_float, VarLockStatus, VarType::VAR_FLOAT,
+        };
+        use crate::ported::message::{capture_errors_begin, capture_errors_take};
+        use std::rc::Rc;
+
+        // Reset the buffer-list thread_local state (Rust reuses test threads).
+        firstbuf.with(|f| *f.borrow_mut() = None);
+        lastbuf.with(|l| *l.borrow_mut() = None);
+        curbuf.with(|c| *c.borrow_mut() = None);
+        top_file_num.with(|t| t.set(1));
+
+        let a = buflist_new(Some("/tmp/a".into()), None, 0, BLN_LISTED).unwrap();
+        let b = buflist_new(Some("/tmp/b".into()), None, 0, BLN_LISTED).unwrap();
+        curbuf.with(|c| *c.borrow_mut() = Some(a.clone()));
+
+        // c:473 VAR_NUMBER → buflist_findnr
+        assert!(Rc::ptr_eq(
+            &tv_get_buf(&typval_T::from(1i64), false).unwrap(),
+            &a
+        ));
+        // c:482 empty string → curbuf
+        assert!(Rc::ptr_eq(
+            &tv_get_buf(&typval_T::from(String::new()), false).unwrap(),
+            &a
+        ));
+        // c:485 "$" → lastbuf
+        assert!(Rc::ptr_eq(
+            &tv_get_buf(&typval_T::from(String::from("$")), false).unwrap(),
+            &b
+        ));
+        // number with no matching buffer → NULL
+        assert!(tv_get_buf(&typval_T::from(999i64), false).is_none());
+
+        // tv_get_buf_from_arg: a non-Number/String type (Float) is rejected by
+        // tv_check_str_or_nr → NULL (and emits E805).
+        let flt = typval_T {
+            v_type: VAR_FLOAT,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_float(1.5),
+        };
+        capture_errors_begin();
+        assert!(tv_get_buf_from_arg(&flt).is_none());
+        assert!(capture_errors_take().iter().any(|e| e.starts_with("E805")));
+        // Number arg still resolves through tv_get_buf_from_arg.
+        assert!(Rc::ptr_eq(
+            &tv_get_buf_from_arg(&typval_T::from(1i64)).unwrap(),
+            &a
+        ));
+
+        // get_buf_arg on a missing buffer → NULL with E158.
+        capture_errors_begin();
+        assert!(get_buf_arg(&typval_T::from(999i64)).is_none());
+        assert!(capture_errors_take()
+            .iter()
+            .any(|e| e.starts_with("E158: Invalid buffer name: 999")));
     }
 }
