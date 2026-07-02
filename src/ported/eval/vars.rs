@@ -57,208 +57,82 @@ thread_local! {
     pub static tabpage_vars: RefCell<dict_T> = RefCell::new(dict_T::default());
 }
 
-/// Port of `set_var()` from `Src/eval/vars.c:2805`.
+/// Port of `set_var()` from `Src/eval/vars.c:2805` (folding `set_var_const`,
+/// `vars.c:2816`).
 ///
-/// Set variable `name` to `tv`, resolving the scope prefix: `g:`/bare-at-script
-/// level → `globvardict`; `l:`/bare-in-function → the current `l:`; `a:` is
-/// read-only (E46, ignored). (`set_var` delegates to `set_var_const` in C —
-/// folded in for the subset.)
-pub fn set_var(name: &str, _name_len: usize, tv: typval_T, _copy: bool) {
-    if let Some(key) = name.strip_prefix("g:") {
-        return globvardict.with(|d| tv_dict_add_tv(&mut d.borrow_mut(), key, tv));
-    }
-    if let Some(key) = name.strip_prefix("s:") {
-        return script_vars.with(|d| tv_dict_add_tv(&mut d.borrow_mut(), key, tv));
-    }
-    if let Some(key) = name.strip_prefix("b:") {
-        return buffer_vars.with(|d| tv_dict_add_tv(&mut d.borrow_mut(), key, tv));
-    }
-    if let Some(key) = name.strip_prefix("w:") {
-        return window_vars.with(|d| tv_dict_add_tv(&mut d.borrow_mut(), key, tv));
-    }
-    if let Some(key) = name.strip_prefix("t:") {
-        return tabpage_vars.with(|d| tv_dict_add_tv(&mut d.borrow_mut(), key, tv));
-    }
-    if let Some(key) = name.strip_prefix("v:") {
-        // c: v: variables — set the vimvars slot; RO entries decline (E46 in C).
-        if let Some(idx) = VIMVARS_DEF.iter().position(|&(n, _, _)| n == key) {
-            if VIMVARS_DEF[idx].2 & (VV_RO | VV_RO_SBX) == 0 {
-                set_vim_var_tv(idx, tv);
+/// Set variable `name` to `tv`. RUST-PORT NOTE: scope resolution is delegated to
+/// [`find_var_ht_dict`] (the single resolver shared with [`find_var`]), so this
+/// no longer strips prefixes itself. The `dictitem_T` lock / watcher / autoload
+/// machinery of C `set_var_const` is not modelled; the reduced setter writes the
+/// resolved scope dict, declines read-only `v:` slots (E46 in C), and refuses to
+/// add `v:`/`a:` variables (E461, matching `vars.c:2882`).
+pub fn set_var(name: &str, name_len: usize, tv: typval_T, _copy: bool) {
+    // RUST-PORT NOTE: reduced-model callers (get_lval/set_var_lval, tests, and
+    // the eval bridge) pass name_len==0 to mean "the whole name" (the pre-dedup
+    // set_var ignored the length). C always passes STRLEN(name); mirror that so
+    // find_var_ht_dict doesn't truncate a real name to empty (which would E461).
+    let name_len = if name_len == 0 { name.len() } else { name_len };
+    // c:2823 ht = find_var_ht_dict(name, name_len, &varname, &dict);
+    let (scope, varname) = match find_var_ht_dict(name, name_len) {
+        // c:2830 if (ht == NULL || *varname == NUL) { semsg(_(e_illvar), name); return; }
+        Some((s, v)) if !v.is_empty() => (s, v),
+        _ => {
+            crate::ported::message::semsg(&format!("E461: Illegal variable name: {name}"));
+            return;
+        }
+    };
+    match scope {
+        VarScopeDict::Global => {
+            globvardict.with(|d| tv_dict_add_tv(&mut d.borrow_mut(), &varname, tv));
+        }
+        VarScopeDict::Script => {
+            script_vars.with(|d| tv_dict_add_tv(&mut d.borrow_mut(), &varname, tv));
+        }
+        VarScopeDict::Buffer => {
+            buffer_vars.with(|d| tv_dict_add_tv(&mut d.borrow_mut(), &varname, tv));
+        }
+        VarScopeDict::Window => {
+            window_vars.with(|d| tv_dict_add_tv(&mut d.borrow_mut(), &varname, tv));
+        }
+        VarScopeDict::Tabpage => {
+            tabpage_vars.with(|d| tv_dict_add_tv(&mut d.borrow_mut(), &varname, tv));
+        }
+        VarScopeDict::FuncLocal => {
+            funccal_stack.with(|s| {
+                if let Some(top) = s.borrow_mut().last_mut() {
+                    tv_dict_add_tv(&mut top.fc_l_vars, &varname, tv);
+                }
+            });
+        }
+        VarScopeDict::VimVar => {
+            // c: existing v: var — decline read-only slots (var_check_ro, E46);
+            //    an unknown v: name would be a "new v: variable" → E461 (c:2882).
+            if let Some(idx) = VIMVARS_DEF.iter().position(|&(n, _, _)| n == varname) {
+                if VIMVARS_DEF[idx].2 & (VV_RO | VV_RO_SBX) == 0 {
+                    set_vim_var_tv(idx, tv);
+                }
+            } else {
+                crate::ported::message::semsg(&format!("E461: Illegal variable name: {name}"));
             }
         }
-        return;
-    }
-    if name.strip_prefix("a:").is_some() {
-        // c: a: variables are read-only (E46) — silently ignore in the subset.
-        return;
-    }
-    if let Some(key) = name.strip_prefix("l:") {
-        funccal_stack.with(|s| {
-            if let Some(top) = s.borrow_mut().last_mut() {
-                tv_dict_add_tv(&mut top.fc_l_vars, key, tv);
-            }
-        });
-        return;
-    }
-    // Bare name: the current scope — `l:` inside a function, else `g:`.
-    funccal_stack.with(|s| {
-        let mut stack = s.borrow_mut();
-        match stack.last_mut() {
-            Some(top) => tv_dict_add_tv(&mut top.fc_l_vars, name, tv),
-            None => globvardict.with(|d| tv_dict_add_tv(&mut d.borrow_mut(), name, tv)),
+        VarScopeDict::FuncArgs => {
+            // c:2882 can't add an "a:" variable; existing a: args are read-only.
+            crate::ported::message::semsg(&format!("E461: Illegal variable name: {name}"));
         }
-    });
+    }
 }
 
 /// Port of `eval_variable()` from `Src/eval/vars.c:2353` (read path).
 ///
-/// Look up a variable, resolving the scope chain: `v:` constants, then the
-/// prefix scopes `g:`/`a:`/`l:`, then a bare name (`l:` inside a function, `g:`
-/// at script level). Returns the value (the C out-param + dictitem form is
-/// restored in the later phase).
+/// Look up a variable's value, or `None` when it does not exist. RUST-PORT NOTE:
+/// the C `eval_variable(name, len, rettv, dip, verbose, no_autoload)` resolves
+/// via `find_var(name, len, NULL, no_autoload)` (`vars.c:2371`); the reduced
+/// reader keeps that delegation, so scope resolution lives in exactly one place
+/// ([`find_var_ht_dict`]). The C out-param `rettv`/`dip` collapse into the
+/// returned value.
 pub fn eval_variable(name: &str) -> Option<typval_T> {
-    // A `VAR_DICT` snapshot of a scope dict, for a bare scope reference used as a
-    // Dict (`keys(g:)`, `get(b:, …)`). Vim exposes the live scope dict; this is a
-    // read snapshot (covers introspection, not mutation-through-the-dict).
-    let scope_snapshot = |d: &dict_T| -> typval_T {
-        let nd = crate::ported::eval::typval::tv_dict_alloc();
-        {
-            let mut b = nd.borrow_mut();
-            for (k, v) in d.dv_hashtab.iter() {
-                b.dv_hashtab.insert(k.clone(), v.clone());
-            }
-        }
-        typval_T {
-            v_type: VAR_DICT,
-            v_lock: VarLockStatus::VAR_UNLOCKED,
-            vval: v_dict(Some(nd)),
-        }
-    };
-    // c: v: predefined constants live in vimvardict (eval_init, eval.c:204).
-    match name {
-        "v:true" => {
-            return Some(typval_T {
-                v_type: VAR_BOOL,
-                v_lock: VarLockStatus::VAR_UNLOCKED,
-                vval: v_bool(kBoolVarTrue),
-            })
-        }
-        "v:false" => {
-            return Some(typval_T {
-                v_type: VAR_BOOL,
-                v_lock: VarLockStatus::VAR_UNLOCKED,
-                vval: v_bool(kBoolVarFalse),
-            })
-        }
-        "v:null" => {
-            return Some(typval_T {
-                v_type: VAR_SPECIAL,
-                v_lock: VarLockStatus::VAR_UNLOCKED,
-                vval: v_special(kSpecialVarNull),
-            })
-        }
-        "v:none" => {
-            return Some(typval_T {
-                v_type: VAR_SPECIAL,
-                v_lock: VarLockStatus::VAR_UNLOCKED,
-                vval: v_special(SpecialVarValue::kSpecialVarNone),
-            })
-        }
-        _ => {}
-    }
-    if let Some(key) = name.strip_prefix("g:") {
-        return globvardict.with(|d| {
-            let d = d.borrow();
-            if key.is_empty() {
-                Some(scope_snapshot(&d))
-            } else {
-                tv_dict_find(&d, key).cloned()
-            }
-        });
-    }
-    if let Some(key) = name.strip_prefix("s:") {
-        return script_vars.with(|d| {
-            let d = d.borrow();
-            if key.is_empty() {
-                Some(scope_snapshot(&d))
-            } else {
-                tv_dict_find(&d, key).cloned()
-            }
-        });
-    }
-    if let Some(key) = name.strip_prefix("b:") {
-        return buffer_vars.with(|d| {
-            let d = d.borrow();
-            if key.is_empty() {
-                Some(scope_snapshot(&d))
-            } else {
-                tv_dict_find(&d, key).cloned()
-            }
-        });
-    }
-    if let Some(key) = name.strip_prefix("w:") {
-        return window_vars.with(|d| {
-            let d = d.borrow();
-            if key.is_empty() {
-                Some(scope_snapshot(&d))
-            } else {
-                tv_dict_find(&d, key).cloned()
-            }
-        });
-    }
-    if let Some(key) = name.strip_prefix("t:") {
-        return tabpage_vars.with(|d| {
-            let d = d.borrow();
-            if key.is_empty() {
-                Some(scope_snapshot(&d))
-            } else {
-                tv_dict_find(&d, key).cloned()
-            }
-        });
-    }
-    if let Some(key) = name.strip_prefix("a:") {
-        return funccal_stack.with(|s| {
-            let s = s.borrow();
-            let f = s.last()?;
-            if key.is_empty() {
-                Some(scope_snapshot(&f.fc_l_avars))
-            } else {
-                tv_dict_find(&f.fc_l_avars, key).cloned()
-            }
-        });
-    }
-    if let Some(key) = name.strip_prefix("l:") {
-        return funccal_stack.with(|s| {
-            let s = s.borrow();
-            let f = s.last()?;
-            if key.is_empty() {
-                Some(scope_snapshot(&f.fc_l_vars))
-            } else {
-                tv_dict_find(&f.fc_l_vars, key).cloned()
-            }
-        });
-    }
-    // c: v: variables live in `vimvardict` — consult the vimvars store. Returns
-    // None for VAR_UNKNOWN entries (v:val/v:key, which the bridge supplies
-    // dynamically) and for unknown v: names.
-    if let Some(key) = name.strip_prefix("v:") {
-        if let Some(idx) = VIMVARS_DEF.iter().position(|&(n, _, _)| n == key) {
-            let tv = get_vim_var_tv(idx);
-            if tv.v_type != VAR_UNKNOWN {
-                return Some(tv);
-            }
-        }
-        return None;
-    }
-    // Bare name: `l:` inside a function (locals only — no fallthrough to g:),
-    // else the global scope.
-    funccal_stack.with(|s| {
-        let stack = s.borrow();
-        match stack.last() {
-            Some(top) => tv_dict_find(&top.fc_l_vars, name).cloned(),
-            None => globvardict.with(|d| tv_dict_find(&d.borrow(), name).cloned()),
-        }
-    })
+    // c:2371 v = find_var(name, (size_t)len, NULL, no_autoload);
+    find_var(name, false)
 }
 
 // ── v: variables (`vimvardict` / vimvars[] table) ───────────────────────────
@@ -1064,6 +938,38 @@ pub fn v_exception(oldval: Option<String>) -> Option<String> {
     }
 }
 
+/// Port of `set_cmdarg()` from `Src/eval/vars.c:2204`.
+///
+/// Set `v:cmdarg`. With `Some(eap)`, build the value from the command's `++`
+/// file modifiers and return the old value; with `eap == None` and `oldarg`,
+/// restore the saved value and return `None`. Always called in pairs.
+///
+/// RUST-PORT NOTE: the write-half (the `v:cmdarg` `get_vim_var_tv`/save/restore
+/// pairing) is ported faithfully. The reduced [`exarg_T`] does not model the
+/// `:command` file-modifier fields, so the `++bin`/`++nobin`/`++edit`/`++ff=…`/
+/// `++enc=…`/`++bad=…`/`++p` suffix construction (`vars.c:2213`-`2251`) cannot be
+/// reconstructed and is deferred (see deferred_deps); with no modifiers the C
+/// value is the base case (`*newval = NUL`, `vars.c:2246`), i.e. the empty
+/// string, which is what the `Some(eap)` branch writes.
+pub fn set_cmdarg(eap: Option<&exarg_T>, oldarg: Option<String>) -> Option<String> {
+    // c:2207 typval_T *tv = get_vim_var_tv(VV_CMDARG);
+    // c:2208 char *oldval = tv->vval.v_string;
+    let oldval = get_vim_var_str(vv::VV_CMDARG);
+    if eap.is_none() {
+        // c:2209 if (eap == NULL) goto error;
+        // c:2257 error: tv->vval.v_string = oldarg; return NULL;
+        set_vim_var_string(vv::VV_CMDARG, &oldarg.unwrap_or_default());
+        return None;
+    }
+    // c:2213-2251 DEFERRED: build newval from eap->force_bin/read_edit/force_ff/
+    //   force_enc/bad_char/mkdir_p — the reduced exarg_T lacks these fields, so
+    //   the value is the no-modifier base case (empty string).
+    // c:2253 tv->vval.v_string = newval;
+    set_vim_var_string(vv::VV_CMDARG, "");
+    // c:2254 return oldval;
+    Some(oldval)
+}
+
 /// Port of `v_throwpoint()` from `Src/eval/vars.c:2322`.
 ///
 /// The `v:throwpoint` counterpart of [`v_exception`].
@@ -1401,15 +1307,254 @@ pub fn new_script_vars() {}
 /// are default-initialized (see [`evalvars_init`]), so this is a no-op.
 pub fn init_var_dict() {}
 
+/// The scope a variable name resolves to — the reduced stand-in for the C
+/// `hashtab_T *` return of [`find_var_ht_dict`] together with its `dict_T **d`
+/// out-param.
+///
+/// RUST-PORT NOTE: C `find_var_ht_dict` returns a single `hashtab_T *` (and sets
+/// `*d`) naming one scope dict. The reduced model's scopes are stored
+/// heterogeneously — `g:`/`s:`/`b:`/`w:`/`t:` in per-scope thread-local
+/// `RefCell<dict_T>`, `l:`/`a:` as `dict_T` fields inside the `funccal_stack`
+/// Vec, and `v:` in the `vimvars[]` table — none of them a uniform
+/// `Rc<RefCell<dict_T>>`, so a single pointer type cannot name all of them. This
+/// enum identifies the resolved scope; the caller ([`find_var`]/[`set_var`])
+/// reaches into the matching store.
+pub enum VarScopeDict {
+    /// `g:` / a bare name at script level — `globvardict` (`vars.c:2531`/`:2525`).
+    Global,
+    /// `s:` — the script-local scope (`vars.c:2562`, SID/nlua machinery deferred).
+    Script,
+    /// `b:` — `curbuf->b_vars` (`vars.c:2540`).
+    Buffer,
+    /// `w:` — `curwin->w_vars` (`vars.c:2542`).
+    Window,
+    /// `t:` — `curtab->tp_vars` (`vars.c:2544`).
+    Tabpage,
+    /// `l:` / a bare name inside a function — `get_funccal_local_dict()`
+    /// (`vars.c:2550`/`:2520`).
+    FuncLocal,
+    /// `a:` — `get_funccal_args_dict()` (`vars.c:2548`).
+    FuncArgs,
+    /// `v:` (and the implicit `version` compat name) — `get_vimvar_dict()`
+    /// (`vars.c:2546`/`:2517`).
+    VimVar,
+}
+
+/// Port of `find_var_ht_dict()` from `Src/eval/vars.c:2498`.
+///
+/// Find the scope dict (`g:`, `l:`, `s:`, …) used for variable `name`, returning
+/// `Some((scope, varname))` where `varname` is `name` without its scope prefix,
+/// or `None` when `name` is not a valid variable name. This is the single scope
+/// resolver: [`find_var`] (read) and [`set_var`] (write) both delegate here, so
+/// prefix stripping lives in exactly one place.
+///
+/// RUST-PORT NOTE: the C out-params `**varname`/`**d` and the `hashtab_T *`
+/// return collapse into the returned tuple ([`VarScopeDict`] naming the resolved
+/// dict, plus the owned stripped name). The `s:` branch's SID / anonymous-script
+/// creation (`nlua_set_sctx`/`new_script_item`, `vars.c:2551`-`2562`) is not
+/// modelled — the standalone has a single always-present script scope. For `l:`
+/// and `a:` the C returns NULL when not in a function (`*d ? … : NULL`,
+/// `vars.c:2566`); this returns `None` there too.
+pub fn find_var_ht_dict(name: &str, name_len: usize) -> Option<(VarScopeDict, String)> {
+    let name_len = name_len.min(name.len());
+    let b = name.as_bytes();
+    // c:2503 if (name_len == 0) return NULL;
+    if name_len == 0 {
+        return None;
+    }
+    // c:2506 if (name_len == 1 || name[1] != ':') — implicit scope.
+    if name_len == 1 || b[1] != b':' {
+        // c:2508 the name must not start with a colon or '#'.
+        if b[0] == b':' || b[0] == crate::ported::eval::AUTOLOAD_CHAR {
+            return None;
+        }
+        // c:2512 *varname = name;
+        let varname = name[..name_len].to_string();
+        // c:2514 "version" is "v:version" in all scopes (compat_hashtab). Only
+        //   the VV_COMPAT vimvar ("version") lives in that table.
+        if varname == "version" {
+            return Some((VarScopeDict::VimVar, varname));
+        }
+        // c:2520 local variable if inside a function, else global (c:2525).
+        if crate::ported::eval::userfunc::get_funccal_local_dict().is_some() {
+            return Some((VarScopeDict::FuncLocal, varname));
+        }
+        return Some((VarScopeDict::Global, varname));
+    }
+
+    // c:2529 *varname = name + 2;
+    let varname = name[2..name_len].to_string();
+    // c:2530 if (*name == 'g') global variable.
+    if b[0] == b'g' {
+        return Some((VarScopeDict::Global, varname));
+    }
+    // c:2532 there must be no ':' or '#' in the rest of the name if g: was not
+    //   used.
+    if name_len > 2
+        && (varname.as_bytes().contains(&b':')
+            || varname
+                .as_bytes()
+                .contains(&crate::ported::eval::AUTOLOAD_CHAR))
+    {
+        return None;
+    }
+
+    // c:2539 dispatch on the scope character; `l:`/`a:` are valid only in a
+    //   function (C: *d stays the funccal dict, else NULL at c:2566).
+    let scope = match b[0] {
+        b'b' => VarScopeDict::Buffer,  // c:2539
+        b'w' => VarScopeDict::Window,  // c:2541
+        b't' => VarScopeDict::Tabpage, // c:2543
+        b'v' => VarScopeDict::VimVar,  // c:2545
+        b'a' => {
+            // c:2547
+            crate::ported::eval::userfunc::get_funccal_args_dict()?;
+            VarScopeDict::FuncArgs
+        }
+        b'l' => {
+            // c:2549
+            crate::ported::eval::userfunc::get_funccal_local_dict()?;
+            VarScopeDict::FuncLocal
+        }
+        b's' => VarScopeDict::Script, // c:2551
+        // c:2564 unknown scope char → *d stays NULL → return NULL.
+        _ => return None,
+    };
+    Some((scope, varname))
+}
+
+/// Port of `find_var_ht()` from `Src/eval/vars.c:2577`.
+///
+/// The hashtable/scope used for variable `name`, without the C `dict_T **d`
+/// out-param. RUST-PORT NOTE: delegates to [`find_var_ht_dict`] (as C does) and
+/// returns the resolved [`VarScopeDict`] plus the stripped `varname` (the C
+/// `**varname` out-param).
+pub fn find_var_ht(name: &str, name_len: usize) -> Option<(VarScopeDict, String)> {
+    // c:2579 dict_T *d; return find_var_ht_dict(name, name_len, varname, &d);
+    find_var_ht_dict(name, name_len)
+}
+
 /// Port of `find_var()` from `Src/eval/vars.c:2404`.
 ///
-/// Look up variable `name` across the scope chain (prefix scopes, the active
-/// `l:`/`a:`, and a lambda's captured parent scope). RUST-PORT NOTE: the C
-/// returns a mutable `dictitem_T`; this read-reduced port routes the whole
-/// resolution through [`eval_variable`] (which already covers closures), so it
-/// returns the value. `no_autoload` is moot — no autoload standalone.
+/// Look up variable `name`, returning its value or `None`. RUST-PORT NOTE: the C
+/// returns a mutable `dictitem_T`; this read-reduced port resolves the scope
+/// through [`find_var_ht_dict`] (the single resolver shared with [`set_var`])
+/// and reads the value out of it — folding the `find_var_in_ht` lookup
+/// (`vars.c:2439`), including its empty-`varname` "scope self-dict" case
+/// (`vars.c:2444`), into this function. The lambda parent-scope retry
+/// (`find_var_in_scoped_ht`) and global-scope autoload are not modelled;
+/// `no_autoload` is moot.
 pub fn find_var(name: &str, _no_autoload: bool) -> Option<typval_T> {
-    eval_variable(name)
+    // A `VAR_DICT` snapshot of a scope dict — the reduced `find_var_in_ht`
+    // empty-`varname` case (C returns the scope's `&…_var` self-dictitem, e.g.
+    // `&globvars_var`; here a read snapshot of the scope's contents). Covers
+    // introspection (`keys(g:)`, `get(b:, …)`), not mutation-through-the-dict.
+    let scope_snapshot = |d: &dict_T| -> typval_T {
+        let nd = crate::ported::eval::typval::tv_dict_alloc();
+        {
+            let mut bm = nd.borrow_mut();
+            for (k, v) in d.dv_hashtab.iter() {
+                bm.dv_hashtab.insert(k.clone(), v.clone());
+            }
+        }
+        typval_T {
+            v_type: VAR_DICT,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_dict(Some(nd)),
+        }
+    };
+    // c: v: boolean/special literals. RUST-PORT NOTE: not in C `find_var` (there
+    //   they are ordinary vimvars[] entries); kept as a reduced-model safety net
+    //   so they resolve even before `evalvars_init` seeds the vimvars[] table
+    //   (whose type-zero defaults would otherwise read v:true as false).
+    match name {
+        "v:true" => {
+            return Some(typval_T {
+                v_type: VAR_BOOL,
+                v_lock: VarLockStatus::VAR_UNLOCKED,
+                vval: v_bool(kBoolVarTrue),
+            })
+        }
+        "v:false" => {
+            return Some(typval_T {
+                v_type: VAR_BOOL,
+                v_lock: VarLockStatus::VAR_UNLOCKED,
+                vval: v_bool(kBoolVarFalse),
+            })
+        }
+        "v:null" => {
+            return Some(typval_T {
+                v_type: VAR_SPECIAL,
+                v_lock: VarLockStatus::VAR_UNLOCKED,
+                vval: v_special(kSpecialVarNull),
+            })
+        }
+        "v:none" => {
+            return Some(typval_T {
+                v_type: VAR_SPECIAL,
+                v_lock: VarLockStatus::VAR_UNLOCKED,
+                vval: v_special(SpecialVarValue::kSpecialVarNone),
+            })
+        }
+        _ => {}
+    }
+    // c:2406 ht = find_var_ht(name, name_len, &varname); if (ht == NULL) return NULL;
+    let (scope, varname) = find_var_ht_dict(name, name.len())?;
+    // c:2439 find_var_in_ht: empty varname → the scope's self-dict (snapshot).
+    if varname.is_empty() {
+        return Some(match scope {
+            VarScopeDict::Global => globvardict.with(|d| scope_snapshot(&d.borrow())),
+            VarScopeDict::Script => script_vars.with(|d| scope_snapshot(&d.borrow())),
+            VarScopeDict::Buffer => buffer_vars.with(|d| scope_snapshot(&d.borrow())),
+            VarScopeDict::Window => window_vars.with(|d| scope_snapshot(&d.borrow())),
+            VarScopeDict::Tabpage => tabpage_vars.with(|d| scope_snapshot(&d.borrow())),
+            VarScopeDict::VimVar => scope_snapshot(&get_vimvar_dict()),
+            // FuncLocal/FuncArgs only reach here with an active frame (the
+            // resolver returns them only inside a function), so `last()` is Some.
+            VarScopeDict::FuncLocal => funccal_stack.with(|s| {
+                s.borrow()
+                    .last()
+                    .map(|f| scope_snapshot(&f.fc_l_vars))
+                    .unwrap_or_default()
+            }),
+            VarScopeDict::FuncArgs => funccal_stack.with(|s| {
+                s.borrow()
+                    .last()
+                    .map(|f| scope_snapshot(&f.fc_l_avars))
+                    .unwrap_or_default()
+            }),
+        });
+    }
+    // c:2467 hi = hash_find_len(ht, varname, varname_len); read the value.
+    match scope {
+        VarScopeDict::Global => globvardict.with(|d| tv_dict_find(&d.borrow(), &varname).cloned()),
+        VarScopeDict::Script => script_vars.with(|d| tv_dict_find(&d.borrow(), &varname).cloned()),
+        VarScopeDict::Buffer => buffer_vars.with(|d| tv_dict_find(&d.borrow(), &varname).cloned()),
+        VarScopeDict::Window => window_vars.with(|d| tv_dict_find(&d.borrow(), &varname).cloned()),
+        VarScopeDict::Tabpage => {
+            tabpage_vars.with(|d| tv_dict_find(&d.borrow(), &varname).cloned())
+        }
+        VarScopeDict::FuncLocal => funccal_stack.with(|s| {
+            let s = s.borrow();
+            tv_dict_find(&s.last()?.fc_l_vars, &varname).cloned()
+        }),
+        VarScopeDict::FuncArgs => funccal_stack.with(|s| {
+            let s = s.borrow();
+            tv_dict_find(&s.last()?.fc_l_avars, &varname).cloned()
+        }),
+        // c: v: variables live in the vimvars[] table. Returns None for
+        //   VAR_UNKNOWN slots (v:val/v:key, supplied dynamically by the bridge)
+        //   and for unknown v: names.
+        VarScopeDict::VimVar => {
+            let idx = VIMVARS_DEF.iter().position(|&(n, _, _)| n == varname)?;
+            let tv = get_vim_var_tv(idx);
+            if tv.v_type != VAR_UNKNOWN {
+                Some(tv)
+            } else {
+                None
+            }
+        }
+    }
 }
 
 /// Port of `var_exists()` from `Src/eval/vars.c:3371`.
@@ -3394,5 +3539,124 @@ mod let_driver_tests {
         setwinvar(&opt_args, 0);
         let sw = find_option("shiftwidth");
         assert_eq!(get_option_value(sw, 0).data, OptValData::number(3));
+    }
+}
+
+#[cfg(test)]
+mod find_var_ht_dict_tests {
+    use super::*;
+    use crate::ported::eval::typval::tv_get_string;
+
+    fn scope_of(name: &str) -> Option<VarScopeDict> {
+        find_var_ht_dict(name, name.len()).map(|(s, _)| s)
+    }
+
+    #[test]
+    fn resolves_explicit_scope_prefixes_and_strips_name() {
+        // Each explicit prefix resolves to its scope; varname is stripped.
+        for (name, want) in [
+            ("g:foo", VarScopeDict::Global),
+            ("s:foo", VarScopeDict::Script),
+            ("b:foo", VarScopeDict::Buffer),
+            ("w:foo", VarScopeDict::Window),
+            ("t:foo", VarScopeDict::Tabpage),
+            ("v:count", VarScopeDict::VimVar),
+        ] {
+            let (scope, varname) = find_var_ht_dict(name, name.len()).unwrap();
+            assert!(std::mem::discriminant(&scope) == std::mem::discriminant(&want));
+            assert_eq!(varname, &name[2..]);
+        }
+    }
+
+    #[test]
+    fn implicit_scope_and_compat_version() {
+        // A bare name at script level (no active function) → Global.
+        funccal_stack.with(|s| s.borrow_mut().clear());
+        assert!(matches!(scope_of("bare"), Some(VarScopeDict::Global)));
+        // The compat "version" name resolves to v: in every scope.
+        let (scope, varname) = find_var_ht_dict("version", 7).unwrap();
+        assert!(matches!(scope, VarScopeDict::VimVar));
+        assert_eq!(varname, "version");
+        // A bare name inside a function → FuncLocal.
+        funccal_stack.with(|s| s.borrow_mut().push(FuncScope::default()));
+        assert!(matches!(scope_of("bare"), Some(VarScopeDict::FuncLocal)));
+        funccal_stack.with(|s| s.borrow_mut().clear());
+    }
+
+    #[test]
+    fn invalid_names_and_scopeless_func_vars_return_none() {
+        // name_len 0, a leading ':' or '#', an unknown scope char, and a ':'/'#'
+        // in the tail of a non-g: name are all invalid.
+        assert!(scope_of("").is_none());
+        assert!(scope_of(":x").is_none());
+        assert!(scope_of("#x").is_none());
+        assert!(scope_of("x:foo").is_none());
+        assert!(scope_of("b:a:b").is_none());
+        assert!(scope_of("b:a#b").is_none());
+        // g: may contain ':' / '#' in the tail (autoload etc.).
+        assert!(matches!(scope_of("g:a#b"), Some(VarScopeDict::Global)));
+        // l:/a: are invalid outside a function (C returns NULL there).
+        funccal_stack.with(|s| s.borrow_mut().clear());
+        assert!(scope_of("l:foo").is_none());
+        assert!(scope_of("a:1").is_none());
+        // …and valid inside one.
+        funccal_stack.with(|s| s.borrow_mut().push(FuncScope::default()));
+        assert!(matches!(scope_of("l:foo"), Some(VarScopeDict::FuncLocal)));
+        assert!(matches!(scope_of("a:1"), Some(VarScopeDict::FuncArgs)));
+        funccal_stack.with(|s| s.borrow_mut().clear());
+    }
+
+    #[test]
+    fn set_var_find_var_roundtrip_through_one_resolver() {
+        // set_var (writer) and find_var (reader) both delegate to the resolver;
+        // a write is visible through the read for each non-func scope.
+        for (name, key) in [
+            ("g:rt_probe", "g:rt_probe"),
+            ("s:rt_probe", "s:rt_probe"),
+            ("b:rt_probe", "b:rt_probe"),
+            ("w:rt_probe", "w:rt_probe"),
+            ("t:rt_probe", "t:rt_probe"),
+        ] {
+            set_var(name, name.len(), typval_T::from("v".to_string()), false);
+            assert_eq!(tv_get_string(&find_var(key, false).unwrap()), "v");
+            assert_eq!(tv_get_string(&eval_variable(key).unwrap()), "v");
+        }
+    }
+
+    #[test]
+    fn func_local_scope_roundtrip_and_empty_key_snapshot() {
+        use crate::ported::eval::typval::tv_dict_add_nr;
+        funccal_stack.with(|s| s.borrow_mut().clear());
+        funccal_stack.with(|s| {
+            let mut frame = FuncScope::default();
+            tv_dict_add_nr(&mut frame.fc_l_avars, "1", 7);
+            s.borrow_mut().push(frame);
+        });
+        // Bare write lands in l:, read back through the resolver.
+        set_var("loc", 3, typval_T::from(5 as varnumber_T), false);
+        assert_eq!(tv_get_string(&find_var("l:loc", false).unwrap()), "5");
+        // a: argument is readable, and the empty-key "a:" ref is a scope snapshot.
+        assert_eq!(tv_get_string(&find_var("a:1", false).unwrap()), "7");
+        let snap = find_var("a:", false).unwrap();
+        match snap.vval {
+            v_dict(Some(d)) => assert!(d.borrow().dv_hashtab.contains_key("1")),
+            _ => panic!("a: is not a Dict snapshot"),
+        }
+        funccal_stack.with(|s| s.borrow_mut().clear());
+    }
+
+    #[test]
+    fn set_cmdarg_save_and_restore() {
+        // Seed a known v:cmdarg, then set_cmdarg(Some(eap), _) returns the old
+        // value and (with no modelled modifiers) writes the empty base case.
+        set_vim_var_string(vv::VV_CMDARG, "prev");
+        let eap = exarg_T::default();
+        let old = set_cmdarg(Some(&eap), None);
+        assert_eq!(old.as_deref(), Some("prev"));
+        assert_eq!(get_vim_var_str(vv::VV_CMDARG), "");
+        // Restore path: eap == None restores oldarg and returns None.
+        let ret = set_cmdarg(None, old);
+        assert!(ret.is_none());
+        assert_eq!(get_vim_var_str(vv::VV_CMDARG), "prev");
     }
 }

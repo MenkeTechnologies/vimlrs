@@ -26,6 +26,11 @@ pub mod eval;
 pub mod eval_h;
 /// Port of `src/nvim/ex_eval.c` (abort/exception state predicates).
 pub mod ex_eval;
+/// Port of `src/nvim/strings.c` (the Vimscript string builtins `f_string`,
+/// `f_strlen`, `f_byteidx`, `f_tr`, …). Home file not under the vendored
+/// `csrc/eval/` tree; see `tests/data/fake_fn_allowlist.txt`.
+/// Port of `src/nvim/mark.c` (subset: the mark store behind setmark_pos/getpos).
+pub mod mark;
 /// Port of `src/nvim/mbyte.c` (subset: the UTF-8 codec helpers `utf_ptr2char`,
 /// `utf_ptr2len`, `utf_char2len`, `utf_char2bytes` behind the JSON decoder).
 pub mod mbyte;
@@ -47,13 +52,14 @@ pub mod os;
 /// Port of `src/nvim/path.c` (subset: the path-component helpers behind
 /// `pathshorten()`).
 pub mod path;
+/// Port of `src/nvim/plines.c`+`indent.c` (subset: getvcol/win_chartabsize/tabstop_padding).
+pub mod plines;
 /// Port of `src/nvim/profile.c` (the `proftime_T` helpers backing `reltime()`).
 pub mod profile;
+/// Port of `src/nvim/search.c` (subset: searchit/do_searchpair reference).
+pub mod search;
 /// Port of `src/nvim/sha256.c` (FIPS-180-2 SHA-256, behind `sha256()`).
 pub mod sha256;
-/// Port of `src/nvim/strings.c` (the Vimscript string builtins `f_string`,
-/// `f_strlen`, `f_byteidx`, `f_tr`, …). Home file not under the vendored
-/// `csrc/eval/` tree; see `tests/data/fake_fn_allowlist.txt`.
 pub mod strings;
 /// Generated not-yet-ported surface: one stub per vendored C function
 /// definition (real name + `csrc/<file>:<line>` citation). Regenerate with

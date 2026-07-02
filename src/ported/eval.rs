@@ -686,10 +686,201 @@ pub fn check_luafunc_name(str: &str, paren: bool) -> i32 {
     }
 }
 
-/// Port of `get_echo_hl_id()` from `Src/eval.c` — the highlight id for `:echohl`;
-/// no highlight groups standalone → 0.
+thread_local! {
+    /// C file-static `int echo_hl_id` (`Src/eval.c:113`) — the highlight id set
+    /// by `:echohl {name}` and applied by `:echo`/`:echomsg`/`:echoerr`.
+    ///
+    /// RUST-PORT NOTE: a per-thread `Cell` stands in for the C file-static, the
+    /// same basis as the `message.rs::did_emsg` / `ex_eval.rs` global models.
+    static echo_hl_id: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+}
+
+/// Port of `get_echo_hl_id()` from `Src/eval.c:6213` — the `:echo` highlight id.
+/// C: `return echo_hl_id;`
 pub fn get_echo_hl_id() -> i32 {
-    0
+    // c:6215 return echo_hl_id;
+    echo_hl_id.with(|h| h.get())
+}
+
+/// Port of `ex_echohl()` from `Src/eval.c:6207`.
+///
+/// `":echohl {name}"` — set the highlight group applied to subsequent `:echo`
+/// output. RUST-PORT NOTE: the C `void ex_echohl(exarg_T *eap)` reads
+/// `eap->arg`; taken directly here (the shared `exarg_T` in `ex_eval.rs` does not
+/// enumerate `CMD_echohl`). `syn_name2id()` (`Src/syntax.c`, not vendored) has no
+/// highlight groups standalone, so it always resolves to `0` — meaning `:echohl`
+/// clears the id, which is exactly the observable standalone behaviour.
+pub fn ex_echohl(arg: &str) {
+    // c:6209 echo_hl_id = syn_name2id(eap->arg);
+    // syn_name2id() → 0 (no highlight groups standalone).
+    let _ = arg;
+    echo_hl_id.with(|h| h.set(0));
+}
+
+/// Port of `ex_echo()` from `Src/eval.c:6124`.
+///
+/// `":echo expr1 ..."` prints each argument separated with a space and adds a
+/// newline; `":echon expr1 ..."` prints each argument plain (`echon == true`).
+///
+/// RUST-PORT NOTE (reference port): at runtime `:echo`/`:echon` are compiled to
+/// the fusevm bridge's `VIML_ECHO`/`VIML_ECHON` opcodes, whose handler writes the
+/// bridge's `ECHO_SINK` (PORT.md carve-out). This strict port mirrors the C body
+/// as dead-code reference. Deviations:
+/// - `void ex_echo(exarg_T *eap)` → the read fields (`eap->arg`, `eap->skip`,
+///   and `eap->cmdidx == CMD_echon`) are taken directly, since the shared
+///   `exarg_T` (`ex_eval.rs`) does not enumerate the echo commands.
+/// - The message area does not exist standalone, so instead of `msg_start()` /
+///   `msg_multiline()` / `msg_puts_hl(" ")` the assembled echo text is returned
+///   (the same "no standalone message area" basis as [`last_set_msg`]); the
+///   runtime sink is the bridge. Separators (`" "` for `:echo`, none for
+///   `:echon`) are folded into the returned string.
+/// - `msg_ext_*` / `need_clr_eos` / `check_nextcmd` / `emsg_skip` are message-UI
+///   and ex-loop state not modeled standalone (matching [`eval0`]).
+///
+/// Arguments are the whitespace-separated expressions the C loop walks with
+/// `eval1(&arg, &rettv, &evalarg)`; the same ported [`eval1`] both advances the
+/// cursor and evaluates each expression (its function-call sub-path itself
+/// dispatches through `EVAL_STRING_HOOK`).
+pub fn ex_echo(arg: &str, skip: bool, echon: bool) -> String {
+    let mut arg = arg; // c:6126 char *arg = eap->arg;
+    let mut rettv = typval_T::default(); // c:6127 typval_T rettv;
+    let mut atstart = true; // c:6128 bool atstart = true;
+    let did_emsg_before = crate::ported::message::did_emsg.with(|d| d.get()); // c:6130
+    let mut out = String::new();
+
+    let mut evalarg = evalarg_T {
+        eval_flags: if skip { 0 } else { EVAL_EVALUATE },
+    }; // c:6134 fill_evalarg_from_eap(&evalarg, eap, eap->skip)
+
+    // c:6139 while (*arg != NUL && *arg != '|' && *arg != '\n' && !got_int)
+    // (note: unlike the general `ends_excmd`, `"` does NOT terminate — an echo
+    // argument may be a `"..."` string literal.)
+    while !matches!(arg.as_bytes().first(), None | Some(b'|') | Some(b'\n'))
+        && !crate::ported::ex_eval::got_int.with(|g| g.get())
+    {
+        // c:6145 char *p = arg;
+        let p = arg;
+        if eval1(&mut arg, &mut rettv, Some(&mut evalarg)) == FAIL {
+            // c:6146 eval1(&arg, &rettv, &evalarg). c:6149 Report the invalid
+            // expression unless evaluation was
+            // cancelled by an aborting error / interrupt / exception.
+            if !crate::ported::ex_eval::aborting()
+                && crate::ported::message::did_emsg.with(|d| d.get()) == did_emsg_before
+            {
+                crate::ported::message::semsg(&format!("E15: Invalid expression: \"{p}\""));
+            }
+            break; // c:6158
+        }
+
+        if !skip {
+            if atstart {
+                atstart = false; // c:6165
+            } else if !echon {
+                // c:6178 msg_puts_hl(" ", echo_hl_id, false);
+                out.push(' ');
+            }
+            // c:6180 char *tofree = encode_tv2echo(&rettv, NULL);
+            out.push_str(&crate::ported::eval::encode::encode_tv2echo(&rettv));
+        }
+        crate::ported::eval::typval::tv_clear(&mut rettv); // c:6184
+        arg = skipwhite(arg); // c:6185
+    }
+    // c:6187 eap->nextcmd = check_nextcmd(arg); — no ex-loop standalone.
+    out
+}
+
+/// Port of `ex_execute()` from `Src/eval.c:6223`.
+///
+/// `":execute expr1 ..."` runs the concatenated string as an ex command;
+/// `":echomsg expr1 ..."` prints a message; `":echoerr expr1 ..."` prints an
+/// error. Each argument is separated by a space in the assembled string.
+///
+/// RUST-PORT NOTE (reference port): at runtime these are compiled by the fusevm
+/// frontend; this strict port mirrors the C body as dead-code reference.
+/// Deviations:
+/// - `void ex_execute(exarg_T *eap)` → the read fields (`eap->arg`, `eap->skip`,
+///   `eap->cmdidx`) are taken directly; the three commands are selected by
+///   `echomsg`/`echoerr` (both false ⇒ `CMD_execute`), since the shared
+///   `exarg_T` (`ex_eval.rs`) does not enumerate them.
+/// - The assembled string (`garray_T ga`) is returned. For `CMD_echomsg` the C
+///   `msg()` has no standalone message area (returned instead, as [`ex_echo`]);
+///   for `CMD_echoerr` the C `emsg_multiline()` is routed through
+///   [`emsg`](crate::ported::message::emsg) (the real error path); for
+///   `CMD_execute` the tail `do_cmdline()` (`Src/ex_docmd.c`) is DEFERRED — the
+///   ex-command loop is not ported (see `deferred_deps`), so the assembled
+///   command line is returned unrun.
+/// - C's `eval1_emsg(&arg, &rettv, eap)` (`Src/eval.c:281`) advances a cursor;
+///   the module's [`eval1_emsg`] wrapper evaluates a whole string via
+///   `EVAL_STRING_HOOK` and cannot advance, so the cursor-advancing
+///   `eval1`-plus-`E15`-report body of `eval1_emsg` is inlined in the loop
+///   (driving the ported [`eval1`] over `*arg`).
+pub fn ex_execute(arg: &str, skip: bool, echomsg: bool, echoerr: bool) -> String {
+    let mut arg = arg; // c:6225 char *arg = eap->arg;
+    let mut rettv = typval_T::default(); // c:6226 typval_T rettv;
+    let mut ret = OK; // c:6227 int ret = OK;
+    let mut ga = String::new(); // c:6229 garray_T ga; ga_init(&ga, 1, 80);
+    let is_execute = !echomsg && !echoerr; // c: cmdidx == CMD_execute
+
+    // c:6235 while (*arg != NUL && *arg != '|' && *arg != '\n')
+    while !matches!(arg.as_bytes().first(), None | Some(b'|') | Some(b'\n')) {
+        // c:6236 ret = eval1_emsg(&arg, &rettv, eap);
+        // eval1_emsg() advances the cursor and reports an invalid expression;
+        // the cursor-advancing form is inlined here (the module's [`eval1_emsg`]
+        // wrapper evaluates a whole string via `EVAL_STRING_HOOK` and cannot
+        // advance a cursor). `eap`-dependent skip/abort guards are message-UI
+        // state not modeled standalone (matching [`eval0`]).
+        {
+            let p = arg;
+            let mut evalarg = evalarg_T {
+                eval_flags: if skip { 0 } else { EVAL_EVALUATE },
+            };
+            ret = eval1(&mut arg, &mut rettv, Some(&mut evalarg)); // c: eval1(arg, rettv, …)
+            if ret == FAIL && !crate::ported::ex_eval::aborting() {
+                crate::ported::message::semsg(&format!("E15: Invalid expression: \"{p}\""));
+            }
+        }
+        if ret == FAIL {
+            break; // c:6239
+        }
+
+        if !skip {
+            // c:6243 argstr: execute → tv_get_string; else VAR_STRING →
+            // encode_tv2echo, otherwise encode_tv2string.
+            let argstr = if is_execute {
+                crate::ported::eval::typval::tv_get_string(&rettv)
+            } else if rettv.v_type == VAR_STRING {
+                crate::ported::eval::encode::encode_tv2echo(&rettv)
+            } else {
+                crate::ported::eval::encode::encode_tv2string(&rettv)
+            };
+            // c:6251 if (!GA_EMPTY(&ga)) ga_data[ga_len++] = ' ';
+            if !ga.is_empty() {
+                ga.push(' ');
+            }
+            // c:6254 memcpy(ga_data + ga_len, argstr, len + 1);
+            ga.push_str(&argstr);
+        }
+
+        crate::ported::eval::typval::tv_clear(&mut rettv); // c:6259
+        arg = skipwhite(arg); // c:6260
+    }
+
+    // c:6265 if (ret != FAIL && ga.ga_data != NULL)
+    if ret != FAIL && !ga.is_empty() {
+        if echomsg {
+            // c:6268 msg(ga.ga_data, echo_hl_id); — no standalone message area
+            // (returned below, as ex_echo).
+        } else if echoerr {
+            // c:6272 emsg_multiline(ga.ga_data, "echoerr", HLF_E, true);
+            crate::ported::message::emsg(&ga);
+        } else {
+            // c:6277 do_cmdline(ga.ga_data, ...) — DEFERRED: the ex-command loop
+            // (do_cmdline / ex_docmd.c) is not ported; the assembled command
+            // line is returned unrun.
+        }
+    }
+    // c:6287 eap->nextcmd = check_nextcmd(arg); — no ex-loop standalone.
+    ga
 }
 
 /// Port of `may_call_simple_func()` from `Src/eval.c` — the fast path for a bare
@@ -6878,5 +7069,101 @@ mod tests {
         assert_eq!(fi3.fi_string.as_deref(), Some("abc"));
 
         EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = saved);
+    }
+
+    // ── ex_echo / ex_echohl / ex_execute reference-port tests ──
+
+    /// `EVAL_STRING_HOOK` = `eval0` (the ported tree-walker), as PORT.md prescribes
+    /// for VimL-string tests: the hook evaluates whole expression strings through
+    /// the reference walker (the function-call sub-path uses it in turn).
+    fn eval0_hook(e: &str) -> Option<typval_T> {
+        let mut tv = typval_T::default();
+        let mut ea = super::evalarg_T {
+            eval_flags: super::EVAL_EVALUATE,
+        };
+        if super::eval0(e, &mut tv, Some(&mut ea)) == crate::ported::eval_h::OK {
+            Some(tv)
+        } else {
+            None
+        }
+    }
+
+    #[test]
+    fn ex_echo_joins_and_echon_concats() {
+        use crate::ported::eval::typval::EVAL_STRING_HOOK;
+        let saved = EVAL_STRING_HOOK.with(|h| *h.borrow());
+        EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = Some(eval0_hook));
+
+        // :echo separates arguments with a space.
+        assert_eq!(super::ex_echo("1 2 3", false, false), "1 2 3");
+        // :echon concatenates with no separator.
+        assert_eq!(super::ex_echo("1 2 3", false, true), "123");
+        // String arguments print without quotes (encode_tv2echo).
+        assert_eq!(super::ex_echo("'ab' 'cd'", false, false), "ab cd");
+        // eap->skip suppresses all output.
+        assert_eq!(super::ex_echo("1 2", true, false), "");
+        // A single expression.
+        assert_eq!(super::ex_echo("40 + 2", false, false), "42");
+
+        EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = saved);
+    }
+
+    #[test]
+    fn ex_echo_invalid_expr_stops() {
+        use crate::ported::eval::typval::EVAL_STRING_HOOK;
+        let saved = EVAL_STRING_HOOK.with(|h| *h.borrow());
+        EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = Some(eval0_hook));
+        crate::ported::message::capture_errors_begin();
+
+        // "1 )" → first arg echoes, the stray ")" cannot start an expression so
+        // the second arg fails to parse (E15); earlier output is kept.
+        let out = super::ex_echo("1 )", false, false);
+        assert_eq!(out, "1");
+        let errs = crate::ported::message::capture_errors_take();
+        assert!(errs.iter().any(|e| e.contains("E15")), "errs={errs:?}");
+
+        EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = saved);
+    }
+
+    #[test]
+    fn ex_execute_concatenates_args() {
+        use crate::ported::eval::typval::EVAL_STRING_HOOK;
+        let saved = EVAL_STRING_HOOK.with(|h| *h.borrow());
+        EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = Some(eval0_hook));
+
+        // :execute uses tv_get_string per arg, space-joined.
+        assert_eq!(
+            super::ex_execute("'echo' 'hi'", false, false, false),
+            "echo hi"
+        );
+        // :echomsg of non-String numbers uses encode_tv2string (still "1"/"2").
+        assert_eq!(super::ex_execute("1 2", false, true, false), "1 2");
+        // eap->skip yields an empty assembled string.
+        assert_eq!(super::ex_execute("'a' 'b'", true, false, false), "");
+
+        EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = saved);
+    }
+
+    #[test]
+    fn ex_execute_echoerr_routes_to_emsg() {
+        use crate::ported::eval::typval::EVAL_STRING_HOOK;
+        let saved = EVAL_STRING_HOOK.with(|h| *h.borrow());
+        EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = Some(eval0_hook));
+        crate::ported::message::capture_errors_begin();
+
+        // :echoerr emits the assembled message through the error path.
+        let out = super::ex_execute("'boom'", false, false, true);
+        assert_eq!(out, "boom");
+        let errs = crate::ported::message::capture_errors_take();
+        assert!(errs.iter().any(|e| e == "boom"), "errs={errs:?}");
+
+        EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = saved);
+    }
+
+    #[test]
+    fn ex_echohl_resolves_to_zero_standalone() {
+        // No highlight groups standalone → syn_name2id() == 0.
+        super::ex_echohl("ErrorMsg");
+        assert_eq!(super::get_echo_hl_id(), 0);
     }
 }

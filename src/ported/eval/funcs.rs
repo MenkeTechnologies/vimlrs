@@ -8963,6 +8963,1413 @@ pub fn f_fullcommand(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.vval = v_string(result);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Reference ports of the remaining portable `funcs.c` leaves.
+//
+// These mirror the C bodies faithfully. The runtime dispatches the matching
+// builtins through the fusevm bytecode bridge and the folded strict `f_*`
+// helpers above (`f_col`, `f_search`, `f_setpos`, `f_libcall`, …), so several of
+// the functions below are dead-code references kept as the C spec alongside that
+// synthesis (see PORT.md and the porting brief). C names are verbatim.
+// ─────────────────────────────────────────────────────────────────────────────
+#[allow(unused_imports)]
+use crate::ported::eval::typval::{
+    tv_check_for_dict_arg, tv_check_for_list_arg, tv_check_for_opt_dict_arg,
+    tv_check_for_opt_number_arg, tv_check_for_string_or_list_arg, tv_copy,
+    tv_dict_add_allocated_str, tv_dict_extend, tv_dict_get_bool, tv_dict_get_string,
+    tv_dict_item_remove, tv_get_string_buf_chk, tv_list_append_allocated_string,
+    tv_list_append_owned_tv,
+};
+
+/// c: funcs.c:5585 — `search*()`/`searchpair*()` flag bits (`#define SP_*`).
+const SP_NOMOVE: i32 = 0x01; // don't move cursor
+const SP_REPEAT: i32 = 0x02; // repeat to find outer pair
+const SP_RETCOUNT: i32 = 0x04; // return matchcount
+const SP_SETPCMARK: i32 = 0x08; // set previous context mark
+const SP_START: i32 = 0x10; // accept match at start position
+const SP_SUBPAT: i32 = 0x20; // return nr of matching sub-pattern
+const SP_END: i32 = 0x40; // leave cursor at end of match
+const SP_COLUMN: i32 = 0x80; // start at cursor column
+
+/// `MAXCOL` (`pos_defs.h`) — the maximum column number sentinel.
+const MAXCOL: crate::ported::window::colnr_T = crate::ported::window::colnr_T::MAX;
+
+/// `MAX_FUNC_ARGS = 20` (`eval/typval_defs.h:292`) — max function arguments.
+const MAX_FUNC_ARGS: i32 = 20;
+
+/// Port of `f_call()` from `Src/eval/funcs.c:547`.
+///
+/// "call(func, arglist [, dict])" — call `func` with the List `arglist`,
+/// optionally bound to a `dict` as `self`.
+///
+/// RUST-PORT NOTE: the Lua-table callback branch (`nlua_is_table_from_lua` /
+/// `nlua_register_table_as_callable`) needs the Lua VM (not modelled) and is
+/// omitted; `func_unref`/`xfree(tofree)` cleanup is `Rc`/scope-managed.
+pub fn f_call(argvars: &[typval_T], rettv: &mut typval_T) {
+    // c:549 if (tv_check_for_list_arg(argvars, 1) == FAIL) return;
+    if tv_check_for_list_arg(argvars, 1) == FAIL {
+        return;
+    }
+    // c:552 if (argvars[1].vval.v_list == NULL) return;
+    let arglist_null = !matches!(&argvars[1].vval, v_list(Some(_)));
+    if arglist_null {
+        return;
+    }
+
+    // c:558 resolve the function name / partial.
+    let mut partial: Option<std::rc::Rc<crate::ported::eval::typval_defs_h::partial_T>> = None;
+    let mut func: String = match (&argvars[0].v_type, &argvars[0].vval) {
+        // c:560 VAR_FUNC → argvars[0].vval.v_string
+        (VAR_FUNC, v_string(s)) => s.clone(),
+        // c:562 VAR_PARTIAL → partial_name(partial)
+        (VAR_PARTIAL, v_partial(Some(pt))) => {
+            partial = Some(pt.clone());
+            crate::ported::eval::partial_name(pt).to_string()
+        }
+        // c:571 else → tv_get_string(&argvars[0])
+        _ => tv_get_string(&argvars[0]),
+    };
+
+    // c:574 if (func == NULL || *func == NUL) return;
+    if func.is_empty() {
+        return;
+    }
+
+    // c:576 if (argvars[0].v_type == VAR_STRING) trans_function_name(...).
+    if argvars[0].v_type == VAR_STRING {
+        use crate::ported::eval::userfunc::tfn::{TFN_INT, TFN_QUIET};
+        let mut p: &str = &func;
+        match crate::ported::eval::userfunc::trans_function_name(
+            &mut p,
+            false,
+            TFN_INT | TFN_QUIET,
+            None,
+            None,
+        ) {
+            // c:583 if (tofree == NULL) { emsg_funcname(e_unknown_function_str, func); return; }
+            None => {
+                crate::ported::eval::userfunc::emsg_funcname("E117: Unknown function: %s", &func);
+                return;
+            }
+            Some(tofree) => func = tofree,
+        }
+    }
+
+    // c:591 dict_T *selfdict = NULL;
+    let mut selfdict: Option<
+        std::rc::Rc<std::cell::RefCell<crate::ported::eval::typval_defs_h::dict_T>>,
+    > = None;
+    if argvars[2].v_type != VAR_UNKNOWN {
+        // c:594 if (tv_check_for_dict_arg(argvars, 2) == FAIL) goto done;
+        if tv_check_for_dict_arg(argvars, 2) == FAIL {
+            return;
+        }
+        if let v_dict(Some(d)) = &argvars[2].vval {
+            selfdict = Some(d.clone());
+        }
+    }
+
+    // c:600 func_call(func, &argvars[1], partial, selfdict, rettv);
+    crate::ported::eval::userfunc::func_call(
+        &func,
+        &argvars[1],
+        partial.as_ref(),
+        selfdict.as_ref(),
+        rettv,
+    );
+}
+
+/// Port of `f_eval()` from `Src/eval/funcs.c:1233`.
+///
+/// "eval(string)" — evaluate `string` as a Vimscript expression.
+///
+/// RUST-PORT NOTE: `need_clr_eos`/`aborting()` editor state is not modelled; the
+/// ported [`eval1`](crate::ported::eval::eval1) reference drives evaluation, with
+/// `EVAL_STRING_HOOK` backing sub-expression evaluation as elsewhere.
+pub fn f_eval(argvars: &[typval_T], rettv: &mut typval_T) {
+    // c:1235 const char *s = tv_get_string_chk(&argvars[0]);
+    let s0 = tv_get_string_chk(&argvars[0]);
+    // c:1236 if (s != NULL) s = skipwhite(s);
+    let expr = s0
+        .as_deref()
+        .map(|s| crate::ported::eval::skipwhite(s).to_string());
+
+    // c:1240 if (s == NULL || eval1(&s, rettv, &EVALARG_EVALUATE) == FAIL)
+    let mut ok = false;
+    let mut trailing: Option<String> = None;
+    if let Some(e) = &expr {
+        let mut p: &str = e;
+        let mut ea = crate::ported::eval::evalarg_T {
+            eval_flags: crate::ported::eval::EVAL_EVALUATE,
+        };
+        if crate::ported::eval::eval1(&mut p, rettv, Some(&mut ea)) != FAIL {
+            ok = true;
+            // c:1248 else if (*s != NUL) semsg(_(e_trailing_arg), s);
+            if !p.is_empty() {
+                trailing = Some(p.to_string());
+            }
+        }
+    }
+
+    if !ok {
+        // c:1241 semsg(_(e_invexpr2), expr_start); rettv = 0
+        if let Some(e) = &expr {
+            crate::ported::message::semsg(&format!("E15: Invalid expression: \"{e}\""));
+        }
+        rettv.v_type = VAR_NUMBER;
+        rettv.vval = v_number(0);
+    } else if let Some(t) = trailing {
+        crate::ported::message::semsg(&format!("E488: Trailing characters: {t}"));
+    }
+}
+
+/// Port of `common_function()` from `Src/eval/funcs.c:1654`.
+///
+/// The shared body of `function()` (`is_funcref == false`) and `funcref()`
+/// (`is_funcref == true`): resolve a function name / partial into a `VAR_FUNC` or
+/// a `VAR_PARTIAL` (when bound args, a `self` dict, or an existing partial are
+/// involved).
+///
+/// RUST-PORT NOTE: the `nlua_is_table_from_lua` dance is omitted; `func_ref` /
+/// `func_ptr_ref` are refcount no-ops; the resolved-`ufunc_T` `pt_func` field is
+/// not modelled, so a funcref always binds by `pt_name`.
+pub fn common_function(argvars: &[typval_T], rettv: &mut typval_T, is_funcref: bool) {
+    use crate::ported::eval::typval_defs_h::{partial_T, VarLockStatus};
+    use crate::ported::eval::userfunc::tfn::{TFN_INT, TFN_NO_AUTOLOAD, TFN_NO_DEREF, TFN_QUIET};
+
+    let mut use_string = false; // c:1658
+    let mut arg_pt: Option<std::rc::Rc<partial_T>> = None; // c:1659
+    let mut trans_name: Option<String> = None; // c:1660
+
+    // c:1662 resolve the source name / partial.
+    let mut s: Option<String> = match (&argvars[0].v_type, &argvars[0].vval) {
+        (VAR_FUNC, v_string(name)) => Some(name.clone()), // c:1664
+        (VAR_PARTIAL, v_partial(Some(pt))) => {
+            arg_pt = Some(pt.clone()); // c:1668
+            Some(crate::ported::eval::partial_name(pt).to_string())
+        }
+        _ => {
+            use_string = true; // c:1673
+            Some(tv_get_string(&argvars[0]))
+        }
+    };
+
+    // c:1676 if ((use_string && no AUTOLOAD_CHAR) || is_funcref) save_function_name(...).
+    let has_autoload = s
+        .as_deref()
+        .is_some_and(|x| x.as_bytes().contains(&crate::ported::eval::AUTOLOAD_CHAR));
+    if (use_string && !has_autoload) || is_funcref {
+        let orig = s.clone().unwrap_or_default();
+        let mut name: &str = &orig;
+        trans_name = crate::ported::eval::userfunc::save_function_name(
+            &mut name,
+            false,
+            TFN_INT | TFN_QUIET | TFN_NO_AUTOLOAD | TFN_NO_DEREF,
+            None,
+        );
+        // c:1681 if (*name != NUL) s = NULL;
+        if !name.is_empty() {
+            s = None;
+        }
+    }
+
+    let s_empty = s.as_deref().is_none_or(str::is_empty);
+    let s_digit = s
+        .as_deref()
+        .and_then(|x| x.bytes().next())
+        .is_some_and(|b| b.is_ascii_digit());
+    if s_empty || (use_string && s_digit) || (is_funcref && trans_name.is_none()) {
+        // c:1685 semsg(_(e_invarg2), use_string ? tv_get_string(&argvars[0]) : s);
+        let arg = if use_string {
+            tv_get_string(&argvars[0])
+        } else {
+            s.clone().unwrap_or_default()
+        };
+        crate::ported::message::semsg(&format!("E475: Invalid argument: {arg}"));
+        return;
+    }
+
+    // c:1688 else if (unknown function) semsg(E700).
+    let name_exists = trans_name.as_deref().is_some_and(|tn| {
+        if is_funcref {
+            crate::ported::eval::userfunc::find_func(tn).is_some()
+        } else {
+            crate::ported::eval::userfunc::translated_function_exists(tn)
+        }
+    });
+    if trans_name.is_some() && !name_exists {
+        crate::ported::message::semsg(&format!(
+            "E700: Unknown function: {}",
+            s.clone().unwrap_or_default()
+        ));
+        return;
+    }
+
+    // c:1694 build the result.
+    let sname = s.unwrap_or_default();
+    // c:1697 expand s:/<SID> into <SNR>nr_.
+    let name: String = if sname.starts_with("s:") || sname.starts_with("<SID>") {
+        crate::ported::eval::userfunc::get_scriptlocal_funcname(Some(&sname)).unwrap_or_default()
+    } else {
+        sname.clone()
+    };
+
+    // c:1707 figure out arg_idx / dict_idx.
+    let mut dict_idx = 0usize;
+    let mut arg_idx = 0usize;
+    let mut list: Option<
+        std::rc::Rc<std::cell::RefCell<crate::ported::eval::typval_defs_h::list_T>>,
+    > = None;
+    if argvars[1].v_type != VAR_UNKNOWN {
+        if argvars[2].v_type != VAR_UNKNOWN {
+            arg_idx = 1; // c:1710 function(name, [args], dict)
+            dict_idx = 2;
+        } else if argvars[1].v_type == VAR_DICT {
+            dict_idx = 1; // c:1713 function(name, dict)
+        } else {
+            arg_idx = 1; // c:1716 function(name, [args])
+        }
+        if dict_idx > 0 {
+            // c:1719 if (tv_check_for_dict_arg(argvars, dict_idx) == FAIL) return;
+            if tv_check_for_dict_arg(argvars, dict_idx) == FAIL {
+                return;
+            }
+            if !matches!(&argvars[dict_idx].vval, v_dict(Some(_))) {
+                dict_idx = 0; // c:1725 (NULL dict)
+            }
+        }
+        if arg_idx > 0 {
+            // c:1729 if (argvars[arg_idx].v_type != VAR_LIST) emsg(E923); return;
+            match &argvars[arg_idx].vval {
+                v_list(Some(l)) if argvars[arg_idx].v_type == VAR_LIST => {
+                    let len = tv_list_len(&l.borrow());
+                    if len == 0 {
+                        arg_idx = 0; // c:1738 (empty arg list)
+                    } else if len > MAX_FUNC_ARGS {
+                        // c:1739 MAX_FUNC_ARGS → E118
+                        crate::ported::eval::userfunc::emsg_funcname(
+                            "E118: Too many arguments for function: %s",
+                            &sname,
+                        );
+                        return;
+                    } else {
+                        list = Some(l.clone());
+                    }
+                }
+                _ => {
+                    crate::ported::message::emsg(
+                        "E923: Second argument of function() must be a list or a dict",
+                    );
+                    return;
+                }
+            }
+        }
+    }
+
+    // c:1748 build VAR_PARTIAL when there are bound args / dict / an arg_pt.
+    let make_partial = dict_idx > 0 || arg_idx > 0 || arg_pt.is_some() || is_funcref;
+    if make_partial {
+        let mut pt = partial_T {
+            pt_refcount: 1, // c:1782
+            pt_name: String::new(),
+            pt_argv: Vec::new(),
+            pt_dict: None,
+        };
+
+        // c:1752 collect bound arguments: arg_pt's then the new list's.
+        let arg_len = arg_pt.as_ref().map_or(0, |p| p.pt_argv.len());
+        let lv_len = list
+            .as_ref()
+            .map_or(0, |l| tv_list_len(&l.borrow()) as usize);
+        if arg_idx > 0 || arg_len > 0 {
+            if let Some(ap) = &arg_pt {
+                for i in 0..arg_len {
+                    let mut dst = typval_T::default();
+                    tv_copy(&ap.pt_argv[i], &mut dst); // c:1762
+                    pt.pt_argv.push(dst);
+                }
+            }
+            if lv_len > 0 {
+                if let Some(l) = &list {
+                    for it in &l.borrow().lv_items {
+                        let mut dst = typval_T::default();
+                        tv_copy(&it.li_tv, &mut dst); // c:1768
+                        pt.pt_argv.push(dst);
+                    }
+                }
+            }
+        }
+
+        // c:1774 bind the dict.
+        if dict_idx > 0 {
+            if let v_dict(Some(d)) = &argvars[dict_idx].vval {
+                d.borrow_mut().dv_refcount += 1; // c:1777
+                pt.pt_dict = Some(d.clone());
+            }
+        } else if let Some(ap) = &arg_pt {
+            if let Some(d) = &ap.pt_dict {
+                d.borrow_mut().dv_refcount += 1; // c:1784
+                pt.pt_dict = Some(d.clone());
+            }
+        }
+
+        // c:1789 bind the name (pt_func not modelled → always pt_name).
+        pt.pt_name = match &arg_pt {
+            Some(ap) if !ap.pt_name.is_empty() => ap.pt_name.clone(),
+            _ => name,
+        };
+        crate::ported::eval::userfunc::func_ref();
+
+        // c:1808 rettv->v_type = VAR_PARTIAL;
+        rettv.v_type = VAR_PARTIAL;
+        rettv.v_lock = VarLockStatus::VAR_UNLOCKED;
+        rettv.vval = v_partial(Some(std::rc::Rc::new(pt)));
+    } else {
+        // c:1812 result is a VAR_FUNC.
+        crate::ported::eval::userfunc::func_ref();
+        rettv.v_type = VAR_FUNC;
+        rettv.v_lock = VarLockStatus::VAR_UNLOCKED;
+        rettv.vval = v_string(name);
+    }
+}
+
+/// Port of `get_col()` from `Src/eval/funcs.c:712`.
+///
+/// Get the cursor/mark column (a byte index, or a character index when
+/// `charcol`) for `col()`/`charcol()`.
+///
+/// RUST-PORT NOTE: `virtual_active()` (the 'virtualedit' state) is not modelled
+/// and is treated as `false`, so the `coladd`/`win_chartabsize` fix-up branch is
+/// unreachable but kept for fidelity via
+/// [`plines::win_chartabsize`](crate::ported::plines::win_chartabsize).
+pub fn get_col(argvars: &[typval_T], rettv: &mut typval_T, charcol: bool) {
+    // c:714 argument type checks.
+    if tv_check_for_string_or_list_arg(argvars, 0) == FAIL
+        || tv_check_for_opt_number_arg(argvars, 1) == FAIL
+    {
+        return;
+    }
+
+    // c:719 win_T *wp = curwin;
+    let mut wp = crate::ported::window::curwin.with(|c| c.borrow().clone());
+    if argvars[1].v_type != VAR_UNKNOWN {
+        // c:723 wp = win_id2wp_tp((int)tv_get_number(&argvars[1]), &tp);
+        let mut tp = None;
+        wp = crate::ported::eval::window::win_id2wp_tp(
+            tv_get_number(&argvars[1]) as i32,
+            Some(&mut tp),
+        );
+        if wp.is_none() || tp.is_none() {
+            return; // c:725
+        }
+    }
+    let wp = match wp {
+        Some(w) => w,
+        None => return,
+    };
+
+    // c:731 buf_T *bp = wp->w_buffer;
+    let bp = match wp.borrow().w_buffer.clone() {
+        Some(b) => b,
+        None => return,
+    };
+    let mut col: crate::ported::window::colnr_T = 0; // c:732
+    let mut fnum = bp.borrow().handle; // c:733 bp->b_fnum
+                                       // c:734 pos_T *fp = var2fpos(&argvars[0], false, &fnum, charcol, wp);
+    let fp = crate::ported::eval::var2fpos(&argvars[0], false, &mut fnum, charcol, &wp);
+    if let Some(fp) = fp {
+        if fnum == bp.borrow().handle {
+            if fp.col == MAXCOL {
+                // c:737 '> can be MAXCOL: use the line length.
+                if fp.lnum <= bp.borrow().b_ml.ml_line_count {
+                    col = crate::ported::buffer::ml_get_buf_len(&mut bp.borrow_mut(), fp.lnum) + 1;
+                } else {
+                    col = MAXCOL;
+                }
+            } else {
+                col = fp.col + 1; // c:745
+                                  // c:748 virtual_active() fix-up — not modelled (see note).
+                if virtual_active() && wp.borrow().w_cursor == fp {
+                    let line = crate::ported::buffer::ml_get_buf(
+                        &mut bp.borrow_mut(),
+                        wp.borrow().w_cursor.lnum,
+                    );
+                    let cur_col = wp.borrow().w_cursor.col;
+                    let p = line.get(cur_col as usize..).unwrap_or("");
+                    let _ = crate::ported::plines::win_chartabsize(&wp, p, 0);
+                }
+            }
+        }
+    }
+    rettv.vval = v_number(col as varnumber_T); // c:762
+}
+
+/// Port of `virtual_active()` from `Src/misc2.c` — 'virtualedit' state.
+///
+/// RUST-PORT NOTE: 'virtualedit' is not modelled here → always inactive.
+fn virtual_active() -> bool {
+    false
+}
+
+/// Port of `set_position()` from `Src/eval/funcs.c:6442`.
+///
+/// Shared body of `setpos()` (`charpos == false`) and `setcharpos()` (`true`):
+/// set the cursor (`.`) or a mark (`'x`) to the position List.
+pub fn set_position(argvars: &[typval_T], rettv: &mut typval_T, charpos: bool) {
+    let mut curswant: crate::ported::window::colnr_T = -1; // c:6444
+
+    rettv.vval = v_number(-1); // c:6446
+                               // c:6447 const char *name = tv_get_string_chk(argvars);
+    let name = match tv_get_string_chk(&argvars[0]) {
+        Some(n) => n,
+        None => return, // c:6449
+    };
+
+    // c:6452 list2fpos(&argvars[1], &pos, &fnum, &curswant, charpos)
+    let mut pos = crate::ported::window::pos_T::default();
+    let mut fnum = 0i32;
+    if crate::ported::eval::list2fpos(
+        &argvars[1],
+        &mut pos,
+        Some(&mut fnum),
+        Some(&mut curswant),
+        charpos,
+    ) != OK
+    {
+        return; // c:6455
+    }
+
+    // c:6458 if (pos.col != MAXCOL && --pos.col < 0) pos.col = 0;
+    if pos.col != MAXCOL {
+        pos.col -= 1;
+        if pos.col < 0 {
+            pos.col = 0;
+        }
+    }
+
+    let nb = name.as_bytes();
+    if nb == b"." {
+        // c:6461 set cursor; "fnum" is ignored.
+        if let Some(w) = crate::ported::window::curwin.with(|c| c.borrow().clone()) {
+            w.borrow_mut().w_cursor = pos;
+            if curswant >= 0 {
+                // RUST-PORT NOTE: w_curswant/w_set_curswant not modelled.
+            }
+        }
+        rettv.vval = v_number(0); // c:6469
+    } else if nb.len() == 2 && nb[0] == b'\'' {
+        // c:6470 set mark.
+        if crate::ported::mark::setmark_pos(nb[1] as i32, &pos, fnum) == OK {
+            rettv.vval = v_number(0); // c:6473
+        }
+    } else {
+        // c:6476 emsg(_(e_invarg));
+        crate::ported::message::emsg("E474: Invalid argument");
+    }
+}
+
+/// Port of `get_search_arg()` from `Src/eval/funcs.c:5593`.
+///
+/// Parse the flags string of a `search*()` call, setting `'wrapscan'` (`p_ws`)
+/// and OR-ing `SP_*` bits into `flagsp`. Returns the direction (`FORWARD` /
+/// `BACKWARD`), or `0` on a bad flag.
+pub fn get_search_arg(varp: &typval_T, flagsp: Option<&mut i32>) -> i32 {
+    use crate::ported::search::{BACKWARD, FORWARD};
+    let mut dir = FORWARD; // c:5595
+
+    if varp.v_type == VAR_UNKNOWN {
+        return FORWARD; // c:5598
+    }
+    // c:5602 const char *flags = tv_get_string_buf_chk(varp, nbuf);
+    let flags = match tv_get_string_buf_chk(varp) {
+        Some(f) => f,
+        None => return 0, // c:5604 type error
+    };
+
+    let mut flagsp = flagsp;
+    for &c in flags.as_bytes() {
+        match c {
+            b'b' => dir = BACKWARD, // c:5610
+            b'w' => crate::ported::search::p_ws.with(|w| *w.borrow_mut() = true), // c:5612
+            b'W' => crate::ported::search::p_ws.with(|w| *w.borrow_mut() = false), // c:5614
+            _ => {
+                let mut mask = 0; // c:5617
+                if flagsp.is_some() {
+                    mask = match c {
+                        b'c' => SP_START,
+                        b'e' => SP_END,
+                        b'm' => SP_RETCOUNT,
+                        b'n' => SP_NOMOVE,
+                        b'p' => SP_SUBPAT,
+                        b'r' => SP_REPEAT,
+                        b's' => SP_SETPCMARK,
+                        b'z' => SP_COLUMN,
+                        _ => 0,
+                    };
+                }
+                if mask == 0 {
+                    // c:5637 semsg(_(e_invarg2), flags); dir = 0;
+                    crate::ported::message::semsg(&format!("E475: Invalid argument: {flags}"));
+                    dir = 0;
+                } else if let Some(fp) = flagsp.as_deref_mut() {
+                    *fp |= mask; // c:5641
+                }
+            }
+        }
+        if dir == 0 {
+            break; // c:5645
+        }
+    }
+    dir // c:5649
+}
+
+/// Port of `search_cmn()` from `Src/eval/funcs.c:5653`.
+///
+/// Shared by `search()` and `searchpos()`: run one search from the cursor,
+/// updating `match_pos` and moving the cursor. Returns the match line (or the
+/// sub-pattern number for `SP_SUBPAT`), or `0` on failure.
+///
+/// RUST-PORT NOTE: the profile time limit, `SEARCH_COL`, and `setpcmark`
+/// side-effect are not modelled; matching goes through
+/// [`search::searchit`](crate::ported::search::searchit).
+pub fn search_cmn(
+    argvars: &[typval_T],
+    match_pos: Option<&mut crate::ported::window::pos_T>,
+    flagsp: &mut i32,
+) -> i32 {
+    use crate::ported::search::{searchit, SEARCH_COL, SEARCH_END, SEARCH_KEEP, SEARCH_START};
+    let save_p_ws = crate::ported::search::p_ws.with(|w| *w.borrow()); // c:5655
+    let mut retval = 0; // c:5656
+    let mut lnum_stop = 0; // c:5657
+    let mut options = SEARCH_KEEP; // c:5659
+    let mut use_skip = false; // c:5660
+
+    // c:5662 const char *pat = tv_get_string(&argvars[0]);
+    let pat = tv_get_string(&argvars[0]);
+    // c:5663 int dir = get_search_arg(&argvars[1], flagsp);
+    let dir = get_search_arg(&argvars[1], Some(flagsp));
+    if dir == 0 {
+        crate::ported::search::p_ws.with(|w| *w.borrow_mut() = save_p_ws);
+        return retval; // c:5665 goto theend
+    }
+    let flags = *flagsp;
+    if flags & SP_START != 0 {
+        options |= SEARCH_START; // c:5669
+    }
+    if flags & SP_END != 0 {
+        options |= SEARCH_END; // c:5672
+    }
+    if flags & SP_COLUMN != 0 {
+        options |= SEARCH_COL; // c:5675
+    }
+
+    // c:5678 optional stop line / timeout / skip.
+    if argvars[1].v_type != VAR_UNKNOWN && argvars[2].v_type != VAR_UNKNOWN {
+        lnum_stop = tv_get_number_chk(&argvars[2], None) as crate::ported::window::linenr_T;
+        if lnum_stop < 0 {
+            crate::ported::search::p_ws.with(|w| *w.borrow_mut() = save_p_ws);
+            return retval; // c:5683
+        }
+        if argvars[3].v_type != VAR_UNKNOWN {
+            let time_limit = tv_get_number_chk(&argvars[3], None);
+            if time_limit < 0 {
+                crate::ported::search::p_ws.with(|w| *w.borrow_mut() = save_p_ws);
+                return retval; // c:5689
+            }
+            use_skip = crate::ported::eval::eval_expr_valid_arg(&argvars[4]); // c:5691
+        }
+    }
+
+    // c:5701 reject SP_REPEAT|SP_RETCOUNT and NOMOVE+SETPCMARK together.
+    if (flags & (SP_REPEAT | SP_RETCOUNT)) != 0
+        || ((flags & SP_NOMOVE != 0) && (flags & SP_SETPCMARK != 0))
+    {
+        crate::ported::message::semsg(&format!(
+            "E475: Invalid argument: {}",
+            tv_get_string(&argvars[1])
+        ));
+        crate::ported::search::p_ws.with(|w| *w.borrow_mut() = save_p_ws);
+        return retval; // c:5706
+    }
+
+    // c:5710 save_cursor = pos = curwin->w_cursor;
+    let curwin_rc = crate::ported::window::curwin.with(|c| c.borrow().clone());
+    let save_cursor = curwin_rc
+        .as_ref()
+        .map_or(crate::ported::window::pos_T::default(), |w| {
+            w.borrow().w_cursor
+        });
+    let mut pos = save_cursor;
+    let mut firstpos = crate::ported::window::pos_T::default(); // c:5712
+    let mut subpatnum;
+
+    // c:5721 repeat until {skip} returns false.
+    loop {
+        subpatnum = searchit(&mut pos, dir, &pat, options, lnum_stop);
+        // c:5726 finding the first match again means no match where {skip}==0.
+        if firstpos.lnum != 0 && pos == firstpos {
+            subpatnum = FAIL;
+        }
+        if subpatnum == FAIL || !use_skip {
+            break; // c:5729
+        }
+        if firstpos.lnum == 0 {
+            firstpos = pos; // c:5733
+        }
+        // c:5737 if the skip expression matches, ignore this match.
+        if let Some(w) = &curwin_rc {
+            let save_pos = w.borrow().w_cursor;
+            w.borrow_mut().w_cursor = pos;
+            let do_skip = crate::ported::eval::eval_expr_to_bool(&argvars[4]);
+            w.borrow_mut().w_cursor = save_pos;
+            if !do_skip {
+                break; // c:5748
+            }
+        } else {
+            break;
+        }
+        options &= !SEARCH_START; // c:5753
+    }
+
+    if subpatnum != FAIL {
+        if flags & SP_SUBPAT != 0 {
+            retval = subpatnum; // c:5758
+        } else {
+            retval = pos.lnum; // c:5761
+        }
+        // c:5763 SP_SETPCMARK → setpcmark() (not modelled).
+        if let Some(w) = &curwin_rc {
+            w.borrow_mut().w_cursor = pos; // c:5766
+        }
+        if let Some(mp) = match_pos {
+            mp.lnum = pos.lnum; // c:5769
+            mp.col = pos.col + 1;
+        }
+    }
+
+    // c:5777 SP_NOMOVE → restore cursor.
+    if flags & SP_NOMOVE != 0 {
+        if let Some(w) = &curwin_rc {
+            w.borrow_mut().w_cursor = save_cursor;
+        }
+    }
+    crate::ported::search::p_ws.with(|w| *w.borrow_mut() = save_p_ws); // c:5783
+    retval
+}
+
+/// Port of `searchpair_cmn()` from `Src/eval/funcs.c:6064`.
+///
+/// Shared by `searchpair()` and `searchpairpos()`: parse the start/middle/end
+/// patterns and flags then delegate to
+/// [`do_searchpair`](crate::ported::search::do_searchpair). Returns the match
+/// line (via `do_searchpair`) or `0`.
+pub fn searchpair_cmn(
+    argvars: &[typval_T],
+    match_pos: Option<&mut crate::ported::window::pos_T>,
+) -> i32 {
+    use crate::ported::search::do_searchpair;
+    let save_p_ws = crate::ported::search::p_ws.with(|w| *w.borrow()); // c:6066
+    let mut flags = 0; // c:6067
+    let mut retval = 0; // c:6068
+    let mut lnum_stop = 0; // c:6069
+    let mut time_limit = 0i64; // c:6070
+
+    // c:6074 the three patterns.
+    let spat = tv_get_string_chk(&argvars[0]);
+    let mpat = tv_get_string_buf_chk(&argvars[1]);
+    let epat = tv_get_string_buf_chk(&argvars[2]);
+    let (spat, mpat, epat) = match (spat, mpat, epat) {
+        (Some(s), Some(m), Some(e)) => (s, m, e),
+        _ => {
+            crate::ported::search::p_ws.with(|w| *w.borrow_mut() = save_p_ws);
+            return retval; // c:6080 type error
+        }
+    };
+
+    // c:6083 int dir = get_search_arg(&argvars[3], &flags);
+    let dir = get_search_arg(&argvars[3], Some(&mut flags));
+    if dir == 0 {
+        crate::ported::search::p_ws.with(|w| *w.borrow_mut() = save_p_ws);
+        return retval; // c:6085
+    }
+
+    // c:6089 don't accept SP_END or SP_SUBPAT; NOMOVE/SETPCMARK mutually exclusive.
+    if (flags & (SP_END | SP_SUBPAT)) != 0
+        || ((flags & SP_NOMOVE != 0) && (flags & SP_SETPCMARK != 0))
+    {
+        crate::ported::message::semsg(&format!(
+            "E475: Invalid argument: {}",
+            tv_get_string(&argvars[3])
+        ));
+        crate::ported::search::p_ws.with(|w| *w.borrow_mut() = save_p_ws);
+        return retval; // c:6093
+    }
+
+    // c:6096 'r' implies 'W'.
+    if flags & SP_REPEAT != 0 {
+        crate::ported::search::p_ws.with(|w| *w.borrow_mut() = false);
+    }
+
+    // c:6101 optional skip expression, stop line, timeout.
+    let mut skip: Option<&typval_T> = None;
+    if !(argvars[3].v_type == VAR_UNKNOWN || argvars[4].v_type == VAR_UNKNOWN) {
+        skip = Some(&argvars[4]); // c:6108
+        if argvars[5].v_type != VAR_UNKNOWN {
+            lnum_stop = tv_get_number_chk(&argvars[5], None) as crate::ported::window::linenr_T;
+            if lnum_stop < 0 {
+                crate::ported::message::semsg(&format!(
+                    "E475: Invalid argument: {}",
+                    tv_get_string(&argvars[5])
+                ));
+                crate::ported::search::p_ws.with(|w| *w.borrow_mut() = save_p_ws);
+                return retval; // c:6113
+            }
+            if argvars[6].v_type != VAR_UNKNOWN {
+                time_limit = tv_get_number_chk(&argvars[6], None);
+                if time_limit < 0 {
+                    crate::ported::message::semsg(&format!(
+                        "E475: Invalid argument: {}",
+                        tv_get_string(&argvars[6])
+                    ));
+                    crate::ported::search::p_ws.with(|w| *w.borrow_mut() = save_p_ws);
+                    return retval; // c:6120
+                }
+            }
+        }
+    }
+
+    // c:6127 do_searchpair(...).
+    retval = do_searchpair(
+        &spat, &mpat, &epat, dir, skip, flags, match_pos, lnum_stop, time_limit,
+    );
+    crate::ported::search::p_ws.with(|w| *w.borrow_mut() = save_p_ws); // c:6131
+    retval
+}
+
+/// Port of `libcall_common()` from `Src/eval/funcs.c:3940`.
+///
+/// Shared body of `libcall()` (`out_type == VAR_STRING`) and `libcallnr()`
+/// (`out_type == VAR_NUMBER`): load a native library and call a function taking a
+/// string/int and returning a string/int (via
+/// [`os_libcall`](crate::ported::os::dl::os_libcall)).
+///
+/// RUST-PORT NOTE (signature): `out_type` is passed as the [`VarType`] enum.
+/// `check_secure()` (the `'secure'`/sandbox gate) is not modelled and is elided.
+pub fn libcall_common(
+    argvars: &[typval_T],
+    rettv: &mut typval_T,
+    out_type: crate::ported::eval::typval_defs_h::VarType,
+) {
+    // c:3942 rettv->v_type = out_type; if (out_type != VAR_NUMBER) rettv->vval.v_string = NULL;
+    rettv.v_type = out_type;
+    if out_type != VAR_NUMBER {
+        rettv.vval = v_string(String::new());
+    }
+
+    // c:3951 both libname and funcname must be strings.
+    let (libname, funcname) = match (&argvars[0], &argvars[1]) {
+        (a, b) if a.v_type == VAR_STRING && b.v_type == VAR_STRING => {
+            (tv_get_string(a), tv_get_string(b))
+        }
+        _ => return, // c:3952
+    };
+
+    // c:3958 input variables.
+    let in_type = argvars[2].v_type;
+    let str_in = if in_type == VAR_STRING {
+        Some(tv_get_string(&argvars[2]))
+    } else {
+        None
+    };
+    let int_in = tv_get_number(&argvars[2]) as i32; // c:3963
+
+    // c:3969 os_libcall(...).
+    let mut int_out = 0i32;
+    let mut str_out: Option<String> = None;
+    let success = if out_type == VAR_STRING {
+        crate::ported::os::dl::os_libcall(
+            Some(&libname),
+            Some(&funcname),
+            str_in.as_deref(),
+            int_in,
+            Some(&mut str_out),
+            &mut int_out,
+        )
+    } else {
+        crate::ported::os::dl::os_libcall(
+            Some(&libname),
+            Some(&funcname),
+            str_in.as_deref(),
+            int_in,
+            None,
+            &mut int_out,
+        )
+    };
+
+    if !success {
+        // c:3973 semsg(_(e_libcall), funcname);
+        crate::ported::message::semsg(&format!("E364: Library call failed for \"{funcname}\""));
+        return;
+    }
+
+    if out_type == VAR_NUMBER {
+        rettv.vval = v_number(int_out as varnumber_T); // c:3978
+    } else {
+        rettv.vval = v_string(str_out.unwrap_or_default());
+    }
+}
+
+/// Port of `create_environment()` from `Src/eval/funcs.c:3382`.
+///
+/// Build the child-process environment Dict from `job_env` (a user dict), the
+/// inherited process environment (unless `clear_env`), and pty/`$NVIM` fix-ups.
+///
+/// RUST-PORT NOTE: `uv_os_environ`/`os_getenv` are replaced by `std::env`; the
+/// Windows uppercase-dedup, `p_tgc` COLORTERM, and the `pty_ignored_env_vars` /
+/// `required_env_vars` tables are modelled with the documented default sets.
+pub fn create_environment(
+    job_env: Option<&crate::ported::eval::typval_defs_h::dict_T>,
+    clear_env: bool,
+    pty: bool,
+    set_nvim_addr: bool,
+    pty_term_name: &str,
+) -> std::rc::Rc<std::cell::RefCell<crate::ported::eval::typval_defs_h::dict_T>> {
+    // c:3385 dict_T *env = tv_dict_alloc();
+    let env = crate::ported::eval::typval::tv_dict_alloc();
+
+    if !clear_env {
+        // c:3388 uv_os_environ → std::env::vars().
+        for (name, value) in std::env::vars() {
+            tv_dict_add_str(&mut env.borrow_mut(), &name, &value); // c:3400
+        }
+
+        if pty {
+            // c:3406 remove pty-ignored env vars.
+            for var in PTY_IGNORED_ENV_VARS {
+                tv_dict_item_remove(&mut env.borrow_mut(), var);
+            }
+            // c:3417 p_tgc → COLORTERM=truecolor (not modelled → skipped).
+        }
+    }
+
+    if pty {
+        // c:3427 set a sane $TERM.
+        tv_dict_item_remove(&mut env.borrow_mut(), "TERM");
+        tv_dict_add_str(&mut env.borrow_mut(), "TERM", pty_term_name);
+    }
+
+    if set_nvim_addr {
+        // c:3437 $NVIM = v:servername.
+        let nvim_addr = get_vim_var_str(crate::ported::eval::vars::vv::VV_SEND_SERVER);
+        if !nvim_addr.is_empty() {
+            tv_dict_item_remove(&mut env.borrow_mut(), "NVIM");
+            tv_dict_add_str(&mut env.borrow_mut(), "NVIM", &nvim_addr);
+        }
+    }
+
+    if let Some(je) = job_env {
+        // c:3466 tv_dict_extend(env, job_env->di_tv.vval.v_dict, "force");
+        tv_dict_extend(&mut env.borrow_mut(), je, "force");
+    }
+
+    if pty {
+        // c:3470 ensure required env vars are present.
+        for var in REQUIRED_ENV_VARS {
+            let present = env.borrow().dv_hashtab.contains_key(*var);
+            if !present {
+                if let Ok(val) = std::env::var(var) {
+                    tv_dict_add_allocated_str(&mut env.borrow_mut(), var, val);
+                }
+            }
+        }
+    }
+
+    env // c:3485
+}
+
+/// c:funcs.c:3372 `pty_ignored_env_vars[]` — env vars stripped for a pty child.
+const PTY_IGNORED_ENV_VARS: &[&str] = &["COLUMNS", "LINES", "TERMCAP", "COLORFGBG", "COLORTERM"];
+/// c:funcs.c:3378 `required_env_vars[]` — env vars a pty child must have.
+const REQUIRED_ENV_VARS: &[&str] = &["HOME"];
+
+/// Port of `msgpackparse_unpack_blob()` from `Src/eval/funcs.c:4750`.
+///
+/// Decode a Blob of msgpack bytes into `ret_list` (one value per element).
+pub fn msgpackparse_unpack_blob(
+    blob: &crate::ported::eval::typval_defs_h::blob_T,
+    ret_list: &mut crate::ported::eval::typval_defs_h::list_T,
+) {
+    // c:4753 const int len = tv_blob_len(blob); if (len == 0) return;
+    let data_all = &blob.bv_ga;
+    if data_all.is_empty() {
+        return;
+    }
+    // c:4759 const char *data = blob->bv_ga.ga_data; size_t remaining = len;
+    let mut data: &[u8] = data_all;
+    let mut remaining = data_all.len();
+    while remaining != 0 {
+        let mut tv = typval_T::default();
+        // c:4763 int status = unpack_typval(&data, &remaining, &tv);
+        let status = crate::ported::eval::decode::unpack_typval(&mut data, &mut remaining, &mut tv);
+        if status != crate::ported::mpack::MPACK_OK {
+            // c:4765 emsg_mpack_error(status);
+            crate::ported::message::emsg("E5071: Failed to parse msgpack");
+            return;
+        }
+        // c:4769 tv_list_append_owned_tv(ret_list, tv);
+        tv_list_append_owned_tv(ret_list, tv);
+    }
+}
+
+/// Port of `msgpackparse_unpack_list()` from `Src/eval/funcs.c:4686`.
+///
+/// Decode a List of msgpack byte-string "lines" into `ret_list`.
+///
+/// RUST-PORT NOTE: Neovim streams the joined list bytes through a persistent
+/// `mpack_parser_t` in `ARENA_BLOCK_SIZE` chunks. This reference reconstructs the
+/// full joined byte stream via [`encode_read_from_list`] (the same primitive the
+/// C uses to read the list) and then decodes value-by-value with
+/// [`unpack_typval`], the same primitive the Blob path uses.
+pub fn msgpackparse_unpack_list(
+    list: &crate::ported::eval::typval_defs_h::list_T,
+    ret_list: &mut crate::ported::eval::typval_defs_h::list_T,
+) {
+    use crate::ported::eval::encode::{encode_init_lrstate, encode_read_from_list};
+    // c:4689 if (tv_list_len(list) == 0) return;
+    if tv_list_len(list) == 0 {
+        return;
+    }
+    // c:4692 first item must be a string.
+    let first_is_string = list
+        .lv_items
+        .first()
+        .is_some_and(|it| it.li_tv.v_type == VAR_STRING);
+    if !first_is_string {
+        crate::ported::message::semsg("E475: Invalid argument: List item is not a string");
+        return;
+    }
+
+    // c:4697 read the whole joined byte stream from the list.
+    const ARENA_BLOCK_SIZE: usize = 4096; // c: memory_defs.h
+    let mut lrstate = encode_init_lrstate(list);
+    let mut bytes: Vec<u8> = Vec::new();
+    let mut chunk = vec![0u8; ARENA_BLOCK_SIZE];
+    loop {
+        let (status, read_bytes) = encode_read_from_list(&mut lrstate, list, &mut chunk);
+        bytes.extend_from_slice(&chunk[..read_bytes]);
+        if status == FAIL {
+            crate::ported::message::semsg("E475: Invalid argument: List item is not a string");
+            return;
+        }
+        if status == OK {
+            break; // finished
+        }
+        // status == NOTDONE (2): keep reading.
+    }
+
+    // Decode value-by-value.
+    let mut data: &[u8] = &bytes;
+    let mut remaining = bytes.len();
+    while remaining != 0 {
+        let mut tv = typval_T::default();
+        let status = crate::ported::eval::decode::unpack_typval(&mut data, &mut remaining, &mut tv);
+        if status != crate::ported::mpack::MPACK_OK {
+            crate::ported::message::emsg("E5071: Failed to parse msgpack");
+            return;
+        }
+        tv_list_append_owned_tv(ret_list, tv);
+    }
+}
+
+/// Port of `block_def2str()` from `Src/eval/funcs.c:2164`.
+///
+/// Render a `block_def` (start-padding spaces + the text + end-padding spaces) to
+/// a String, for the `getregion()`/`getregionpos()` blockwise/charwise paths.
+pub fn block_def2str(bd: &block_def) -> String {
+    // c:2166 size = startspaces + endspaces + textlen;
+    let mut ret = String::new();
+    // c:2169 memset(' ', startspaces)
+    for _ in 0..bd.startspaces.max(0) {
+        ret.push(' ');
+    }
+    // c:2172 memmove(textstart, textlen)
+    let tl = bd.textlen.max(0) as usize;
+    if tl > 0 {
+        let end = (bd.textstart_off as usize + tl).min(bd.line.len());
+        let start = (bd.textstart_off as usize).min(end);
+        ret.push_str(&bd.line[start..end]);
+    }
+    // c:2175 memset(' ', endspaces)
+    for _ in 0..bd.endspaces.max(0) {
+        ret.push(' ');
+    }
+    ret
+}
+
+/// Port of `struct block_def` (`Src/ops.c`) — the fields the region/block
+/// builtins read.
+///
+/// RUST-PORT NOTE: the C `char *textstart` pointer into the buffer line becomes a
+/// byte offset (`textstart_off`) into the owned `line` string.
+#[derive(Default)]
+pub struct block_def {
+    pub startspaces: crate::ported::window::colnr_T,
+    pub endspaces: crate::ported::window::colnr_T,
+    pub textlen: crate::ported::window::colnr_T,
+    pub textcol: crate::ported::window::colnr_T,
+    pub textstart_off: crate::ported::window::colnr_T,
+    pub is_oneChar: bool,
+    pub start_vcol: crate::ported::window::colnr_T,
+    pub end_vcol: crate::ported::window::colnr_T,
+    pub start_char_vcols: crate::ported::window::colnr_T,
+    /// The owning line text (`textstart` points inside this).
+    pub line: String,
+}
+
+/// Port of `add_regionpos_range()` from `Src/eval/funcs.c:2355`.
+///
+/// Append one `[[fnum,lnum,col,coladd], [fnum,lnum,col,coladd]]` region range to
+/// the `getregionpos()` result list.
+pub fn add_regionpos_range(
+    rettv: &mut typval_T,
+    p1: crate::ported::window::pos_T,
+    p2: crate::ported::window::pos_T,
+) {
+    // c:2357 fnum = curbuf->b_fnum.
+    let fnum = crate::ported::buffer::curbuf
+        .with(|c| c.borrow().clone())
+        .map_or(0, |b| b.borrow().handle) as varnumber_T;
+
+    let l1 = crate::ported::eval::typval::tv_list_alloc(2); // c:2357
+    let l2 = crate::ported::eval::typval::tv_list_alloc(4); // c:2360
+    let l3 = crate::ported::eval::typval::tv_list_alloc(4); // c:2363
+
+    // c:2366 l2 = [fnum, p1.lnum, p1.col, p1.coladd]
+    {
+        let mut b = l2.borrow_mut();
+        tv_list_append_number(&mut b, fnum);
+        tv_list_append_number(&mut b, p1.lnum as varnumber_T);
+        tv_list_append_number(&mut b, p1.col as varnumber_T);
+        tv_list_append_number(&mut b, p1.coladd as varnumber_T);
+    }
+    // c:2371 l3 = [fnum, p2.lnum, p2.col, p2.coladd]
+    {
+        let mut b = l3.borrow_mut();
+        tv_list_append_number(&mut b, fnum);
+        tv_list_append_number(&mut b, p2.lnum as varnumber_T);
+        tv_list_append_number(&mut b, p2.col as varnumber_T);
+        tv_list_append_number(&mut b, p2.coladd as varnumber_T);
+    }
+    // c:2358 l1 = [l2, l3]; append l1 to rettv.
+    tv_list_append_list(&mut l1.borrow_mut(), l2);
+    tv_list_append_list(&mut l1.borrow_mut(), l3);
+    if let v_list(Some(rl)) = &rettv.vval {
+        tv_list_append_list(&mut rl.borrow_mut(), l1);
+    }
+}
+
+/// Port of `getregionpos()` from `Src/eval/funcs.c:2180`.
+///
+/// Validate the `[lnum,col]` list arguments and `{type}` dict of
+/// `getregion()`/`getregionpos()`, computing the sorted region endpoints
+/// (`p1`/`p2`), `inclusive`, and the [`MotionType`] into `region_type`. Returns
+/// [`OK`](crate::ported::eval_h::OK)/[`FAIL`](crate::ported::eval_h::FAIL).
+///
+/// RUST-PORT NOTE: charwise / linewise are faithful; the blockwise
+/// `getvvcol`/`oparg`/`reset_lbr`/`virtual_op` machinery is simplified — the
+/// `oap` out-param records only `start_vcol`/`end_vcol` via
+/// [`plines::getvcol`](crate::ported::plines::getvcol). The exclusive-selection
+/// `unadjust_for_sel_inner` back-up is approximated. `region_type` is
+/// `Option<MotionType>` where `None` == `kMTUnknown`.
+#[allow(clippy::too_many_arguments)]
+pub fn getregionpos(
+    argvars: &[typval_T],
+    rettv: &mut typval_T,
+    p1: &mut crate::ported::window::pos_T,
+    p2: &mut crate::ported::window::pos_T,
+    inclusive: &mut bool,
+    region_type: &mut Option<MotionType>,
+    oap: &mut oparg_T,
+) -> i32 {
+    // c:2182 tv_list_alloc_ret(rettv, kListLenMayKnow);
+    tv_list_alloc_ret(rettv, 0);
+
+    // c:2184 argument checks.
+    if tv_check_for_list_arg(argvars, 0) == FAIL
+        || tv_check_for_list_arg(argvars, 1) == FAIL
+        || tv_check_for_opt_dict_arg(argvars, 2) == FAIL
+    {
+        return FAIL;
+    }
+
+    // c:2192 list2fpos both endpoints; buffers must match.
+    let mut fnum1 = -1;
+    let mut fnum2 = -1;
+    if crate::ported::eval::list2fpos(&argvars[0], p1, Some(&mut fnum1), None, false) != OK
+        || crate::ported::eval::list2fpos(&argvars[1], p2, Some(&mut fnum2), None, false) != OK
+        || fnum1 != fnum2
+    {
+        return FAIL; // c:2197
+    }
+
+    // c:2200 selection exclusivity + type. `*p_sel == 'e'` → 'selection' is
+    // "exclusive".
+    let sel_excl = tv_get_string(&crate::ported::option::get_option_value("selection"))
+        .as_bytes()
+        .first()
+        == Some(&b'e');
+    let mut is_select_exclusive = sel_excl;
+    let mut type_str = String::from("v"); // default_type
+    if argvars[2].v_type == VAR_DICT {
+        if let v_dict(Some(d)) = &argvars[2].vval {
+            is_select_exclusive =
+                tv_dict_get_bool(&d.borrow(), "exclusive", sel_excl as varnumber_T) != 0;
+            if let Some(t) = tv_dict_get_string(&d.borrow(), "type") {
+                type_str = t;
+            }
+        }
+    }
+
+    // c:2214 parse the type into region_type + block_width.
+    let tb = type_str.as_bytes();
+    let mut block_width = 0i32;
+    if tb == b"v" {
+        *region_type = Some(MotionType::CharWise); // c:2216
+    } else if tb == b"V" {
+        *region_type = Some(MotionType::LineWise); // c:2218
+    } else if tb.first() == Some(&0x16) {
+        // Ctrl-V — blockwise.
+        let rest = &type_str[1..];
+        if !rest.is_empty() {
+            match rest.parse::<i32>() {
+                Ok(w) if w > 0 => block_width = w,
+                _ => {
+                    crate::ported::message::semsg(&format!(
+                        "E475: Invalid value for argument type: {type_str}"
+                    ));
+                    return FAIL;
+                }
+            }
+        }
+        *region_type = Some(MotionType::BlockWise(block_width)); // c:2226
+    } else {
+        crate::ported::message::semsg(&format!(
+            "E475: Invalid value for argument type: {type_str}"
+        ));
+        return FAIL; // c:2229
+    }
+
+    // c:2232 buffer lookup.
+    let findbuf = if fnum1 != 0 {
+        crate::ported::buffer::buflist_findnr(fnum1)
+    } else {
+        crate::ported::buffer::curbuf.with(|c| c.borrow().clone())
+    };
+    let findbuf = match findbuf {
+        Some(b) if b.borrow().b_ml.ml_mfp => b,
+        _ => {
+            crate::ported::message::emsg("E681: Buffer is not loaded");
+            return FAIL; // c:2235
+        }
+    };
+
+    // c:2239 line/column validation, inlined for p1 (c:2244) then p2 (c:2254),
+    // exactly as the C does.
+    let line_count = findbuf.borrow().b_ml.ml_line_count;
+    // p1:
+    if p1.lnum < 1 || p1.lnum > line_count {
+        crate::ported::message::semsg(&format!("E966: Invalid line number: {}", p1.lnum));
+        return FAIL;
+    }
+    let l1len = crate::ported::buffer::ml_get_buf_len(&mut findbuf.borrow_mut(), p1.lnum);
+    if p1.col == MAXCOL {
+        p1.col = l1len + 1;
+    } else if p1.col < 1 || p1.col > l1len + 1 {
+        crate::ported::message::semsg(&format!("E964: Invalid column number: {}", p1.col));
+        return FAIL;
+    }
+    // p2:
+    if p2.lnum < 1 || p2.lnum > line_count {
+        crate::ported::message::semsg(&format!("E966: Invalid line number: {}", p2.lnum));
+        return FAIL;
+    }
+    let l2len = crate::ported::buffer::ml_get_buf_len(&mut findbuf.borrow_mut(), p2.lnum);
+    if p2.col == MAXCOL {
+        p2.col = l2len + 1;
+    } else if p2.col < 1 || p2.col > l2len + 1 {
+        crate::ported::message::semsg(&format!("E964: Invalid column number: {}", p2.col));
+        return FAIL;
+    }
+
+    // c:2266 curbuf = findbuf; (virtual_op not modelled).
+    crate::ported::buffer::curbuf.with(|c| *c.borrow_mut() = Some(findbuf.clone()));
+
+    // c:2271 adjustment: 0-based columns.
+    p1.col -= 1;
+    p2.col -= 1;
+
+    // c:2274 swap so p1 <= p2.
+    if !lt(*p1, *p2) {
+        std::mem::swap(p1, p2);
+    }
+
+    match region_type {
+        Some(MotionType::CharWise) => {
+            // c:2281 exclusive selection back-up.
+            if is_select_exclusive && *p1 != *p2 {
+                // RUST-PORT NOTE: unadjust_for_sel_inner is approximated by
+                // backing p2 up one column, clamping at column 0.
+                if p2.col > 0 {
+                    p2.col -= 1;
+                    *inclusive = true;
+                } else {
+                    *inclusive = false;
+                }
+            }
+            // c:2288 if inclusive and p2 on NUL → not inclusive.
+            let line = crate::ported::buffer::ml_get_buf(&mut findbuf.borrow_mut(), p2.lnum);
+            if *inclusive && line.as_bytes().get(p2.col as usize).is_none() {
+                *inclusive = false;
+            }
+        }
+        Some(MotionType::BlockWise(bw)) => {
+            // c:2292 blockwise vcol computation (simplified).
+            let wp = crate::ported::window::curwin
+                .with(|c| c.borrow().clone())
+                .expect("curwin");
+            let l1 = crate::ported::buffer::ml_get_buf(&mut findbuf.borrow_mut(), p1.lnum);
+            let l2 = crate::ported::buffer::ml_get_buf(&mut findbuf.borrow_mut(), p2.lnum);
+            let sc1 = crate::ported::plines::getvcol(&wp, &l1, p1.col);
+            let sc2 = crate::ported::plines::getvcol(&wp, &l2, p2.col);
+            let ec1 = sc1;
+            let ec2 = sc2;
+            oap.motion_type = Some(MotionType::BlockWise(*bw));
+            oap.inclusive = true;
+            oap.op_type = 0; // OP_NOP
+            oap.start = *p1;
+            oap.end = *p2;
+            oap.start_vcol = sc1.min(sc2);
+            oap.end_vcol = if *bw > 0 {
+                oap.start_vcol + *bw - 1
+            } else {
+                ec1.max(ec2)
+            };
+        }
+        _ => {}
+    }
+
+    OK // c:2318
+}
+
+/// Port of `oparg_T` (`Src/normal_defs.h`) — the operator-argument fields the
+/// region builtins read. RUST-PORT NOTE: only the blockwise vcol fields are
+/// modelled here (see [`getregionpos`]).
+#[derive(Default)]
+pub struct oparg_T {
+    pub motion_type: Option<MotionType>,
+    pub inclusive: bool,
+    pub op_type: i32,
+    pub start: crate::ported::window::pos_T,
+    pub end: crate::ported::window::pos_T,
+    pub start_vcol: crate::ported::window::colnr_T,
+    pub end_vcol: crate::ported::window::colnr_T,
+}
+
+/// Port of `lt()` from `Src/pos_defs.h` — position ordering (`a < b`).
+fn lt(a: crate::ported::window::pos_T, b: crate::ported::window::pos_T) -> bool {
+    if a.lnum != b.lnum {
+        a.lnum < b.lnum
+    } else if a.col != b.col {
+        a.col < b.col
+    } else {
+        a.coladd < b.coladd
+    }
+}
+
+#[cfg(test)]
+mod phaseg_reference_tests {
+    use super::*;
+    use crate::ported::eval::typval::EVAL_STRING_HOOK;
+    use crate::ported::eval::typval_defs_h::{blob_T, list_T, typval_T};
+
+    #[test]
+    fn f_eval_evaluates_number() {
+        // Install a hook so any sub-expression string resolves; the ported eval1
+        // parses a plain integer literal directly.
+        fn hook(e: &str) -> Option<typval_T> {
+            e.trim().parse::<i64>().ok().map(typval_T::from)
+        }
+        let saved = EVAL_STRING_HOOK.with(|h| *h.borrow());
+        EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = Some(hook));
+        let args = vec![typval_T::from("42".to_string())];
+        let mut rettv = typval_T::default();
+        f_eval(&args, &mut rettv);
+        assert!(matches!(rettv.vval, v_number(42)));
+        EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = saved);
+    }
+
+    #[test]
+    fn get_search_arg_parses_flags() {
+        use crate::ported::search::{BACKWARD, FORWARD};
+        crate::ported::search::p_ws.with(|w| *w.borrow_mut() = true);
+        // 'b' → BACKWARD; 'W' → wrapscan off; 'n'/'c' → SP_ flags.
+        let mut flags = 0;
+        let varp = typval_T::from("bWnc".to_string());
+        let dir = get_search_arg(&varp, Some(&mut flags));
+        assert_eq!(dir, BACKWARD);
+        assert!(!crate::ported::search::p_ws.with(|w| *w.borrow()));
+        assert_eq!(flags & SP_NOMOVE, SP_NOMOVE);
+        assert_eq!(flags & SP_START, SP_START);
+
+        // Unknown arg → FORWARD, no flags.
+        let unk = typval_T::default();
+        let mut f2 = 0;
+        assert_eq!(get_search_arg(&unk, Some(&mut f2)), FORWARD);
+        assert_eq!(f2, 0);
+    }
+
+    #[test]
+    fn block_def2str_pads_and_copies() {
+        let bd = block_def {
+            startspaces: 2,
+            endspaces: 1,
+            textlen: 3,
+            textstart_off: 1,
+            line: "abcdef".to_string(),
+            ..Default::default()
+        };
+        // 2 leading spaces + "bcd" + 1 trailing space.
+        assert_eq!(block_def2str(&bd), "  bcd ");
+    }
+
+    #[test]
+    fn msgpackparse_blob_roundtrip_fixint() {
+        // msgpack: 0x01 (fixint 1), 0x02 (fixint 2).
+        let mut blob = blob_T::default();
+        blob.bv_ga = vec![0x01, 0x02];
+        let mut out = list_T::default();
+        msgpackparse_unpack_blob(&blob, &mut out);
+        assert_eq!(out.lv_items.len(), 2);
+        assert!(matches!(out.lv_items[0].li_tv.vval, v_number(1)));
+        assert!(matches!(out.lv_items[1].li_tv.vval, v_number(2)));
+    }
+
+    #[test]
+    fn create_environment_includes_and_overrides() {
+        // A user job dict overriding an inherited var.
+        std::env::set_var("VIMLRS_TEST_ENV", "inherited");
+        let mut je = crate::ported::eval::typval_defs_h::dict_T::default();
+        crate::ported::eval::typval::tv_dict_add_str(&mut je, "VIMLRS_TEST_ENV", "overridden");
+        let env = create_environment(Some(&je), false, false, false, "");
+        let got = env.borrow().dv_hashtab.get("VIMLRS_TEST_ENV").cloned();
+        match got {
+            Some(tv) => assert!(matches!(&tv.vval, v_string(s) if s == "overridden")),
+            None => panic!("env var missing"),
+        }
+        std::env::remove_var("VIMLRS_TEST_ENV");
+    }
+}
+
 #[cfg(test)]
 mod helper_tests {
     use super::may_add_state_char;

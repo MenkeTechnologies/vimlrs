@@ -1,6 +1,8 @@
 //! Ports of `src/nvim/os/` (platform layer). Only the pieces the eval engine
 //! needs are mirrored here.
 
+/// Port of `src/nvim/os/dl.c` (os_libcall via POSIX dlopen).
+pub mod dl;
 /// Port of `src/nvim/os/env.c` (subset: `os_get_pid`).
 pub mod env;
 /// Port of `src/nvim/os/fileio.c` + `os/fs.c` (the buffered `FileDescriptor`
