@@ -70,12 +70,17 @@ impl ClassItem {
         match self {
             ClassItem::Ch(x) => *x == c,
             ClassItem::Range(a, b) => *a <= c && c <= *b,
+            // Vim's `\d \w \a \l \u \x` are ASCII-only regardless of locale
+            // (`:help /\a`): `\a`=[A-Za-z], `\w`=[0-9A-Za-z_], `\l`=[a-z],
+            // `\u`=[A-Z]. Unicode-aware predicates would wrongly match é/Ω/４.
+            // (Multibyte word chars only matter for `\<`/`\>` and `\k`, which go
+            // through `is_word`/iskeyword, not these class atoms.)
             ClassItem::Digit => c.is_ascii_digit(),
-            ClassItem::Word => c.is_alphanumeric() || c == '_',
+            ClassItem::Word => c.is_ascii_alphanumeric() || c == '_',
             ClassItem::Space => c == ' ' || c == '\t',
-            ClassItem::Alpha => c.is_alphabetic(),
-            ClassItem::Lower => c.is_lowercase(),
-            ClassItem::Upper => c.is_uppercase(),
+            ClassItem::Alpha => c.is_ascii_alphabetic(),
+            ClassItem::Lower => c.is_ascii_lowercase(),
+            ClassItem::Upper => c.is_ascii_uppercase(),
             ClassItem::Hex => c.is_ascii_hexdigit(),
         }
     }
@@ -765,6 +770,11 @@ fn char_eq(a: char, b: char, ic: bool) -> bool {
     }
 }
 
+/// Word-character test for `\<`/`\>` boundaries. Unlike the `\w` class atom
+/// (ASCII-only), Vim's word boundaries follow `'iskeyword'`, whose default
+/// (`@,48-57,_,192-255`) plus `utf_class` classification treats multibyte
+/// letters/digits (é, Ω, ４, ñ) as keyword chars — verified against nvim/vim:
+/// `matchstr('!é', '\<.')` == 'é'. So this stays Unicode-aware on purpose.
 fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }

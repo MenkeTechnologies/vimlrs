@@ -78,6 +78,11 @@ Early / in development.
 | Unit-testing framework — `assert_equal`/`assert_notequal`/`assert_true`/`assert_false`/`assert_match`/`assert_notmatch`/`assert_report`/`assert_inrange`/`assert_exception` → `v:errors`, plus `assert_fails` (run a command, require it to error/match a code) — message wording per `eval.lua` | Working — every `examples/*.vim` is a self-test, run in CI via `tests/examples.rs` |
 | `eval()` / `execute()` (run-string metaprogramming) | Working |
 | Regex engine — Vim magic dialect, backing `=~`/`matchstr`/`match`/`substitute`/`split`/`:catch` | Working |
+| Regex char-class atoms are ASCII-only per `:help /\a` — `\a`/`\l`/`\u`/`\w`/`\d`/`\x` (+ negations) reject multibyte letters/digits (é, À, Ω, ４); only `\<`/`\>` word boundaries follow multibyte `'iskeyword'` — `examples/regex_classes.vim` self-tests vs nvim/vim | Working |
+| Substring/width builtins — byte-indexed `strpart` vs char-indexed `strcharpart`/`strgetchar`, `strlen`/`strchars`/`strwidth`/`strdisplaywidth`, `nr2char`/`char2nr` (multibyte + astral emoji round-trips) — `examples/substr_funcs.vim` / `examples/strwidth_funcs.vim` self-test vs nvim/vim | Working |
+| String building — literal-pattern `substitute`, `tr`, `repeat` (string + list), `split` (literal sep + keepempty flag), `join` — `examples/strmanip.vim` self-tests vs nvim/vim | Working |
+| `reduce()` left fold (seeded/unseeded, numeric/string/list accumulators) + positional list `extend(l, l2, idx)` — `examples/reduce_fold.vim` self-tests vs nvim/vim | Working |
+| Value introspection — `type()`/`empty()`/`len()` across Number/String/Funcref/List/Dict/Float/Bool/Special/Blob; `abs`/`ceil`/`floor`/`trunc`/`round` (half-away-from-zero)/`float2nr` — `examples/typeintro.vim` / `examples/numround.vim` self-test vs nvim/vim | Working |
 | `:source {file}` (functions/globals persist) + autoload (`foo#bar()` sources `autoload/foo.vim` on demand) | Working |
 | Lambdas `{args -> body}` (with closure capture), funcref-variable calls `F(args)`, Blob literals `0z…`, `d.key` member read, `#{key: val}` literal-key Dicts, `\` line continuation | Working |
 | one-line block bars — `if … \| … \| endif` (and `for`/`while`), incl. after a leaf command (`let x=1 \| if x \| … \| endif`) | Working |
