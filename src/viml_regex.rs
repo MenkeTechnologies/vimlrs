@@ -82,6 +82,29 @@ enum ClassItem {
     Keyword,
     /// `\K` — `\k` but excluding digits.
     KeywordNoDigit,
+    /// `[:alnum:]` — ASCII letters/digits `[0-9A-Za-z]` (no `_`, unlike `\w`).
+    Alnum,
+    /// `[:blank:]` — space or tab only (`:help /[:blank:]`).
+    Blank,
+    /// `[:cntrl:]` — ASCII control chars `0x00`–`0x1F` and DEL `0x7F`.
+    Cntrl,
+    /// `[:graph:]` — ASCII printable non-space `0x21`–`0x7E` (ASCII-only).
+    Graph,
+    /// `[:punct:]` — ASCII punctuation (`is_ascii_punctuation`, includes `_`).
+    Punct,
+    /// `[:lower:]` — Unicode lowercase (é/ÿ/я match; unlike ASCII-only `\l`). Vim
+    /// classifies multibyte case via `utf_islower`; approximated with
+    /// `char::is_lowercase`. Known divergence: titlecase digraphs (ǅ/ǈ/ǋ) match
+    /// both `[:lower:]` and `[:upper:]` in Vim but neither `is_lowercase` nor
+    /// `is_uppercase` in Rust.
+    LowerU,
+    /// `[:upper:]` — Unicode uppercase (À/Ω/Я match; unlike ASCII-only `\u`).
+    /// `char::is_uppercase`; same titlecase divergence as `LowerU`.
+    UpperU,
+    /// `[:space:]` — POSIX whitespace: space, tab, nl, cr, vertical-tab, form-feed
+    /// (`0x09`–`0x0D` + space). Wider than `\s` (space/tab) and includes `\x0B`,
+    /// which Rust's `is_ascii_whitespace` omits.
+    Whitespace,
 }
 
 impl ClassItem {
@@ -113,6 +136,19 @@ impl ClassItem {
             ClassItem::IdentNoDigit => is_ident_char(c) && !c.is_ascii_digit(),
             ClassItem::Keyword => is_keyword_char(c),
             ClassItem::KeywordNoDigit => is_keyword_char(c) && !c.is_ascii_digit(),
+            // POSIX bracket classes `[[:name:]]` (`:help /[:alpha:]`). ASCII-ness
+            // matches Vim/nvim empirically: alnum/graph/punct are ASCII-only,
+            // `[:print:]` reuses `is_printable` (multibyte-aware).
+            ClassItem::Alnum => c.is_ascii_alphanumeric(),
+            ClassItem::Blank => c == ' ' || c == '\t',
+            ClassItem::Cntrl => c.is_ascii_control(),
+            ClassItem::Graph => c.is_ascii_graphic(),
+            ClassItem::Punct => c.is_ascii_punctuation(),
+            ClassItem::LowerU => c.is_lowercase(),
+            ClassItem::UpperU => c.is_uppercase(),
+            // Explicit set: `\x0B` (vertical tab) is whitespace to Vim but not to
+            // Rust's `char::is_ascii_whitespace`, so it can't be reused here.
+            ClassItem::Whitespace => matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0b' | '\x0c'),
         }
     }
 }
@@ -586,6 +622,13 @@ impl Parser {
                 self.i += 1;
                 break;
             }
+            // POSIX bracket class `[:name:]` inside `[...]` (`:help /[:alpha:]`).
+            if c == '[' && self.peek2() == Some(':') {
+                if let Some(mut posix) = self.posix_class() {
+                    items.append(&mut posix);
+                    continue;
+                }
+            }
             self.i += 1;
             // Range `a-z` (not when `-` is last before `]`).
             if self.peek() == Some('-') && self.peek2().is_some() && self.peek2() != Some(']') {
@@ -598,6 +641,62 @@ impl Parser {
         }
         Class { negated, items }
     }
+
+    /// Parse a POSIX bracket class `[:name:]` starting at `self.i` (which points at
+    /// `[`, with `peek2() == ':'`). On a recognized name, consumes through the
+    /// closing `:]` and returns its `ClassItem`(s); otherwise leaves `self.i` where
+    /// it was and returns `None` so the `[` is treated as a literal (Vim behavior).
+    fn posix_class(&mut self) -> Option<Vec<ClassItem>> {
+        let mut j = self.i + 2; // skip `[` and `:`
+        let mut name = String::new();
+        while let Some(ch) = self.p.get(j).copied() {
+            if ch == ':' {
+                break;
+            }
+            if !ch.is_ascii_alphabetic() {
+                return None;
+            }
+            name.push(ch);
+            j += 1;
+        }
+        // Require the closing `:]`.
+        if self.p.get(j).copied() != Some(':') || self.p.get(j + 1).copied() != Some(']') {
+            return None;
+        }
+        let items = posix_class_items(&name)?;
+        self.i = j + 2; // consume through `:]`
+        Some(items)
+    }
+}
+
+/// Map a POSIX/Vim bracket-class name to its `ClassItem` predicate(s). Covers the
+/// standard POSIX set plus Vim's extras (`tab/escape/backspace/return/ident/
+/// keyword`); the single-char extras become literal `Ch` items. `[:fname:]` is
+/// intentionally unmapped (returns `None`): `'isfname'` is platform-dependent,
+/// like `\f`, so the token falls through to a literal. Unknown names → `None`.
+fn posix_class_items(name: &str) -> Option<Vec<ClassItem>> {
+    let item = match name {
+        "alnum" => ClassItem::Alnum,
+        "alpha" => ClassItem::Alpha,
+        "blank" => ClassItem::Blank,
+        "cntrl" => ClassItem::Cntrl,
+        "digit" => ClassItem::Digit,
+        "graph" => ClassItem::Graph,
+        "lower" => ClassItem::LowerU,
+        "print" => ClassItem::Print,
+        "punct" => ClassItem::Punct,
+        "space" => ClassItem::Whitespace,
+        "upper" => ClassItem::UpperU,
+        "xdigit" => ClassItem::Hex,
+        "tab" => ClassItem::Ch('\t'),
+        "escape" => ClassItem::Ch('\x1b'),
+        "backspace" => ClassItem::Ch('\x08'),
+        "return" => ClassItem::Ch('\r'),
+        "ident" => ClassItem::Ident,
+        "keyword" => ClassItem::Keyword,
+        _ => return None,
+    };
+    Some(vec![item])
 }
 
 fn class_atom(negated: bool, item: ClassItem) -> Node {
