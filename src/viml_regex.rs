@@ -8,7 +8,10 @@
 //! `substitute()`, pattern `split()`, and `:catch /pat/`.
 //!
 //! Supported (magic mode): literals, `.`, `^`, `$`, `[...]`/`[^...]` with
-//! ranges, the class atoms `\d \D \w \W \s \S \a \l \u \x` (+negations),
+//! ranges, the class atoms `\d \D \w \W \s \S \a \A \l \u \x \h \H \o \O`
+//! (+negations) and the option-derived `\p \P \i \I \k \K` (default
+//! `'isprint'`/`'isident'`/`'iskeyword'`; the uppercase forms exclude digits,
+//! per `:help /\P`, and are NOT set-complements),
 //! quantifiers `* \+ \? \= \{n,m}` and the non-greedy `\{-n,m}`, groups
 //! `\(...\)` (capturing) and `\%(...\)` (non-capturing) with `\|` alternation,
 //! word boundaries `\< \>`, and case control `\c`/`\C` plus the caller's
@@ -63,6 +66,22 @@ enum ClassItem {
     Lower,
     Upper,
     Hex,
+    /// `\h` — head-of-word char `[A-Za-z_]` (ASCII, `:help /\h`).
+    Head,
+    /// `\o` — octal digit `[0-7]`.
+    Octal,
+    /// `\p` — printable char (default `'isprint'` + Vim's multibyte width rule).
+    Print,
+    /// `\P` — `\p` but excluding digits (Vim's `\P` is NOT a negation of `\p`).
+    PrintNoDigit,
+    /// `\i` — identifier char (default `'isident'`); single-byte only.
+    Ident,
+    /// `\I` — `\i` but excluding digits.
+    IdentNoDigit,
+    /// `\k` — keyword char (default `'iskeyword'`); multibyte-aware.
+    Keyword,
+    /// `\K` — `\k` but excluding digits.
+    KeywordNoDigit,
 }
 
 impl ClassItem {
@@ -82,8 +101,49 @@ impl ClassItem {
             ClassItem::Lower => c.is_ascii_lowercase(),
             ClassItem::Upper => c.is_ascii_uppercase(),
             ClassItem::Hex => c.is_ascii_hexdigit(),
+            // `\h` head-of-word: ASCII letter or `_`, no digits (unlike `\w`).
+            ClassItem::Head => c.is_ascii_alphabetic() || c == '_',
+            ClassItem::Octal => ('0'..='7').contains(&c),
+            ClassItem::Print => is_printable(c),
+            // Vim's `\P \I \K` mean "like the lowercase form but excluding
+            // digits" (`:help /\P`), NOT the set-complement `\p`/`\i`/`\k`
+            // negation. So these are positive predicates, not `negated` classes.
+            ClassItem::PrintNoDigit => is_printable(c) && !c.is_ascii_digit(),
+            ClassItem::Ident => is_ident_char(c),
+            ClassItem::IdentNoDigit => is_ident_char(c) && !c.is_ascii_digit(),
+            ClassItem::Keyword => is_keyword_char(c),
+            ClassItem::KeywordNoDigit => is_keyword_char(c) && !c.is_ascii_digit(),
         }
     }
+}
+
+/// `\p` printable test — default `'isprint'` (`@,161-255`) plus Vim's multibyte
+/// width rule. Empirically (nvim 0.12.3 / vim 9.2, default `'isprint'`): ASCII
+/// `0x20`–`0x7E` is always printable; `0x7F`–`0x9F` (DEL + C1 controls) are not;
+/// `0xA0` (NBSP) and every char above it — including all multibyte and combining
+/// marks — are printable. Known divergence: Vim treats a few zero-width format
+/// chars (U+200B ZWSP … U+200D ZWJ) as non-printable; this predicate does not.
+fn is_printable(c: char) -> bool {
+    let n = c as u32;
+    (0x20..=0x7E).contains(&n) || n >= 0xA0
+}
+
+/// Single-byte membership shared by `\i` (default `'isident'`) and `\k` (default
+/// `'iskeyword'`) — both default to `@,48-57,_,192-255`: ASCII letters/digits,
+/// `_`, and bytes `0xC0`–`0xFF` (this range is numeric, so it includes
+/// non-letters like `×` U+00D7). Verified against nvim 0.12.3 / vim 9.2. `\i`
+/// uses exactly this (no multibyte membership); `\k` widens it below.
+fn is_ident_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || matches!(c as u32, 0xC0..=0xFF)
+}
+
+/// `\k` keyword test — the `\i` single-byte set OR a multibyte word char. Vim
+/// classifies multibyte (`> 0xFF`) via `utf_class`; this approximates that with
+/// `char::is_alphanumeric` (verified: Ω/中/あ/é match `\k`, `←`/`∀`/`•`/spaces do
+/// not). Known divergence: Vim's `utf_class` also flags emoji and combining
+/// marks as keyword chars; `is_alphanumeric` does not.
+fn is_keyword_char(c: char) -> bool {
+    is_ident_char(c) || ((c as u32) > 0xFF && c.is_alphanumeric())
 }
 
 impl Class {
@@ -473,6 +533,18 @@ impl Parser {
             'l' => class_atom(false, ClassItem::Lower),
             'u' => class_atom(false, ClassItem::Upper),
             'x' => class_atom(false, ClassItem::Hex),
+            'h' => class_atom(false, ClassItem::Head),
+            'H' => class_atom(true, ClassItem::Head),
+            'o' => class_atom(false, ClassItem::Octal),
+            'O' => class_atom(true, ClassItem::Octal),
+            // `\P \I \K` are "excluding digits", not negations — see the
+            // `PrintNoDigit`/… `ClassItem` predicates; they stay `negated=false`.
+            'p' => class_atom(false, ClassItem::Print),
+            'P' => class_atom(false, ClassItem::PrintNoDigit),
+            'i' => class_atom(false, ClassItem::Ident),
+            'I' => class_atom(false, ClassItem::IdentNoDigit),
+            'k' => class_atom(false, ClassItem::Keyword),
+            'K' => class_atom(false, ClassItem::KeywordNoDigit),
             'c' => {
                 self.forced_ic = Some(true);
                 return self.atom(false);

@@ -1331,12 +1331,23 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
         let cur = argvars.get(explicit_idx.unwrap_or(arg));
         let core = match conv {
             'd' | 'i' => cur.map_or(0, |t| tv_get_number_chk(t, None)).to_string(),
-            // c: `%S` is like `%s` but width/precision count screen cells; for the
-            // common case it renders identically.
+            // c: `%s`/`%S` fetch the argument through `tv_str()`, which for a
+            // non-string typval returns `encode_tv2echo()` — so List/Dict/Funcref/
+            // Blob stringify (`[1, 2, 3]`, `{'a': 1}`, `type`) instead of raising
+            // E730 as `tv_get_string_buf_chk` would. `%S` differs from `%s` only in
+            // that width/precision count screen cells; the value renders the same.
             's' | 'S' => {
-                let mut s = cur.map(tv_get_string).unwrap_or_default();
+                let mut s = cur.map(encode_tv2echo).unwrap_or_default();
                 if let Some(p) = prec {
-                    s.truncate(p);
+                    // c: precision caps the byte count; keep it a char boundary so
+                    // multi-byte container output never splits mid-codepoint.
+                    if s.len() > p {
+                        let mut end = p;
+                        while end > 0 && !s.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        s.truncate(end);
+                    }
                 }
                 s
             }
