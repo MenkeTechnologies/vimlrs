@@ -26,10 +26,10 @@ call assert_equal('0.0', string(0.0))
 call assert_equal('-0.0', string(-0.0))
 call assert_equal('-0.0', string(0.0 / -1.0))
 
-" --- %g switches to exponent form by magnitude (exp < -4 or >= 6 sig digits)
-call assert_equal('1e+06', string(1000000.0))
-call assert_equal('1.23457e+08', string(123456789.0))
-call assert_equal('0.0001', string(0.0001))
+" --- string() uses Vim's %g: fixed form in [1e-4, 1e7), exponent (eN/e-N) outside
+call assert_equal('1000000.0', string(1000000.0))
+call assert_equal('1.234568e8', string(123456789.0))
+call assert_equal('1.0e-4', string(0.0001))
 
 if len(v:errors) > 0
   for err in v:errors

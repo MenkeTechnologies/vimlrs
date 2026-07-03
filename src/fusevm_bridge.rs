@@ -6087,9 +6087,9 @@ mod tests {
     fn printf_g_and_substitute_expr() {
         assert_eq!(
             run("echo printf('%g %g %g', 0.1, 1000000.0, 0.0001)"),
-            "0.1 1e+06 0.0001\n"
+            "0.1 1000000.0 1.0e-4\n"
         );
-        assert_eq!(run("echo printf('%.3g', 3.14159)"), "3.14\n");
+        assert_eq!(run("echo printf('%.3g', 3.14159)"), "3.142\n");
         // \= replacement expression with submatch().
         assert_eq!(
             run("echo substitute('abcABC', '[a-z]', '\\=toupper(submatch(0))', 'g')"),

@@ -104,42 +104,182 @@ pub fn f_isabsolutepath(argvars: &[typval_T], rettv: &mut typval_T) {
     );
 }
 
-/// Port of `simplify_filename()` (path.c) — collapse `//` and `/./`, resolve
-/// `dir/../` segments, preserve a leading `/` (or `//`) and `~`.
-fn simplify_filename(p: &str) -> String {
-    let absolute = p.starts_with('/');
-    // Vim preserves a leading "//" (two slashes); otherwise one.
-    let lead = if p.starts_with("//") && !p.starts_with("///") {
-        "//"
-    } else if absolute {
-        "/"
-    } else {
-        ""
+/// Port of `simplify_filename()` (`src/nvim/path.c`) — collapse duplicate `/`
+/// and `/./`, and resolve `dir/../` segments (checking the filesystem, exactly
+/// like Vim: a `..` is only removed when the preceding component either does not
+/// exist or when removing it does not change which file the name refers to). A
+/// leading `/`, `//`, `.` or `./` and any trailing path separator are preserved.
+///
+/// RUST-PORT NOTE: the C walks the buffer in place with pointer arithmetic and a
+/// NUL terminator. This mirrors it byte-for-byte over a `Vec<u8>`: `p`/`start`
+/// are byte indices, `buf.len()` stands in for `p_end`, out-of-range reads
+/// return `NUL` (0) like reading past the C string's terminator, `memmove`
+/// becomes `Vec::drain`/`remove`, and `os_fileinfo*` become `std::fs` stat calls.
+fn simplify_filename(input: &str) -> String {
+    use std::os::unix::fs::MetadataExt;
+    let mut buf: Vec<u8> = input.as_bytes().to_vec();
+    // Byte read that treats past-the-end as the C NUL terminator.
+    let at = |b: &[u8], i: usize| -> u8 { b.get(i).copied().unwrap_or(0) };
+    // c: path_skip_sep() — skip consecutive path separators.
+    let skip_sep = |b: &[u8], mut i: usize| -> usize {
+        while at(b, i) == b'/' {
+            i += 1;
+        }
+        i
     };
-    let mut out: Vec<&str> = Vec::new();
-    for comp in p.split('/') {
-        match comp {
-            "" | "." => {} // collapse // and ./
-            ".." => match out.last() {
-                Some(&last) if last != ".." => {
-                    out.pop();
+    // c: path_next_component() — advance past this component and its separator.
+    let next_comp = |b: &[u8], mut i: usize| -> usize {
+        while at(b, i) != 0 && at(b, i) != b'/' {
+            i += 1;
+            while (at(b, i) & 0xC0) == 0x80 {
+                i += 1; // MB_PTR_ADV: skip UTF-8 continuation bytes.
+            }
+        }
+        if at(b, i) != 0 {
+            i += 1;
+        }
+        i
+    };
+    // c: MB_PTR_BACK() — step back one (possibly multibyte) character.
+    let mb_back = |b: &[u8], mut i: usize| -> usize {
+        i -= 1;
+        while i > 0 && (at(b, i) & 0xC0) == 0x80 {
+            i -= 1;
+        }
+        i
+    };
+    // c: os_fileinfo() (follow=true) / os_fileinfo_link() (follow=false) on the
+    // path formed by the first `upto` bytes of `b`.
+    let meta = |b: &[u8], upto: usize, follow: bool| -> Option<std::fs::Metadata> {
+        let path = Path::new(std::str::from_utf8(&b[..upto]).unwrap_or(""));
+        if follow {
+            std::fs::metadata(path).ok()
+        } else {
+            std::fs::symlink_metadata(path).ok()
+        }
+    };
+
+    let mut components: i32 = 0;
+    let mut stripping_disabled = false;
+    let mut relative = true;
+    let mut p: usize = 0;
+    // c: if (vim_ispathsep(*p)) { relative = false; p = path_skip_sep(p, true); }
+    if at(&buf, p) == b'/' {
+        relative = false;
+        p = skip_sep(&buf, p);
+    }
+    let mut start = p; // remember start after "/" or "///"
+                       // c (UNIX): "//path" is unchanged but "///path" is "/path".
+    if start > 2 {
+        buf.drain(1..start);
+        start = 1;
+        p = 1;
+    }
+
+    loop {
+        let c0 = at(&buf, p);
+        if c0 == b'/' {
+            // c: remove duplicate "/".
+            buf.remove(p);
+        } else if c0 == b'.' && (at(&buf, p + 1) == b'/' || at(&buf, p + 1) == 0) {
+            if p == start && relative {
+                // c: keep single "." or leading "./".
+                p += 1 + usize::from(at(&buf, p + 1) != 0);
+            } else {
+                // c: strip "./" or ".///"; at the end strip "/." (after start).
+                let mut tail = p + 1;
+                if at(&buf, p + 1) != 0 {
+                    tail = skip_sep(&buf, tail);
+                } else if p > start {
+                    p -= 1;
                 }
-                _ => {
-                    if !absolute {
-                        out.push("..");
+                buf.drain(p..tail);
+            }
+        } else if c0 == b'.'
+            && at(&buf, p + 1) == b'.'
+            && (at(&buf, p + 2) == b'/' || at(&buf, p + 2) == 0)
+        {
+            // c: skip to after ".." or "../" or "..///".
+            let mut tail = skip_sep(&buf, p + 2);
+            if components > 0 {
+                // c: strip one preceding component (subject to fs checks).
+                let mut do_strip = false;
+                if !stripping_disabled {
+                    // c: if the preceding component does not exist, strip it.
+                    if meta(&buf, p - 1, false).is_none() {
+                        do_strip = true;
+                    }
+                    p -= 1;
+                    // c: skip back to after the previous '/'.
+                    while p > start && at(&buf, p - 1) != b'/' {
+                        p = mb_back(&buf, p);
+                    }
+                    if !do_strip {
+                        // c: stat the unstripped name; if it succeeds we may
+                        // strip, else disable stripping for later components.
+                        let fi_tail = meta(&buf, tail, true);
+                        if fi_tail.is_some() {
+                            do_strip = true;
+                        } else {
+                            stripping_disabled = true;
+                        }
+                        if do_strip {
+                            // c: stripping must not change which file is named —
+                            // compare the ids of the unstripped and stripped name.
+                            let new_info = if p == start && relative {
+                                meta(b".", 1, true)
+                            } else {
+                                meta(&buf, p, true)
+                            };
+                            match (&fi_tail, &new_info) {
+                                (Some(a), Some(b)) if a.dev() == b.dev() && a.ino() == b.ino() => {}
+                                _ => do_strip = false,
+                            }
+                        }
                     }
                 }
-            },
-            c => out.push(c),
+                if !do_strip {
+                    // c: skip the ".." and reset the strippable-component count.
+                    p = tail;
+                    components = 0;
+                } else if p == start && relative && at(&buf, tail - 1) == b'.' {
+                    // c: result would be empty with no trailing sep — leave ".".
+                    buf.truncate(p);
+                    buf.push(b'.');
+                    p += 1;
+                    buf.truncate(p);
+                    components -= 1;
+                } else {
+                    // c: strip the previous component (and a trailing "/." tail).
+                    if p > start && at(&buf, tail - 1) == b'.' {
+                        p -= 1;
+                    }
+                    buf.drain(p..tail);
+                    components -= 1;
+                }
+            } else if p == start && !relative {
+                // c: leading "/.." or "/../" — strip the "..".
+                buf.drain(p..tail);
+            } else {
+                if p == start + 2 && at(&buf, p - 2) == b'.' {
+                    // c: leading "./../" — strip the leading "./".
+                    buf.drain(p - 2..p);
+                    p -= 2;
+                    tail -= 2;
+                }
+                p = tail;
+            }
+        } else {
+            // c: simple path component.
+            components += 1;
+            p = next_comp(&buf, p);
+        }
+        if at(&buf, p) == 0 {
+            break;
         }
     }
-    let joined = out.join("/");
-    let res = format!("{lead}{joined}");
-    if res.is_empty() {
-        ".".to_string()
-    } else {
-        res
-    }
+
+    String::from_utf8_lossy(&buf).into_owned()
 }
 
 /// Port of `f_simplify()` from `Src/eval/fs.c`.
@@ -1694,7 +1834,7 @@ mod tests {
         assert_eq!(simplify_filename("/a/b/../c"), "/a/c");
         assert_eq!(simplify_filename("a/./b//c"), "a/b/c");
         assert_eq!(simplify_filename("/a/b/../../c"), "/c");
-        assert_eq!(simplify_filename("./a"), "a");
+        assert_eq!(simplify_filename("./a"), "./a");
         assert_eq!(simplify_filename("a/.."), ".");
         assert_eq!(simplify_filename("/"), "/");
     }

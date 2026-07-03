@@ -753,6 +753,14 @@ struct SomeMatch {
 fn find_some_match(argvars: &[typval_T]) -> Option<SomeMatch> {
     let pat = tv_get_string(&argvars[1]);
     let ic = tv_get_bool(&get_option_value("ignorecase")) != 0;
+    // c: reported positions are BYTE offsets (`regmatch.startp[0] - expr`), while
+    // the regex engine works in char indices — convert against the subject.
+    let char_to_byte = |subject: &str, ci: i64| -> i64 {
+        subject
+            .char_indices()
+            .nth(ci as usize)
+            .map_or(subject.len() as i64, |(b, _)| b as i64)
+    };
     let has_count = argvars.len() > 3 && argvars[3].v_type != VAR_UNKNOWN;
     let count = if has_count {
         tv_get_number(&argvars[3])
@@ -793,8 +801,8 @@ fn find_some_match(argvars: &[typval_T]) -> Option<SomeMatch> {
                 if remaining <= 0 {
                     return Some(SomeMatch {
                         list_idx: Some(idx),
-                        start: s,
-                        end: e,
+                        start: char_to_byte(&str, s),
+                        end: char_to_byte(&str, e),
                         groups,
                         item: items[idx as usize].clone(),
                     });
@@ -831,8 +839,8 @@ fn find_some_match(argvars: &[typval_T]) -> Option<SomeMatch> {
     };
     hit.map(|(start, end, groups)| SomeMatch {
         list_idx: None,
-        start,
-        end,
+        start: char_to_byte(&s, start),
+        end: char_to_byte(&s, end),
         groups,
         item: typval_T::default(),
     })
@@ -1350,7 +1358,7 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
                 } else if v.is_nan() {
                     "nan".to_string()
                 } else {
-                    crate::ported::eval::encode::vim_float_g(v, prec.unwrap_or(6) as i32)
+                    crate::ported::eval::encode::vim_float_g(v, prec.map(|p| p as i32))
                 };
                 if conv == 'G' {
                     s.to_uppercase()

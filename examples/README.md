@@ -31,6 +31,16 @@ cargo build
 | [`oneline.vim`](oneline.vim) | one-line block bars: `if c \| … \| endif`, `for`/`while` on one line |
 | [`varargs.vim`](varargs.vim) | variadic functions (`...`/`a:000`/`a:0`), `:unlet` |
 | [`compare.vim`](compare.vim) | comparison operators incl. case suffixes (`==?`/`==#`/`=~?`), `is`/`isnot` |
+| [`bitops.vim`](bitops.vim) | bitwise builtins `and`/`or`/`xor`/`invert` (two's-complement `invert(x) == -x-1`) |
+| [`math_extra.vim`](math_extra.vim) | `pow`/`fmod` — powers, roots, and sign-preserving IEEE remainder |
+| [`path_funcs.vim`](path_funcs.vim) | path strings: `simplify`/`resolve`/`isabsolutepath`, `escape`/`fnameescape` |
+| [`list_transform.vim`](list_transform.vim) | non-mutating structural ops `flatten`/`flattennew`/`extendnew`/`mapnew`/`deepcopy`/`foreach` (copy-independence asserted) |
+| [`strconvert.vim`](strconvert.vim) | codepoint conversion `str2list`/`list2str` (round-trip) and byte-offset search `stridx`/`strridx` |
+| [`dict_ops.vim`](dict_ops.vim) | Dictionary builtins `keys`/`values`/`items`/`has_key`/`get`/`extend`/`filter`/`map`/`remove`/`copy` (hash order normalised via `sort`) |
+| [`list_ops.vim`](list_ops.vim) | mutating/searching list builtins `insert`/`add`/`remove` (index+range+negative), `count`/`index`/`extend`/`uniq` |
+| [`sort_variants.vim`](sort_variants.vim) | every `sort()` mode (default/`n`/`N`/`i`/`f`/custom comparator/legacy `1`), `reverse`, and the `sort`+`uniq` dedupe idiom |
+| [`printf_fmt.vim`](printf_fmt.vim) | `printf()` specifiers: `%d`/`%x`/`%o`/`%b` radices, `0`/`-`/`+`/`#` flags, width/precision, `%e`/`%f`/`%g`, `%c`, `*` width, `N$` positional |
+| [`str_case.vim`](str_case.vim) | case folding (`toupper`/`tolower`), `trim` (mask+direction), and match position `match`/`matchend`/`matchstr`/`matchlist` |
 
 Run any script with `VIMLRS_JIT_STATS=1` to see JIT activity, or `VIMLRS_NO_JIT=1`
 to force the interpreter baseline.

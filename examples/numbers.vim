@@ -9,7 +9,7 @@ call assert_equal('0.333333', string(1.0 / 3.0))
 call assert_equal('100.0', string(100.0))
 call assert_equal('-2.5', string(-2.5))
 call assert_equal('0.0', string(0.0))
-call assert_equal('3.14159', string(3.14159265))
+call assert_equal('3.141593', string(3.14159265))
 
 " --- json_encode uses the same float rendering
 call assert_equal('{"x":0.5}', json_encode({'x': 0.5}))

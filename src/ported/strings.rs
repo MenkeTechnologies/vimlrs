@@ -176,11 +176,48 @@ pub fn f_trim(argvars: &[typval_T], rettv: &mut typval_T) {
 }
 
 /// Port of `f_strridx()` from `Src/strings.c` — byte index of the LAST
-/// occurrence of `{needle}` in `{haystack}`, or -1.
+/// occurrence of `{needle}` in `{haystack}`, or -1. The optional third argument
+/// is an upper limit for the match index; an empty needle matches past the end.
 pub fn f_strridx(argvars: &[typval_T], rettv: &mut typval_T) {
     let hay = tv_get_string(&argvars[0]);
     let needle = tv_get_string(&argvars[1]);
-    rettv.vval = v_number(hay.rfind(&needle).map_or(-1, |i| i as varnumber_T));
+    // c: rettv->vval.v_number = -1;
+    rettv.v_type = VAR_NUMBER;
+    rettv.vval = v_number(-1);
+    let hb = hay.as_bytes();
+    let nb = needle.as_bytes();
+    // c: third argument — upper limit for the index; negative can never match.
+    let end_idx: isize = if argvars.len() > 2 && argvars[2].v_type != VAR_UNKNOWN {
+        let e = tv_get_number_chk(&argvars[2], None) as isize;
+        if e < 0 {
+            return;
+        }
+        e
+    } else {
+        hb.len() as isize
+    };
+    let lastmatch: Option<usize> = if nb.is_empty() {
+        // c: empty string matches past the end — lastmatch = haystack + end_idx.
+        Some(end_idx as usize)
+    } else {
+        // c: for (rest = haystack; …) { rest = strstr(rest, needle); if (rest ==
+        //    NULL || rest > haystack + end_idx) break; lastmatch = rest; }
+        let mut found = None;
+        let mut from = 0usize;
+        loop {
+            match (from..=hb.len().saturating_sub(nb.len())).find(|&i| hb[i..i + nb.len()] == *nb) {
+                Some(pos) if (pos as isize) <= end_idx => {
+                    found = Some(pos);
+                    from = pos + 1;
+                }
+                _ => break,
+            }
+        }
+        found
+    };
+    if let Some(i) = lastmatch {
+        rettv.vval = v_number(i as varnumber_T);
+    }
 }
 
 /// Port of `f_tr()` from `Src/strings.c` — translate characters of `{src}`
