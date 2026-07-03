@@ -4141,9 +4141,8 @@ pub fn hl_resolved(name: &str) -> Option<ResolvedHl> {
             })
             .unwrap_or_default();
         // A colour token of "NONE" means "no colour" — treat as unset.
-        let colour = |key: &str| {
-            hl_lookup(&reg, name, key, 0).filter(|v| !v.eq_ignore_ascii_case("none"))
-        };
+        let colour =
+            |key: &str| hl_lookup(&reg, name, key, 0).filter(|v| !v.eq_ignore_ascii_case("none"));
         Some(ResolvedHl {
             guifg: colour("guifg"),
             guibg: colour("guibg"),
@@ -4221,9 +4220,8 @@ fn hl_synidattr(id: varnumber_T, what: &str, mode: &str) -> String {
             "sp" => colour("guisp", "ctermul"),
             "font" => hl_lookup(&reg, &name, "font", 0).unwrap_or_default(),
             // Boolean display attributes live in the `gui=`/`cterm=`/`term=` lists.
-            "bold" | "italic" | "reverse" | "inverse" | "standout" | "underline"
-            | "undercurl" | "underdouble" | "underdotted" | "underdashed" | "strikethrough"
-            | "nocombine" => {
+            "bold" | "italic" | "reverse" | "inverse" | "standout" | "underline" | "undercurl"
+            | "underdouble" | "underdotted" | "underdashed" | "strikethrough" | "nocombine" => {
                 let list_key = if gui { "gui" } else { "cterm" };
                 let hit = hl_lookup(&reg, &name, list_key, 0)
                     .or_else(|| hl_lookup(&reg, &name, "term", 0))
@@ -4233,7 +4231,11 @@ fn hl_synidattr(id: varnumber_T, what: &str, mode: &str) -> String {
                         list.split(',').any(|a| a.eq_ignore_ascii_case(want))
                     })
                     .unwrap_or(false);
-                if hit { "1".into() } else { String::new() }
+                if hit {
+                    "1".into()
+                } else {
+                    String::new()
+                }
             }
             _ => String::new(),
         }
