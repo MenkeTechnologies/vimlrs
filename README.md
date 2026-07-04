@@ -101,6 +101,10 @@ Early / in development.
 | one-line block bars — `if … \| … \| endif` (and `for`/`while`), incl. after a leaf command (`let x=1 \| if x \| … \| endif`) | Working |
 | variadic functions (`...` -> `a:000`/`a:0`), `:unlet`, `:source`, autoload | Working |
 | `:command`/`:autocmd` (user commands + `:doautocmd` event firing) | Working — `examples/user_commands.vim` / `examples/autocommands.vim` self-test in CI |
+| Blob index/slice operators + arithmetic — element index → unsigned byte, INCLUSIVE `[a:b]` sub-Blob (with open/negative ends), `+` concatenation, `==`/`!=` content compare, `string()` 0z-literal render, `type()` → `v:t_blob` (10), and `get()` byte-or-default — `examples/blob_bytes.vim` self-tests vs nvim/vim | Working |
+| `sha256()` SHA-256 hex digest — FIPS-180-4 empty/`abc` vectors, longer ASCII, UTF-8 multibyte, 1000-byte multi-block, plus 64-char/lowercase/deterministic/avalanche invariants — `examples/sha256_digest.vim` self-tests vs nvim/vim | Working |
+| Dictionary copy + `extend` collision policy — shallow `copy()` (nested containers shared) vs recursive `deepcopy()` (fully independent), `extend` `force`/`keep`/`error` (E737) actions, and `extendnew()` leaving both args intact — `examples/dict_deepcopy.vim` self-tests vs nvim/vim | Working |
+| `count()` across container kinds — non-overlapping substring count on Strings, value-match count on Dicts, element count on Lists, with the `ic` case-fold flag and multibyte substrings — `examples/count_types.vim` self-tests vs nvim/vim | Working |
 
 The full interpreter C surface is scaffolded: `scripts/gen_port_stubs.sh`
 generates one stub per not-yet-ported Neovim C function (real name +

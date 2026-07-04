@@ -1338,6 +1338,24 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
             continue;
         }
         let cur = argvars.get(explicit_idx.unwrap_or(arg));
+        // c (vim_vsnprintf_typval): inf/nan render as fixed words, lowercase for
+        // the lowercase float conversions (f/e/g), uppercase for the uppercase
+        // ones (F/E/G); negative infinity keeps a leading '-', nan is unsigned;
+        // zero-padding is suppressed (space-padded). `nonfinite`/`nonfinite_nan`
+        // carry that state to the sign/pad logic below.
+        let mut nonfinite = false;
+        let mut nonfinite_nan = false;
+        let nf_str = |v: f64, upper: bool| -> String {
+            if v.is_nan() {
+                if upper { "NAN" } else { "nan" }.to_string()
+            } else if v < 0.0 {
+                if upper { "-INF" } else { "-inf" }.to_string()
+            } else if upper {
+                "INF".to_string()
+            } else {
+                "inf".to_string()
+            }
+        };
         let core = match conv {
             'd' | 'i' => cur.map_or(0, |t| tv_get_number_chk(t, None)).to_string(),
             // c: `%s`/`%S` fetch the argument through `tv_str()`, which for a
@@ -1360,7 +1378,16 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
                 }
                 s
             }
-            'f' => format!("{:.*}", prec.unwrap_or(6), cur.map_or(0.0, tv_get_float)),
+            'f' | 'F' => {
+                let v = cur.map_or(0.0, tv_get_float);
+                if !v.is_finite() {
+                    nonfinite = true;
+                    nonfinite_nan = v.is_nan();
+                    nf_str(v, conv == 'F')
+                } else {
+                    format!("{:.*}", prec.unwrap_or(6), v)
+                }
+            }
             'x' => format!("{:x}", cur.map_or(0, |t| tv_get_number_chk(t, None))),
             'X' => format!("{:X}", cur.map_or(0, |t| tv_get_number_chk(t, None))),
             'o' => format!("{:o}", cur.map_or(0, |t| tv_get_number_chk(t, None))),
@@ -1376,35 +1403,41 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
                 // C `%g`: `prec` significant digits (default 6), trailing zeros
                 // stripped, `%e`/`%f` chosen by exponent.
                 let v = cur.map_or(0.0, tv_get_float);
-                let s = if v.is_infinite() {
-                    if v < 0.0 { "-inf" } else { "inf" }.to_string()
-                } else if v.is_nan() {
-                    "nan".to_string()
+                if !v.is_finite() {
+                    nonfinite = true;
+                    nonfinite_nan = v.is_nan();
+                    nf_str(v, conv == 'G')
                 } else {
-                    crate::ported::eval::encode::vim_float_g(v, prec.map(|p| p as i32))
-                };
-                if conv == 'G' {
-                    s.to_uppercase()
-                } else {
-                    s
+                    let s = crate::ported::eval::encode::vim_float_g(v, prec.map(|p| p as i32));
+                    if conv == 'G' {
+                        s.to_uppercase()
+                    } else {
+                        s
+                    }
                 }
             }
             'e' | 'E' => {
-                let s = format!("{:.*e}", prec.unwrap_or(6), cur.map_or(0.0, tv_get_float));
-                // Rust emits "1e2"; C/Vim emit "1.000000e+02" — add sign + 2-digit exp.
-                let s = if let Some(ep) = s.find('e') {
-                    let (m, ex) = s.split_at(ep);
-                    let en: i32 = ex[1..].parse().unwrap_or(0);
-                    format!(
-                        "{m}{}{}{:02}",
-                        conv,
-                        if en < 0 { '-' } else { '+' },
-                        en.abs()
-                    )
+                let v = cur.map_or(0.0, tv_get_float);
+                if !v.is_finite() {
+                    nonfinite = true;
+                    nonfinite_nan = v.is_nan();
+                    nf_str(v, conv == 'E')
                 } else {
-                    s
-                };
-                s
+                    let s = format!("{:.*e}", prec.unwrap_or(6), v);
+                    // Rust emits "1e2"; C/Vim emit "1.000000e+02" — sign + 2-digit exp.
+                    if let Some(ep) = s.find('e') {
+                        let (m, ex) = s.split_at(ep);
+                        let en: i32 = ex[1..].parse().unwrap_or(0);
+                        format!(
+                            "{m}{}{}{:02}",
+                            conv,
+                            if en < 0 { '-' } else { '+' },
+                            en.abs()
+                        )
+                    } else {
+                        s
+                    }
+                }
             }
             other => {
                 out.push('%');
@@ -1422,6 +1455,10 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
         // width flag have no effect.
         let mut zero = zero;
         let mut core = core;
+        // c: inf/nan are space-padded, never zero-padded, regardless of the flag.
+        if nonfinite {
+            zero = false;
+        }
         if matches!(conv, 'd' | 'i' | 'o' | 'u' | 'x' | 'X' | 'b' | 'B') {
             if let Some(p) = prec {
                 zero = false;
@@ -1443,7 +1480,10 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
         // non-negative values; split it off `core` so zero-padding lands between
         // the sign and the digits (`%+05d` of 7 → `+0007`).
         let signed = matches!(conv, 'd' | 'i' | 'f' | 'F' | 'e' | 'E' | 'g' | 'G');
-        let (sign, core) = if signed {
+        let (sign, core) = if nonfinite_nan {
+            // c: nan carries no sign even under the `+`/space flag.
+            ("", core)
+        } else if signed {
             if let Some(rest) = core.strip_prefix('-') {
                 ("-", rest.to_string())
             } else if plus {
@@ -1469,8 +1509,15 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
         } else {
             ("", core)
         };
-        // Pad to width (width counts the sign).
-        let len = sign.len() + core.chars().count();
+        // Pad to width (width counts the sign). c: `%s` width is the byte length
+        // (`strlen`); `%S` counts screen cells (here approximated by the codepoint
+        // count); numeric conversions are ASCII so bytes and chars coincide.
+        let visible = if conv == 'S' {
+            core.chars().count()
+        } else {
+            core.len()
+        };
+        let len = sign.len() + visible;
         if len >= width {
             out.push_str(sign);
             out.push_str(&core);

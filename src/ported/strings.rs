@@ -284,24 +284,42 @@ pub fn f_strgetchar(argvars: &[typval_T], rettv: &mut typval_T) {
 /// Port of `f_strcharpart()` from `Src/strings.c` — a substring of `{src}` by
 /// CHARACTER index: `{start}` chars in, `{len}` chars long (to end if omitted).
 /// A negative `{start}` counts toward `{len}` (matching Vim).
+///
+/// The optional 4th arg `{skipcc}` selects how a "character" is measured: when
+/// truthy, a base character plus its trailing composing characters count as one
+/// character (c: `utfc_ptr2len`); otherwise each codepoint is its own character
+/// (c: `utf_ptr2len`).
 pub fn f_strcharpart(argvars: &[typval_T], rettv: &mut typval_T) {
-    let chars: Vec<char> = tv_get_string(&argvars[0]).chars().collect();
+    // c: skipcc = (argvars[2] != UNKNOWN && argvars[3] != UNKNOWN) ? tv_get_bool(&argvars[3]) : 0;
+    let skipcc = argvars
+        .get(3)
+        .is_some_and(|t| tv_get_number_chk(t, None) != 0);
+    // Build character units. With skipcc, composing marks fold into the
+    // preceding base character's unit; otherwise every codepoint is its own.
+    let mut units: Vec<String> = Vec::new();
+    for c in tv_get_string(&argvars[0]).chars() {
+        if skipcc && utf_iscomposing(c) && !units.is_empty() {
+            units.last_mut().unwrap().push(c);
+        } else {
+            units.push(c.to_string());
+        }
+    }
     let mut start = tv_get_number_chk(&argvars[1], None);
     let has_len = argvars.len() >= 3;
     let mut len = if has_len {
         tv_get_number_chk(&argvars[2], None)
     } else {
-        chars.len() as varnumber_T - start
+        units.len() as varnumber_T - start
     };
     if start < 0 {
         len += start; // chars before 0 are skipped but still consume {len}
         start = 0;
     }
-    let start = (start as usize).min(chars.len());
+    let start = (start as usize).min(units.len());
     let len = len.max(0) as usize;
-    let end = (start + len).min(chars.len());
+    let end = (start + len).min(units.len());
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(chars[start..end].iter().collect());
+    rettv.vval = v_string(units[start..end].concat());
 }
 
 /// Port of `f_byteidx()` from `Src/strings.c` — the byte index of the `{nr}`'th
