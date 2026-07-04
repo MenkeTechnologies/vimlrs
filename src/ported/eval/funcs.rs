@@ -161,7 +161,16 @@ pub fn f_str2float(argvars: &[typval_T], rettv: &mut typval_T) {
 ///
 /// "float2nr()" function — truncate a Float to a Number.
 pub fn f_float2nr(argvars: &[typval_T], rettv: &mut typval_T) {
-    rettv.vval = v_number(tv_get_float(&argvars[0]) as varnumber_T);
+    let f = tv_get_float(&argvars[0]);
+    // c: clamp to ±VARNUMBER_MAX (not i64::MIN) using DBL_EPSILON slack.
+    let n = if f <= -(varnumber_T::MAX as f64) + f64::EPSILON {
+        -varnumber_T::MAX
+    } else if f >= varnumber_T::MAX as f64 - f64::EPSILON {
+        varnumber_T::MAX
+    } else {
+        f as varnumber_T
+    };
+    rettv.vval = v_number(n);
 }
 
 /// Port of `f_function()` from `Src/eval/funcs.c` — a Funcref to the named
@@ -1357,9 +1366,12 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
             'o' => format!("{:o}", cur.map_or(0, |t| tv_get_number_chk(t, None))),
             'b' | 'B' => format!("{:b}", cur.map_or(0, |t| tv_get_number_chk(t, None))),
             'u' => (cur.map_or(0, |t| tv_get_number_chk(t, None)) as u64).to_string(),
-            'c' => char::from_u32(cur.map_or(0, |t| tv_get_number_chk(t, None)) as u32)
-                .unwrap_or('\u{0}')
-                .to_string(),
+            'c' => {
+                // c: `%c` emits a single byte — the value truncated to `char`
+                // (`str[0] = (char)uj`), i.e. `value & 0xFF`.
+                let byte = (cur.map_or(0, |t| tv_get_number_chk(t, None)) & 0xFF) as u32;
+                char::from_u32(byte).unwrap_or('\u{0}').to_string()
+            }
             'g' | 'G' => {
                 // C `%g`: `prec` significant digits (default 6), trailing zeros
                 // stripped, `%e`/`%f` chosen by exponent.
@@ -1403,6 +1415,29 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
         // A positional spec does not advance the sequential argument counter.
         if explicit_idx.is_none() {
             arg += 1;
+        }
+        // c: integer conversions treat precision as the minimum number of digits,
+        // left-padding the magnitude with `0`. A precision of 0 with value 0
+        // produces no digits at all, and specifying a precision makes the `0`
+        // width flag have no effect.
+        let mut zero = zero;
+        let mut core = core;
+        if matches!(conv, 'd' | 'i' | 'o' | 'u' | 'x' | 'X' | 'b' | 'B') {
+            if let Some(p) = prec {
+                zero = false;
+                let (neg, digits) = match core.strip_prefix('-') {
+                    Some(rest) => (true, rest.to_string()),
+                    None => (false, core),
+                };
+                let digits = if p == 0 && digits == "0" {
+                    String::new()
+                } else if digits.len() < p {
+                    format!("{}{digits}", "0".repeat(p - digits.len()))
+                } else {
+                    digits
+                };
+                core = if neg { format!("-{digits}") } else { digits };
+            }
         }
         // For signed numeric conversions the `+`/space flag forces a sign on
         // non-negative values; split it off `core` so zero-padding lands between

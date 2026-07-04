@@ -125,6 +125,17 @@ pub fn f_strpart(argvars: &[typval_T], rettv: &mut typval_T) {
     } else if nbyte + len > slen {
         len = slen - nbyte;
     }
+    // c: with {chars} ({4}) set, reinterpret the byte-clamped {len} as a
+    // character count and walk that many characters forward from `nbyte`
+    // (the {start} offset itself stays byte-based, matching the C).
+    if argvars.len() >= 3 && argvars.get(3).is_some_and(|t| t.v_type != VAR_UNKNOWN) {
+        let mut off = nbyte;
+        while off < slen && len > 0 {
+            off += crate::ported::mbyte::utf_ptr2len(&bytes[off as usize..]) as varnumber_T;
+            len -= 1;
+        }
+        len = off - nbyte;
+    }
     let start = nbyte as usize;
     let end = start + len as usize;
     rettv.v_type = VAR_STRING;

@@ -6,7 +6,7 @@
 //! `Option<&mut …>`.
 #![allow(non_upper_case_globals)]
 
-use crate::ported::eval::typval_defs_h::varnumber_T;
+use crate::ported::eval::typval_defs_h::{varnumber_T, VARNUMBER_MAX, VARNUMBER_MIN};
 
 /// `STR2NR_BIN` — recognize a `0b`/`0B` binary prefix. (charset.h)
 pub const STR2NR_BIN: i32 = 0x01;
@@ -154,8 +154,16 @@ pub fn vim_str2nr(
         *u = un;
     }
     if let Some(n) = nptr {
+        // c: clamp the unsigned magnitude to the signed range before applying
+        // the sign — negative overflow → VARNUMBER_MIN, positive → VARNUMBER_MAX.
         *n = if negative {
-            (un as varnumber_T).wrapping_neg()
+            if un > VARNUMBER_MAX as u64 {
+                VARNUMBER_MIN
+            } else {
+                -(un as varnumber_T)
+            }
+        } else if un > VARNUMBER_MAX as u64 {
+            VARNUMBER_MAX
         } else {
             un as varnumber_T
         };
