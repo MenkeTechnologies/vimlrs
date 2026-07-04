@@ -108,6 +108,17 @@ enum ClassItem {
 }
 
 impl ClassItem {
+    /// Whether case-fold (`\c` / 'ignorecase') applies to this set member.
+    /// Verified against vim 9.2 / nvim 0.12.3: folding rewrites LITERAL set
+    /// members (`[abc]`, `[A-Z]`, `\ca`) so `\c` matches either case, but a
+    /// case-*defined* predicate keeps its own definition — a lowercase char
+    /// must NOT match `[[:upper:]]` / `\u` under `\c`. So only `Ch`/`Range`
+    /// fold; every predicate variant (Upper/Lower/UpperU/LowerU/Digit/…) does
+    /// not. Case-agnostic predicates (`\d \w \a \x`) are no-ops either way.
+    fn folds_under_ic(&self) -> bool {
+        matches!(self, ClassItem::Ch(_) | ClassItem::Range(_, _))
+    }
+
     fn contains(&self, c: char) -> bool {
         match self {
             ClassItem::Ch(x) => *x == c,
@@ -185,7 +196,7 @@ fn is_keyword_char(c: char) -> bool {
 impl Class {
     fn matches(&self, c: char, ic: bool) -> bool {
         let hit = self.items.iter().any(|it| {
-            if ic {
+            if ic && it.folds_under_ic() {
                 it.contains(c.to_ascii_lowercase()) || it.contains(c.to_ascii_uppercase())
             } else {
                 it.contains(c)
