@@ -1084,11 +1084,18 @@ pub fn regex_substitute(subject: &str, pat: &str, sub: &str, flags: &str) -> Str
     // `submatch()` available), not literal text.
     let sub_expr = sub.strip_prefix("\\=");
     let mut out = String::new();
-    let mut pos = 0usize;
+    // Faithful port of `do_string_sub` (eval.c:6398). `tail` is the current
+    // search origin; `zero_width` remembers the position of the last empty match
+    // that was substituted, so a fresh empty match at that same spot is skipped
+    // (copy one char, advance) rather than emitting a duplicate replacement. This
+    // is Vim's "skip empty match except for first match" rule — e.g.
+    // `substitute("aaa","a*","X","g")` is `X`, not `XX`.
+    let mut tail = 0usize;
+    let mut zero_width: Option<usize> = None;
     loop {
-        // Find the next match at or after `pos`.
+        // Find the next match at or after `tail`.
         let mut found = None;
-        for start in pos..=chars.len() {
+        for start in tail..=chars.len() {
             let mut groups = vec![None; re.ngroups + 1];
             if let Some(end) = re.match_alt(
                 &re.branches,
@@ -1105,7 +1112,20 @@ pub fn regex_substitute(subject: &str, pat: &str, sub: &str, flags: &str) -> Str
         let Some((s, e, groups)) = found else {
             break;
         };
-        out.extend(&chars[pos..s]);
+        // c: `if (regmatch.startp[0] == regmatch.endp[0])` — empty match. Skip it
+        // only when it lands on the same position as the previous empty match.
+        if s == e {
+            if zero_width == Some(s) {
+                if tail < chars.len() {
+                    out.push(chars[tail]);
+                    tail += 1;
+                    continue;
+                }
+                break;
+            }
+            zero_width = Some(s);
+        }
+        out.extend(&chars[tail..s]);
         if let Some(expr) = sub_expr {
             // Populate submatch() context, then evaluate the replacement expr.
             let subs: Vec<String> = groups
@@ -1124,20 +1144,16 @@ pub fn regex_substitute(subject: &str, pat: &str, sub: &str, flags: &str) -> Str
         } else {
             out.push_str(&expand_sub(sub, &chars, &groups));
         }
-        // Advance; guard zero-width matches by emitting one char.
-        if e > s {
-            pos = e;
-        } else if e < chars.len() {
-            out.push(chars[e]);
-            pos = e + 1;
-        } else {
+        // c: `tail = regmatch.endp[0]; if (*tail == NUL) break;`
+        tail = e;
+        if tail >= chars.len() {
             break;
         }
         if !global {
             break;
         }
     }
-    out.extend(&chars[pos.min(chars.len())..]);
+    out.extend(&chars[tail.min(chars.len())..]);
     out
 }
 
@@ -1167,8 +1183,8 @@ impl SubCase {
 }
 
 /// Expand a substitute replacement: `\0`/`&` → whole match, `\1`..`\9` → group,
-/// `\\` → `\`, `\n`/`\t`/`\r` → control chars, `\u`/`\l`/`\U`/`\L`/`\e`/`\E` →
-/// case folding (matching Vim's `vim_regsub` behaviour).
+/// `\\` → `\`, `\n` → NUL (0x00), `\r` → carriage return, `\t` → tab,
+/// `\u`/`\l`/`\U`/`\L`/`\e`/`\E` → case folding (matching Vim's `vim_regsub`).
 fn expand_sub(sub: &str, chars: &[char], groups: &[Option<(usize, usize)>]) -> String {
     let s: Vec<char> = sub.chars().collect();
     let mut out = String::new();
@@ -1191,7 +1207,11 @@ fn expand_sub(sub: &str, chars: &[char], groups: &[Option<(usize, usize)>]) -> S
                             cs.push_str(&mut out, chars[*a..*b].iter().copied());
                         }
                     }
-                    'n' => out.push('\n'),
+                    // Vim's `vim_regsub` replacement quirk: `\n` inserts a NUL
+                    // (0x00), NOT a newline; `\r` inserts a carriage return
+                    // (0x0d); `\t` a tab. (The PATTERN side is the opposite — there
+                    // `\n` means newline.)
+                    'n' => out.push('\0'),
                     't' => out.push('\t'),
                     'r' => out.push('\r'),
                     '\\' => cs.push(&mut out, '\\'),

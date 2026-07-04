@@ -353,32 +353,63 @@ fn byteidx_impl(argvars: &[typval_T], skipcc: bool) -> varnumber_T {
 pub fn f_charidx(argvars: &[typval_T], rettv: &mut typval_T) {
     let s = tv_get_string(&argvars[0]);
     let idx = tv_get_number_chk(&argvars[1], None);
-    if idx < 0 || idx as usize >= s.len() {
+    if idx < 0 {
         rettv.vval = v_number(-1);
         return;
     }
-    let idx = idx as usize;
     // c: {countcc} (argvars[2]) — default 0 folds composing characters into their
     // base character (so the index is of the base); 1 counts each separately.
-    let countcc = argvars
-        .get(2)
-        .is_some_and(|t| tv_get_number_chk(t, None) != 0);
-    // Character index of the character whose byte span contains byte `idx`, via
-    // char boundaries (a non-boundary `idx` maps to its containing char and never
-    // panics). With folding, a composing char does not advance the index.
-    let mut ci: varnumber_T = -1;
+    let countcc = argvars.len() >= 3
+        && argvars[2].v_type != VAR_UNKNOWN
+        && tv_get_number_chk(&argvars[2], None) != 0;
+    // c: {utf16} (argvars[3]) — when truthy, {idx} is a UTF-16 code-unit index
+    // into {string} instead of a byte index.
+    let use_utf16 = argvars.len() >= 4
+        && argvars[3].v_type != VAR_UNKNOWN
+        && tv_get_number_chk(&argvars[3], None) != 0;
+
+    // Split into index-units: a base character plus its trailing composing marks
+    // when {countcc} is false, else each character alone. Record each unit's
+    // start byte and the number of UTF-16 code units preceding it. The character
+    // index is the unit's ordinal; an {idx} landing exactly at the end yields the
+    // character count and one past the end -1 ("less than {idx} bytes").
+    let mut units: Vec<(usize, varnumber_T)> = Vec::new();
+    let mut u16_acc: varnumber_T = 0;
     let mut prev = false;
     for (b, c) in s.char_indices() {
-        if b > idx {
-            break;
-        }
         let folds = !countcc && prev && utf_iscomposing(c);
-        if !folds {
-            ci += 1;
-        }
         prev = true;
+        if !folds {
+            units.push((b, u16_acc));
+            u16_acc += utf_char2utf16len(c);
+        }
     }
-    rettv.vval = v_number(ci);
+    let n = units.len() as varnumber_T;
+
+    // Ordinal of the unit whose span (in bytes, or in UTF-16 units) contains
+    // `idx`; the unit spans are contiguous and their keys strictly increasing, so
+    // the containing unit is the last whose key is <= idx.
+    let result = if use_utf16 {
+        match idx {
+            i if i == u16_acc => n,
+            i if i > u16_acc => -1,
+            i => units.iter().take_while(|(_, before)| *before <= i).count() as varnumber_T - 1,
+        }
+    } else {
+        let strlen = s.len() as varnumber_T;
+        match idx {
+            i if i == strlen => n,
+            i if i > strlen => -1,
+            i => {
+                units
+                    .iter()
+                    .take_while(|(sb, _)| (*sb as varnumber_T) <= i)
+                    .count() as varnumber_T
+                    - 1
+            }
+        }
+    };
+    rettv.vval = v_number(result);
 }
 
 /// Port of `f_byteidxcomp()` from `Src/strings.c` — the byte index of the
@@ -651,12 +682,131 @@ pub fn f_strdisplaywidth(argvars: &[typval_T], rettv: &mut typval_T) {
 pub fn f_charclass(argvars: &[typval_T], rettv: &mut typval_T) {
     let class = match tv_get_string(&argvars[0]).chars().next() {
         None => 0,
-        Some(c) if c == ' ' || c == '\t' || c == '\0' => 0,
-        Some(c) if matches!(c as u32, 0x1F300..=0x1FAFF | 0x2600..=0x27BF) => 3,
-        Some(c) if c == '_' || c.is_alphanumeric() => 2,
-        Some(_) => 1,
+        Some(c) => utf_class_tab(c as u32),
     };
-    rettv.vval = v_number(class as varnumber_T);
+    rettv.vval = v_number(class);
+}
+
+/// Port of `utf_class_tab()` / `mb_get_class_tab()` (Neovim mbyte.c) — the
+/// character class of codepoint `c`: 0 for blank/NUL, 1 for punctuation, 2 for
+/// an alphanumeric word character, and >2 (a representative codepoint) for other
+/// word characters such as CJK ideographs, Hangul and kana.
+///
+/// The Latin1 fast path uses the default `'iskeyword'` (`@,48-57,_,192-255`).
+/// The emoji branch mirrors `prop_is_emojilike()` (`UTF8PROC_BOUNDCLASS_`
+/// `EXTENDED_PICTOGRAPHIC`/`REGIONAL_INDICATOR`); utf8proc's property tables are
+/// not vendored, so it is approximated by the common emoji blocks — the same
+/// approximation `utf_char2cells()` uses for width. The interval table below is
+/// transcribed verbatim from `utf_class_tab()` and binary-searched exactly as
+/// the C does.
+fn utf_class_tab(c: u32) -> varnumber_T {
+    // First quick check for Latin1 characters, use 'iskeyword'.
+    if c < 0x100 {
+        if c == b' ' as u32 || c == b'\t' as u32 || c == 0 || c == 0xa0 {
+            return 0; // blank
+        }
+        if (c as u8).is_ascii_alphanumeric() || c == b'_' as u32 || (0xc0..=0xff).contains(&c) {
+            return 2; // word character
+        }
+        return 1; // punctuation
+    }
+
+    // emoji (utf8proc data not vendored — approximate the common blocks).
+    if matches!(c, 0x1F1E6..=0x1F1FF | 0x1F300..=0x1FAFF | 0x2600..=0x27BF) {
+        return 3;
+    }
+
+    // sorted list of non-overlapping intervals: (first, last, class).
+    const CLASSES: &[(u32, u32, varnumber_T)] = &[
+        (0x037e, 0x037e, 1), // Greek question mark
+        (0x0387, 0x0387, 1), // Greek ano teleia
+        (0x055a, 0x055f, 1), // Armenian punctuation
+        (0x0589, 0x0589, 1), // Armenian full stop
+        (0x05be, 0x05be, 1),
+        (0x05c0, 0x05c0, 1),
+        (0x05c3, 0x05c3, 1),
+        (0x05f3, 0x05f4, 1),
+        (0x060c, 0x060c, 1),
+        (0x061b, 0x061b, 1),
+        (0x061f, 0x061f, 1),
+        (0x066a, 0x066d, 1),
+        (0x06d4, 0x06d4, 1),
+        (0x0700, 0x070d, 1), // Syriac punctuation
+        (0x0964, 0x0965, 1),
+        (0x0970, 0x0970, 1),
+        (0x0df4, 0x0df4, 1),
+        (0x0e4f, 0x0e4f, 1),
+        (0x0e5a, 0x0e5b, 1),
+        (0x0f04, 0x0f12, 1),
+        (0x0f3a, 0x0f3d, 1),
+        (0x0f85, 0x0f85, 1),
+        (0x104a, 0x104f, 1), // Myanmar punctuation
+        (0x10fb, 0x10fb, 1), // Georgian punctuation
+        (0x1361, 0x1368, 1), // Ethiopic punctuation
+        (0x166d, 0x166e, 1), // Canadian Syl. punctuation
+        (0x1680, 0x1680, 0),
+        (0x169b, 0x169c, 1),
+        (0x16eb, 0x16ed, 1),
+        (0x1735, 0x1736, 1),
+        (0x17d4, 0x17dc, 1), // Khmer punctuation
+        (0x1800, 0x180a, 1), // Mongolian punctuation
+        (0x2000, 0x200b, 0), // spaces
+        (0x200c, 0x2027, 1), // punctuation and symbols
+        (0x2028, 0x2029, 0),
+        (0x202a, 0x202e, 1), // punctuation and symbols
+        (0x202f, 0x202f, 0),
+        (0x2030, 0x205e, 1), // punctuation and symbols
+        (0x205f, 0x205f, 0),
+        (0x2060, 0x206f, 1),      // punctuation and symbols
+        (0x2070, 0x207f, 0x2070), // superscript
+        (0x2080, 0x2094, 0x2080), // subscript
+        (0x20a0, 0x27ff, 1),      // all kinds of symbols
+        (0x2800, 0x28ff, 0x2800), // braille
+        (0x2900, 0x2998, 1),      // arrows, brackets, etc.
+        (0x29d8, 0x29db, 1),
+        (0x29fc, 0x29fd, 1),
+        (0x2e00, 0x2e7f, 1), // supplemental punctuation
+        (0x3000, 0x3000, 0), // ideographic space
+        (0x3001, 0x3020, 1), // ideographic punctuation
+        (0x3030, 0x3030, 1),
+        (0x303d, 0x303d, 1),
+        (0x3040, 0x309f, 0x3040), // Hiragana
+        (0x30a0, 0x30ff, 0x30a0), // Katakana
+        (0x3300, 0x9fff, 0x4e00), // CJK Ideographs
+        (0xac00, 0xd7a3, 0xac00), // Hangul Syllables
+        (0xf900, 0xfaff, 0x4e00), // CJK Ideographs
+        (0xfd3e, 0xfd3f, 1),
+        (0xfe30, 0xfe6b, 1),        // punctuation forms
+        (0xff00, 0xff0f, 1),        // half/fullwidth ASCII
+        (0xff1a, 0xff20, 1),        // half/fullwidth ASCII
+        (0xff3b, 0xff40, 1),        // half/fullwidth ASCII
+        (0xff5b, 0xff65, 1),        // half/fullwidth ASCII
+        (0x1d000, 0x1d24f, 1),      // Musical notation
+        (0x1d400, 0x1d7ff, 1),      // Mathematical Alphanumeric Symbols
+        (0x1f000, 0x1f2ff, 1),      // Game pieces; enclosed characters
+        (0x1f300, 0x1f9ff, 1),      // Many symbol blocks
+        (0x20000, 0x2a6df, 0x4e00), // CJK Ideographs
+        (0x2a700, 0x2b73f, 0x4e00), // CJK Ideographs
+        (0x2b740, 0x2b81f, 0x4e00), // CJK Ideographs
+        (0x2f800, 0x2fa1f, 0x4e00), // CJK Ideographs
+    ];
+
+    // binary search in table
+    let mut bot: i64 = 0;
+    let mut top: i64 = CLASSES.len() as i64 - 1;
+    while top >= bot {
+        let mid = ((bot + top) / 2) as usize;
+        if CLASSES[mid].1 < c {
+            bot = mid as i64 + 1;
+        } else if CLASSES[mid].0 > c {
+            top = mid as i64 - 1;
+        } else {
+            return CLASSES[mid].2;
+        }
+    }
+
+    // most other characters are "word" characters
+    2
 }
 
 /// UTF-16 code-unit length of a single character: 2 for an astral character
@@ -698,27 +848,49 @@ pub fn f_utf16idx(argvars: &[typval_T], rettv: &mut typval_T) {
     let countcc = argvars.len() >= 3
         && argvars[2].v_type != VAR_UNKNOWN
         && tv_get_number_chk(&argvars[2], None) != 0;
-    let charidx = argvars.len() >= 4
+    let usecharidx = argvars.len() >= 4
         && argvars[3].v_type != VAR_UNKNOWN
         && tv_get_number_chk(&argvars[3], None) != 0;
-    let target = idx as usize;
 
-    let mut byte_pos = 0usize;
-    let mut char_pos = 0usize;
-    let mut u16_pos: varnumber_T = 0;
-    for c in s.chars() {
-        let pos = if charidx { char_pos } else { byte_pos };
-        if pos >= target {
-            rettv.vval = v_number(u16_pos);
-            return;
+    // Split the string into index-units. With {countcc} false a composing mark
+    // folds into the preceding base character (contributing 0 UTF-16 units and
+    // no new index), so a unit is a base char plus its trailing composing marks;
+    // with {countcc} true every character is its own unit. For each unit record
+    // its start byte and the number of UTF-16 code units in all preceding units.
+    // The result is that "before" count for the unit whose span contains {idx}
+    // (byte-index mode, or the {idx}'th unit in {charidx} mode); when {idx} lands
+    // exactly at the end the total UTF-16 length is returned, and past the end -1.
+    let mut units: Vec<(usize, varnumber_T)> = Vec::new();
+    let mut u16_acc: varnumber_T = 0;
+    let mut prev = false;
+    for (b, c) in s.char_indices() {
+        let folds = !countcc && prev && utf_iscomposing(c);
+        prev = true;
+        if !folds {
+            units.push((b, u16_acc));
+            u16_acc += utf_char2utf16len(c);
         }
-        if countcc || !utf_iscomposing(c) {
-            u16_pos += utf_char2utf16len(c);
-            char_pos += 1;
-        }
-        byte_pos += c.len_utf8();
     }
-    // idx exactly at the end → the total length; past the end → -1.
-    let end = if charidx { char_pos } else { byte_pos };
-    rettv.vval = v_number(if target == end { u16_pos } else { -1 });
+    let total_u16 = u16_acc;
+
+    let result = if usecharidx {
+        let n = units.len() as varnumber_T;
+        match idx {
+            i if i == n => total_u16,
+            i if i > n => -1,
+            i => units[i as usize].1,
+        }
+    } else {
+        let strlen = s.len() as varnumber_T;
+        match idx {
+            i if i == strlen => total_u16,
+            i if i > strlen => -1,
+            i => units
+                .iter()
+                .take_while(|(sb, _)| (*sb as varnumber_T) <= i)
+                .last()
+                .map_or(0, |(_, before)| *before),
+        }
+    };
+    rettv.vval = v_number(result);
 }
