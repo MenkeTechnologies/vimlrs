@@ -1441,13 +1441,30 @@ impl Parser {
     /// a spaced `a . b` is left to `eval6` as concatenation.
     fn postfix(&mut self, mut base: Expr) -> Result<Expr, VimlError> {
         loop {
-            // `d.key` member read — but not on a numeric literal (`1.foo` is concat).
-            if self.at_member_dot() && !matches!(base, Expr::Number(_) | Expr::Float(_)) {
+            // `d.key` member read. Skipped for statically-known non-Dict bases —
+            // number/float (`1.foo`), string (`'('.name`) and list literals can
+            // never be a Dict at runtime, so their `.name` is unambiguously
+            // concat and is left to `eval6`. Leaving it there is also what makes
+            // the concat RHS bind trailing subscripts correctly (`'('.p[0]` →
+            // `'(' . p[0]`, not `('(' . p)[0]`): eval6 re-parses the RHS as a
+            // fresh postfix chain, matching vim's `handle_subscript`, which only
+            // consumes `.name` when `rettv->v_type == VAR_DICT`.
+            if self.at_member_dot()
+                && !matches!(
+                    base,
+                    Expr::Number(_) | Expr::Float(_) | Expr::Str(_) | Expr::List(_)
+                )
+            {
                 self.advance(); // consume the dot
                 if let Tok::Ident(key) = self.advance() {
-                    base = Expr::Index {
+                    // Syntactically identical to string concat (`a.b`): whether
+                    // this is a Dict subscript or `.`-concat is decided by the
+                    // runtime type of `base` (see the `Expr::Member` lowering in
+                    // `compile_viml.rs`). Carry the literal key; it doubles as the
+                    // bare variable name for the concat RHS (`a.b` → `a . b`).
+                    base = Expr::Member {
                         base: Box::new(base),
-                        index: Box::new(Expr::Str(key)),
+                        key,
                     };
                     continue;
                 }
@@ -1763,15 +1780,14 @@ mod tests {
 
     #[test]
     fn dict_member_dot_vs_concat() {
-        // `d.key` (no spaces) → a string subscript (member read).
+        // `d.key` (no spaces) → a runtime-dispatched Member (Dict subscript vs
+        // string concat, decided by the runtime type of the base).
         match parse_expr("d.key").unwrap() {
-            Expr::Index { index, .. } => {
-                assert!(matches!(*index, Expr::Str(ref s) if s == "key"))
-            }
-            e => panic!("expected member Index, got {e:?}"),
+            Expr::Member { key, .. } => assert_eq!(key, "key"),
+            e => panic!("expected Member, got {e:?}"),
         }
-        // Nested `d.a.b` → chained subscripts.
-        assert!(matches!(parse_expr("d.a.b").unwrap(), Expr::Index { .. }));
+        // Nested `d.a.b` → chained Members.
+        assert!(matches!(parse_expr("d.a.b").unwrap(), Expr::Member { .. }));
         // `a . b` (spaced) stays concatenation.
         assert!(matches!(
             parse_expr("a . b").unwrap(),

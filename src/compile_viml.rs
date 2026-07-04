@@ -1769,10 +1769,28 @@ impl Compiler {
                 self.emit(Op::CallBuiltin(h::VIML_SLICE, 3));
             }
             Expr::Member { base, key } => {
-                // `base.key` Dict member read — identical to `base['key']`.
-                self.expr(base)?;
-                self.load_str(key);
-                self.emit(Op::CallBuiltin(h::VIML_INDEX, 2));
+                // A no-space `base.key` is syntactically ambiguous: it is a Dict
+                // subscript `base['key']` when `base` is a Dict at runtime, and
+                // string concatenation `base . key` (a bare variable read) in
+                // every other case. Vim decides by runtime type, so lower to a
+                // type test that dispatches at execution time. `base` is
+                // evaluated exactly ONCE (Dup the value), so a side-effecting base
+                // fires once and chains like `a.b.c` do not blow up.
+                self.expr(base)?; // [base]
+                self.emit(Op::Dup); // [base, base]
+                self.emit(Op::CallBuiltin(h::VIML_IS_DICT, 1)); // [base, bool]
+                let jf = self.emit(Op::JumpIfFalse(0)); // pops bool → [base]
+                                                        // Dict branch: subscript with the literal key.
+                self.load_str(key); // [base, "key"]
+                self.emit(Op::CallBuiltin(h::VIML_INDEX, 2)); // [value]
+                let jend = self.emit(Op::Jump(0));
+                // Concat branch: `base . <var named key>` — matches spaced `a . b`.
+                let lconcat = self.b.current_pos();
+                self.b.patch_jump(jf, lconcat);
+                self.get_var(key); // [base, varval]
+                self.emit(Op::CallBuiltin(h::VIML_CONCAT, 2)); // [result]
+                let lend = self.b.current_pos();
+                self.b.patch_jump(jend, lend);
             }
             Expr::Call { name, args } => {
                 // JIT fast path: the bitwise builtins lower to fusevm-NATIVE ops

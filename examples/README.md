@@ -41,6 +41,7 @@ cargo build
 | [`sort_variants.vim`](sort_variants.vim) | every `sort()` mode (default/`n`/`N`/`i`/`f`/custom comparator/legacy `1`), `reverse`, and the `sort`+`uniq` dedupe idiom |
 | [`printf_fmt.vim`](printf_fmt.vim) | `printf()` specifiers: `%d`/`%x`/`%o`/`%b` radices, `0`/`-`/`+`/`#` flags, width/precision, `%e`/`%f`/`%g`, `%c`, `*` width, `N$` positional |
 | [`str_case.vim`](str_case.vim) | case folding (`toupper`/`tolower`), `trim` (mask+direction), and match position `match`/`matchend`/`matchstr`/`matchlist` |
+| [`dot_operator.vim`](dot_operator.vim) | the `.` operator's runtime dispatch: no-space `base.name` is a Dict subscript when `base` is a Dict at runtime, else string concat (`a.b` over string vars → `pq`), chains, lambda-body concat, base-evaluated-once |
 
 Run any script with `VIMLRS_JIT_STATS=1` to see JIT activity, or `VIMLRS_NO_JIT=1`
 to force the interpreter baseline.
@@ -81,9 +82,11 @@ These idioms — common in modern Vimscript — are now all supported:
   enclosing-scope variables** (by value at creation, including nested closures),
   and a lambda/Funcref stored in a variable is callable both directly —
   `F(args)` — and via `call(F, [args])`.
-- **`d.key` member *read*** — now supported (a no-space `d.key` is a dict member
-  read; a spaced `a . b` stays concatenation). Bracket access `d['key']` also
-  works and is needed for non-literal keys.
+- **`d.key` member *read*** — now supported, and disambiguated at **runtime** by
+  the type of the base: a no-space `base.name` is a Dict subscript when `base` is
+  a Dict at runtime, and string concatenation otherwise (so `a.b` over two string
+  vars yields `'pq'`, matching Vim). A spaced `a . b` is always concatenation.
+  Bracket access `d['key']` also works and is needed for non-literal keys.
 - **`\` line continuation** — now supported: a line whose first non-blank char
   is `\` joins onto the previous one, so multi-line list/dict literals work (see
   `json.vim`).

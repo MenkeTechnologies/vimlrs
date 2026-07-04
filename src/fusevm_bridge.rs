@@ -197,6 +197,9 @@ pub const VIML_SLICE: u16 = 3053;
 pub const VIML_SETINDEX: u16 = 3054;
 /// `let base[idx1:idx2] = list` — pop idx2, idx1, base, value; range-assign.
 pub const VIML_SETRANGE: u16 = 3055;
+/// Runtime type test for the ambiguous no-space `base.key`: pop value → `Bool`
+/// (`true` iff it is a Dict). Drives the subscript-vs-concat branch selection.
+pub const VIML_IS_DICT: u16 = 3056;
 /// `:echo`
 pub const VIML_ECHO: u16 = 3060;
 /// `:echon`
@@ -1616,6 +1619,14 @@ fn b_index(vm: &mut VM, _: u8) -> Value {
     let index = pop_tv(vm);
     let base = pop_tv(vm);
     tv_to_value(index_value(&base, &index))
+}
+
+/// Runtime type test backing the no-space `base.key` dispatch: `true` iff the
+/// popped value is a Dict (so `base.key` is a subscript; otherwise it is `.`
+/// string concatenation). Faithful to eval.c, where `.` after a Dict subscripts
+/// and after any other type concatenates.
+fn b_is_dict(vm: &mut VM, _: u8) -> Value {
+    Value::Bool(pop_tv(vm).v_type == VAR_DICT)
 }
 
 fn b_slice(vm: &mut VM, _: u8) -> Value {
@@ -3341,6 +3352,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_MAKE_LIST, b_make_list);
     vm.register_builtin(VIML_MAKE_DICT, b_make_dict);
     vm.register_builtin(VIML_INDEX, b_index);
+    vm.register_builtin(VIML_IS_DICT, b_is_dict);
     vm.register_builtin(VIML_SLICE, b_slice);
     vm.register_builtin(VIML_SETINDEX, b_setindex);
     vm.register_builtin(VIML_SETRANGE, b_setrange);
