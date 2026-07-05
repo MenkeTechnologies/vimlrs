@@ -10,7 +10,7 @@
 [![CI](https://github.com/MenkeTechnologies/vimlrs/actions/workflows/ci.yml/badge.svg)](https://github.com/MenkeTechnologies/vimlrs/actions/workflows/ci.yml)
 ![Rust](https://img.shields.io/badge/Rust-2021-05d9e8?style=flat-square)
 ![license](https://img.shields.io/badge/license-MIT-ff2a6d?style=flat-square)
-![status](https://img.shields.io/badge/status-early%20%C2%B7%20in%20development-9b5de5?style=flat-square)
+![status](https://img.shields.io/badge/status-active%20%C2%B7%20in%20development-9b5de5?style=flat-square)
 
 **VimL (Vimscript) in Rust** — the first compiled **standalone** VimL interpreter,
 run outside Vim. A faithful port of Neovim's C eval engine, hosted on the
@@ -34,7 +34,7 @@ VimL source  →  lexer  →  parser (AST)  →  lower to fusevm bytecode  →  
 
 ## Status
 
-Early / in development.
+In active development.
 
 | Component | State |
 |---|---|
