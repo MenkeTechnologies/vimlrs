@@ -2,6 +2,8 @@
 name = "vimlrs"
 description = "Faithful Rust port of the Vimscript (VimL) interpreter, from the Neovim C eval engine"
 version = "0.1.2"
+keywords = ["vim", "vimscript", "viml", "interpreter", "fusevm"]
+categories = ["command-line-utilities", "compilers"]
 authors = ["MenkeTechnologies"]
 edition = "2021"
 rust-version = "1.80"
