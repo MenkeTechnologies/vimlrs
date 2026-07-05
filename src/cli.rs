@@ -49,7 +49,7 @@ fn banner() -> String {
 fn footer() -> String {
     let ver = env!("CARGO_PKG_VERSION");
     format!(
-        "\x1b[36m  ── SYSTEM ─────────────────────────────────────────\x1b[0m\n  \x1b[35mv{ver} \x1b[0m// \x1b[33m(c) Jacob Menke and contributors\x1b[0m\n  \x1b[35mThe script is compiled. The runtime is vast.\x1b[0m\n  \x1b[33m>>> JACK IN. SOURCE THE SCRIPT. RUN VIML EVERYWHERE. <<<\x1b[0m\n \x1b[36m░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░\x1b[0m"
+        "\x1b[36m  ── SYSTEM ─────────────────────────────────────────\x1b[0m\n  \x1b[35mv{ver} \x1b[0m// \x1b[33m(c) MenkeTechnologies\x1b[0m\n  \x1b[35mThe script is compiled. The runtime is vast.\x1b[0m\n  \x1b[33m>>> JACK IN. SOURCE THE SCRIPT. RUN VIML EVERYWHERE. <<<\x1b[0m\n \x1b[36m░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░\x1b[0m"
     )
 }
 
