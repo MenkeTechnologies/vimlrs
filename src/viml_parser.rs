@@ -16,6 +16,47 @@
 
 use crate::viml_ast::{ArithOp, Expr, ForVars, LetTarget, Stmt, UnaryOp, UnletArg};
 use crate::viml_lexer::{lex, CaseFlag, CmpOp, Tok, Token, VimlError};
+use std::cell::Cell;
+
+thread_local! {
+    /// Whether the code currently being parsed is vim9 (`:vim9script` script or a
+    /// `def … enddef` body). In vim9, dict literals `{key: val}` use BARE literal
+    /// keys (`{a: 1}` → key `"a"`), not the legacy expression-keyed form where the
+    /// key is evaluated. Set for the parse duration by [`Vim9Guard`].
+    static VIM9: Cell<bool> = const { Cell::new(false) };
+}
+
+/// True when the parser is in a vim9 region (see [`VIM9`]).
+fn vim9_active() -> bool {
+    VIM9.with(|f| f.get())
+}
+
+/// RAII guard that switches [`VIM9`] for the duration of a parse (script body,
+/// `def` body, or legacy `function` body) and restores the previous value on
+/// drop, so nested regions (a legacy `:function` inside a `:vim9script`, or a
+/// `:def` inside a legacy script) each parse in their own mode.
+struct Vim9Guard(bool);
+
+impl Vim9Guard {
+    fn enter(on: bool) -> Self {
+        Vim9Guard(VIM9.with(|f| f.replace(on)))
+    }
+}
+
+impl Drop for Vim9Guard {
+    fn drop(&mut self) {
+        VIM9.with(|f| f.set(self.0));
+    }
+}
+
+/// True when a script is a `:vim9script` — its first non-blank logical line's
+/// command word is `vim9script`. Mirrors the detection in [`Lines::new`].
+fn script_is_vim9(src: &str) -> bool {
+    src.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .is_some_and(|l| l.split(char::is_whitespace).next() == Some("vim9script"))
+}
 
 /// The small set of names Phase 3 recognizes as builtin function calls. The
 /// full `funcs.c` table is ported in Phase 5.
@@ -425,6 +466,7 @@ pub fn parse_program(src: &str) -> Result<Vec<Stmt>, VimlError> {
 /// Like [`parse_program`] but pairs each TOP-LEVEL statement with its 1-based
 /// source line (for the debugger's statement markers).
 pub fn parse_program_lines(src: &str) -> Result<Vec<(u32, Stmt)>, VimlError> {
+    let _vim9 = Vim9Guard::enter(script_is_vim9(src));
     let mut cur = Lines::new(src);
     let mut out = Vec::new();
     loop {
@@ -456,6 +498,7 @@ pub type TolerantParse = (Vec<(u32, Stmt)>, Vec<(u32, String)>);
 /// for each skipped one. Mirrors Vim reporting an error while sourcing a script
 /// and continuing; used for best-effort config sourcing (e.g. a real `.vimrc`).
 pub fn parse_program_lines_tolerant(src: &str) -> TolerantParse {
+    let _vim9 = Vim9Guard::enter(script_is_vim9(src));
     let mut cur = Lines::new(src);
     let mut out = Vec::new();
     let mut errs = Vec::new();
@@ -1249,6 +1292,9 @@ fn strip_vim9_type(rest: &str) -> String {
 }
 
 fn parse_function(cur: &mut Lines, header: &str) -> Result<Stmt, VimlError> {
+    // A legacy `:function … endfunction` body is legacy even inside a
+    // `:vim9script`: its dict literals use expression keys, not vim9 bare keys.
+    let _vim9 = Vim9Guard::enter(false);
     // `[!] {name}({a}, {b}, …) [flags]`.
     let header = header.trim();
     let (bang, header) = match header.strip_prefix('!') {
@@ -1344,6 +1390,9 @@ fn parse_function(cur: &mut Lines, header: &str) -> Result<Stmt, VimlError> {
 /// uses vim9 automatic line continuation, joined in [`Lines::new`]. `...` varargs
 /// collection and full type checking are deferred.
 fn parse_def(cur: &mut Lines, header: &str) -> Result<Stmt, VimlError> {
+    // A `def … enddef` body is vim9 even inside a legacy script: its parameter
+    // defaults and body statements parse with vim9 bare-key dict semantics.
+    let _vim9 = Vim9Guard::enter(true);
     let header = header.trim();
     // A leading `!` (`def!`) is accepted and discarded — vim9 `def` always
     // (re)defines, so there is no bang distinction as for legacy `:function`.
@@ -1817,7 +1866,7 @@ fn parse_expr_list(src: &str) -> Result<Vec<Expr>, VimlError> {
         return Ok(Vec::new());
     }
     let toks = lex(src)?;
-    let mut p = Parser::new(toks);
+    let mut p = Parser::new(toks, src);
     let mut out = Vec::new();
     loop {
         out.push(p.eval1()?);
@@ -1831,7 +1880,7 @@ fn parse_expr_list(src: &str) -> Result<Vec<Expr>, VimlError> {
 /// Parse a single expression string into an [`Expr`].
 pub fn parse_expr(src: &str) -> Result<Expr, VimlError> {
     let toks = lex(src)?;
-    let mut p = Parser::new(toks);
+    let mut p = Parser::new(toks, src);
     let e = p.eval1()?;
     if !matches!(p.peek(), Tok::Eof) {
         return Err(VimlError::msg(
@@ -1844,11 +1893,19 @@ pub fn parse_expr(src: &str) -> Result<Expr, VimlError> {
 struct Parser {
     toks: Vec<Token>,
     i: usize,
+    /// The source string the tokens were lexed from. Token spans are byte
+    /// offsets into this; used to extract the exact text of a vim9 bare dict key
+    /// (`{a-b: 1}` → `"a-b"`), which does not survive tokenization intact.
+    src: String,
 }
 
 impl Parser {
-    fn new(toks: Vec<Token>) -> Self {
-        Parser { toks, i: 0 }
+    fn new(toks: Vec<Token>, src: &str) -> Self {
+        Parser {
+            toks,
+            i: 0,
+            src: src.to_string(),
+        }
     }
 
     fn peek(&self) -> &Tok {
@@ -2321,9 +2378,19 @@ impl Parser {
             self.advance();
             return Ok(Expr::Dict(pairs));
         }
+        // In a vim9 region `{key: val}` uses BARE literal keys — the key text is
+        // taken verbatim, not evaluated as a variable (`:help vim9-scriptlocal`,
+        // vim9.txt "the {} form uses literal keys"). Legacy scripts keep the
+        // expression-keyed form.
+        let vim9 = vim9_active();
         loop {
-            let key = self.eval1()?;
-            self.eat(&Tok::Colon)?;
+            let key = if vim9 {
+                self.vim9_dict_key()?
+            } else {
+                let k = self.eval1()?;
+                self.eat(&Tok::Colon)?;
+                k
+            };
             let val = self.eval1()?;
             pairs.push((key, val));
             match self.advance() {
@@ -2342,6 +2409,64 @@ impl Parser {
             }
         }
         Ok(Expr::Dict(pairs))
+    }
+
+    /// Parse a vim9 dict key and its trailing `:`, leaving the cursor at the
+    /// value. Three key forms, matching Vim 9.2:
+    ///  * `{'k': v}` / `{"k": v}` — a quoted string key.
+    ///  * `{[expr]: v}` — a bracketed computed key; `expr` is evaluated and its
+    ///    string form is the key.
+    ///  * `{a: 1}`, `{a-b: 1}`, `{007: 1}` — a BARE key: a run of
+    ///    `[A-Za-z0-9_-]` used verbatim as a string (leading zeros kept). The
+    ///    tokens (`Ident`/`Number`/`Minus`, or a scope-letter `Ident` that
+    ///    absorbed the `:`) do not preserve the key intact, so it is read from
+    ///    the source between the key start and the `:`.
+    fn vim9_dict_key(&mut self) -> Result<Expr, VimlError> {
+        if let Tok::Str(s) = self.peek().clone() {
+            self.advance();
+            self.eat(&Tok::Colon)?;
+            return Ok(Expr::Str(s));
+        }
+        if matches!(self.peek(), Tok::LBracket) {
+            self.advance();
+            let key = self.eval1()?;
+            self.eat(&Tok::RBracket)?;
+            self.eat(&Tok::Colon)?;
+            return Ok(key);
+        }
+        let start = self.toks[self.i].span;
+        let bytes = self.src.as_bytes();
+        let mut p = start;
+        while p < bytes.len()
+            && (bytes[p].is_ascii_alphanumeric() || bytes[p] == b'_' || bytes[p] == b'-')
+        {
+            p += 1;
+        }
+        if p == start {
+            return Err(VimlError::msg(format!(
+                "E15: expected literal Dict key, found {:?}",
+                self.peek()
+            )));
+        }
+        let key = self.src[start..p].to_string();
+        // The `:` separator follows the key (optional intervening whitespace is
+        // tolerated as a benign superset; strict Vim rejects it with E1068).
+        let mut colon = p;
+        while colon < bytes.len() && (bytes[colon] == b' ' || bytes[colon] == b'\t') {
+            colon += 1;
+        }
+        if colon >= bytes.len() || bytes[colon] != b':' {
+            return Err(VimlError::msg(
+                "E720: Missing colon in Dictionary".to_string(),
+            ));
+        }
+        // Advance past every token up to and including the `:` at offset `colon`
+        // (a standalone `Colon`, or one absorbed into a scope-letter `Ident`),
+        // leaving the cursor at the value.
+        while self.toks[self.i].span <= colon && !matches!(self.peek(), Tok::Eof) {
+            self.advance();
+        }
+        Ok(Expr::Str(key))
     }
 
     fn arg_list(&mut self, close: &Tok) -> Result<Vec<Expr>, VimlError> {
