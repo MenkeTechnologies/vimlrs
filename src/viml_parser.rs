@@ -45,6 +45,16 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
     if line.is_empty() {
         return Ok(Stmt::Expr(Expr::Number(0)));
     }
+    // `:vim9script [noclear]` — switches the script to vim9 mode (a no-op leaf;
+    // the mode's parse effects are applied in `Lines::new`). Matched here because
+    // its command word ends at the `9`, which `cmd_word` treats as a boundary.
+    if line
+        .split(|c: char| c.is_whitespace())
+        .next()
+        .is_some_and(|w| w == "vim9script")
+    {
+        return Ok(Stmt::Expr(Expr::Number(0)));
+    }
     let cmd_end = line
         .find(|c: char| !c.is_ascii_alphabetic())
         .unwrap_or(line.len());
@@ -86,6 +96,13 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
                 .map(Stmt::Unlet)
         }
         "let" => parse_let(rest),
+        // vim9 `:var {name}[: type] = {expr}` / `:final …` declare-and-assign like
+        // `:let`. The `: type` annotation is parsed and discarded (the vim9 type
+        // system — checking/coercion, immutability of `:final`/`:const`, and
+        // default-init of a type-only `var x: number` — is deferred). RUST-PORT
+        // NOTE: real Vim rejects `:var`/`:final` in a legacy script (E1124); this
+        // leaf accepts the vim9 form everywhere, a benign superset.
+        "var" | "final" => parse_let(&strip_vim9_type(rest)),
         // A `:function` that reaches here (not caught as a block opener in
         // `parse_one` — e.g. behind a modifier, `silent function`) with no
         // parameter-list `(` is the listing/show command, not a definition:
@@ -99,7 +116,7 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
         // `:const {name} = {expr}` assigns like `:let`. RUST-PORT NOTE: Vim also
         // locks the variable (reassigning is E741); that immutability is not yet
         // enforced here — `:const` parses and assigns as `:let`.
-        "const" | "cons" => parse_let(rest),
+        "const" | "cons" => parse_let(&strip_vim9_type(rest)),
         "call" => Ok(Stmt::Call(parse_expr(rest)?)),
         "eval" => Ok(Stmt::Expr(parse_expr(rest)?)),
         "break" => Ok(Stmt::Break),
@@ -358,6 +375,7 @@ fn is_block_terminator(cmd: &str) -> bool {
             | "endwhile"
             | "endfor"
             | "endfunction"
+            | "enddef"
             | "catch"
             | "finally"
             | "endtry"
@@ -545,16 +563,79 @@ impl Lines {
             collapsed.push((lineno, raw[k].to_string()));
             k += 1;
         }
-        // Pass 1: continuation join.
+        // Pass 1: continuation join. A leading `\` joins verbatim (legacy
+        // `line-continuation`) everywhere. In a vim9 region — a script whose first
+        // command is `:vim9script`, or the body of any `def … enddef` (vim9
+        // functions are vim9 even inside a legacy script) — vim9 AUTOMATIC line
+        // continuation also applies (`:help vim9-line-continuation`): an
+        // expression joins the next physical line when it has unclosed
+        // `[]`/`{}`/`()`, ends with a trailing binary operator, or the next line
+        // begins with a binary operator / method `->` / member `.` / closing
+        // bracket / command-`|`. vim9 `#` comments are dropped in the region.
+        let script_vim9 = collapsed
+            .iter()
+            .map(|(_, l)| l.trim())
+            .find(|t| !t.is_empty() && !t.starts_with('"'))
+            .is_some_and(|t| t.split(char::is_whitespace).next() == Some("vim9script"));
         let mut joined: Vec<(u32, String)> = Vec::new();
+        let mut in_def: u32 = 0; // depth of open `def … enddef`
+        let mut open_depth: i32 = 0; // unclosed brackets of the current logical line
         for (lineno, raw) in collapsed {
-            if let Some(rest) = raw.trim_start().strip_prefix('\\') {
+            let trimmed = raw.trim_start();
+            // Legacy `\` continuation: always joins the text after the `\`.
+            if let Some(rest) = trimmed.strip_prefix('\\') {
                 if let Some(last) = joined.last_mut() {
                     last.1.push_str(rest);
+                    if script_vim9 || in_def > 0 {
+                        open_depth = vim9_bracket_depth(&last.1);
+                    }
                     continue;
                 }
             }
-            joined.push((lineno, raw.to_string()));
+            let fw = cmd_word(&raw).0;
+            let is_enddef = fw == "enddef";
+            let active_vim9 = script_vim9 || in_def > 0;
+            // vim9 `#` comment: a line that is only a comment is dropped — skipped
+            // silently while accumulating a bracketed expression, else emitted as
+            // an empty line for `skip_blanks` to pass over.
+            if active_vim9 && !trimmed.is_empty() && strip_vim9_comment(&raw).trim().is_empty() {
+                if open_depth <= 0 {
+                    joined.push((lineno, String::new()));
+                }
+                continue;
+            }
+            if active_vim9 && !is_enddef {
+                if let Some(last) = joined.last_mut() {
+                    let join = open_depth > 0
+                        || vim9_trailing_continues(&last.1)
+                        || vim9_leading_continues(trimmed)
+                        || (trimmed.starts_with(':') && vim9_open_ternary(&last.1));
+                    if join {
+                        last.1.push(' ');
+                        last.1.push_str(strip_vim9_comment(&raw).trim_start());
+                        open_depth = vim9_bracket_depth(&last.1);
+                        continue;
+                    }
+                }
+            }
+            // Start a new logical line. A vim9-region line (or a `def` opener,
+            // whose body region begins here) has its trailing `#` comment stripped.
+            let text = if active_vim9 || fw == "def" {
+                strip_vim9_comment(&raw).to_string()
+            } else {
+                raw.to_string()
+            };
+            joined.push((lineno, text));
+            if fw == "def" {
+                in_def += 1;
+            } else if is_enddef && in_def > 0 {
+                in_def -= 1;
+            }
+            open_depth = if script_vim9 || in_def > 0 {
+                vim9_bracket_depth(&joined.last().expect("just pushed").1)
+            } else {
+                0
+            };
         }
         // Pass 2: split `|`-separated commands into one logical line each, so a
         // block opener anywhere on the line (`let x=1 | if x | … | endif`) is
@@ -654,6 +735,22 @@ fn parse_one(cur: &mut Lines) -> Result<Vec<Stmt>, VimlError> {
                 .trim_start();
             if !hdr.starts_with('/') && hdr.contains('(') {
                 Ok(vec![parse_function(cur, rest)?])
+            } else {
+                Ok(vec![Stmt::Expr(Expr::Number(0))])
+            }
+        }
+        "def" => {
+            cur.bump();
+            // Only `[!] {name}({params})` is a vim9 definition; a bare `def`
+            // (list functions) or `def {name}` (show one) has no `(` and is a
+            // listing/query — a no-op editor-less, matching `:function`.
+            let hdr = rest
+                .trim_start()
+                .strip_prefix('!')
+                .unwrap_or(rest)
+                .trim_start();
+            if hdr.contains('(') {
+                Ok(vec![parse_def(cur, rest)?])
             } else {
                 Ok(vec![Stmt::Expr(Expr::Number(0))])
             }
@@ -877,6 +974,280 @@ fn parse_for(cur: &mut Lines, header: &str) -> Result<Stmt, VimlError> {
     Ok(Stmt::For { vars, iter, body })
 }
 
+/// Return the code portion of a vim9 line, dropping a trailing `#` comment. In
+/// vim9script `#` (at the start of a token — line start or preceded by
+/// whitespace) is the comment leader and `"` delimits a string (unlike legacy,
+/// where `"` starts the comment). `#` mid-token (`autoload#name`) is not a
+/// comment. Skips `'…'` (`''` escapes) and `"…"` (`\` escapes) string bodies.
+fn strip_vim9_comment(s: &str) -> &str {
+    let b = s.as_bytes();
+    let mut i = 0;
+    let mut sq = false;
+    let mut dq = false;
+    let mut prev_ws = true; // start of line counts as preceded-by-whitespace
+    while i < b.len() {
+        let c = b[i];
+        if sq {
+            if c == b'\'' {
+                if b.get(i + 1) == Some(&b'\'') {
+                    i += 2;
+                    continue;
+                }
+                sq = false;
+            }
+            prev_ws = false;
+            i += 1;
+            continue;
+        }
+        if dq {
+            if c == b'\\' {
+                i += 2;
+                prev_ws = false;
+                continue;
+            }
+            if c == b'"' {
+                dq = false;
+            }
+            prev_ws = false;
+            i += 1;
+            continue;
+        }
+        match c {
+            b'\'' => {
+                sq = true;
+                prev_ws = false;
+            }
+            b'"' => {
+                dq = true;
+                prev_ws = false;
+            }
+            b'#' if prev_ws => return &s[..i],
+            _ => prev_ws = c == b' ' || c == b'\t',
+        }
+        i += 1;
+    }
+    s
+}
+
+/// Net unclosed-bracket depth of a vim9 code fragment (`([{` add, `)]}`
+/// subtract), skipping string and `#`-comment bytes. A positive result means the
+/// expression is unterminated and continues on the next physical line — vim9's
+/// automatic line continuation inside `[]`/`{}`/`()` (`:help
+/// vim9-line-continuation`), the fix for the earlier `[`-continuation recursion.
+fn vim9_bracket_depth(s: &str) -> i32 {
+    let code = strip_vim9_comment(s);
+    let b = code.as_bytes();
+    let mut i = 0;
+    let mut depth = 0i32;
+    let mut sq = false;
+    let mut dq = false;
+    while i < b.len() {
+        let c = b[i];
+        if sq {
+            if c == b'\'' {
+                if b.get(i + 1) == Some(&b'\'') {
+                    i += 2;
+                    continue;
+                }
+                sq = false;
+            }
+            i += 1;
+            continue;
+        }
+        if dq {
+            if c == b'\\' {
+                i += 2;
+                continue;
+            }
+            if c == b'"' {
+                dq = false;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            b'\'' => sq = true,
+            b'"' => dq = true,
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            _ => {}
+        }
+        i += 1;
+    }
+    depth
+}
+
+/// Whether a vim9 logical line ends mid-expression with a trailing binary
+/// operator (or an assignment `=` whose RHS is on the next line), so the next
+/// physical line continues it. Trailing single `.` is excluded (`.member`
+/// continuation is leading, and `edit .` legitimately ends in `.`).
+fn vim9_trailing_continues(s: &str) -> bool {
+    let code = strip_vim9_comment(s).trim_end();
+    for op in ["..", "&&", "||", "==", "!=", ">=", "<=", "=~", "!~", "->"] {
+        if code.ends_with(op) {
+            return true;
+        }
+    }
+    // `<`/`>` are deliberately excluded: they clash with vim9 generic type
+    // syntax (`list<number>`, `dict<string>`) that ends a `def`/`var` line.
+    matches!(
+        code.as_bytes().last(),
+        Some(b'+' | b'-' | b'*' | b'%' | b'?' | b'&' | b'|' | b'=')
+    )
+}
+
+/// Whether a vim9 physical line begins with a continuation leader — a binary
+/// operator, method `->`, member `.`, closing bracket, or command-list `|` — so
+/// it continues the previous line (`:help vim9-line-continuation`). A leading `:`
+/// is NOT handled here (it introduces a range); the ternary `:` case is gated on
+/// [`vim9_open_ternary`] by the caller.
+fn vim9_leading_continues(trimmed: &str) -> bool {
+    for op in ["->", "..", "&&", "||", "==", "!=", ">=", "<=", "=~", "!~"] {
+        if trimmed.starts_with(op) {
+            return true;
+        }
+    }
+    // `<`/`>` are excluded (they clash with vim9 `<type>` syntax); `>=`/`<=` are
+    // still matched by the multi-char loop above.
+    matches!(
+        trimmed.as_bytes().first(),
+        Some(b'+' | b'-' | b'*' | b'/' | b'%' | b'.' | b'?' | b')' | b']' | b'}' | b'|' | b'&')
+    )
+}
+
+/// Whether `s` has an unmatched top-level `?` (an open ternary), so a following
+/// line that begins with `:` is the ternary's else-branch continuation rather
+/// than a range. Scope colons (`g:`/`a:`/…) can undercount this; that rare miss
+/// is accepted for the bounded slice.
+fn vim9_open_ternary(s: &str) -> bool {
+    let code = strip_vim9_comment(s);
+    let b = code.as_bytes();
+    let mut i = 0;
+    let mut sq = false;
+    let mut dq = false;
+    let mut depth = 0i32;
+    let mut q = 0i32;
+    while i < b.len() {
+        let c = b[i];
+        if sq {
+            if c == b'\'' {
+                if b.get(i + 1) == Some(&b'\'') {
+                    i += 2;
+                    continue;
+                }
+                sq = false;
+            }
+            i += 1;
+            continue;
+        }
+        if dq {
+            if c == b'\\' {
+                i += 2;
+                continue;
+            }
+            if c == b'"' {
+                dq = false;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            b'\'' => sq = true,
+            b'"' => dq = true,
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b'?' if depth == 0 => q += 1,
+            b':' if depth == 0 => q -= 1,
+            _ => {}
+        }
+        i += 1;
+    }
+    q > 0
+}
+
+/// Byte offset of the top-level assignment `=` in `s` (not part of `==`/`!=`/
+/// `<=`/`>=`/`=~`), skipping strings and bracketed groups. Used to split a vim9
+/// `def` parameter or `var` declaration into its LHS and initializer.
+fn find_top_eq(s: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    let mut depth = 0i32;
+    let mut quote: Option<u8> = None;
+    for (i, &c) in b.iter().enumerate() {
+        match quote {
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                }
+            }
+            None => match c {
+                b'\'' | b'"' => quote = Some(c),
+                b'[' | b'(' | b'{' => depth += 1,
+                b']' | b')' | b'}' => depth -= 1,
+                b'=' if depth == 0
+                    && !matches!(b.get(i.wrapping_sub(1)), Some(b'!' | b'<' | b'>' | b'='))
+                    && !matches!(b.get(i + 1), Some(b'=' | b'~')) =>
+                {
+                    return Some(i);
+                }
+                _ => {}
+            },
+        }
+    }
+    None
+}
+
+/// Byte offset of the first top-level `:` in `s` (a vim9 `name: type`
+/// annotation separator), skipping strings and bracketed groups.
+fn find_top_colon(s: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    let mut depth = 0i32;
+    let mut quote: Option<u8> = None;
+    for (i, &c) in b.iter().enumerate() {
+        match quote {
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                }
+            }
+            None => match c {
+                b'\'' | b'"' => quote = Some(c),
+                b'[' | b'(' | b'{' => depth += 1,
+                b']' | b')' | b'}' => depth -= 1,
+                b':' if depth == 0 => return Some(i),
+                _ => {}
+            },
+        }
+    }
+    None
+}
+
+/// Whether `s` is a plain identifier (`[A-Za-z_][A-Za-z0-9_]*`) — a vim9 `def`
+/// parameter that gets a bare-name `let` prologue (excludes `...` varargs).
+fn is_plain_ident(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+        && !s.as_bytes()[0].is_ascii_digit()
+}
+
+/// Strip a vim9 `: type` annotation from a `var`/`final`/`const` declaration's
+/// LHS, leaving `NAME = expr` for [`parse_let`]. `var x: number = 5` → `x = 5`.
+/// The vim9 type system (checking/coercion, default init for a type-only
+/// `var x: number`) is deferred; the annotation is parsed and discarded.
+fn strip_vim9_type(rest: &str) -> String {
+    let Some(eq) = find_top_eq(rest) else {
+        return rest.to_string();
+    };
+    let (decl, tail) = (rest[..eq].trim_end(), &rest[eq..]);
+    // A list-unpack LHS (`[a, b]`) has no scalar `: type`; leave it untouched.
+    if decl.starts_with('[') {
+        return rest.to_string();
+    }
+    match find_top_colon(decl) {
+        Some(p) => format!("{} {}", decl[..p].trim_end(), tail),
+        None => rest.to_string(),
+    }
+}
+
 fn parse_function(cur: &mut Lines, header: &str) -> Result<Stmt, VimlError> {
     // `[!] {name}({a}, {b}, …) [flags]`.
     let header = header.trim();
@@ -955,6 +1326,112 @@ fn parse_function(cur: &mut Lines, header: &str) -> Result<Stmt, VimlError> {
         defaults,
         body,
         bang,
+    })
+}
+
+/// Parse a vim9 `def[!] {name}({params}): {rettype} … enddef` definition.
+///
+/// Unlike legacy `:function`, vim9 parameters are BARE names: inside the body `x`
+/// refers to the parameter `x` directly (no `a:` prefix). This is realized by
+/// synthesizing a `let {p} = a:{p}` prologue for each plain-identifier
+/// parameter — the identical mechanism the `{args -> body}` lambda compiler uses
+/// (compile_viml.rs) — so params still bind through the existing `a:` call
+/// machinery yet resolve as bare locals when the body runs.
+///
+/// Parameter `: type` annotations and the `: rettype` return type are PARSED and
+/// discarded (the vim9 type system is deferred). Optional `param = default`
+/// values are honored via the shared [`Stmt::Function`] `defaults` path. The body
+/// uses vim9 automatic line continuation, joined in [`Lines::new`]. `...` varargs
+/// collection and full type checking are deferred.
+fn parse_def(cur: &mut Lines, header: &str) -> Result<Stmt, VimlError> {
+    let header = header.trim();
+    // A leading `!` (`def!`) is accepted and discarded — vim9 `def` always
+    // (re)defines, so there is no bang distinction as for legacy `:function`.
+    let header = header.strip_prefix('!').map_or(header, str::trim_start);
+    let lparen = header
+        .find('(')
+        .ok_or_else(|| VimlError::msg("E1055: Missing '(' in :def"))?;
+    let name = header[..lparen].trim().to_string();
+    // Match the parameter-list `)` (tracking nesting, skipping quoted strings) —
+    // a default value may contain its own parens/brackets.
+    let rparen = {
+        let mut depth = 0i32;
+        let mut quote: Option<u8> = None;
+        let mut found = None;
+        for (i, &b) in header.as_bytes().iter().enumerate().skip(lparen) {
+            match quote {
+                Some(q) => {
+                    if b == q {
+                        quote = None;
+                    }
+                }
+                None => match b {
+                    b'\'' | b'"' => quote = Some(b),
+                    b'(' | b'[' | b'{' => depth += 1,
+                    b')' | b']' | b'}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            found = Some(i);
+                            break;
+                        }
+                    }
+                    _ => {}
+                },
+            }
+        }
+        found.ok_or_else(|| VimlError::msg("E1055: Missing ')' in :def"))?
+    };
+    // Text after `)` is `: rettype` (or nothing) — parsed and ignored.
+    let mut args: Vec<String> = Vec::new();
+    let mut defaults: Vec<(usize, Expr)> = Vec::new();
+    for raw in split_top_commas(&header[lparen + 1..rparen]) {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        if raw.starts_with("...") {
+            // Varargs boundary: record the marker so fixed params before it bind
+            // correctly; collecting the rest into a typed list is deferred.
+            args.push("...".to_string());
+            continue;
+        }
+        // `name[: type][ = default]` — split off the default, then the type.
+        let (decl, default) = match find_top_eq(raw) {
+            Some(p) => (raw[..p].trim(), Some(raw[p + 1..].trim())),
+            None => (raw, None),
+        };
+        let pname = match find_top_colon(decl) {
+            Some(p) => decl[..p].trim(),
+            None => decl,
+        };
+        if let Some(d) = default {
+            defaults.push((args.len(), parse_expr(d)?));
+        }
+        args.push(pname.to_string());
+    }
+    let (body_stmts, term) = parse_block(cur, &["enddef"])?;
+    if term.is_none() {
+        return Err(VimlError::msg("E1057: Missing :enddef"));
+    }
+    // Prepend `let {p} = a:{p}` so each bare parameter name resolves in the body.
+    let mut body: Vec<Stmt> = Vec::with_capacity(body_stmts.len() + args.len());
+    for p in &args {
+        if is_plain_ident(p) {
+            body.push(Stmt::Let {
+                target: LetTarget::Var(p.clone()),
+                expr: Expr::Var(format!("a:{p}")),
+            });
+        }
+    }
+    body.extend(body_stmts);
+    Ok(Stmt::Function {
+        name,
+        args,
+        defaults,
+        body,
+        // vim9 `def` always (re)defines; there is no "already defined" error as
+        // for legacy `:function` without `!`.
+        bang: true,
     })
 }
 
