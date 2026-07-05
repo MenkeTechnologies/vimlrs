@@ -326,7 +326,7 @@ pub fn build_native(script_paths: &[PathBuf], out_path: &Path) -> Result<PathBuf
         .map_err(|e| format!("vimlrs --build --native: {e}"))?;
     let prog = crate::compile_viml::compile_program(&stmts)
         .map_err(|e| format!("vimlrs --build --native: {e}"))?;
-    if !prog.funcs.is_empty() {
+    if !prog.funcs.is_empty() || !prog.deferred_funcs.is_empty() {
         return Err(
             "vimlrs --build --native: scripts defining `:function` are not yet supported \
              (user functions compile to a separate registry, not the main chunk); \

@@ -1193,6 +1193,10 @@ pub const VIML_CHECK_EXC: u16 = 3074;
 pub const VIML_CATCH_MATCH: u16 = 3075;
 /// At program end: if an exception is still pending, report `E605` and clear it.
 pub const VIML_REPORT_UNCAUGHT: u16 = 3076;
+/// Register a deferred (block-level) `:function` when its line executes. Pops the
+/// staging key emitted by the compiler and moves the staged def into the live
+/// `FUNCTIONS` registry — see [`b_define_func`].
+pub const VIML_DEFINE_FUNC: u16 = 3580;
 
 /// Builtin id for comparison `(op, ignore_case)`.
 pub fn cmp_id(op: CmpOp, ic: bool) -> u16 {
@@ -1254,6 +1258,15 @@ thread_local! {
     /// Registry of user-defined functions, by name (populated from a compiled
     /// program before its `main` chunk runs).
     static FUNCTIONS: RefCell<std::collections::HashMap<String, crate::compile_viml::UserFuncDef>> =
+        RefCell::new(std::collections::HashMap::new());
+    /// Staged deferred (block-level) `:function` defs, by content-stable staging
+    /// key (`compile_viml::deferred_key`). A program stages its `deferred_funcs`
+    /// here at load; the `VIML_DEFINE_FUNC` op moves the keyed def into
+    /// `FUNCTIONS` when its `:function` line executes. Global (shared by every
+    /// sourced script and nested function body) and persistent, so a define-op
+    /// inside a function body still resolves its def when the function is called
+    /// long after the source completed.
+    static PENDING_FUNCS: RefCell<std::collections::HashMap<String, crate::compile_viml::UserFuncDef>> =
         RefCell::new(std::collections::HashMap::new());
     /// Stack of pending function return values (one per active call); the
     /// `VIML_SET_RETURN` handler writes the top.
@@ -2092,14 +2105,36 @@ fn compile_expr_chunk(src: &str) -> Result<fusevm::Chunk, VimlError> {
 /// source register globally.
 fn run_source_nested(src: &str) -> Result<(), VimlError> {
     let prog = crate::compile_viml::compile_program(&crate::viml_parser::parse_program(src)?)?;
+    register_prog_funcs(&mut prog.funcs.into_iter());
+    stage_deferred_funcs(prog.deferred_funcs);
+    run_chunk_nested(prog.main);
+    Ok(())
+}
+
+/// Insert a program's top-level `:function` defs into the live registry — done
+/// at load, unconditionally (matching Vim's top-level `:function`).
+fn register_prog_funcs(funcs: &mut dyn Iterator<Item = crate::compile_viml::UserFuncDef>) {
     FUNCTIONS.with(|f| {
         let mut f = f.borrow_mut();
-        for func in prog.funcs {
+        for func in funcs {
             f.insert(func.name.clone(), func);
         }
     });
-    run_chunk_nested(prog.main);
-    Ok(())
+}
+
+/// Stage a program's block-level `:function` defs into the pending registry.
+/// They are NOT registered yet — the `VIML_DEFINE_FUNC` op registers each one
+/// when its `:function` line actually executes, preserving guard idempotency.
+fn stage_deferred_funcs(funcs: Vec<crate::compile_viml::UserFuncDef>) {
+    if funcs.is_empty() {
+        return;
+    }
+    PENDING_FUNCS.with(|p| {
+        let mut p = p.borrow_mut();
+        for func in funcs {
+            p.insert(crate::compile_viml::deferred_key(&func), func);
+        }
+    });
 }
 
 fn b_eval(vm: &mut VM, _: u8) -> Value {
@@ -2413,6 +2448,23 @@ fn func_exists_hook(name: &str) -> bool {
     let name = name.strip_prefix("g:").unwrap_or(name);
     FUNCTIONS.with(|f| f.borrow().contains_key(name))
         || crate::compile_viml::builtin_fn_id(name).is_some()
+}
+
+/// `VIML_DEFINE_FUNC` — register a deferred (block-level) `:function` when its
+/// line executes. The compiler emits this for a `:function` inside a script-level
+/// `:if`/`:while`/`:for`/`:try` block: the def was staged into `PENDING_FUNCS`
+/// at load, and this op moves it into the live `FUNCTIONS` registry only now,
+/// when control flow actually reached the definition. That is what makes the
+/// idempotent `if !exists('*F') | function F() … | endif` guard define `F` on
+/// the first source and skip it thereafter. Registration overwrites an existing
+/// entry, matching the top-level `:function` path (which also inserts
+/// unconditionally). Returns a dummy the compiler immediately pops.
+fn b_define_func(vm: &mut VM, _argc: u8) -> Value {
+    let key = tv_get_string(&pop_tv(vm));
+    if let Some(def) = PENDING_FUNCS.with(|p| p.borrow().get(&key).cloned()) {
+        FUNCTIONS.with(|f| f.borrow_mut().insert(def.name.clone(), def));
+    }
+    Value::Int(0)
 }
 
 /// Resolve a function name to either a user `:function` or a ported builtin and
@@ -4042,16 +4094,13 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_CHECK_EXC, b_check_exc);
     vm.register_builtin(VIML_CATCH_MATCH, b_catch_match);
     vm.register_builtin(VIML_REPORT_UNCAUGHT, b_report_uncaught);
+    vm.register_builtin(VIML_DEFINE_FUNC, b_define_func);
 }
 
 /// Register a compiled program's user functions, then run its `main` chunk.
 pub fn run_compiled(prog: crate::compile_viml::CompiledProgram) {
-    FUNCTIONS.with(|f| {
-        let mut f = f.borrow_mut();
-        for func in prog.funcs {
-            f.insert(func.name.clone(), func);
-        }
-    });
+    register_prog_funcs(&mut prog.funcs.into_iter());
+    stage_deferred_funcs(prog.deferred_funcs);
     run_chunk(prog.main);
 }
 

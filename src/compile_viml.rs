@@ -41,6 +41,16 @@ pub struct CompiledProgram {
     pub main: fusevm::Chunk,
     /// User functions defined at the top level.
     pub funcs: Vec<UserFuncDef>,
+    /// User functions whose `:function` sits inside a script-level `:if`/
+    /// `:while`/`:for`/`:try` block. Unlike [`funcs`](Self::funcs) (registered
+    /// unconditionally at load), these are *staged* into the runtime's pending
+    /// registry and only inserted into the live `FUNCTIONS` table when their
+    /// `:function` line actually executes — so the idempotent
+    /// `if !exists('*F') | function F() … | endif` guard defines `F` only on the
+    /// first source, exactly as Vim does. Faithful to userfunc.c: `:function`
+    /// inside `if`/`while`/`for`/`try` is legal (those only adjust `indent`,
+    /// userfunc.c:2485-2494); the def executes when control flow reaches it.
+    pub deferred_funcs: Vec<UserFuncDef>,
 }
 
 thread_local! {
@@ -51,6 +61,33 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
     /// Counter for unique `<lambda>N` names within a compile.
     static LAMBDA_COUNTER: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Functions whose `:function` sits inside a script-level control-flow block
+    /// (`:if`/`:while`/`:for`/`:try`). Accumulated as the block body compiles,
+    /// then moved into [`CompiledProgram::deferred_funcs`]. They are registered
+    /// at run time when their emitted define-op executes, not at load — see
+    /// [`CompiledProgram::deferred_funcs`].
+    static DEFERRED_FUNCS: std::cell::RefCell<Vec<UserFuncDef>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Stable, content-derived staging key for a deferred (block-level) `:function`.
+/// The compiler emits this key as a string constant ahead of the runtime
+/// define-op; the bridge stages the def under the same key. Content-addressed so
+/// the key is identical across a recompile or a script-cache hit (survives
+/// caching) and cannot collide across independently-compiled programs — the
+/// runtime pending registry is a global thread-local shared by every sourced
+/// script and nested function body. `DefaultHasher::new()` uses a fixed seed, so
+/// the digest is deterministic across processes. The name prefix guarantees two
+/// distinct functions never share a key even under a (astronomically unlikely)
+/// digest collision.
+pub fn deferred_key(def: &UserFuncDef) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    // Hash the serialized def (name + params + defaults + bang + body chunk).
+    // bincode is already a dependency (the script cache uses it); an encode
+    // failure is impossible for these owned, plain-data types.
+    bincode::serialize(def).unwrap_or_default().hash(&mut h);
+    format!("{}#{:016x}", def.name, h.finish())
 }
 
 /// Collect the bare (unscoped) free variable names referenced in `e` that are
@@ -135,6 +172,30 @@ fn collect_free_vars(
     }
 }
 
+/// Compile a `:function` definition's fields into a [`UserFuncDef`]. Shared by
+/// the top-level collection in [`compile_program`] and the block-level deferred
+/// path in [`Compiler::stmt`], so both register byte-identical defs.
+fn build_user_func_def(
+    name: &str,
+    args: &[String],
+    defaults: &[(usize, Expr)],
+    body: &[Stmt],
+    bang: bool,
+    exc: bool,
+) -> Result<UserFuncDef, VimlError> {
+    let defaults = defaults
+        .iter()
+        .map(|(i, e)| Ok((*i, compile_expr_only(e)?)))
+        .collect::<Result<Vec<_>, VimlError>>()?;
+    Ok(UserFuncDef {
+        name: name.to_string(),
+        params: args.to_vec(),
+        defaults,
+        bang,
+        chunk: compile_function_body(body, exc)?,
+    })
+}
+
 /// A fresh unique anonymous-function name, `<lambda>N`.
 fn next_lambda_name() -> String {
     LAMBDA_COUNTER.with(|c| {
@@ -152,6 +213,7 @@ pub fn compile_program(stmts: &[Stmt]) -> Result<CompiledProgram, VimlError> {
     // function call into a caller's `:try`).
     let exc = uses_exceptions(stmts);
     LAMBDA_FUNCS.with(|f| f.borrow_mut().clear());
+    DEFERRED_FUNCS.with(|f| f.borrow_mut().clear());
     LAMBDA_COUNTER.with(|c| c.set(0));
     let mut funcs = Vec::new();
     let mut top = Vec::new();
@@ -164,17 +226,7 @@ pub fn compile_program(stmts: &[Stmt]) -> Result<CompiledProgram, VimlError> {
             bang,
         } = s
         {
-            let defaults = defaults
-                .iter()
-                .map(|(i, e)| Ok((*i, compile_expr_only(e)?)))
-                .collect::<Result<Vec<_>, VimlError>>()?;
-            funcs.push(UserFuncDef {
-                name: name.clone(),
-                params: args.clone(),
-                defaults,
-                bang: *bang,
-                chunk: compile_function_body(body, exc)?,
-            });
+            funcs.push(build_user_func_def(name, args, defaults, body, *bang, exc)?);
         } else {
             top.push(s.clone());
         }
@@ -206,9 +258,13 @@ pub fn compile_program(stmts: &[Stmt]) -> Result<CompiledProgram, VimlError> {
     // Fold in any anonymous functions generated from lambdas (top-level and
     // inside function bodies).
     funcs.extend(LAMBDA_FUNCS.with(|f| std::mem::take(&mut *f.borrow_mut())));
+    // Block-level `:function` defs collected while compiling `top` — staged for
+    // conditional, run-when-reached registration.
+    let deferred_funcs = DEFERRED_FUNCS.with(|f| std::mem::take(&mut *f.borrow_mut()));
     Ok(CompiledProgram {
         main: c.b.build(),
         funcs,
+        deferred_funcs,
     })
 }
 
@@ -935,9 +991,39 @@ impl Compiler {
                 self.returns.push(j);
                 Ok(())
             }
-            Stmt::Function { .. } => Err(VimlError::msg(
-                "E120: nested :function is not supported (define at script level)",
-            )),
+            Stmt::Function {
+                name,
+                args,
+                defaults,
+                body,
+                bang,
+            } => {
+                // A `:function` reached HERE (in `stmt`, not `compile_program`'s
+                // top-level loop) is nested inside a control-flow block and/or
+                // another function's body. Vim treats BOTH as legal: reading a
+                // function body, `:if`/`:while`/`:for`/`:try` only adjust `indent`
+                // (userfunc.c:2485-2494) and an inner `:function …(` bumps the
+                // function-nesting counter and is defined when the enclosing code
+                // runs (userfunc.c:2496-2511) — the inner def is registered when
+                // the outer function executes, NOT at parse time. (Vim's E120 is
+                // "Using <SID> not in a script context", userfunc.c:1631 — never
+                // "nested :function"; the only nesting error is E1058 "Function
+                // nesting too deep" at MAX_FUNC_NESTING, out of scope here.)
+                // Register when this line executes — not at compile time — so a
+                // guarded idempotent definition (`if !exists('*F') | function
+                // F() … | endif`, whether at script level or inside an init
+                // function) defines `F` only on the first pass. The compiled def
+                // is staged into the program's `deferred_funcs`; the runtime
+                // define-op inserts it into the live registry, keyed by a
+                // content-stable staging key.
+                let def = build_user_func_def(name, args, defaults, body, *bang, self.exc)?;
+                let key = deferred_key(&def);
+                DEFERRED_FUNCS.with(|f| f.borrow_mut().push(def));
+                self.load_str(&key);
+                self.emit(Op::CallBuiltin(h::VIML_DEFINE_FUNC, 1));
+                self.emit(Op::Pop);
+                Ok(())
+            }
             Stmt::Throw(e) => {
                 self.expr(e)?;
                 self.emit(Op::CallBuiltin(h::VIML_THROW, 1));
