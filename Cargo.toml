@@ -1,5 +1,5 @@
 [package]
-name = "zemacs-viml"
+name = "vimlrs"
 description = "Faithful Rust port of the Vimscript (VimL) interpreter, from the Neovim C eval engine"
 version = "0.1.2"
 authors = ["MenkeTechnologies"]
