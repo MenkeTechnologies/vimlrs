@@ -8,6 +8,7 @@ authors = ["MenkeTechnologies"]
 edition = "2021"
 rust-version = "1.80"
 homepage = "https://menketechnologies.github.io/vimlrs/"
+documentation = "https://docs.rs/vimlrs"
 repository = "https://github.com/MenkeTechnologies/vimlrs"
 license = "MIT"
 readme = "README.md"
