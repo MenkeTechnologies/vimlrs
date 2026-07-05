@@ -1659,11 +1659,33 @@ impl Compiler {
                 self.emit(Op::CallBuiltin(h::VIML_GETREG, 1));
             }
             Expr::List(items) => {
-                for it in items {
-                    self.expr(it)?;
+                // A single `VIML_MAKE_LIST` op carries the element count in a `u8`
+                // (max 255). VimL puts no size limit on a List literal, so for a
+                // longer literal build it in chunks of 255 and concatenate the
+                // chunks with `+` (`VIML_ADD` List+List concat) — an identical
+                // List, no size cap. (Vim corpus e.g. clojurecomplete.vim's ~700
+                // element completion list.)
+                const MAX: usize = u8::MAX as usize;
+                if items.len() <= MAX {
+                    for it in items {
+                        self.expr(it)?;
+                    }
+                    self.emit(Op::CallBuiltin(h::VIML_MAKE_LIST, items.len() as u8));
+                } else {
+                    let mut chunks = items.chunks(MAX);
+                    let first = chunks.next().unwrap();
+                    for it in first {
+                        self.expr(it)?;
+                    }
+                    self.emit(Op::CallBuiltin(h::VIML_MAKE_LIST, first.len() as u8));
+                    for chunk in chunks {
+                        for it in chunk {
+                            self.expr(it)?;
+                        }
+                        self.emit(Op::CallBuiltin(h::VIML_MAKE_LIST, chunk.len() as u8));
+                        self.emit(Op::CallBuiltin(h::VIML_ADD, 2));
+                    }
                 }
-                let n = Self::argc(items.len())?;
-                self.emit(Op::CallBuiltin(h::VIML_MAKE_LIST, n));
             }
             Expr::Dict(pairs) => {
                 for (k, v) in pairs {

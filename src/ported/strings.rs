@@ -210,6 +210,11 @@ pub fn f_strridx(argvars: &[typval_T], rettv: &mut typval_T) {
     let lastmatch: Option<usize> = if nb.is_empty() {
         // c: empty string matches past the end — lastmatch = haystack + end_idx.
         Some(end_idx as usize)
+    } else if nb.len() > hb.len() {
+        // c: a needle longer than the haystack never matches (`strstr` → NULL).
+        // Guard before the search below so its `hb[i..i + nb.len()]` slice — whose
+        // range floors at 0 via `saturating_sub` — cannot index past the end.
+        None
     } else {
         // c: for (rest = haystack; …) { rest = strstr(rest, needle); if (rest ==
         //    NULL || rest > haystack + end_idx) break; lastmatch = rest; }

@@ -2640,7 +2640,27 @@ fn exec_ex_or_stmt(line: &str) {
         ExCmdResult::NotEx => {
             // Strip a leading ':' so `:echo …` runs as the `echo` statement.
             let stmt = line.trim().strip_prefix(':').unwrap_or(line.trim());
-            let _ = run_source_nested(stmt);
+            // A statement whose first character re-routes it straight back to an
+            // Ex command (the parser sends leading `'` mark-addresses, `!`, and
+            // `%`+alpha to `Stmt::ExCmd`) must NOT be re-dispatched here: doing so
+            // re-parses the identical line into another ExCmd and recurses without
+            // bound (stack overflow). `do_excmd` already declined it, so emit the
+            // error real Vim produces for the single-line form and stop. (These
+            // lines reach here mostly as vim9script bracket-continuation fragments
+            // like `'context\w\+',`, which real Vim joins to the previous line.)
+            if stmt.starts_with('\'') {
+                // `'{mark}…`: Vim evaluates the mark address first; an unset mark
+                // is E20 (`'aa'` → `E20: Mark not set`).
+                message::emsg("E20: Mark not set");
+            } else if stmt.starts_with('!')
+                || (stmt.starts_with('%')
+                    && stmt[1..].starts_with(|c: char| c.is_ascii_alphabetic()))
+            {
+                // Unrecognized command word after a `%`/`!` range (`%foobar`).
+                message::semsg(&format!("E492: Not an editor command: {stmt}"));
+            } else {
+                let _ = run_source_nested(stmt);
+            }
         }
         ExCmdResult::Global(mut lines, cmd) => {
             // Run `cmd` on each matched line, highest first so deletions above
@@ -6319,5 +6339,24 @@ mod tests {
         assert_eq!(run("echo len([1, 2, 3])"), "3\n");
         assert_eq!(run("echo abs(-5)"), "5\n");
         assert_eq!(run("echo [1, 2, 3]->len()"), "3\n");
+    }
+
+    // A line the parser routes to `Stmt::ExCmd` — a leading `'` mark-address, or a
+    // `%`/`!` range — that `do_excmd` declines (`NotEx`) must NOT be re-dispatched
+    // as a statement: re-parsing the identical line yields another ExCmd and
+    // recurses without bound (stack overflow — Vim corpus: the vim9script bracket
+    // continuation fragments in autoload/context.vim, ccomplete.vim, tohtml.vim
+    // reach the interpreter as standalone `'…'`-prefixed lines). The guard emits
+    // the error real Vim gives for the single-line form and stops; execution of
+    // the following statements continues. If this test hangs / aborts the test
+    // binary, the recursion guard has regressed.
+    #[test]
+    fn ex_mark_address_no_infinite_recursion() {
+        // `'aa'` = range `'a` (mark a, unset → E20) + append; must not recurse.
+        assert_eq!(run("'aa'\necho 'after-mark'"), "after-mark\n");
+        // `%foobar` = whole-file range + unknown command → E492; must not recurse.
+        assert_eq!(run("%foobar\necho 'after-pct'"), "after-pct\n");
+        // A lone unset mark-address (no command word) is a cursor move: no recursion.
+        assert_eq!(run("'z\necho 'after-lone'"), "after-lone\n");
     }
 }
