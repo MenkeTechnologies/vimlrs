@@ -9,10 +9,7 @@ homepage = "https://menketechnologies.github.io/vimlrs/"
 repository = "https://github.com/MenkeTechnologies/vimlrs"
 license = "MIT"
 readme = "README.md"
-# Early / in development — not yet published to crates.io (matches the other
-# in-progress crates in the meta repo). Flip to publishable once the interpreter
-# is feature-complete and the crate is renamed to match the `vimlrs` repo.
-publish = false
+publish = true
 # `vendor/` is the vendored Neovim C spec for porting; `docs/` is the published
 # HUD site — neither is part of the crate build.
 exclude = ["/vendor/", "/docs/"]
