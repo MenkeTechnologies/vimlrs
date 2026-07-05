@@ -1800,14 +1800,9 @@ fn b_exec_stmt(vm: &mut VM, argc: u8) -> Value {
 /// so functions and globals it defines persist. `~`/`$VAR` in the path expand.
 fn b_source(vm: &mut VM, _: u8) -> Value {
     let path = tv_get_string(&pop_tv(vm));
-    let expanded = if let Some(rest) = path.strip_prefix("~/") {
-        match std::env::var("HOME") {
-            Ok(h) => format!("{h}/{rest}"),
-            Err(_) => path.clone(),
-        }
-    } else {
-        path.clone()
-    };
+    // `:source` runs its filename through `expand_env` (Vim's `do_source`), so
+    // `$VAR`/`${VAR}`/`~` in the path resolve — e.g. `source $ZPWR_FZF_DIR/x.vim`.
+    let expanded = crate::ported::eval::fs::expand_env(&path);
     match std::fs::read_to_string(&expanded) {
         Ok(src) => {
             // `<sfile>`/`<script>` inside the sourced file resolve to ITS path,
@@ -1819,7 +1814,7 @@ fn b_source(vm: &mut VM, _: u8) -> Value {
             let _ = run_source_nested(&src);
             crate::ported::eval::fs::pop_sourcing_name();
         }
-        Err(_) => message::semsg(&format!("E484: Can't open file {path}")),
+        Err(_) => message::semsg(&format!("E484: Can't open file {expanded}")),
     }
     Value::Undef
 }

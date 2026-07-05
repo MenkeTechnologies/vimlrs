@@ -7730,7 +7730,7 @@ pub fn do_excmd(line: &str) -> ExCmdResult {
             ex_sort(lo2, hi2, bang, args);
             ExCmdResult::Handled
         }
-        "mark" | "ma" | "k" => {
+        "mark" | "ma" | "mar" | "k" => {
             // `:[line]mark x` / `:[line]k x` sets mark x at the range's last line.
             if let Some(name) = args.chars().next() {
                 setmark(name, hi, 1);
@@ -7754,6 +7754,29 @@ pub fn do_excmd(line: &str) -> ExCmdResult {
             }
             ExCmdResult::Handled
         }
+        "echohl" | "echoh" => {
+            // `:echohl {group}` — set the highlight id for subsequent `:echo`.
+            // `ex_echohl` (Src/eval.c:6207) resolves the group via `syn_name2id`,
+            // which is 0 standalone (no highlight groups), so this clears the id.
+            crate::ported::eval::ex_echohl(args);
+            ExCmdResult::Handled
+        }
+        // Screen/session commands with no observable effect on an editor-less
+        // config load: `:redraw[!]`/`:redrawstatus`/`:redrawtabline` (repaint),
+        // `:redir` (message redirection — no message UI here), and `:runtime`
+        // (source from 'runtimepath' — plugin loading, out of scope like the
+        // Vundle block). Recognized as no-ops so a function body using them still
+        // defines instead of the line aborting the `:function`.
+        "redraw" | "redr" | "redra" | "redraws" | "redrawstatus" | "redrawt" | "redrawtabline"
+        | "redir" | "redi" | "runtime" | "ru" | "run" | "runt" | "runti" | "runtim" => {
+            ExCmdResult::Handled
+        }
+        // Buffer-list navigation (`:bnext`/`:bprevious`/`:bfirst`/`:blast`/
+        // `:buffer`/`:bmodified`/`:ball`) switches the displayed buffer — a no-op
+        // editor-less. (`:edit {file}` above still loads a file when given one.)
+        "bnext" | "bn" | "bne" | "bprevious" | "bp" | "bprev" | "bNext" | "bN" | "bfirst"
+        | "bf" | "blast" | "bl" | "buffer" | "bu" | "buf" | "bmodified" | "bm" | "bmod"
+        | "ball" | "ba" => ExCmdResult::Handled,
         "delmarks" | "delm" => {
             if bang {
                 MARKS.with(|m| m.borrow_mut().clear());
@@ -7806,6 +7829,15 @@ pub fn do_excmd(line: &str) -> ExCmdResult {
                 let count = rest.chars().take_while(|&x| x == c).count();
                 ex_shift(lo, hi, c == '>', count);
             }
+            ExCmdResult::Handled
+        }
+        // A bare line range with no command word (`:'>`, `:'<`, `:5`, `:.`) moves
+        // the cursor to the (last) addressed line — `do_excmd()` runs the range's
+        // implicit `:` which is "print"/goto in an editor. Editor-less, the
+        // observable effect is the cursor move. Recognized so a mark-address line
+        // like `'>` in a function body parses instead of aborting the `:function`.
+        "" if had_range => {
+            set_cursorpos(hi, 1);
             ExCmdResult::Handled
         }
         _ => ExCmdResult::NotEx,

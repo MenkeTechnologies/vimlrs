@@ -52,10 +52,24 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
     let rest = line[cmd_end..].trim_start();
 
     match cmd {
-        "echo" => Ok(Stmt::Echo(parse_expr_list(rest)?)),
+        "echo" | "ec" => Ok(Stmt::Echo(parse_expr_list(rest)?)),
         "echon" => Ok(Stmt::Echon(parse_expr_list(rest)?)),
-        "echomsg" | "echom" => Ok(Stmt::Echo(parse_expr_list(rest)?)),
-        "execute" | "exe" => Ok(Stmt::Execute(parse_expr_list(rest)?)),
+        // `:echomsg`/`:echoerr` (Vim abbreviations `echom`, `echoe`/`echoer`)
+        // both evaluate and print their expression list; they are modelled as
+        // `:echo` here (same simplification already used for `:echomsg`). Adding
+        // `:echoerr` stops an unrecognized `echoerr` in a function body from
+        // falling through to `parse_expr` and aborting the `:function`.
+        "echomsg" | "echom" | "echoerr" | "echoer" | "echoe" => {
+            Ok(Stmt::Echo(parse_expr_list(rest)?))
+        }
+        // `:execute` accepts every prefix down to `:exe` (verified against Vim
+        // 9.2: `exe`/`exec`/`execu`/`execut`/`execute` all run). Missing the
+        // intermediate forms made `exec '…'` fall through to `parse_expr`, which
+        // aborts the enclosing function definition and leaks its body to global
+        // scope (E461 on `l:` vars).
+        "execute" | "execut" | "execu" | "exec" | "exe" => {
+            Ok(Stmt::Execute(parse_expr_list(rest)?))
+        }
         "set" | "se" | "setlocal" | "setl" | "setglobal" | "setg" => {
             Ok(Stmt::Set(rest.to_string()))
         }
@@ -72,6 +86,16 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
                 .map(Stmt::Unlet)
         }
         "let" => parse_let(rest),
+        // A `:function` that reaches here (not caught as a block opener in
+        // `parse_one` — e.g. behind a modifier, `silent function`) with no
+        // parameter-list `(` is the listing/show command, not a definition:
+        // no-op editor-less. (`:function {name}(…)` behind a modifier is not a
+        // leaf and is left to error, matching the pre-existing limitation.)
+        "function" | "fu" | "fun" | "func" | "funct" | "functi" | "functio"
+            if !rest.contains('(') =>
+        {
+            Ok(Stmt::Expr(Expr::Number(0)))
+        }
         // `:const {name} = {expr}` assigns like `:let`. RUST-PORT NOTE: Vim also
         // locks the variable (reassigning is E741); that immutability is not yet
         // enforced here — `:const` parses and assigns as `:let`.
@@ -135,11 +159,60 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
         "filetype" | "filetyp" | "filety" | "filet" if !line[cmd.len()..].starts_with('(') => {
             Ok(Stmt::Filetype(rest.trim().to_string()))
         }
+        // `:normal[!] {keys}` runs normal-mode keys against the buffer, dispatched
+        // by `do_excmd` at run time. Recognized even without a leading `:` so a
+        // function body line like `normal! el` parses and the function defines —
+        // otherwise it fell through to `parse_expr`, aborting the whole `:function`
+        // and leaking its body to global scope.
+        "normal" | "norm" if !line[cmd.len()..].starts_with('(') => {
+            Ok(Stmt::ExCmd(line.to_string()))
+        }
+        // `:echohl {group}` sets the highlight group for later `:echo` output.
+        // Its argument is a group NAME, not an expression, so it can't go through
+        // the `:echo` path (that would evaluate the name as a variable). Routed to
+        // `do_excmd`'s `ex_echohl` handler; recognized even bare so a function body
+        // line like `echohl ErrorMsg` parses instead of aborting the `:function`.
+        "echohl" | "echoh" if !line[cmd.len()..].starts_with('(') => {
+            Ok(Stmt::ExCmd(line.to_string()))
+        }
+        // Screen/session/mark commands (`:redraw[!]`, `:redir`, `:runtime`,
+        // `:mark`) — dispatched (or no-op'd) by `do_excmd`. Recognized bare so a
+        // function body line like `redraw!` or `redir => x` parses instead of
+        // being mis-read as an expression and aborting the `:function`.
+        "redraw" | "redr" | "redra" | "redraws" | "redrawstatus" | "redrawt" | "redrawtabline"
+        | "redir" | "redi" | "runtime" | "ru" | "run" | "runt" | "runti" | "runtim" | "mark"
+        | "ma" | "mar"
+            if !line[cmd.len()..].starts_with('(') =>
+        {
+            Ok(Stmt::ExCmd(line.to_string()))
+        }
+        // `:edit`/`:ed` (load a file / reload) and buffer-list navigation
+        // (`:bnext`, `:bprevious`, `:bfirst`, `:blast`, `:buffer`, …) — dispatched
+        // by `do_excmd`. Recognized bare so a body line like `edit #` or `bnext`
+        // parses instead of `parse_expr` choking on it and aborting the function.
+        "edit" | "ed" | "bnext" | "bn" | "bne" | "bprevious" | "bp" | "bprev" | "bNext" | "bN"
+        | "bfirst" | "bf" | "blast" | "bl" | "buffer" | "bu" | "buf" | "bmodified" | "bm"
+        | "bmod" | "ball" | "ba"
+            if !line[cmd.len()..].starts_with('(') =>
+        {
+            Ok(Stmt::ExCmd(line.to_string()))
+        }
         // A `:`-prefixed line, or a `%`-prefixed line (`%s/…`), is an Ex command
         // with an optional line range. Neither can begin a valid expression
         // statement, so this is safe; unrecognized Ex commands fall back to
         // running as an ordinary statement at run time.
+        // A leading `!` is the `:!{cmd}` shell command (`:h :!`); `do_excmd`
+        // treats a range-less one as a handled no-op. Recognized here so a bang
+        // command — especially with shell redirection (`!mkdir … > /dev/null
+        // 2>&1`) — parses as a statement instead of being mis-read as the `!`
+        // (logical-not) expression, which aborts the enclosing `:function`.
+        // A line beginning with `'` is a mark-address Ex command (`:'<`, `:'>`,
+        // `:'<,'>s/…`) — never a bare string, which isn't a valid statement. Route
+        // it to `do_excmd` so it parses; otherwise `parse_expr` reads it as an
+        // unterminated string literal and aborts the enclosing `:function`.
         _ if line.starts_with(':')
+            || line.starts_with('!')
+            || line.starts_with('\'')
             || (line.starts_with('%')
                 && line[1..].starts_with(|c: char| c.is_ascii_alphabetic())) =>
         {
@@ -278,19 +351,48 @@ fn cmd_word(line: &str) -> (&str, &str) {
 /// block parser, never as a leaf statement).
 fn is_block_terminator(cmd: &str) -> bool {
     matches!(
-        cmd,
+        canon_block_kw(cmd),
         "endif"
             | "elseif"
             | "else"
             | "endwhile"
-            | "endwh"
             | "endfor"
             | "endfunction"
-            | "endfunc"
             | "catch"
             | "finally"
             | "endtry"
     )
+}
+
+/// Normalize a command word to its canonical block-control keyword, resolving
+/// Vim's command abbreviations (`fu`→`function`, `endw`→`endwhile`, `en`→`endif`,
+/// `cat`→`catch`, …). The abbreviation sets match Vim 9.2's `fullcommand()`
+/// exactly, including the gaps where a prefix resolves to a *different* command
+/// (`fo`→`fold`, `tr`→`trewind`, `final`→`final`, `i`→`insert`) — so these are
+/// explicit sets, never prefix tests. A word that is not a block keyword is
+/// returned unchanged. Every block-structure decision routes through this so the
+/// openers and terminators accept the same forms Vim does; missing one made an
+/// abbreviated `endw`/`endf` leak out as an undefined-variable expression and
+/// desync the enclosing block.
+fn canon_block_kw(cmd: &str) -> &str {
+    match cmd {
+        "fu" | "fun" | "func" | "funct" | "functi" | "functio" | "function" => "function",
+        "endf" | "endfu" | "endfun" | "endfunc" | "endfunct" | "endfuncti" | "endfunctio"
+        | "endfunction" => "endfunction",
+        "wh" | "whi" | "whil" | "while" => "while",
+        "endw" | "endwh" | "endwhi" | "endwhil" | "endwhile" => "endwhile",
+        "for" => "for",
+        "endfo" | "endfor" => "endfor",
+        "if" => "if",
+        "elsei" | "elseif" => "elseif",
+        "el" | "els" | "else" => "else",
+        "en" | "end" | "endi" | "endif" => "endif",
+        "try" => "try",
+        "cat" | "catc" | "catch" => "catch",
+        "fina" | "finall" | "finally" => "finally",
+        "endt" | "endtr" | "endtry" => "endtry",
+        other => other,
+    }
 }
 
 /// Parse a whole source block into a flat statement list with block structure
@@ -464,6 +566,15 @@ impl Lines {
                 lines.push((lineno, text));
                 continue;
             }
+            // Commands whose argument absorbs a trailing `|` (`:autocmd`,
+            // `:command`, `:normal`, `:global`/`:vglobal`) must not be bar-split:
+            // the `|` is part of their text. `autocmd … exe '…' | e` is one
+            // autocmd, not an autocmd followed by a stray `e` statement.
+            let (lead, _) = cmd_word(strip_command_modifiers(trimmed));
+            if cmd_takes_bar_arg(lead) {
+                lines.push((lineno, text));
+                continue;
+            }
             let segs = split_commands(&text);
             if segs.len() > 1 {
                 for seg in segs {
@@ -509,7 +620,9 @@ impl Lines {
 fn parse_one(cur: &mut Lines) -> Result<Vec<Stmt>, VimlError> {
     let line = cur.peek().expect("parse_one called at EOF");
     let (cmd, rest) = cmd_word(&line);
-    match cmd {
+    // Route block openers through `canon_block_kw` so every Vim abbreviation
+    // (`fu`/`fun`/`func` for `:function`, `wh` for `:while`, …) opens the block.
+    match canon_block_kw(cmd) {
         "if" => {
             cur.bump();
             Ok(vec![parse_if(cur, rest)?])
@@ -526,12 +639,33 @@ fn parse_one(cur: &mut Lines) -> Result<Vec<Stmt>, VimlError> {
             cur.bump();
             Ok(vec![parse_try(cur)?])
         }
-        "function" | "func" => {
+        "function" => {
             cur.bump();
-            Ok(vec![parse_function(cur, rest)?])
+            // Only `[!] {name}({params})` is a definition. `:function` (list all),
+            // `:function {name}` (show one), and `:function /{pat}` (list matching)
+            // have no parameter-list `(` and must NOT open a block — a bare
+            // `function` inside a body (e.g. `silent function`) would otherwise be
+            // taken as a nested `:function` with a missing `(` (E124) and abort the
+            // enclosing definition. Editor-less the listing has no output → no-op.
+            let hdr = rest
+                .trim_start()
+                .strip_prefix('!')
+                .unwrap_or(rest)
+                .trim_start();
+            if !hdr.starts_with('/') && hdr.contains('(') {
+                Ok(vec![parse_function(cur, rest)?])
+            } else {
+                Ok(vec![Stmt::Expr(Expr::Number(0))])
+            }
         }
         _ => {
             cur.bump();
+            // Commands that absorb a trailing `|` (`:autocmd`, `:command`,
+            // `:normal`, `:global`) are parsed whole — splitting them would break
+            // off part of their argument (e.g. `autocmd … exe '…' | e`).
+            if cmd_takes_bar_arg(cmd_word(strip_command_modifiers(line.trim())).0) {
+                return Ok(vec![parse_stmt(&line)?]);
+            }
             let mut out = Vec::new();
             for seg in split_commands(&line) {
                 if seg.trim().is_empty() {
@@ -547,6 +681,40 @@ fn parse_one(cur: &mut Lines) -> Result<Vec<Stmt>, VimlError> {
 /// Split a command line into its `|`-separated commands, the way Vim's
 /// `do_one_cmd` does. A `|` ends a command except when it is inside a string,
 /// part of the `||` operator, backslash-escaped, or after a `"` line comment.
+/// Ex commands whose argument text includes any trailing `|` — they lack Vim's
+/// `EX_TRLBAR` flag, so a `|` after them is part of the command, not a command
+/// separator. Abbreviation sets match Vim 9.2 `fullcommand()`. Used by the
+/// logical-line splitter (Pass 2) to keep such a line whole.
+fn cmd_takes_bar_arg(cmd: &str) -> bool {
+    matches!(
+        cmd,
+        "au" | "aut"
+            | "auto"
+            | "autoc"
+            | "autocm"
+            | "autocmd"
+            | "com"
+            | "comm"
+            | "command"
+            | "norm"
+            | "norma"
+            | "normal"
+            | "g"
+            | "gl"
+            | "glo"
+            | "glob"
+            | "globa"
+            | "global"
+            | "v"
+            | "vg"
+            | "vgl"
+            | "vglo"
+            | "vglob"
+            | "vgloba"
+            | "vglobal"
+    )
+}
+
 fn split_commands(line: &str) -> Vec<&str> {
     let bytes = line.as_bytes();
     let mut segs = Vec::new();
@@ -630,9 +798,12 @@ fn parse_block(cur: &mut Lines, terms: &[&str]) -> ParseBlockResult {
             return Ok((stmts, None));
         };
         let (cmd, rest) = cmd_word(&line);
-        if terms.contains(&cmd) {
+        // Compare (and hand back) the canonical keyword so an abbreviated
+        // terminator (`endw`, `endf`, `en`, `cat`, …) closes its block.
+        let ck = canon_block_kw(cmd);
+        if terms.contains(&ck) {
             cur.bump();
-            return Ok((stmts, Some((cmd.to_string(), rest.to_string()))));
+            return Ok((stmts, Some((ck.to_string(), rest.to_string()))));
         }
         if is_block_terminator(cmd) {
             return Err(VimlError::msg(format!("E580: unexpected `:{cmd}`")));
@@ -674,7 +845,7 @@ fn parse_if(cur: &mut Lines, cond_str: &str) -> Result<Stmt, VimlError> {
 
 fn parse_while(cur: &mut Lines, cond_str: &str) -> Result<Stmt, VimlError> {
     let cond = parse_expr(cond_str)?;
-    let (body, term) = parse_block(cur, &["endwhile", "endwh"])?;
+    let (body, term) = parse_block(cur, &["endwhile"])?;
     if term.is_none() {
         return Err(VimlError::msg("E170: Missing :endwhile"));
     }
@@ -774,7 +945,7 @@ fn parse_function(cur: &mut Lines, header: &str) -> Result<Stmt, VimlError> {
             None => args.push(raw.to_string()),
         }
     }
-    let (body, term) = parse_block(cur, &["endfunction", "endfunc"])?;
+    let (body, term) = parse_block(cur, &["endfunction"])?;
     if term.is_none() {
         return Err(VimlError::msg("E126: Missing :endfunction"));
     }
@@ -828,9 +999,13 @@ fn parse_try(cur: &mut Lines) -> Result<Stmt, VimlError> {
 }
 
 fn parse_let(rest: &str) -> Result<Stmt, VimlError> {
-    let eq = rest
-        .find('=')
-        .ok_or_else(|| VimlError::msg("E121: let requires '='"))?;
+    let Some(eq) = rest.find('=') else {
+        // No `=`: `:let` (list all variables) or `:let {var}` (show one) — a
+        // listing/show command, not an assignment. Editor-less it has no
+        // observable output, so it is a no-op; erroring here would abort an
+        // enclosing `:function` whose body lists variables (`silent let`).
+        return Ok(Stmt::Expr(Expr::Number(0)));
+    };
     // Compound assignment (`+= -= *= /= %= .=`, ex_let's `tv_op`): the char just
     // before `=` is the operator. A `:let` target never ends in one of these, so
     // its presence unambiguously marks a compound assign.

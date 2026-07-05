@@ -1537,7 +1537,9 @@ pub fn f_readdir(argvars: &[typval_T], rettv: &mut typval_T) {
 
 /// Expand a leading `~`/`~/` to `$HOME` and `$VAR`/`${VAR}` references in a
 /// path (`expand_env` subset — enough for glob/expand patterns standalone).
-fn expand_env(s: &str) -> String {
+/// `pub(crate)` so `:source` can expand `$VAR`/`~` in its path argument the same
+/// way (Vim runs the sourced filename through `expand_env` in `do_source`).
+pub(crate) fn expand_env(s: &str) -> String {
     let s = if let Some(rest) = s.strip_prefix("~/") {
         match std::env::var("HOME") {
             Ok(h) => format!("{h}/{rest}"),
