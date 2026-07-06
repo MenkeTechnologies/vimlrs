@@ -286,6 +286,14 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
         {
             Ok(Stmt::ExCmd(line.to_string()))
         }
+        // Script-language interface commands (`:python`/`:py3`/`:ruby`/`:perl`/
+        // `:lua`/`:tcl`/`:mzscheme` and their `do`/`file` variants) run an embedded
+        // interpreter. Editor-less — with the interface uncompiled (`has('ruby')`
+        // etc. are 0) — they are never executed, but they MUST parse as Ex commands
+        // (no-op'd by `do_excmd`) so a `:ruby …` line inside a not-taken branch
+        // (ftplugin/ruby.vim's `if has('ruby') && has('win32')`) does not fail to
+        // parse and drop its whole enclosing `:if` block via the tolerant parser.
+        _ if is_script_lang_cmd(&line) => Ok(Stmt::ExCmd(line.to_string())),
         // A `:`-prefixed line, or a `%`-prefixed line (`%s/…`), is an Ex command
         // with an optional line range. Neither can begin a valid expression
         // statement, so this is safe; unrecognized Ex commands fall back to
@@ -438,6 +446,68 @@ fn is_map_command(cmd: &str) -> bool {
     matches!(
         prefix,
         Some("" | "n" | "i" | "v" | "x" | "s" | "o" | "c" | "t" | "l")
+    )
+}
+
+/// Whether `line` invokes one of Vim's script-language interface Ex commands —
+/// `:python`/`:py`, `:python3`/`:py3`, `:pythonx`/`:pyx`, `:perl`, `:ruby`,
+/// `:lua`, `:tcl`, `:mzscheme`/`:mz`, and their `do`/`file` variants. The command
+/// name may carry a trailing digit (`python3`, `py3`), which `cmd_word` splits
+/// off, so it is matched on the leading alphanumeric run instead. A name directly
+/// followed by `(` is a funcref call expression, not a command. Shared with
+/// `do_excmd` so the runtime no-ops exactly the set the parser routes to `ExCmd`.
+pub(crate) fn is_script_lang_cmd(line: &str) -> bool {
+    let line = line.trim_start();
+    let end = line
+        .find(|c: char| !c.is_ascii_alphanumeric())
+        .unwrap_or(line.len());
+    if line[end..].starts_with('(') {
+        return false;
+    }
+    // A short name (`py`/`mz`) or a full one directly followed by an assignment
+    // operator (`py = 7`, `lua += 1`) is a vim9 assignment to a same-named
+    // variable, not the interface command — real Vim reassigns it. Decline so the
+    // vim9-assignment arm handles it. (`=<<` heredoc-assign counts; `==`/`=~`
+    // comparisons do not — a bare `cmd == …` is not a valid statement anyway.)
+    let after = line[end..].trim_start();
+    let is_assign = matches!(
+        after.as_bytes().first(),
+        Some(b'+' | b'-' | b'*' | b'/' | b'%')
+    ) && after[1..].starts_with('=')
+        || after.starts_with("..=")
+        || after.starts_with(".=")
+        || (after.starts_with('=') && !after.starts_with("==") && !after.starts_with("=~"));
+    if is_assign {
+        return false;
+    }
+    matches!(
+        &line[..end],
+        "python"
+            | "py"
+            | "pydo"
+            | "pyfile"
+            | "python3"
+            | "py3"
+            | "py3do"
+            | "py3file"
+            | "pythonx"
+            | "pyx"
+            | "pyxdo"
+            | "pyxfile"
+            | "perl"
+            | "perldo"
+            | "ruby"
+            | "rubydo"
+            | "rubyfile"
+            | "lua"
+            | "luado"
+            | "luafile"
+            | "tcl"
+            | "tcldo"
+            | "tclfile"
+            | "mzscheme"
+            | "mz"
+            | "mzfile"
     )
 }
 

@@ -7881,6 +7881,15 @@ pub fn do_excmd(line: &str) -> ExCmdResult {
             set_cursorpos(hi, 1);
             ExCmdResult::Handled
         }
+        // Script-language interface commands (`:python`/`:py3`/`:ruby`/`:perl`/
+        // `:lua`/`:tcl`/`:mzscheme` and variants) run an embedded interpreter that
+        // is not compiled in (`has('ruby')` etc. are 0), so every form is a no-op
+        // editor-less. Recognized here — via the same set the parser routes to
+        // `Stmt::ExCmd` — so an executed interface line resolves to `Handled`
+        // instead of `NotEx`, which would re-parse it back into an `ExCmd` and
+        // recurse without bound (E169). The command word may carry a trailing
+        // digit (`python3`, `py3`), so it is matched on `rest`, not the alpha `cmd`.
+        _ if crate::viml_parser::is_script_lang_cmd(rest) => ExCmdResult::Handled,
         _ => ExCmdResult::NotEx,
     }
 }
