@@ -27,6 +27,31 @@ endfunction
 call assert_equal('x: 0 items', Tag('x'))
 call assert_equal('y: 3 items', Tag('y', 1, 2, 3))
 
+" ── each extra arg is also reachable positionally as a:1, a:2, ... a:N ──
+" (Vim binds the varargs individually in addition to the a:000 list; e.g.
+" runtime indent/html.vim's s:AddBlockTag(tag, id, ...) reads a:1.)
+function! Positional(tag, id, ...) abort
+  if a:0 == 0
+    return a:tag . '/' . a:id
+  else
+    return a:tag . '/' . a:id . '/' . a:1
+  endif
+endfunction
+
+call assert_equal('pre/2', Positional('pre', 2))
+call assert_equal('cmt/5/-->', Positional('cmt', 5, '-->'))
+
+function! Pick(...) abort
+  return a:1 . a:2 . a:3
+endfunction
+
+call assert_equal('abc', Pick('a', 'b', 'c'))
+" a:N and a:000 stay in sync.
+function! Both(...) abort
+  return [a:1, a:2, a:000]
+endfunction
+call assert_equal(['x', 'y', ['x', 'y']], Both('x', 'y'))
+
 " ── a vararg function works as a lambda body's callee, too ──
 call assert_equal([1, 3, 6], map([1, 2, 3], {i, v -> Sum(v, i * v)}))
 

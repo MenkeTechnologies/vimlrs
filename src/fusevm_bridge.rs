@@ -2261,6 +2261,11 @@ fn call_user_function(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
         Vec::new()
     };
     bind_avar("0", tv_num(extra.len() as varnumber_T));
+    // Each extra argument is also reachable as a:1, a:2, ... a:N (Vim binds the
+    // varargs individually in addition to the a:000 list).
+    for (i, v) in extra.iter().enumerate() {
+        bind_avar(&(i + 1).to_string(), v.clone());
+    }
     bind_avar("000", new_list(extra));
 
     RETURN_STACK.with(|r| r.borrow_mut().push(None));
