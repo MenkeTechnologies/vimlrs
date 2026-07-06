@@ -2192,8 +2192,7 @@ fn run_source_nested(src: &str) -> Result<(), VimlError> {
     }
     CMD_RECURSE.with(|c| c.set(depth + 1));
     let r = (|| {
-        let prog =
-            crate::compile_viml::compile_program(&crate::viml_parser::parse_program(src)?)?;
+        let prog = crate::compile_viml::compile_program(&crate::viml_parser::parse_program(src)?)?;
         register_prog_funcs(&mut prog.funcs.into_iter());
         stage_deferred_funcs(prog.deferred_funcs);
         run_chunk_nested(prog.main);

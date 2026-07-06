@@ -972,8 +972,32 @@ fn split_commands(line: &str) -> Vec<&str> {
     let mut i = 0usize;
     let mut sq = false; // inside a single-quoted string ('' is an escaped quote)
     let mut dq = false; // inside a double-quoted string (\ escapes)
+                        // A `:sy[ntax]` command carries `/…/`-delimited regex patterns whose bars are
+                        // literal alternation, not command separators: `syn match Foo /\v(N|G|E)/`.
+                        // Vim's syntax parser skips each pattern via `skip_regexp` before it looks for
+                        // a trailing `|`, so a `|` inside `/…/` never ends the command. Track a slash
+                        // pattern the same way sq/dq strings are tracked (`\` escapes, `/` closes) so
+                        // inner bars stay literal. (`'…'`/`"…"` delimiters are already covered by the
+                        // sq/dq handling.) Scoped to `:syntax` so real division — `let x = 4/2 | …` —
+                        // still splits on the bar.
+    let is_syntax_cmd = matches!(
+        cmd_word(strip_command_modifiers(line.trim())).0,
+        "sy" | "syn" | "synt" | "synta" | "syntax"
+    );
+    let mut slash = false; // inside a `/…/` :syntax pattern (\ escapes, / closes)
     while i < bytes.len() {
         let c = bytes[i];
+        if slash {
+            if c == b'\\' {
+                i += 2;
+                continue;
+            }
+            if c == b'/' {
+                slash = false;
+            }
+            i += 1;
+            continue;
+        }
         if sq {
             if c == b'\'' {
                 if bytes.get(i + 1) == Some(&b'\'') {
@@ -997,6 +1021,7 @@ fn split_commands(line: &str) -> Vec<&str> {
             continue;
         }
         match c {
+            b'/' if is_syntax_cmd => slash = true,
             b'\'' => sq = true,
             b'"' => {
                 // A `"` with only whitespace before it in this command is a
