@@ -465,15 +465,16 @@ fn canon_block_kw(cmd: &str) -> &str {
     }
 }
 
-/// Whether `cmd` OPENS a multi-line block (`:if`/`:while`/`:for`/`:function`/
-/// `:def`/`:try`), routed through `canon_block_kw` so every Vim abbreviation
-/// (`fu`/`wh`/…) counts. Used by the tolerant parser to consume a whole block
-/// as one unit when its body fails to parse.
+/// Whether `cmd` OPENS a multi-line block: the legacy `:if`/`:while`/`:for`/
+/// `:function`/`:try` (routed through `canon_block_kw` so every Vim abbreviation
+/// `fu`/`wh`/… counts) plus the vim9 definition blocks `:def`/`:enum`/`:class`/
+/// `:interface`. Used by the tolerant parser to consume a whole block as one
+/// unit when its body fails to parse.
 fn is_block_opener(cmd: &str) -> bool {
     matches!(
         canon_block_kw(cmd),
-        "if" | "while" | "for" | "function" | "try"
-    ) || cmd == "def"
+        "if" | "while" | "for" | "function" | "try" | "def" | "enum" | "class" | "interface"
+    )
 }
 
 /// The command word that determines a line's block role, seen through any
@@ -492,14 +493,23 @@ fn block_cmd_word(line: &str) -> &str {
 }
 
 /// Whether `cmd` is a *final* block terminator — the keyword that closes a block
-/// for good (`:endif`/`:endwhile`/`:endfor`/`:endfunction`/`:enddef`/`:endtry`).
-/// The mid-block continuations (`:else`/`:elseif`/`:catch`/`:finally`) are NOT
-/// finals: they neither open nor close a block, so they leave nesting depth
-/// unchanged when balancing openers against terminators.
+/// for good (`:endif`/`:endwhile`/`:endfor`/`:endfunction`/`:endtry`, and the
+/// vim9 `:enddef`/`:endenum`/`:endclass`/`:endinterface`). The mid-block
+/// continuations (`:else`/`:elseif`/`:catch`/`:finally`) are NOT finals: they
+/// neither open nor close a block, so they leave nesting depth unchanged when
+/// balancing openers against terminators.
 fn is_final_block_terminator(cmd: &str) -> bool {
     matches!(
         canon_block_kw(cmd),
-        "endif" | "endwhile" | "endfor" | "endfunction" | "enddef" | "endtry"
+        "endif"
+            | "endwhile"
+            | "endfor"
+            | "endfunction"
+            | "enddef"
+            | "endtry"
+            | "endenum"
+            | "endclass"
+            | "endinterface"
     )
 }
 
