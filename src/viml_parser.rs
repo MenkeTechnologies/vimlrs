@@ -2098,6 +2098,20 @@ impl Parser {
                     self.advance();
                     let args = self.arg_list(&Tok::RParen)?;
                     Ok(Expr::Call { name, args })
+                } else if vim9_active() {
+                    // vim9 keyword literals (`vim9.txt`): in a `:vim9script` script
+                    // or a `def…enddef` body, bare `true`/`false`/`null` are the
+                    // boolean/special constants — equal to `v:true`/`v:false`/`v:null`
+                    // (binary-verified: `true == v:true`, `type(true) == 6`,
+                    // `type(null) == 7`). In legacy mode they stay ordinary names
+                    // (bare `true` → E121 undefined variable), so this only fires
+                    // under `vim9_active()`.
+                    match name.as_str() {
+                        "true" => Ok(Expr::Var("v:true".to_string())),
+                        "false" => Ok(Expr::Var("v:false".to_string())),
+                        "null" => Ok(Expr::Var("v:null".to_string())),
+                        _ => Ok(Expr::Var(name)),
+                    }
                 } else {
                     Ok(Expr::Var(name))
                 }
