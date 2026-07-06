@@ -1416,6 +1416,19 @@ fn b_report_uncaught(_vm: &mut VM, _: u8) -> Value {
 
 fn b_getvar(vm: &mut VM, _: u8) -> Value {
     let name = tv_get_string(&pop_tv(vm));
+    // `b:changedtick` is Vim's always-present buffer change counter (never
+    // `:let`-set; `:help changetick`). It reads the current buffer's tick via
+    // the ported `buf_get_changedtick`, so a script that samples/compares it
+    // (e.g. `runtime/indent/php.vim`: `let b:PHP_oldchangetick = b:changedtick`)
+    // sees a Number instead of an E121, matching Vim.
+    if name == "b:changedtick" {
+        let tick = crate::ported::buffer::curbuf
+            .with(|c| c.borrow().clone())
+            .map_or(0, |b| {
+                crate::ported::buffer::buf_get_changedtick(&b.borrow())
+            });
+        return Value::Int(tick as i64);
+    }
     // Dynamic v: state (not fixed v: constants).
     if name == "v:exception" {
         return Value::str(V_EXCEPTION.with(|e| e.borrow().clone()));

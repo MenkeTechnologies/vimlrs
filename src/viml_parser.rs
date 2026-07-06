@@ -160,17 +160,19 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
         // locks the variable (reassigning is E741); that immutability is not yet
         // enforced here — `:const` parses and assigns as `:let`.
         "const" | "cons" => parse_let(&strip_vim9_type(rest)),
-        "call" => Ok(Stmt::Call(parse_expr(rest)?)),
-        "eval" => Ok(Stmt::Expr(parse_expr(rest)?)),
+        "call" => Ok(Stmt::Call(parse_expr(strip_legacy_trailing_comment(rest))?)),
+        "eval" => Ok(Stmt::Expr(parse_expr(strip_legacy_trailing_comment(rest))?)),
         "break" => Ok(Stmt::Break),
         "continue" | "cont" => Ok(Stmt::Continue),
         "finish" | "finis" | "fini" => Ok(Stmt::Finish),
         "return" => Ok(if rest.trim().is_empty() {
             Stmt::Return(None)
         } else {
-            Stmt::Return(Some(parse_expr(rest)?))
+            Stmt::Return(Some(parse_expr(strip_legacy_trailing_comment(rest))?))
         }),
-        "throw" => Ok(Stmt::Throw(parse_expr(rest)?)),
+        "throw" => Ok(Stmt::Throw(parse_expr(strip_legacy_trailing_comment(
+            rest,
+        ))?)),
         // `:command[!] …` defines a user command; `:delcommand` removes one.
         // (`command(`/`delcommand(` are not builtins, but guard anyway.)
         "command" | "comm" | "com" if !line[cmd.len()..].starts_with('(') => {
@@ -463,6 +465,44 @@ fn canon_block_kw(cmd: &str) -> &str {
     }
 }
 
+/// Whether `cmd` OPENS a multi-line block (`:if`/`:while`/`:for`/`:function`/
+/// `:def`/`:try`), routed through `canon_block_kw` so every Vim abbreviation
+/// (`fu`/`wh`/…) counts. Used by the tolerant parser to consume a whole block
+/// as one unit when its body fails to parse.
+fn is_block_opener(cmd: &str) -> bool {
+    matches!(
+        canon_block_kw(cmd),
+        "if" | "while" | "for" | "function" | "try"
+    ) || cmd == "def"
+}
+
+/// The command word that determines a line's block role, seen through any
+/// leading command modifiers (`silent`/`verbose`/…) and a vim9 `export` marker.
+/// `export def`/`export function` open a block exactly as the bare forms do, so
+/// the tolerant parser must classify them as openers when it skips a body that
+/// failed to parse — otherwise the raw command word is `export` (not a block
+/// keyword) and the block's inner statements leak out to run at the top level.
+fn block_cmd_word(line: &str) -> &str {
+    let (cmd, rest) = cmd_word(strip_command_modifiers(line));
+    if cmd == "export" {
+        cmd_word(rest).0
+    } else {
+        cmd
+    }
+}
+
+/// Whether `cmd` is a *final* block terminator — the keyword that closes a block
+/// for good (`:endif`/`:endwhile`/`:endfor`/`:endfunction`/`:enddef`/`:endtry`).
+/// The mid-block continuations (`:else`/`:elseif`/`:catch`/`:finally`) are NOT
+/// finals: they neither open nor close a block, so they leave nesting depth
+/// unchanged when balancing openers against terminators.
+fn is_final_block_terminator(cmd: &str) -> bool {
+    matches!(
+        canon_block_kw(cmd),
+        "endif" | "endwhile" | "endfor" | "endfunction" | "enddef" | "endtry"
+    )
+}
+
 /// Parse a whole source block into a flat statement list with block structure
 /// (the `:if`/`:while`/`:for`/`:function`/`:try` bodies nested inside).
 pub fn parse_program(src: &str) -> Result<Vec<Stmt>, VimlError> {
@@ -535,8 +575,17 @@ pub fn parse_program_lines_tolerant(src: &str) -> TolerantParse {
             }
             Err(e) => {
                 errs.push((lineno, e.0));
-                // Resume at the line after the one that began the failed parse.
-                cur.i = snapshot + 1;
+                if is_block_opener(block_cmd_word(&line)) {
+                    // A block whose body failed to parse is consumed WHOLE, up to
+                    // its matching terminator — exactly as Vim reads a block to
+                    // its end regardless of body contents. This keeps the inner
+                    // statements from leaking out to run at the top level (a
+                    // function's `while` loop must never execute at script scope).
+                    cur.skip_block_from(snapshot);
+                } else {
+                    // Resume at the line after the one that began the failed parse.
+                    cur.i = snapshot + 1;
+                }
             }
         }
     }
@@ -744,6 +793,34 @@ impl Lines {
 
     fn line_no(&self) -> u32 {
         self.lines.get(self.i).map(|(n, _)| *n).unwrap_or(0)
+    }
+
+    /// Advance the cursor past the whole block that began at logical-line index
+    /// `start` (a block-opener line), leaving `i` just after the matching final
+    /// terminator. The tolerant parser calls this when a block's body fails to
+    /// parse, so the block is consumed as ONE unit — mirroring Vim, which reads
+    /// a `:function … :endfunction` (and every `:while`/`:if`/`:for`/`:try`) to
+    /// its terminator regardless of body contents. Without it, a broken body
+    /// leaks its inner statements out to run at the top level (e.g. a function's
+    /// `while` loop executing unbounded at script scope). Nested blocks are
+    /// balanced by depth; an unterminated block consumes to end-of-input.
+    fn skip_block_from(&mut self, start: usize) {
+        let mut depth = 0i32;
+        let mut j = start;
+        while j < self.lines.len() {
+            let cmd = block_cmd_word(&self.lines[j].1);
+            if is_block_opener(cmd) {
+                depth += 1;
+            } else if is_final_block_terminator(cmd) {
+                depth -= 1;
+                if depth == 0 {
+                    self.i = j + 1;
+                    return;
+                }
+            }
+            j += 1;
+        }
+        self.i = self.lines.len();
     }
 }
 
@@ -973,15 +1050,77 @@ fn parse_block(cur: &mut Lines, terms: &[&str]) -> ParseBlockResult {
 
 const IF_TERMS: &[&str] = &["elseif", "else", "endif"];
 
+/// Strip a legacy trailing `"` line comment from a single-expression command
+/// argument (`:if`/`:elseif`/`:while`/`:for`/`:return`/`:eval`/`:call`/`:throw`
+/// and a `:let` RHS). In legacy Vim script a double-quoted string never spans a
+/// line, so a top-level `"` whose body does not close before end-of-line cannot
+/// be a string operand — it opens a comment (`:help :comment`), which these
+/// commands accept after their expression. Binary-verified against Vim 9.2:
+/// `if 1 " c`, `elseif c ==? 'f' " c`, `let x = 1 " c` all succeed, while
+/// `echo 1 " c` errors — so this is applied only to the single-expression
+/// commands, never to `:echo` (which parses a whole expression list). A `"`
+/// inside a complete `'…'`/`"…"` string, or one that *does* close, is a real
+/// operand and left intact — so for a well-formed argument this only trims
+/// trailing whitespace, never altering an expression that already parses. This
+/// makes a trailing-comment line parse in the strict fast path (so the enclosing
+/// `:function` body is captured and the function is defined) instead of failing
+/// with E114 and dropping to the tolerant fallback.
+fn strip_legacy_trailing_comment(s: &str) -> &str {
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'\'' => {
+                // Single-quoted string: `''` is an escaped quote.
+                i += 1;
+                while i < b.len() {
+                    if b[i] == b'\'' {
+                        if b.get(i + 1) == Some(&b'\'') {
+                            i += 2;
+                            continue;
+                        }
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            b'"' => {
+                // Does this `"` open a string that closes before EOL (`\` escapes)?
+                let mut j = i + 1;
+                let mut closed = false;
+                while j < b.len() {
+                    match b[j] {
+                        b'\\' => j += 2,
+                        b'"' => {
+                            closed = true;
+                            j += 1;
+                            break;
+                        }
+                        _ => j += 1,
+                    }
+                }
+                if closed {
+                    i = j; // a real string operand — skip past it
+                } else {
+                    return s[..i].trim_end(); // unterminated → start of comment
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    s.trim_end()
+}
+
 fn parse_if(cur: &mut Lines, cond_str: &str) -> Result<Stmt, VimlError> {
     let mut arms = Vec::new();
     let mut else_body = None;
     let (body, mut term) = parse_block(cur, IF_TERMS)?;
-    arms.push((parse_expr(cond_str)?, body));
+    arms.push((parse_expr(strip_legacy_trailing_comment(cond_str))?, body));
     loop {
         match term {
             Some((ref c, ref rest)) if c == "elseif" => {
-                let cond = parse_expr(rest)?;
+                let cond = parse_expr(strip_legacy_trailing_comment(rest))?;
                 let (b, t) = parse_block(cur, IF_TERMS)?;
                 arms.push((cond, b));
                 term = t;
@@ -1003,7 +1142,7 @@ fn parse_if(cur: &mut Lines, cond_str: &str) -> Result<Stmt, VimlError> {
 }
 
 fn parse_while(cur: &mut Lines, cond_str: &str) -> Result<Stmt, VimlError> {
-    let cond = parse_expr(cond_str)?;
+    let cond = parse_expr(strip_legacy_trailing_comment(cond_str))?;
     let (body, term) = parse_block(cur, &["endwhile"])?;
     if term.is_none() {
         return Err(VimlError::msg("E170: Missing :endwhile"));
@@ -1028,7 +1167,7 @@ fn parse_for(cur: &mut Lines, header: &str) -> Result<Stmt, VimlError> {
     } else {
         ForVars::One(var.to_string())
     };
-    let iter = parse_expr(header[idx + 4..].trim())?;
+    let iter = parse_expr(strip_legacy_trailing_comment(header[idx + 4..].trim()))?;
     let (body, term) = parse_block(cur, &["endfor"])?;
     if term.is_none() {
         return Err(VimlError::msg("E170: Missing :endfor"));
@@ -1774,6 +1913,7 @@ fn parse_let(rest: &str) -> Result<Stmt, VimlError> {
     };
     // Plain `=` stores the RHS directly; `op=` desugars to `target = target op rhs`
     // (`tv_op` semantics), reusing the same store path so it stays JIT-eligible.
+    let rhs = strip_legacy_trailing_comment(rhs);
     let expr = match op {
         None => parse_expr(rhs)?,
         Some(op) => {
