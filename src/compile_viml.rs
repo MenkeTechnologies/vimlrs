@@ -505,6 +505,7 @@ fn slot_plan(stmts: &[Stmt], in_function: bool) -> SlotPlan {
                 | Stmt::Map(_)
                 | Stmt::CommandDef(_)
                 | Stmt::CommandDel(_)
+                | Stmt::DelFunction(_)
                 | Stmt::UserCmd(_)
                 | Stmt::Autocmd(_)
                 | Stmt::Augroup(_)
@@ -877,6 +878,12 @@ impl Compiler {
             Stmt::CommandDel(name) => {
                 self.load_str(name);
                 self.emit(Op::CallBuiltin(h::VIML_DELCOMMAND, 1));
+                self.emit(Op::Pop);
+                Ok(())
+            }
+            Stmt::DelFunction(arg) => {
+                self.load_str(arg);
+                self.emit(Op::CallBuiltin(h::VIML_DELFUNCTION, 1));
                 self.emit(Op::Pop);
                 Ok(())
             }

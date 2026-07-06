@@ -399,6 +399,9 @@ pub const VIML_MAP: u16 = 3562;
 pub const VIML_COMMAND: u16 = 3563;
 /// `:delcommand` statement: pop the name, delete via `ex_delcommand`.
 pub const VIML_DELCOMMAND: u16 = 3564;
+/// `:delfunction[!]` statement: pop the raw arg (optional `!` + name), remove
+/// the user function from the registry.
+pub const VIML_DELFUNCTION: u16 = 3581;
 /// User-command invocation: pop the raw line, expand + run the replacement.
 pub const VIML_USERCMD: u16 = 3565;
 /// `:autocmd` statement: pop the args, register via `do_autocmd`.
@@ -2723,6 +2726,42 @@ fn b_delcommand(vm: &mut VM, _: u8) -> Value {
     Value::Undef
 }
 
+/// `:delfunction[!] {name}` statement: pop the raw argument, split off a leading
+/// `!` (`forceit`), then remove the named user function from the registry.
+///
+/// Mirrors the observable semantics of `ex_delfunction` (userfunc.c:3119) — the
+/// function is looked up and dropped, and an unknown name without `!` reports
+/// `E117` — but resolves the name through the bridge's own registry model
+/// (`canon_func_name`, a leading `g:` stripped) exactly as `:call` and
+/// `exists('*…')` do, rather than the C's `<SNR>`-translation path (which cannot
+/// address vimlrs's literal `s:`/`<SID>` keys in the single-script model).
+fn b_delfunction(vm: &mut VM, _: u8) -> Value {
+    let raw = tv_get_string(&pop_tv(vm));
+    let raw = raw.trim();
+    let (forceit, rest) = match raw.strip_prefix('!') {
+        Some(r) => (true, r.trim_start()),
+        None => (false, raw),
+    };
+    // The name runs up to whitespace or a `|`/comment separator; trailing args
+    // are ignored (real Vim errors E488, but runtime files never rely on that).
+    let name = rest
+        .split(|c: char| c.is_whitespace() || c == '|')
+        .next()
+        .unwrap_or("")
+        .trim();
+    if name.is_empty() {
+        message::emsg("E129: Function name required");
+        return Value::Undef;
+    }
+    let key = name.strip_prefix("g:").unwrap_or(name);
+    let key = &*canon_func_name(key);
+    let removed = FUNCTIONS.with(|f| f.borrow_mut().remove(key).is_some());
+    if !removed && !forceit {
+        message::semsg(&format!("E117: Unknown function: {name}"));
+    }
+    Value::Undef
+}
+
 /// `:autocmd` statement: pop the args, register the autocommand.
 fn b_autocmd(vm: &mut VM, _: u8) -> Value {
     let args = tv_get_string(&pop_tv(vm));
@@ -3695,6 +3734,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_MAP, b_map);
     vm.register_builtin(VIML_COMMAND, b_command);
     vm.register_builtin(VIML_DELCOMMAND, b_delcommand);
+    vm.register_builtin(VIML_DELFUNCTION, b_delfunction);
     vm.register_builtin(VIML_USERCMD, b_usercmd);
     vm.register_builtin(VIML_AUTOCMD, b_autocmd);
     vm.register_builtin(VIML_AUGROUP, b_augroup);

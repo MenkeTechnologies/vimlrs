@@ -324,6 +324,10 @@ pub enum Stmt {
     CommandDef(String),
     /// `:delcommand {name}` — delete a user command.
     CommandDel(String),
+    /// `:delfunction[!] {name}` — remove a user function from the registry.
+    /// The raw argument (optional leading `!`, then the name) is resolved at
+    /// run time, mirroring how `:call`/`exists('*…')` key the function table.
+    DelFunction(String),
     /// Invocation of a user command (`:Name args`): the whole raw line,
     /// resolved against the user-command table at run time.
     UserCmd(String),

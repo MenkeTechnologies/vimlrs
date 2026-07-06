@@ -181,6 +181,16 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
         "delcommand" | "delc" if !line[cmd.len()..].starts_with('(') => {
             Ok(Stmt::CommandDel(rest.to_string()))
         }
+        // `:delf[unction][!] {name}` removes a user function. The raw remainder
+        // (the run-time handler splits off a leading `!`) carries the name; a
+        // `delfunction(` form is an expression call, so guard on `(`.
+        "delfunction" | "delfunctio" | "delfuncti" | "delfunct" | "delfunc" | "delfun" | "delf"
+            if !line[cmd.len()..].starts_with('(') =>
+        {
+            Ok(Stmt::DelFunction(
+                line[cmd.len()..].trim_start().to_string(),
+            ))
+        }
         // `:autocmd`/`:augroup`/`:doautocmd` (with abbreviations).
         "autocmd" | "autocm" | "autoc" | "auto" | "au" if !line[cmd.len()..].starts_with('(') => {
             Ok(Stmt::Autocmd(line[cmd.len()..].trim_start().to_string()))
