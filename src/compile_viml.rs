@@ -1715,12 +1715,37 @@ impl Compiler {
                 }
             }
             Expr::Dict(pairs) => {
-                for (k, v) in pairs {
-                    self.expr(k)?;
-                    self.expr(v)?;
+                // A single `VIML_MAKE_DICT` op carries the slot count (2 per pair)
+                // in a `u8` (max 255), so a literal caps at 127 pairs. VimL puts no
+                // size limit on a Dict literal, so for a longer literal build it in
+                // chunks of 127 pairs and merge the chunks with `extend()` (in-place
+                // merge returning the first dict) — an identical Dict, no size cap.
+                // (Vim corpus e.g. colors/lists/default.vim's 788-entry v:colornames
+                // extend.)
+                const MAX_PAIRS: usize = (u8::MAX as usize) / 2; // 127
+                if pairs.len() <= MAX_PAIRS {
+                    for (k, v) in pairs {
+                        self.expr(k)?;
+                        self.expr(v)?;
+                    }
+                    self.emit(Op::CallBuiltin(h::VIML_MAKE_DICT, (pairs.len() * 2) as u8));
+                } else {
+                    let mut chunks = pairs.chunks(MAX_PAIRS);
+                    let first = chunks.next().unwrap();
+                    for (k, v) in first {
+                        self.expr(k)?;
+                        self.expr(v)?;
+                    }
+                    self.emit(Op::CallBuiltin(h::VIML_MAKE_DICT, (first.len() * 2) as u8));
+                    for chunk in chunks {
+                        for (k, v) in chunk {
+                            self.expr(k)?;
+                            self.expr(v)?;
+                        }
+                        self.emit(Op::CallBuiltin(h::VIML_MAKE_DICT, (chunk.len() * 2) as u8));
+                        self.emit(Op::CallBuiltin(h::VIML_FN_EXTEND, 2));
+                    }
                 }
-                let n = Self::argc(pairs.len() * 2)?;
-                self.emit(Op::CallBuiltin(h::VIML_MAKE_DICT, n));
             }
             Expr::Lambda { params, body } => {
                 // Desugar to an anonymous function `<lambda>N(captures…, params…)`
