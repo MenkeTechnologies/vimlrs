@@ -289,9 +289,18 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
         // `:'<,'>s/…`) — never a bare string, which isn't a valid statement. Route
         // it to `do_excmd` so it parses; otherwise `parse_expr` reads it as an
         // unterminated string literal and aborts the enclosing `:function`.
+        // A line beginning with an ASCII digit is a line-range Ex command: Vim's
+        // `do_one_cmd` reads a leading number as the range's first address
+        // (`1print`, `1,1fold`, `5`), so it is an Ex command, never an expression
+        // statement (a bare number line moves the cursor, `:h {address}`).
+        // `do_excmd`/`parse_line_range` already parse the range and dispatch (or
+        // no-op) the command; routing here lets such a line in a `:function` body
+        // parse instead of falling through to `parse_expr`, which chokes on the
+        // trailing command word and aborts the whole definition.
         _ if line.starts_with(':')
             || line.starts_with('!')
             || line.starts_with('\'')
+            || line.starts_with(|c: char| c.is_ascii_digit())
             || (line.starts_with('%')
                 && line[1..].starts_with(|c: char| c.is_ascii_alphabetic())) =>
         {
