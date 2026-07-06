@@ -87,6 +87,8 @@ pub enum Tok {
     Bang,
     /// `->`
     Arrow,
+    /// `=>` (vim9 lambda arrow)
+    FatArrow,
     /// `(`
     LParen,
     /// `)`
@@ -499,6 +501,11 @@ impl<'a> Lexer<'a> {
             }
             (b'=', b'=') => cmp!(CmpOp::Equal, 2),
             (b'=', b'~') => cmp!(CmpOp::Match, 2),
+            // `=>` is the vim9 lambda arrow (`(a, b) => a + b`).
+            (b'=', b'>') => {
+                self.pos += 2;
+                Ok(Tok::FatArrow)
+            }
             (b'=', _) => {
                 self.pos += 1;
                 Ok(Tok::Assign)

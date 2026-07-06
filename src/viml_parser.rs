@@ -753,6 +753,16 @@ impl Lines {
 fn parse_one(cur: &mut Lines) -> Result<Vec<Stmt>, VimlError> {
     let line = cur.peek().expect("parse_one called at EOF");
     let (cmd, rest) = cmd_word(&line);
+    // vim9 `export` marks the following definition (`def`/`var`/`const`/`final`/
+    // `class`/`interface`/`enum`) visible to importers. Editor-less the marker has
+    // no runtime effect, so strip it and re-dispatch on the real definition. Without
+    // this, `export def Foo()` would fall through to the `_` command arm and its body
+    // would run as top-level statements (E117/E121 on every body line).
+    if cmd == "export" {
+        let stripped = rest.trim_start().to_string();
+        cur.lines[cur.i].1 = stripped;
+        return parse_one(cur);
+    }
     // Route block openers through `canon_block_kw` so every Vim abbreviation
     // (`fu`/`fun`/`func` for `:function`, `wh` for `:while`, …) opens the block.
     match canon_block_kw(cmd) {
@@ -2206,6 +2216,11 @@ impl Parser {
             Tok::Env(e) => Ok(Expr::Env(e)),
             Tok::Register(r) => Ok(Expr::Register(r)),
             Tok::LParen => {
+                // vim9 lambda `(params) => body` (opening `(` already consumed);
+                // otherwise an ordinary parenthesised expression.
+                if self.at_vim9_lambda() {
+                    return self.vim9_lambda();
+                }
                 let e = self.eval1()?;
                 self.eat(&Tok::RParen)?;
                 Ok(e)
@@ -2421,6 +2436,146 @@ impl Parser {
                 Some(Tok::Arrow) => return true,
                 Some(Tok::Comma) => j += 1,
                 _ => return false,
+            }
+        }
+    }
+
+    /// Lookahead (opening `(` already consumed) distinguishing a vim9 lambda
+    /// `(params) => body` — optionally `(params): rettype => body` — from an
+    /// ordinary parenthesised expression. Scans to the matching `)`, then requires
+    /// a `=>` next, allowing an optional `: rettype` annotation in between. Only
+    /// fires in a vim9 region; legacy scripts have no `=>` lambda.
+    fn at_vim9_lambda(&self) -> bool {
+        if !vim9_active() {
+            return false;
+        }
+        let mut j = self.i;
+        let mut depth = 1i32;
+        while depth > 0 {
+            match self.toks.get(j).map(|t| &t.kind) {
+                None | Some(Tok::Eof) => return false,
+                Some(Tok::LParen) | Some(Tok::LBracket) | Some(Tok::LBrace) => depth += 1,
+                Some(Tok::RParen) | Some(Tok::RBracket) | Some(Tok::RBrace) => depth -= 1,
+                _ => {}
+            }
+            j += 1;
+        }
+        // `j` is now just past the matching `)`.
+        match self.toks.get(j).map(|t| &t.kind) {
+            Some(Tok::FatArrow) => true,
+            // `(params): rettype => body` — a top-level `=>` must follow the `:`.
+            Some(Tok::Colon) => {
+                let mut k = j + 1;
+                let mut d = 0i32;
+                while let Some(t) = self.toks.get(k) {
+                    match &t.kind {
+                        Tok::FatArrow if d == 0 => return true,
+                        Tok::LParen | Tok::LBracket | Tok::LBrace => d += 1,
+                        Tok::RParen | Tok::RBracket | Tok::RBrace => {
+                            if d == 0 {
+                                return false;
+                            }
+                            d -= 1;
+                        }
+                        Tok::Comma if d == 0 => return false,
+                        Tok::Eof => return false,
+                        _ => {}
+                    }
+                    k += 1;
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// Parse a vim9 lambda `(params) => body` (opening `(` already consumed).
+    /// Parameter type annotations (`x: type`) and an optional return type
+    /// (`): type =>`) are accepted and discarded — only the names bind, reusing the
+    /// same `Expr::Lambda` representation as the legacy `{params -> body}` form.
+    fn vim9_lambda(&mut self) -> Result<Expr, VimlError> {
+        let mut params = Vec::new();
+        if !matches!(self.peek(), Tok::RParen) {
+            loop {
+                match self.advance() {
+                    // A scope-letter parameter (`a`, `b`, `s`, `g`, `l`, `t`, `v`,
+                    // `w`) followed by a `: type` annotation is lexed with the colon
+                    // absorbed into the identifier (`a: number` → `Ident("a:")`,
+                    // `a:list` → `Ident("a:list")`). Split the name off at that colon
+                    // and skip the remaining type tokens; the standalone-colon case
+                    // (`n: number`) is handled just below.
+                    Tok::Ident(n) => match n.find(':') {
+                        Some(pos) => {
+                            params.push(n[..pos].to_string());
+                            self.skip_type();
+                        }
+                        None => params.push(n),
+                    },
+                    other => {
+                        return Err(VimlError::msg(format!(
+                            "E15: expected lambda parameter, found {other:?}"
+                        )))
+                    }
+                }
+                if matches!(self.peek(), Tok::Colon) {
+                    self.advance();
+                    self.skip_type();
+                }
+                match self.peek() {
+                    Tok::Comma => {
+                        self.advance();
+                    }
+                    Tok::RParen => break,
+                    other => {
+                        return Err(VimlError::msg(format!(
+                            "E15: expected ',' or ')' in lambda, found {other:?}"
+                        )))
+                    }
+                }
+            }
+        }
+        self.eat(&Tok::RParen)?;
+        if matches!(self.peek(), Tok::Colon) {
+            self.advance();
+            self.skip_type();
+        }
+        self.eat(&Tok::FatArrow)?;
+        let body = self.eval1()?;
+        Ok(Expr::Lambda {
+            params,
+            body: Box::new(body),
+        })
+    }
+
+    /// Skip a vim9 type expression in a lambda signature, consuming tokens up to a
+    /// top-level `,`, `)`, or `=>` (its terminators in param / return position).
+    /// `<…>` (`list<number>`), `(…)` (`func(...)`) and `[…]` nest.
+    fn skip_type(&mut self) {
+        let mut angle = 0i32;
+        let mut paren = 0i32;
+        loop {
+            match self.peek() {
+                Tok::Cmp(CmpOp::Less, _) => {
+                    angle += 1;
+                    self.advance();
+                }
+                Tok::Cmp(CmpOp::Greater, _) if angle > 0 => {
+                    angle -= 1;
+                    self.advance();
+                }
+                Tok::LParen | Tok::LBracket => {
+                    paren += 1;
+                    self.advance();
+                }
+                Tok::RParen | Tok::RBracket if paren > 0 => {
+                    paren -= 1;
+                    self.advance();
+                }
+                Tok::Comma | Tok::RParen | Tok::FatArrow if angle == 0 && paren == 0 => break,
+                Tok::Eof => break,
+                _ => {
+                    self.advance();
+                }
             }
         }
     }
