@@ -227,6 +227,13 @@ impl<'a> Lexer<'a> {
             b'\'' => self.lex_single_string(),
             b'"' => self.lex_double_string(),
             b'a'..=b'z' | b'A'..=b'Z' | b'_' => Ok(self.lex_ident()),
+            // `<SID>name` / `<SNR>123_name` are script-local function names, not a
+            // `<` comparison: Vim accepts them wherever a function name is expected
+            // (`:call <SID>Foo()`, `<SID>Foo(...)`, `function('<SID>Foo')`). The
+            // `<SID>`/`<SNR>` marker is case-insensitive (userfunc.c STRNICMP), so
+            // scan the whole marker plus the following name as one identifier and
+            // let the parser treat it as a `Tok::Ident` (call or funcref name).
+            b'<' if self.at_scriptid_name() => Ok(self.lex_scriptid_name()),
             // `#{` opens a literal-key Dict.
             b'#' if self.peek2() == b'{' => {
                 self.pos += 2;
@@ -583,6 +590,29 @@ impl<'a> Lexer<'a> {
                 }
             }
         }
+    }
+
+    /// Whether the bytes at the cursor begin a script-local function name marker
+    /// (`<SID>` or `<SNR>`, case-insensitive). Called only when `peek()` is `<`.
+    fn at_scriptid_name(&self) -> bool {
+        self.src
+            .get(self.pos..self.pos + 5)
+            .is_some_and(|m| m.eq_ignore_ascii_case(b"<SID>") || m.eq_ignore_ascii_case(b"<SNR>"))
+    }
+
+    /// Scan a `<SID>`/`<SNR>` script-local function name into a single
+    /// `Tok::Ident` carrying the literal marker plus the following name (for
+    /// `<SNR>` this includes the `123_` script-id prefix, which is ordinary
+    /// name-tail bytes). The marker is preserved verbatim; the registry resolves
+    /// `<SID>Foo` against the `func <SID>Foo()` definition stored under the same
+    /// literal name.
+    fn lex_scriptid_name(&mut self) -> Tok {
+        let start = self.pos;
+        self.pos += 5; // past `<SID>` / `<SNR>`
+        while matches!(self.peek(), b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_') {
+            self.pos += 1;
+        }
+        Tok::Ident(self.s[start..self.pos].to_string())
     }
 
     fn lex_ident(&mut self) -> Tok {

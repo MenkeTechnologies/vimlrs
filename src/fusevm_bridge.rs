@@ -2045,9 +2045,28 @@ fn b_set_return(vm: &mut VM, _: u8) -> Value {
     Value::Undef
 }
 
+/// Canonicalize a script-local function name's `<SID>`/`<SNR>` marker to its
+/// upper-case form. Vim matches the marker case-insensitively (`STRNICMP`,
+/// userfunc.c) while the name after it stays case-sensitive, so `<sid>Foo` and
+/// `<SID>Foo` name the same function. Every `FUNCTIONS` registry access routes
+/// through this so a `:function` definition, a `:call`, an expression call,
+/// `exists('*…')`, `function('…')`, and `:delfunction` all agree on one key.
+fn canon_func_name(name: &str) -> std::borrow::Cow<'_, str> {
+    let marker = name
+        .get(..5)
+        .filter(|m| m.eq_ignore_ascii_case("<SID>") || m.eq_ignore_ascii_case("<SNR>"));
+    match marker {
+        Some(m) if m.bytes().any(|b| b.is_ascii_lowercase()) => {
+            std::borrow::Cow::Owned(format!("{}{}", m.to_ascii_uppercase(), &name[5..]))
+        }
+        _ => std::borrow::Cow::Borrowed(name),
+    }
+}
+
 /// Invoke a user function: bind `a:` args, push the `l:`/`a:` scope, run the
 /// body chunk on a nested VM, and return the result (`0` if no `:return`).
 fn call_user_function(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
+    let name = &*canon_func_name(name);
     let func = FUNCTIONS.with(|f| f.borrow().get(name).cloned())?;
 
     // Vim caps recursion at 'maxfuncdepth' (default 100): the 101st nested call
@@ -2208,7 +2227,7 @@ fn register_prog_funcs(funcs: &mut dyn Iterator<Item = crate::compile_viml::User
     FUNCTIONS.with(|f| {
         let mut f = f.borrow_mut();
         for func in funcs {
-            f.insert(func.name.clone(), func);
+            f.insert(canon_func_name(&func.name).into_owned(), func);
         }
     });
 }
@@ -2465,6 +2484,7 @@ fn eval_string_hook(expr: &str) -> Option<typval_T> {
 /// The user-function lookup hook (installed into `FIND_FUNC_HOOK`): map a
 /// registered `UserFuncDef` to the ported reduced `ufunc_T` (name + arity).
 fn find_func_hook(name: &str) -> Option<crate::ported::eval::userfunc::ufunc_T> {
+    let name = &*canon_func_name(name);
     let def = FUNCTIONS.with(|f| f.borrow().get(name).cloned())?;
     let nfixed = def
         .params
@@ -2487,6 +2507,7 @@ fn find_func_hook(name: &str) -> Option<crate::ported::eval::userfunc::ufunc_T> 
 /// The user-function removal hook (installed into `REMOVE_FUNC_HOOK`): drop a
 /// function from the registry, reporting whether it was present.
 fn remove_func_hook(name: &str) -> bool {
+    let name = &*canon_func_name(name);
     FUNCTIONS.with(|f| f.borrow_mut().remove(name).is_some())
 }
 
@@ -2537,6 +2558,7 @@ fn call_funcref(funcref: &typval_T, extra: Vec<typval_T>) -> Option<typval_T> {
 /// scope prefix on the function name is ignored, as in Vim.
 fn func_exists_hook(name: &str) -> bool {
     let name = name.strip_prefix("g:").unwrap_or(name);
+    let name = &*canon_func_name(name);
     FUNCTIONS.with(|f| f.borrow().contains_key(name))
         || crate::compile_viml::builtin_fn_id(name).is_some()
 }
@@ -2553,7 +2575,10 @@ fn func_exists_hook(name: &str) -> bool {
 fn b_define_func(vm: &mut VM, _argc: u8) -> Value {
     let key = tv_get_string(&pop_tv(vm));
     if let Some(def) = PENDING_FUNCS.with(|p| p.borrow().get(&key).cloned()) {
-        FUNCTIONS.with(|f| f.borrow_mut().insert(def.name.clone(), def));
+        FUNCTIONS.with(|f| {
+            f.borrow_mut()
+                .insert(canon_func_name(&def.name).into_owned(), def)
+        });
     }
     Value::Int(0)
 }
@@ -2563,7 +2588,7 @@ fn b_define_func(vm: &mut VM, _argc: u8) -> Value {
 /// `function('substitute')`), not just user functions — a user function takes
 /// precedence when both exist.
 fn call_named(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
-    if FUNCTIONS.with(|f| f.borrow().contains_key(name)) {
+    if FUNCTIONS.with(|f| f.borrow().contains_key(&*canon_func_name(name))) {
         return call_user_function(name, args);
     }
     if crate::compile_viml::builtin_fn_id(name).is_some() {
