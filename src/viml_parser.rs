@@ -2470,10 +2470,31 @@ impl Parser {
                     // `type(null) == 7`). In legacy mode they stay ordinary names
                     // (bare `true` → E121 undefined variable), so this only fires
                     // under `vim9_active()`.
+                    // The `null_*` names are vim9 predefined constants
+                    // (`vim9.txt`, "Predefined variables"). Each is the null
+                    // value of its type; oracle-verified against Vim 9.2 they
+                    // are observably the empty literal of that type
+                    // (`type(null_string) == 1 && null_string == ''`,
+                    // `type(null_list) == 3 && string(null_list) == '[]'`,
+                    // `null_blob` → `0z`, `null_function`/`null_partial` →
+                    // `function('')`). `null_channel`/`null_job` need channel
+                    // and job value types vimlrs does not have, so they stay
+                    // ordinary names rather than being faked.
                     match name.as_str() {
                         "true" => Ok(Expr::Var("v:true".to_string())),
                         "false" => Ok(Expr::Var("v:false".to_string())),
                         "null" => Ok(Expr::Var("v:null".to_string())),
+                        "null_string" => Ok(Expr::Str(String::new())),
+                        "null_list" => Ok(Expr::List(Vec::new())),
+                        "null_dict" => Ok(Expr::Dict(Vec::new())),
+                        "null_blob" => Ok(Expr::Call {
+                            name: "list2blob".to_string(),
+                            args: vec![Expr::List(Vec::new())],
+                        }),
+                        "null_function" | "null_partial" => Ok(Expr::Call {
+                            name: "function".to_string(),
+                            args: vec![Expr::Str(String::new())],
+                        }),
                         _ => Ok(Expr::Var(name)),
                     }
                 } else {
