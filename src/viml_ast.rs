@@ -286,6 +286,9 @@ pub enum Stmt {
         body: Vec<Stmt>,
         /// `function!` — replace an existing definition.
         bang: bool,
+        /// `true` for a vim9 `:def` (bare names in the body resolve to
+        /// script-scope vars/functions), `false` for a legacy `:function`.
+        vim9: bool,
     },
     /// `:try … :catch {pat} … :finally … :endtry`.
     Try {

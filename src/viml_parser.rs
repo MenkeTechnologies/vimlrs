@@ -1502,6 +1502,9 @@ fn parse_function(cur: &mut Lines, header: &str) -> Result<Stmt, VimlError> {
         defaults,
         body,
         bang,
+        // Legacy `:function`: bare names in the body do NOT see script-scope
+        // vars (that requires an explicit `s:`/`g:` prefix).
+        vim9: false,
     })
 }
 
@@ -1611,6 +1614,9 @@ fn parse_def(cur: &mut Lines, header: &str) -> Result<Stmt, VimlError> {
         // vim9 `def` always (re)defines; there is no "already defined" error as
         // for legacy `:function` without `!`.
         bang: true,
+        // vim9 `def`: bare names in the body resolve to script-scope
+        // vars/functions when they are not locals or parameters.
+        vim9: true,
     })
 }
 

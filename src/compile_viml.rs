@@ -28,6 +28,10 @@ pub struct UserFuncDef {
     pub defaults: Vec<(usize, fusevm::Chunk)>,
     /// `function!` — replace an existing definition.
     pub bang: bool,
+    /// `true` for a vim9 `:def` — bare names in the body that are not locals or
+    /// parameters resolve to script-scope vars/functions (which vimlrs keeps in
+    /// the global dict). `false` for a legacy `:function`.
+    pub vim9: bool,
     /// Compiled function body.
     pub chunk: fusevm::Chunk,
 }
@@ -181,6 +185,7 @@ fn build_user_func_def(
     defaults: &[(usize, Expr)],
     body: &[Stmt],
     bang: bool,
+    vim9: bool,
     exc: bool,
 ) -> Result<UserFuncDef, VimlError> {
     let defaults = defaults
@@ -192,6 +197,7 @@ fn build_user_func_def(
         params: args.to_vec(),
         defaults,
         bang,
+        vim9,
         chunk: compile_function_body(body, exc)?,
     })
 }
@@ -224,9 +230,12 @@ pub fn compile_program(stmts: &[Stmt]) -> Result<CompiledProgram, VimlError> {
             defaults,
             body,
             bang,
+            vim9,
         } = s
         {
-            funcs.push(build_user_func_def(name, args, defaults, body, *bang, exc)?);
+            funcs.push(build_user_func_def(
+                name, args, defaults, body, *bang, *vim9, exc,
+            )?);
         } else {
             top.push(s.clone());
         }
@@ -997,6 +1006,7 @@ impl Compiler {
                 defaults,
                 body,
                 bang,
+                vim9,
             } => {
                 // A `:function` reached HERE (in `stmt`, not `compile_program`'s
                 // top-level loop) is nested inside a control-flow block and/or
@@ -1016,7 +1026,7 @@ impl Compiler {
                 // is staged into the program's `deferred_funcs`; the runtime
                 // define-op inserts it into the live registry, keyed by a
                 // content-stable staging key.
-                let def = build_user_func_def(name, args, defaults, body, *bang, self.exc)?;
+                let def = build_user_func_def(name, args, defaults, body, *bang, *vim9, self.exc)?;
                 let key = deferred_key(&def);
                 DEFERRED_FUNCS.with(|f| f.borrow_mut().push(def));
                 self.load_str(&key);
@@ -1736,6 +1746,10 @@ impl Compiler {
                         params: all_params,
                         defaults: Vec::new(),
                         bang: true,
+                        // A lambda captures its free vars by value (they are
+                        // rebound as leading params), so it needs no runtime
+                        // script-scope fallback.
+                        vim9: false,
                         chunk,
                     })
                 });

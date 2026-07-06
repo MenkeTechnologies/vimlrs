@@ -1271,6 +1271,12 @@ thread_local! {
     /// Stack of pending function return values (one per active call); the
     /// `VIML_SET_RETURN` handler writes the top.
     static RETURN_STACK: RefCell<Vec<Option<typval_T>>> = const { RefCell::new(Vec::new()) };
+    /// Per-call flag stack, parallel to the `funccal_stack` frames pushed by
+    /// [`call_user_function`]: `true` while the currently-executing user function
+    /// is a vim9 `:def`. A vim9 def sees script-scope vars/functions by bare
+    /// name; a legacy `:function` does not. The top entry gates the bare-name
+    /// script-scope fallback in [`b_getvar`].
+    static VIM9_DEF_STACK: RefCell<Vec<bool>> = const { RefCell::new(Vec::new()) };
     /// The currently-raised, not-yet-caught exception value (`:throw`). `Some`
     /// while unwinding toward a `:catch`. Models `ex_eval.c`'s `current_exception`.
     static PENDING_EXC: RefCell<Option<String>> = const { RefCell::new(None) };
@@ -1425,10 +1431,29 @@ fn b_getvar(vm: &mut VM, _: u8) -> Value {
     match eval_variable(&name) {
         Some(tv) => tv_to_value(tv),
         None => {
+            // vim9 def bare-name fallback. Inside a `:def`, a bare (unscoped)
+            // name resolves to a script-scope var when it is neither a local nor
+            // a parameter; `eval_variable` resolved it to the function-local
+            // scope (a miss). vimlrs stores vim9 script-level `var`/`const` in
+            // the global dict, so retry there. A scoped name (`s:`/`g:`/…) or an
+            // autoload name (`#`) is never a bare script reference, so it keeps
+            // its original E121. Legacy `:function` frames push `false`, so this
+            // does not fire for them (a legacy bare name stays undefined).
+            if is_vim9_def_frame() && !name.contains(':') && !name.contains('#') {
+                if let Some(tv) = eval_variable(&format!("g:{name}")) {
+                    return tv_to_value(tv);
+                }
+            }
             message::semsg(&format!("E121: Undefined variable: {name}"));
             Value::Undef
         }
     }
+}
+
+/// `true` when the innermost executing user function is a vim9 `:def` (the top
+/// of [`VIM9_DEF_STACK`]). Used to gate the bare-name script-scope fallback.
+fn is_vim9_def_frame() -> bool {
+    VIM9_DEF_STACK.with(|s| *s.borrow().last().unwrap_or(&false))
 }
 
 fn b_setvar(vm: &mut VM, _: u8) -> Value {
@@ -2014,6 +2039,9 @@ fn call_user_function(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
             fc_name: name.to_string(),
         })
     });
+    // Track vim9-def-ness parallel to the frame so `b_getvar` can fall back to
+    // script scope for a bare name inside a vim9 def (but not a legacy function).
+    VIM9_DEF_STACK.with(|s| s.borrow_mut().push(func.vim9));
     let bind_avar = |key: &str, v: typval_T| {
         crate::ported::eval::vars::funccal_stack.with(|s| {
             if let Some(top) = s.borrow_mut().last_mut() {
@@ -2048,6 +2076,9 @@ fn call_user_function(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
 
     let ret = RETURN_STACK.with(|r| r.borrow_mut().pop().flatten());
     crate::ported::eval::vars::funccal_stack.with(|s| {
+        s.borrow_mut().pop();
+    });
+    VIM9_DEF_STACK.with(|s| {
         s.borrow_mut().pop();
     });
     // c: a function with no :return yields 0.
