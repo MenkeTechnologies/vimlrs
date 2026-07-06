@@ -1436,7 +1436,7 @@ fn b_getvar(vm: &mut VM, _: u8) -> Value {
             .map_or(0, |b| {
                 crate::ported::buffer::buf_get_changedtick(&b.borrow())
             });
-        return Value::Int(tick as i64);
+        return Value::Int(tick);
     }
     // Dynamic v: state (not fixed v: constants).
     if name == "v:exception" {
