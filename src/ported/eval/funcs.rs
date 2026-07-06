@@ -7790,6 +7790,12 @@ pub fn do_excmd(line: &str) -> ExCmdResult {
         | "redir" | "redi" | "runtime" | "ru" | "run" | "runt" | "runti" | "runtim" => {
             ExCmdResult::Handled
         }
+        // `:noh[lsearch]` (`ex_docmd.c` → `ex_nohlsearch`) turns off the current
+        // search-match highlighting until the next search. There is no highlight
+        // state editor-less, so it is a no-op — recognized so a config/syntax
+        // line `nohlsearch` is handled instead of declining to `parse_expr`.
+        "noh" | "nohl" | "nohls" | "nohlse" | "nohlsea" | "nohlsear" | "nohlsearc"
+        | "nohlsearch" => ExCmdResult::Handled,
         // Buffer-list navigation (`:bnext`/`:bprevious`/`:bfirst`/`:blast`/
         // `:buffer`/`:bmodified`/`:ball`) switches the displayed buffer — a no-op
         // editor-less. (`:edit {file}` above still loads a file when given one.)

@@ -238,12 +238,16 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
             Ok(Stmt::ExCmd(line.to_string()))
         }
         // Screen/session/mark commands (`:redraw[!]`, `:redir`, `:runtime`,
-        // `:mark`) — dispatched (or no-op'd) by `do_excmd`. Recognized bare so a
-        // function body line like `redraw!` or `redir => x` parses instead of
-        // being mis-read as an expression and aborting the `:function`.
+        // `:mark`, `:nohlsearch`) — dispatched (or no-op'd) by `do_excmd`.
+        // Recognized bare so a function body line like `redraw!` or `redir => x`
+        // parses instead of being mis-read as an expression and aborting the
+        // `:function`. `:noh[lsearch]` (`:h :noh`) clears search highlight — a
+        // no-op editor-less; recognized so a config/syntax line `nohlsearch`
+        // parses instead of falling through to `parse_expr` and erroring E121.
         "redraw" | "redr" | "redra" | "redraws" | "redrawstatus" | "redrawt" | "redrawtabline"
         | "redir" | "redi" | "runtime" | "ru" | "run" | "runt" | "runti" | "runtim" | "mark"
-        | "ma" | "mar"
+        | "ma" | "mar" | "noh" | "nohl" | "nohls" | "nohlse" | "nohlsea" | "nohlsear"
+        | "nohlsearc" | "nohlsearch"
             if !line[cmd.len()..].starts_with('(') =>
         {
             Ok(Stmt::ExCmd(line.to_string()))
