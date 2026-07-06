@@ -1328,6 +1328,25 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
                 prec = Some(p);
             }
         }
+        // c (vim_vsnprintf_typval, docs `eval.txt`/vendor/eval.lua:8559): a
+        // field-width or precision that would produce a string longer than 1 MB
+        // (1024*1024 = 1048576) raises E1510 rather than allocating the buffer.
+        // Verified against `/opt/homebrew/bin/vim`: width/precision 1048576 is
+        // accepted, 1048577 errors. Without this a huge width (`%999999999d`)
+        // hangs building a gigabyte string.
+        const PRINTF_MAX: usize = 1024 * 1024;
+        if width > PRINTF_MAX {
+            emsg(&format!("E1510: Value too large: {width}"));
+            rettv.vval = v_string(String::new());
+            return;
+        }
+        if let Some(p) = prec {
+            if p > PRINTF_MAX {
+                emsg(&format!("E1510: Value too large: {p}"));
+                rettv.vval = v_string(String::new());
+                return;
+            }
+        }
         let Some(conv) = bytes.get(i).copied() else {
             out.push('%');
             break;

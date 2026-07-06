@@ -2194,15 +2194,47 @@ struct Parser {
     /// offsets into this; used to extract the exact text of a vim9 bare dict key
     /// (`{a-b: 1}` → `"a-b"`), which does not survive tokenization intact.
     src: String,
+    /// Count of bracket-nested sub-expressions currently open (`(expr)`, list
+    /// elements, call arguments, dict values). Vim caps this at
+    /// [`Self::EXPR_MAX_DEPTH`] and raises `E1169` once it is reached — verified
+    /// against `/opt/homebrew/bin/vim`: 999 nested `(` succeed, 1000 → E1169.
+    /// Ternary branches, unary leaders and left-associative chains (`.`, `+`,
+    /// `[idx]`) do NOT bump this — vim accepts those to great depth (500000
+    /// nested `-` succeed), matching a loop/tail-recursive parse here.
+    depth: u32,
 }
 
 impl Parser {
+    /// Vim's expression-nesting limit (`E1169: Expression too recursive`). The
+    /// error fires when the 1000th bracket opens, so 999 levels are accepted.
+    const EXPR_MAX_DEPTH: u32 = 1000;
+
     fn new(toks: Vec<Token>, src: &str) -> Self {
         Parser {
             toks,
             i: 0,
             src: src.to_string(),
+            depth: 0,
         }
+    }
+
+    /// Parse a bracket-nested sub-expression, bumping the recursion counter so a
+    /// pathologically deep `((((…))))` / `[[[…]]]` / `f(f(f(…)))` / `{a:{a:…}}`
+    /// raises Vim's `E1169` instead of overflowing the native stack. Guards only
+    /// the bracket-open recursion points (paren, list/call element, dict value)
+    /// so it matches vim, which does not count ternary/unary/concat depth.
+    fn nested_eval1(&mut self) -> Result<Expr, VimlError> {
+        self.depth += 1;
+        if self.depth >= Self::EXPR_MAX_DEPTH {
+            self.depth -= 1;
+            let tail = self.src.get(self.toks[self.i].span..).unwrap_or("");
+            return Err(VimlError::msg(format!(
+                "E1169: Expression too recursive: {tail}"
+            )));
+        }
+        let r = self.eval1();
+        self.depth -= 1;
+        r
     }
 
     fn peek(&self) -> &Tok {
@@ -2383,7 +2415,7 @@ impl Parser {
                 if self.at_vim9_lambda() {
                     return self.vim9_lambda();
                 }
-                let e = self.eval1()?;
+                let e = self.nested_eval1()?;
                 self.eat(&Tok::RParen)?;
                 Ok(e)
             }
@@ -2816,7 +2848,7 @@ impl Parser {
             };
             let (key, val) = if let Some(stripped) = raw.strip_suffix(':') {
                 // `a:` — a scope-letter key absorbed its `:`; the value follows.
-                (stripped.to_string(), self.eval1()?)
+                (stripped.to_string(), self.nested_eval1()?)
             } else if let Some(c) = raw.find(':') {
                 // `a:1` — a scope-letter key merged with a glued simple value
                 // (the lexer can only glue a bareword/number after the `:`); split
@@ -2824,7 +2856,7 @@ impl Parser {
                 (raw[..c].to_string(), parse_expr(&raw[c + 1..])?)
             } else {
                 self.eat(&Tok::Colon)?;
-                (raw, self.eval1()?)
+                (raw, self.nested_eval1()?)
             };
             pairs.push((Expr::Str(key), val));
             match self.advance() {
@@ -2864,7 +2896,7 @@ impl Parser {
                 self.eat(&Tok::Colon)?;
                 k
             };
-            let val = self.eval1()?;
+            let val = self.nested_eval1()?;
             pairs.push((key, val));
             match self.advance() {
                 Tok::Comma => {
@@ -2949,7 +2981,7 @@ impl Parser {
             return Ok(args);
         }
         loop {
-            args.push(self.eval1()?);
+            args.push(self.nested_eval1()?);
             match self.advance() {
                 Tok::Comma => {
                     if self.peek() == close {

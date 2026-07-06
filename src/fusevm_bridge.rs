@@ -1257,6 +1257,12 @@ thread_local! {
     /// execute()-capture convention (a newline *before* each `:echo`) instead of
     /// the trailing newline used for stdout / general captures.
     static EXECUTE_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// Nesting depth of `do_cmdline`-style nested command execution (`:source`,
+    /// `:execute`). Vim shares one counter across these and raises `E169: Command
+    /// too recursive` at depth 200 — verified against `/opt/homebrew/bin/vim`
+    /// (self-`:source` reaches 199 then E169). Without this guard a self-sourcing
+    /// script or nested `:execute` overflows the native stack.
+    static CMD_RECURSE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     /// Registry of user-defined functions, by name (populated from a compiled
     /// program before its `main` chunk runs).
     static FUNCTIONS: RefCell<std::collections::HashMap<String, crate::compile_viml::UserFuncDef>> =
@@ -2044,6 +2050,20 @@ fn b_set_return(vm: &mut VM, _: u8) -> Value {
 fn call_user_function(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
     let func = FUNCTIONS.with(|f| f.borrow().get(name).cloned())?;
 
+    // Vim caps recursion at 'maxfuncdepth' (default 100): the 101st nested call
+    // raises E132 rather than recursing — verified against `/opt/homebrew/bin/vim`,
+    // which reaches call depth 100 then errors. The live `funccal_stack` length is
+    // the current depth; without this guard unbounded self-recursion overflows the
+    // native stack (SIGABRT) instead of producing Vim's error. Returning `0` (not
+    // `None`) keeps the call resolved so the caller does not fall through to an
+    // E117 "Unknown function".
+    const MAXFUNCDEPTH: usize = 100;
+    let depth = crate::ported::eval::vars::funccal_stack.with(|s| s.borrow().len());
+    if depth >= MAXFUNCDEPTH {
+        message::emsg("E132: Function call depth is higher than 'maxfuncdepth'");
+        return Some(tv_num(0));
+    }
+
     // Bind named parameters into the a: scope; extras into a:0 / a:000. A `...`
     // entry marks the varargs boundary: params before it are named, every arg
     // from that position on goes to a:000 (so `F(...)` collects all args).
@@ -2160,11 +2180,27 @@ fn compile_expr_chunk(src: &str) -> Result<fusevm::Chunk, VimlError> {
 /// `execute()`, which runs commands mid-outer-run). Functions defined by the
 /// source register globally.
 fn run_source_nested(src: &str) -> Result<(), VimlError> {
-    let prog = crate::compile_viml::compile_program(&crate::viml_parser::parse_program(src)?)?;
-    register_prog_funcs(&mut prog.funcs.into_iter());
-    stage_deferred_funcs(prog.deferred_funcs);
-    run_chunk_nested(prog.main);
-    Ok(())
+    // Shared `do_cmdline` recursion guard: Vim raises E169 at depth 200 for
+    // nested `:source`/`:execute`. Depth is checked before compiling so a
+    // self-sourcing script (`source thisfile`) or nested `execute` string errors
+    // like Vim instead of overflowing the stack.
+    const MAX_CMD_RECURSE: u32 = 200;
+    let depth = CMD_RECURSE.with(|c| c.get());
+    if depth >= MAX_CMD_RECURSE {
+        message::emsg("E169: Command too recursive");
+        return Ok(());
+    }
+    CMD_RECURSE.with(|c| c.set(depth + 1));
+    let r = (|| {
+        let prog =
+            crate::compile_viml::compile_program(&crate::viml_parser::parse_program(src)?)?;
+        register_prog_funcs(&mut prog.funcs.into_iter());
+        stage_deferred_funcs(prog.deferred_funcs);
+        run_chunk_nested(prog.main);
+        Ok(())
+    })();
+    CMD_RECURSE.with(|c| c.set(depth));
+    r
 }
 
 /// Insert a program's top-level `:function` defs into the live registry — done
