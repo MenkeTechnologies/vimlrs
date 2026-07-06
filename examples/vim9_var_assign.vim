@@ -62,6 +62,42 @@ var Total = 0
 Total += 7
 assert_equal(7, Total)
 
+# ── bare list-unpack assignment `[a, b] = expr` (no `var`/`:let` keyword): the
+#    vim9 way to reassign several already-declared names at once. Distinct from
+#    the `var [a, b] = …` declaration form; binary-verified against Vim 9.2. ──
+var ua = 0
+var ub = 0
+[ua, ub] = [1, 2]
+assert_equal(1, ua)
+assert_equal(2, ub)
+
+# swap: the rhs is fully built before any target is bound
+[ua, ub] = [ub, ua]
+assert_equal([2, 1], [ua, ub])
+
+# `[a, b; rest]`: the trailing name soaks up the remainder as a list
+var uh = 0
+var ut = 0
+var urest: list<number> = []
+[uh, ut; urest] = [10, 20, 30, 40]
+assert_equal(10, uh)
+assert_equal(20, ut)
+assert_equal([30, 40], urest)
+
+# a rest binding matches exactly zero remaining elements
+[uh; urest] = [99]
+assert_equal(99, uh)
+assert_equal([], urest)
+
+# unpack assignment inside a def, targeting locals
+def UnpackLocal(): number
+  var x = 0
+  var y = 0
+  [x, y] = [3, 4]
+  return x + y
+enddef
+assert_equal(7, UnpackLocal())
+
 # ── self-test epilogue ──
 if !empty(v:errors)
   for e in v:errors

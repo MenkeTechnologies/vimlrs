@@ -1365,9 +1365,12 @@ fn vim9_var_decl(rest: &str) -> String {
 /// assignment operator and lvalue form.
 fn is_vim9_assignment(line: &str) -> bool {
     let b = line.as_bytes();
-    // An lvalue starts with an identifier char; anything else is not an assignment.
+    // An lvalue starts with an identifier char, or `[` for a `[a, b] = …` /
+    // `[a, b; rest] = …` list-unpack assignment; anything else is not an
+    // assignment. The scan loop below skips the balanced bracket group, and the
+    // trailing operator check confirms a top-level `=` follows.
     match b.first() {
-        Some(&c) if c.is_ascii_alphabetic() || c == b'_' => {}
+        Some(&c) if c.is_ascii_alphabetic() || c == b'_' || c == b'[' => {}
         _ => return false,
     }
     let mut i = 0;
