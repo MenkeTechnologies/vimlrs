@@ -3443,6 +3443,38 @@ pub fn editor_buf_nr() -> Option<HostNum> {
     EDITOR_HOST.with(|s| s.borrow().as_ref().map(|h| (h.buf_nr)()))
 }
 
+thread_local! {
+    /// When set, [`install`] skips enabling the block/tracing JIT on the VM it
+    /// configures. Set only around the tolerant per-statement sourcing loop
+    /// (`source_tolerant`): each surviving top-level statement runs exactly once
+    /// in its own tiny straight-line chunk, so whole-chunk block-JIT compilation
+    /// buys nothing — and it is unsound here. Two structurally-identical one-shot
+    /// chunks (`var a = 0` / `var b = 0`) share a fusevm block-cache key
+    /// (`(chunk.op_hash, slot_kinds_hash)`; the variable name lives in the data
+    /// pool, not the opcodes), so the second to run crosses the warm-up threshold
+    /// and jumps into native code carrying a host-helper call (the script-var
+    /// store) the block JIT cannot resolve — a jump to a null pointer, i.e. a
+    /// segfault. Interpreting these one-shot chunks is behaviorally identical and
+    /// never takes that path, matching Vim (the var decls run, then the unmatched
+    /// block reports its `E171`/`E170` — no crash).
+    static SUPPRESS_JIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// RAII guard: suppress JIT enablement for VMs configured via [`install`] while
+/// alive, restoring the prior state on drop (panic-safe).
+struct JitSuppressGuard(bool);
+
+impl Drop for JitSuppressGuard {
+    fn drop(&mut self) {
+        SUPPRESS_JIT.with(|c| c.set(self.0));
+    }
+}
+
+/// Enter a JIT-suppressed scope (see [`SUPPRESS_JIT`]).
+fn suppress_jit() -> JitSuppressGuard {
+    JitSuppressGuard(SUPPRESS_JIT.with(|c| c.replace(true)))
+}
+
 /// Register every `VIML_*` builtin on a fresh VM before `vm.run()`.
 pub fn install(vm: &mut VM) {
     // Turn on fusevm's tiered Cranelift JIT (Linear/Block/Tracing). Without
@@ -3450,8 +3482,9 @@ pub fn install(vm: &mut VM) {
     // tier dispatch is gated on it. Safe: only CallBuiltin-free chunks/loop
     // bodies are eligible; everything else runs on the interpreter exactly as
     // before, and the tracing tier deopts back to it on a slot-type guard miss.
-    // `VIMLRS_NO_JIT` forces the interpreter (for benchmarking the baseline).
-    if std::env::var_os("VIMLRS_NO_JIT").is_none() {
+    // `VIMLRS_NO_JIT` forces the interpreter (for benchmarking the baseline);
+    // `SUPPRESS_JIT` does the same for the tolerant per-statement sourcing loop.
+    if std::env::var_os("VIMLRS_NO_JIT").is_none() && !SUPPRESS_JIT.with(|c| c.get()) {
         vm.enable_tracing_jit();
     }
     // Seed the v: variable store (vimvars[]) before any script runs.
@@ -4323,6 +4356,9 @@ pub fn source_tolerant(src: &str) -> (usize, usize) {
     let (stmts, parse_errs) = crate::viml_parser::parse_program_lines_tolerant(src);
     let mut ran = 0usize;
     let mut skipped = parse_errs.len();
+    // Each statement runs once in its own one-shot chunk; block-JITing those is
+    // pointless and, for structurally-identical chunks, unsound (see SUPPRESS_JIT).
+    let _no_jit = suppress_jit();
     for (_lineno, stmt) in stmts {
         // Each statement compiles + runs independently; a compile error or an
         // uncaught run-time error ends only that statement's chunk.
