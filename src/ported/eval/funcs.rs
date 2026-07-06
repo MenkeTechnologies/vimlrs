@@ -7796,6 +7796,15 @@ pub fn do_excmd(line: &str) -> ExCmdResult {
         // line `nohlsearch` is handled instead of declining to `parse_expr`.
         "noh" | "nohl" | "nohls" | "nohlse" | "nohlsea" | "nohlsear" | "nohlsearc"
         | "nohlsearch" => ExCmdResult::Handled,
+        // Fold-view commands (`ex_docmd.c` → `ex_fold`/`ex_foldopen`): `:fo[ld]`
+        // creates a fold, `:foldo[pen][!]` opens folds, `:foldc[lose][!]` closes
+        // them (the `!` opens/closes recursively). Folds live in a window's view
+        // state, which a standalone eval engine has none of, so every form is a
+        // no-op — recognized so a runtime line like `syntax/cdl.vim`'s `%foldo!`
+        // (which real Vim runs silently once `foldmethod=expr` has made folds)
+        // is Handled instead of declining to E492.
+        "fold" | "fo" | "fol" | "foldopen" | "foldo" | "foldop" | "foldope" | "foldclose"
+        | "foldc" | "foldcl" | "foldclo" | "foldclos" => ExCmdResult::Handled,
         // Buffer-list navigation (`:bnext`/`:bprevious`/`:bfirst`/`:blast`/
         // `:buffer`/`:bmodified`/`:ball`) switches the displayed buffer — a no-op
         // editor-less. (`:edit {file}` above still loads a file when given one.)

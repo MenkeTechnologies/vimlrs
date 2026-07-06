@@ -252,6 +252,19 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
         {
             Ok(Stmt::ExCmd(line.to_string()))
         }
+        // Fold-view commands (`ex_docmd.c` → `ex_fold`/`ex_foldopen`): `:fo[ld]`
+        // creates a fold, `:foldo[pen][!]` opens folds, `:foldc[lose][!]` closes
+        // them. Folds are window-view state that a standalone eval engine does not
+        // have, so `do_excmd` no-ops them — but they MUST parse as Ex commands so a
+        // config/syntax line like `syntax/cdl.vim`'s `%foldo!` (whole-file range +
+        // recursive open) is handled instead of falling through to `parse_expr`
+        // (which would raise E121 / E492 on the fold word).
+        "fold" | "fo" | "fol" | "foldopen" | "foldo" | "foldop" | "foldope" | "foldclose"
+        | "foldc" | "foldcl" | "foldclo" | "foldclos"
+            if !line[cmd.len()..].starts_with('(') =>
+        {
+            Ok(Stmt::ExCmd(line.to_string()))
+        }
         // `:edit`/`:ed` (load a file / reload) and buffer-list navigation
         // (`:bnext`, `:bprevious`, `:bfirst`, `:blast`, `:buffer`, …) — dispatched
         // by `do_excmd`. Recognized bare so a body line like `edit #` or `bnext`
