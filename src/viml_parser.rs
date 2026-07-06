@@ -1853,10 +1853,12 @@ fn split_top_commas(s: &str) -> Vec<&str> {
 /// If `line` is a heredoc assignment opener (`let X =<< [trim] [eval] MARKER`),
 /// return `(prefix, trim, eval, marker)` where `prefix` is the `:let` target
 /// text before `=<<` (the caller appends `= [...]`). Mirrors the keyword scan
-/// at the top of `heredoc_get()` (vendor/eval/vars.c).
+/// at the top of `heredoc_get()` (vendor/eval/vars.c). vim9 declaration keywords
+/// (`var`/`final`/`const`) also open a heredoc (`:help vim9` uses the same
+/// `=<<` list-assignment form as legacy `:let`).
 fn heredoc_opener(line: &str) -> Option<(String, bool, bool, String)> {
     let (cmd, _) = cmd_word(line.trim_start());
-    if !matches!(cmd, "let" | "const" | "cons") {
+    if !matches!(cmd, "let" | "const" | "cons" | "var" | "final") {
         return None;
     }
     let op = line.find("=<<")?;
