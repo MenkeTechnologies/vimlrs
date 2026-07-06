@@ -1266,6 +1266,16 @@ thread_local! {
     /// (self-`:source` reaches 199 then E169). Without this guard a self-sourcing
     /// script or nested `:execute` overflows the native stack.
     static CMD_RECURSE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// Persistent per-script `s:` scopes, keyed by the script's canonical path —
+    /// the reduced stand-in for Vim's `SCRIPT_SV(sid)->sv_dict` array indexed by
+    /// script id. Vim gives every sourced script its own script-local scope, so a
+    /// nested `:source`/`:runtime` file's `s:` variables never leak into (or get
+    /// clobbered by) the sourcing script's. [`source_file`] swaps the active
+    /// [`script_vars`] out for the nested file's own scope for the duration of the
+    /// source and restores the parent's afterwards; a re-source of the same path
+    /// reuses the scope stored here (matching Vim's persistent per-sid scope).
+    static SCRIPT_SCOPES: RefCell<std::collections::HashMap<String, crate::ported::eval::typval_defs_h::dict_T>> =
+        RefCell::new(std::collections::HashMap::new());
     /// Registry of user-defined functions, by name (populated from a compiled
     /// program before its `main` chunk runs).
     static FUNCTIONS: RefCell<std::collections::HashMap<String, crate::compile_viml::UserFuncDef>> =
@@ -1889,7 +1899,19 @@ fn source_file(path: &str) {
             let sname = std::fs::canonicalize(path)
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|_| path.to_string());
-            crate::ported::eval::fs::push_sourcing_name(sname);
+            crate::ported::eval::fs::push_sourcing_name(sname.clone());
+            // Give the nested script its own `s:` scope (Vim's per-sid script
+            // scope): pull this path's persisted scope (fresh if first source),
+            // install it as the active `script_vars`, and stash the sourcing
+            // script's scope to restore afterwards. Without this, a nested file's
+            // `unlet s:save_cpo` (every ftplugin's cpo-restore epilogue) deletes
+            // the *parent's* `s:save_cpo`, so the parent's own restore then hits
+            // `E121: Undefined variable: s:save_cpo`.
+            let child_scope = SCRIPT_SCOPES
+                .with(|m| m.borrow_mut().remove(&sname))
+                .unwrap_or_default();
+            let parent_scope = crate::ported::eval::vars::script_vars
+                .with(|d| std::mem::replace(&mut *d.borrow_mut(), child_scope));
             // A real runtime file (`:source`d / `:runtime`d ftplugin) can contain
             // a construct vimlrs does not yet parse — e.g. `sh.vim`'s `:compiler`
             // command inside a not-taken branch. `run_source_nested` returns `Err`
@@ -1904,6 +1926,11 @@ fn source_file(path: &str) {
             if run_source_nested(&src).is_err() {
                 source_tolerant(&src);
             }
+            // Restore the sourcing script's scope and persist the nested file's
+            // own scope under its path for any later re-source.
+            let child_scope = crate::ported::eval::vars::script_vars
+                .with(|d| std::mem::replace(&mut *d.borrow_mut(), parent_scope));
+            SCRIPT_SCOPES.with(|m| m.borrow_mut().insert(sname, child_scope));
             crate::ported::eval::fs::pop_sourcing_name();
         }
         Err(_) => message::semsg(&format!("E484: Can't open file {path}")),
