@@ -208,6 +208,8 @@ pub const VIML_ECHON: u16 = 3061;
 pub const VIML_SET_RESULT: u16 = 3062;
 /// `$ENV`
 pub const VIML_GETENV: u16 = 3063;
+/// interpolated-string segment → echo-style string conversion (`$'…{e}…'`).
+pub const VIML_STR_INTERP: u16 = 3067;
 /// `&option`
 pub const VIML_GETOPT: u16 = 3064;
 /// `@reg`
@@ -1823,6 +1825,16 @@ fn b_set_result(vm: &mut VM, _: u8) -> Value {
 fn b_getenv(vm: &mut VM, _: u8) -> Value {
     let name = tv_get_string(&pop_tv(vm));
     Value::str(std::env::var(&name).unwrap_or_default())
+}
+
+/// Convert one interpolated-string segment to text using Vim's echo-style
+/// conversion (`:help interpolated-string`): a String value is inserted
+/// verbatim (no surrounding quotes), Numbers/Floats/Lists/Dicts render as they
+/// would under `:echo`. Always yields a String, so the whole interpolation is a
+/// String regardless of the embedded expressions' types.
+fn b_str_interp(vm: &mut VM, _: u8) -> Value {
+    let v = pop_tv(vm);
+    tv_to_value(tv_str(encode_tv2echo(&v)))
 }
 fn b_exec_stmt(vm: &mut VM, argc: u8) -> Value {
     let mut parts = Vec::with_capacity(argc as usize);
@@ -3458,6 +3470,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_ECHON, b_echon);
     vm.register_builtin(VIML_SET_RESULT, b_set_result);
     vm.register_builtin(VIML_GETENV, b_getenv);
+    vm.register_builtin(VIML_STR_INTERP, b_str_interp);
     vm.register_builtin(VIML_GETOPT, b_getopt);
     vm.register_builtin(VIML_GETREG, |vm, n| call_func(vm, n, f_getreg));
     vm.register_builtin(VIML_SETREG, |vm, n| call_func(vm, n, f_setreg));

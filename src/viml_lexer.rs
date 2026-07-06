@@ -48,6 +48,10 @@ pub enum Tok {
     Blob(Vec<u8>),
     /// String literal, already unescaped.
     Str(String),
+    /// Interpolated string `$'…{expr}…'` / `$"…{expr}…"` — the ordered list of
+    /// literal chunks and raw `{expr}` sources, lowered by the parser to a
+    /// concat of the chunks with each expression echo-stringified.
+    InterpStr(Vec<InterpPart>),
     /// Bare identifier or scoped name (`x`, `g:foo`, `v:true`).
     Ident(String),
     /// Option reference `&name`.
@@ -109,6 +113,17 @@ pub enum Tok {
     Assign,
     /// End of input.
     Eof,
+}
+
+/// One piece of an interpolated string literal (`$'…'` / `$"…"`): either a
+/// resolved literal chunk (escapes, `''`, `{{`/`}}` already applied) or the raw
+/// source text of a `{expr}` region to be sub-parsed and echo-stringified.
+#[derive(Debug, Clone, PartialEq)]
+pub enum InterpPart {
+    /// Literal text with all escapes already resolved.
+    Lit(String),
+    /// Raw expression source that appeared between `{` and `}`.
+    Expr(String),
 }
 
 /// The relational families recognized in `eval4` (`eval.c`). These map onto the
@@ -220,6 +235,9 @@ impl<'a> Lexer<'a> {
             // `&&` is the logical-AND operator; only a lone `&` is an option sigil.
             b'&' if self.peek2() == b'&' => self.lex_operator(),
             b'&' => Ok(self.lex_sigil_name(Tok::Option as fn(String) -> Tok)),
+            // `$'…'` / `$"…"` is an interpolated string (vim9 and legacy); a `$`
+            // followed by a name is an environment-variable reference.
+            b'$' if matches!(self.peek2(), b'\'' | b'"') => self.lex_interp_string(),
             b'$' => Ok(self.lex_sigil_name(Tok::Env as fn(String) -> Tok)),
             b'@' => {
                 self.pos += 1;
@@ -363,53 +381,206 @@ impl<'a> Lexer<'a> {
                     self.pos += 1;
                     return Ok(Tok::Str(out));
                 }
-                b'\\' => {
-                    self.pos += 1;
-                    let e = self.peek();
-                    self.pos += 1;
-                    match e {
-                        b'n' => out.push('\n'),
-                        b't' => out.push('\t'),
-                        b'r' => out.push('\r'),
-                        b'e' => out.push('\x1b'),
-                        b'b' => out.push('\x08'),
-                        b'\\' => out.push('\\'),
-                        b'"' => out.push('"'),
-                        b'0'..=b'7' => {
-                            let mut n = (e - b'0') as u32;
-                            for _ in 0..2 {
-                                let d = self.peek();
-                                if (b'0'..=b'7').contains(&d) {
-                                    n = n * 8 + (d - b'0') as u32;
-                                    self.pos += 1;
-                                } else {
-                                    break;
-                                }
-                            }
-                            if let Some(ch) = char::from_u32(n) {
-                                out.push(ch);
-                            }
-                        }
-                        b'x' | b'X' => {
-                            let mut n = 0u32;
-                            for _ in 0..2 {
-                                let d = self.peek();
-                                if (d as char).is_ascii_hexdigit() {
-                                    n = n * 16 + (d as char).to_digit(16).unwrap();
-                                    self.pos += 1;
-                                } else {
-                                    break;
-                                }
-                            }
-                            if let Some(ch) = char::from_u32(n) {
-                                out.push(ch);
-                            }
-                        }
-                        0 => return Err(VimlError::msg("E114: Missing quote")),
-                        other => out.push(other as char),
+                b'\\' => self.push_double_escape(&mut out)?,
+                _ => out.push(self.next_char()),
+            }
+        }
+    }
+
+    /// Decode one backslash escape in a double-quoted string body (the leading
+    /// `\` is at the current position) and push the resulting char(s) to `out`.
+    /// Shared by [`Self::lex_double_string`] and the double-quote interpolated
+    /// string body, so both honour the identical escape set.
+    fn push_double_escape(&mut self, out: &mut String) -> Result<(), VimlError> {
+        self.pos += 1; // consume the backslash
+        let e = self.peek();
+        self.pos += 1;
+        match e {
+            b'n' => out.push('\n'),
+            b't' => out.push('\t'),
+            b'r' => out.push('\r'),
+            b'e' => out.push('\x1b'),
+            b'b' => out.push('\x08'),
+            b'\\' => out.push('\\'),
+            b'"' => out.push('"'),
+            b'0'..=b'7' => {
+                let mut n = (e - b'0') as u32;
+                for _ in 0..2 {
+                    let d = self.peek();
+                    if (b'0'..=b'7').contains(&d) {
+                        n = n * 8 + (d - b'0') as u32;
+                        self.pos += 1;
+                    } else {
+                        break;
                     }
                 }
-                _ => out.push(self.next_char()),
+                if let Some(ch) = char::from_u32(n) {
+                    out.push(ch);
+                }
+            }
+            b'x' | b'X' => {
+                let mut n = 0u32;
+                for _ in 0..2 {
+                    let d = self.peek();
+                    if (d as char).is_ascii_hexdigit() {
+                        n = n * 16 + (d as char).to_digit(16).unwrap();
+                        self.pos += 1;
+                    } else {
+                        break;
+                    }
+                }
+                if let Some(ch) = char::from_u32(n) {
+                    out.push(ch);
+                }
+            }
+            0 => return Err(VimlError::msg("E114: Missing quote")),
+            other => out.push(other as char),
+        }
+        Ok(())
+    }
+
+    /// Lex an interpolated string `$'…'` (literal body, `''`→`'`, no escapes) or
+    /// `$"…"` (double-quote body, backslash escapes apply). In both, `{expr}`
+    /// marks an embedded expression, `{{`/`}}` (and, for `$"…"`, `\{`/`\}`) are
+    /// literal braces, and a lone unmatched `}` is E1278. The `$` and opening
+    /// quote are at the current position. Faithful to Vim 9.2's interpolated
+    /// string (`:help interpolated-string`), which works in both vim9 and legacy.
+    fn lex_interp_string(&mut self) -> Result<Tok, VimlError> {
+        let double = self.peek2() == b'"';
+        self.pos += 2; // skip `$` and the opening quote
+        let quote = if double { b'"' } else { b'\'' };
+        let mut parts: Vec<InterpPart> = Vec::new();
+        let mut lit = String::new();
+        loop {
+            let c = self.peek();
+            if c == 0 {
+                return Err(VimlError::msg(if double {
+                    "E114: Missing quote"
+                } else {
+                    "E115: Missing quote"
+                }));
+            }
+            if double && c == b'\\' {
+                // `\{`/`\}` fall through to the escape's default arm (literal
+                // brace), so an escaped brace never opens an expression.
+                self.push_double_escape(&mut lit)?;
+                continue;
+            }
+            if c == quote {
+                // A doubled `''` inside a `$'…'` body is a literal quote.
+                if !double && self.peek2() == b'\'' {
+                    lit.push('\'');
+                    self.pos += 2;
+                    continue;
+                }
+                self.pos += 1; // closing quote
+                break;
+            }
+            match c {
+                b'{' => {
+                    if self.peek2() == b'{' {
+                        lit.push('{');
+                        self.pos += 2;
+                    } else {
+                        self.pos += 1; // consume `{`
+                        if !lit.is_empty() {
+                            parts.push(InterpPart::Lit(std::mem::take(&mut lit)));
+                        }
+                        parts.push(InterpPart::Expr(self.scan_interp_expr()?));
+                    }
+                }
+                b'}' => {
+                    if self.peek2() == b'}' {
+                        lit.push('}');
+                        self.pos += 2;
+                    } else {
+                        return Err(VimlError::msg("E1278: Stray '}' without a matching '{'"));
+                    }
+                }
+                _ => lit.push(self.next_char()),
+            }
+        }
+        if !lit.is_empty() {
+            parts.push(InterpPart::Lit(lit));
+        }
+        Ok(Tok::InterpStr(parts))
+    }
+
+    /// Scan the source of one `{expr}` region: the opening `{` is already
+    /// consumed; return the raw text up to (and consuming) the matching `}`.
+    /// Nested `{…}` (dict literals) are depth-counted, and string literals
+    /// `'…'`/`"…"` are skipped whole so a brace or quote inside them neither
+    /// closes the expression nor the enclosing string. Unbalanced → E1279.
+    fn scan_interp_expr(&mut self) -> Result<String, VimlError> {
+        let start = self.pos;
+        let mut depth = 1u32;
+        loop {
+            match self.peek() {
+                0 => return Err(VimlError::msg("E1279: Missing '}'")),
+                b'\'' => self.skip_sq_in_expr(),
+                b'"' => self.skip_dq_in_expr(),
+                b'{' => {
+                    depth += 1;
+                    self.pos += 1;
+                }
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        let expr = self.s[start..self.pos].to_string();
+                        self.pos += 1; // consume the matching `}`
+                        return Ok(expr);
+                    }
+                    self.pos += 1;
+                }
+                _ => {
+                    self.next_char();
+                }
+            }
+        }
+    }
+
+    /// Skip a single-quoted string body inside an interpolation expression (the
+    /// opening `'` is at the current position); `''` is an embedded quote.
+    fn skip_sq_in_expr(&mut self) {
+        self.pos += 1; // opening `'`
+        loop {
+            match self.peek() {
+                0 => return,
+                b'\'' => {
+                    if self.peek2() == b'\'' {
+                        self.pos += 2;
+                    } else {
+                        self.pos += 1;
+                        return;
+                    }
+                }
+                _ => {
+                    self.next_char();
+                }
+            }
+        }
+    }
+
+    /// Skip a double-quoted string body inside an interpolation expression (the
+    /// opening `"` is at the current position); a `\` escapes the next byte.
+    fn skip_dq_in_expr(&mut self) {
+        self.pos += 1; // opening `"`
+        loop {
+            match self.peek() {
+                0 => return,
+                b'\\' => {
+                    self.pos += 1;
+                    if self.peek() != 0 {
+                        self.next_char();
+                    }
+                }
+                b'"' => {
+                    self.pos += 1;
+                    return;
+                }
+                _ => {
+                    self.next_char();
+                }
             }
         }
     }

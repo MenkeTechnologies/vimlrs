@@ -15,7 +15,7 @@
 //! ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 use crate::viml_ast::{ArithOp, Expr, ForVars, LetTarget, Stmt, UnaryOp, UnletArg};
-use crate::viml_lexer::{lex, CaseFlag, CmpOp, Tok, Token, VimlError};
+use crate::viml_lexer::{lex, CaseFlag, CmpOp, InterpPart, Tok, Token, VimlError};
 use std::cell::Cell;
 
 thread_local! {
@@ -2220,6 +2220,7 @@ impl Parser {
                 )],
             }),
             Tok::Str(s) => Ok(Expr::Str(s)),
+            Tok::InterpStr(parts) => self.lower_interp(parts),
             Tok::Option(o) => Ok(Expr::Option(o)),
             Tok::Env(e) => Ok(Expr::Env(e)),
             Tok::Register(r) => Ok(Expr::Register(r)),
@@ -2269,6 +2270,22 @@ impl Parser {
                 "E15: Invalid expression: unexpected {other:?}"
             ))),
         }
+    }
+
+    /// Lower an interpolated string's raw parts into an [`Expr::Interp`]: each
+    /// literal chunk becomes an `Expr::Str`, each `{expr}` region is sub-parsed.
+    /// A blank/empty region (`{ }`, `{}`) sub-parses to an E15 error, matching
+    /// Vim (an empty interpolation expression is invalid). The compiler
+    /// echo-stringifies and concatenates the segments.
+    fn lower_interp(&mut self, parts: Vec<InterpPart>) -> Result<Expr, VimlError> {
+        let mut segs = Vec::with_capacity(parts.len());
+        for part in parts {
+            match part {
+                InterpPart::Lit(s) => segs.push(Expr::Str(s)),
+                InterpPart::Expr(src) => segs.push(parse_expr(&src)?),
+            }
+        }
+        Ok(Expr::Interp(segs))
     }
 
     /// True when the `(` at the current position directly abuts the previous

@@ -16,6 +16,10 @@ pub enum Expr {
     Float(f64),
     /// String literal (already unescaped).
     Str(String),
+    /// Interpolated string `$'…{expr}…'` / `$"…{expr}…"` — each segment (literal
+    /// chunk or embedded expression) is echo-stringified and the results are
+    /// concatenated left to right, always yielding a String.
+    Interp(Vec<Expr>),
     /// List literal `[a, b, …]`.
     List(Vec<Expr>),
     /// Lambda `{args -> body}` — desugars to an anonymous function returning

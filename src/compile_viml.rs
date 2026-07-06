@@ -157,6 +157,7 @@ fn collect_free_vars(
             }
         }
         Expr::Member { base, .. } => collect_free_vars(base, bound, out),
+        Expr::Interp(segs) => segs.iter().for_each(|s| collect_free_vars(s, bound, out)),
         Expr::Call { args, .. } => args.iter().for_each(|a| collect_free_vars(a, bound, out)),
         Expr::CallExpr { callee, args } => {
             collect_free_vars(callee, bound, out);
@@ -711,6 +712,7 @@ fn slot_plan(stmts: &[Stmt], in_function: bool) -> SlotPlan {
                 scoped_e(v, in_function, out);
             }),
             Expr::Call { args, .. } => args.iter().for_each(|a| scoped_e(a, in_function, out)),
+            Expr::Interp(segs) => segs.iter().for_each(|s| scoped_e(s, in_function, out)),
             _ => {}
         }
     }
@@ -1653,6 +1655,21 @@ impl Compiler {
                 self.emit(Op::LoadFloat(*f));
             }
             Expr::Str(s) => self.load_str(s),
+            Expr::Interp(segs) => {
+                // Echo-stringify each segment (`VIML_STR_INTERP`) and concatenate
+                // left to right; an empty interpolation is the empty string.
+                if segs.is_empty() {
+                    self.load_str("");
+                } else {
+                    for (i, seg) in segs.iter().enumerate() {
+                        self.expr(seg)?;
+                        self.emit(Op::CallBuiltin(h::VIML_STR_INTERP, 1));
+                        if i > 0 {
+                            self.emit(Op::CallBuiltin(h::VIML_CONCAT, 2));
+                        }
+                    }
+                }
+            }
             Expr::Var(name) => {
                 self.get_var(name);
             }
