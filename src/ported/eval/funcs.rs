@@ -7780,16 +7780,23 @@ pub fn do_excmd(line: &str) -> ExCmdResult {
             crate::ported::eval::ex_echohl(args);
             ExCmdResult::Handled
         }
-        // Screen/session commands with no observable effect on an editor-less
-        // config load: `:redraw[!]`/`:redrawstatus`/`:redrawtabline` (repaint),
-        // `:redir` (message redirection — no message UI here), and `:runtime`
-        // (source from 'runtimepath' — plugin loading, out of scope like the
-        // Vundle block). Recognized as no-ops so a function body using them still
-        // defines instead of the line aborting the `:function`.
-        "redraw" | "redr" | "redra" | "redraws" | "redrawstatus" | "redrawt" | "redrawtabline"
-        | "redir" | "redi" | "runtime" | "ru" | "run" | "runt" | "runti" | "runtim" => {
+        // `:runtime[!] {file}...` (`ex_docmd.c` → `ex_runtime`) sources matching
+        // files from the runtime search path — how ftplugins pull in a sibling
+        // (`runtime! ftplugin/c.vim` from `cpp.vim`, so `b:undo_ftplugin` exists
+        // before the `..=` that appends to it). Delegated to the crate-root
+        // sourcing machinery (`do_runtime`); the runtime path is rediscovered
+        // editor-less (see [`crate::fusevm_bridge::runtime_dirs`]).
+        "runtime" | "ru" | "run" | "runt" | "runti" | "runtim" => {
+            crate::fusevm_bridge::do_runtime(bang, args);
             ExCmdResult::Handled
         }
+        // Screen/session commands with no observable effect on an editor-less
+        // config load: `:redraw[!]`/`:redrawstatus`/`:redrawtabline` (repaint)
+        // and `:redir` (message redirection — no message UI here). Recognized as
+        // no-ops so a function body using them still defines instead of the line
+        // aborting the `:function`.
+        "redraw" | "redr" | "redra" | "redraws" | "redrawstatus" | "redrawt" | "redrawtabline"
+        | "redir" | "redi" => ExCmdResult::Handled,
         // `:noh[lsearch]` (`ex_docmd.c` → `ex_nohlsearch`) turns off the current
         // search-match highlighting until the next search. There is no highlight
         // state editor-less, so it is a no-op — recognized so a config/syntax

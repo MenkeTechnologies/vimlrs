@@ -12,7 +12,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use crate::ported::eval::typval::tv_get_bool;
+use crate::ported::eval::typval::{tv_get_bool, tv_get_string};
 use crate::ported::eval::typval_defs_h::{typval_T, varnumber_T};
 
 /// Option kind, for parsing `:set` values.
@@ -44,6 +44,11 @@ const OPTIONS: &[(&str, &str, Kind, varnumber_T)] = &[
     ("softtabstop", "sts", Kind::Number, 0),
     ("textwidth", "tw", Kind::Number, 0),
     ("scrolloff", "so", Kind::Number, 0),
+    // Comma-separated runtime search path. Editor-less, its stored value starts
+    // empty (`&rtp` reads ""); `set rtp+=DIR` records the user's additions, which
+    // `:runtime` searches on top of the discovered system runtime dirs (see
+    // `crate::fusevm_bridge::runtime_dirs`).
+    ("runtimepath", "rtp", Kind::String, 0),
 ];
 
 thread_local! {
@@ -109,12 +114,48 @@ pub fn do_set(args: &str) {
         }
     });
     for part in args.split_whitespace() {
-        // `opt=val` / `opt:val`.
-        if let Some((name, val)) = part.split_once(['=', ':']) {
+        // `opt=val` / `opt:val`, plus the compound-assign operators `opt+=val`
+        // (append), `opt^=val` (prepend), `opt-=val` (remove) — `do_set`'s
+        // OP_ADDING/OP_PREPENDING/OP_REMOVING. Compound ops apply to comma-list
+        // string options (e.g. `set rtp+=DIR`); on number/bool options a compound
+        // op is left as a no-op (matches the prior behavior where `sw+` failed to
+        // resolve). A plain `=`/`:` sets.
+        if let Some((lhs, val)) = part.split_once(['=', ':']) {
+            let (name, op) = match lhs.strip_suffix(['+', '^', '-']) {
+                Some(base) => (base, lhs.as_bytes()[lhs.len() - 1]),
+                None => (lhs, b'='),
+            };
             if let Some((canon, _, kind, _)) = findoption(name) {
-                let tv = match kind {
-                    Kind::String => typval_T::from(val.to_string()),
-                    _ => typval_T::from(val.trim().parse().unwrap_or(0)),
+                let tv = match (kind, op) {
+                    (Kind::String, b'+') => {
+                        let cur = tv_get_string(&get_option_value(canon));
+                        typval_T::from(if cur.is_empty() {
+                            val.to_string()
+                        } else {
+                            format!("{cur},{val}")
+                        })
+                    }
+                    (Kind::String, b'^') => {
+                        let cur = tv_get_string(&get_option_value(canon));
+                        typval_T::from(if cur.is_empty() {
+                            val.to_string()
+                        } else {
+                            format!("{val},{cur}")
+                        })
+                    }
+                    (Kind::String, b'-') => {
+                        let cur = tv_get_string(&get_option_value(canon));
+                        typval_T::from(
+                            cur.split(',')
+                                .filter(|s| *s != val)
+                                .collect::<Vec<_>>()
+                                .join(","),
+                        )
+                    }
+                    (Kind::String, _) => typval_T::from(val.to_string()),
+                    (_, b'=') => typval_T::from(val.trim().parse::<varnumber_T>().unwrap_or(0)),
+                    // Compound op on a number/bool option: no-op.
+                    _ => continue,
                 };
                 set_option_value(canon, tv);
             }

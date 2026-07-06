@@ -1875,20 +1875,140 @@ fn b_source(vm: &mut VM, _: u8) -> Value {
     // `:source` runs its filename through `expand_env` (Vim's `do_source`), so
     // `$VAR`/`${VAR}`/`~` in the path resolve — e.g. `source $ZPWR_FZF_DIR/x.vim`.
     let expanded = crate::ported::eval::fs::expand_env(&path);
-    match std::fs::read_to_string(&expanded) {
+    source_file(&expanded);
+    Value::Undef
+}
+
+/// Read `path` and run it in the current (shared) scope, so functions and
+/// globals it defines persist. `<sfile>`/`<script>` inside the sourced file
+/// resolve to ITS path (a nested sourcing-name push, popped after). A missing
+/// file is E484. Shared by `:source` and `:runtime`.
+fn source_file(path: &str) {
+    match std::fs::read_to_string(path) {
         Ok(src) => {
-            // `<sfile>`/`<script>` inside the sourced file resolve to ITS path,
-            // not the parent's (a nested sourcing-name push, popped after).
-            let sname = std::fs::canonicalize(&expanded)
+            let sname = std::fs::canonicalize(path)
                 .map(|p| p.display().to_string())
-                .unwrap_or_else(|_| expanded.clone());
+                .unwrap_or_else(|_| path.to_string());
             crate::ported::eval::fs::push_sourcing_name(sname);
-            let _ = run_source_nested(&src);
+            // A real runtime file (`:source`d / `:runtime`d ftplugin) can contain
+            // a construct vimlrs does not yet parse — e.g. `sh.vim`'s `:compiler`
+            // command inside a not-taken branch. `run_source_nested` returns `Err`
+            // from parse/compile BEFORE running anything, so on failure fall back to
+            // running it statement-by-statement, skipping only the lines that don't
+            // parse (as the top-level `eval_file_inner` path does) — rather than
+            // aborting the whole file and losing the options / `b:did_ftplugin` /
+            // `b:undo_ftplugin` a sibling ftplugin relies on. The tolerant fallback
+            // lives HERE (not in `run_source_nested`) so `assert_fails()` and
+            // `execute()`, which need parse/compile errors to propagate, are
+            // unaffected.
+            if run_source_nested(&src).is_err() {
+                source_tolerant(&src);
+            }
             crate::ported::eval::fs::pop_sourcing_name();
         }
-        Err(_) => message::semsg(&format!("E484: Can't open file {expanded}")),
+        Err(_) => message::semsg(&format!("E484: Can't open file {path}")),
     }
-    Value::Undef
+}
+
+/// Runtime search roots — vimlrs' 'runtimepath'. Real Vim builds `&rtp` from
+/// `$VIM`/`$VIMRUNTIME` at startup (`ex_docmd.c`) and `:runtime` searches it,
+/// honoring live `set rtp+=DIR` edits. Editor-less, the startup dirs are usually
+/// unset, so they are rediscovered: the user's `~/.vim`, an exported
+/// `$VIMRUNTIME`, then the installed-Vim runtime dirs found by
+/// [`system_vim_runtime_dirs`]. On top of those, the entries the user added to
+/// the `'runtimepath'` option (`set rtp+=DIR`) are appended, so `:runtime` finds
+/// files under them exactly as Vim does after the same `set rtp+=`.
+fn runtime_dirs() -> Vec<std::path::PathBuf> {
+    let mut roots = Vec::new();
+    if let Ok(home) = std::env::var("HOME") {
+        roots.push(std::path::PathBuf::from(home).join(".vim"));
+    }
+    if let Ok(rt) = std::env::var("VIMRUNTIME") {
+        roots.push(std::path::PathBuf::from(rt));
+    }
+    roots.extend(system_vim_runtime_dirs());
+    // User additions via `set runtimepath+=DIR` (comma-separated), appended in
+    // order — Vim's `+=` append position.
+    let rtp = crate::ported::eval::typval::tv_get_string(&crate::ported::option::get_option_value(
+        "runtimepath",
+    ));
+    for entry in rtp.split(',') {
+        let entry = entry.trim();
+        if !entry.is_empty() {
+            roots.push(std::path::PathBuf::from(entry));
+        }
+    }
+    roots
+}
+
+/// Match a shell-style glob (`*` = any run, `?` = one char) against a single
+/// filename. Covers the wildcards used in runtime patterns
+/// (`ftplugin/c_*.vim`); no `[...]` classes (runtime names never use them).
+fn wildcard_match(pat: &str, text: &str) -> bool {
+    fn go(p: &[char], t: &[char]) -> bool {
+        match p.first() {
+            None => t.is_empty(),
+            Some('*') => go(&p[1..], t) || (!t.is_empty() && go(p, &t[1..])),
+            Some('?') => !t.is_empty() && go(&p[1..], &t[1..]),
+            Some(&c) => !t.is_empty() && t[0] == c && go(&p[1..], &t[1..]),
+        }
+    }
+    go(
+        &pat.chars().collect::<Vec<_>>(),
+        &text.chars().collect::<Vec<_>>(),
+    )
+}
+
+/// Resolve `{root}/{name}` where `name`'s final path component may contain the
+/// `*`/`?` wildcards used in runtime patterns. Returns every matching regular
+/// file (sorted for determinism); a wildcard-free name yields at most the single
+/// literal file.
+fn runtime_glob(root: &std::path::Path, name: &str) -> Vec<std::path::PathBuf> {
+    let (dir, file) = match name.rsplit_once('/') {
+        Some((d, f)) => (root.join(d), f.to_string()),
+        None => (root.to_path_buf(), name.to_string()),
+    };
+    if !file.contains(['*', '?']) {
+        let p = dir.join(&file);
+        return if p.is_file() { vec![p] } else { Vec::new() };
+    }
+    let mut out = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for e in entries.flatten() {
+            if let Some(n) = e.file_name().to_str() {
+                if wildcard_match(&file, n) && e.path().is_file() {
+                    out.push(e.path());
+                }
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// `:runtime[!] {file}...` — source matching files from the runtime search
+/// path. Port of `ex_runtime()`→`source_runtime()`→`do_in_runtimepath()`
+/// (`ex_docmd.c`): each `{file}` (its last component may glob) is looked up under
+/// every runtime dir; `:runtime` sources the first match found and stops,
+/// `:runtime!` sources every match. Names not found anywhere are silently
+/// skipped, exactly like Vim.
+pub fn do_runtime(bang: bool, args: &str) {
+    let roots = runtime_dirs();
+    for name in args.split_whitespace() {
+        let mut done = false;
+        for root in &roots {
+            for m in runtime_glob(root, name) {
+                source_file(&m.display().to_string());
+                if !bang {
+                    done = true;
+                    break;
+                }
+            }
+            if done {
+                break;
+            }
+        }
+    }
 }
 
 /// `:unlet {name}` — delete a variable (forceit: missing is not an error here).
