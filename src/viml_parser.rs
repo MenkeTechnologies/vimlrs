@@ -137,13 +137,15 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
                 .map(Stmt::Unlet)
         }
         "let" => parse_let(rest),
-        // vim9 `:var {name}[: type] = {expr}` / `:final …` declare-and-assign like
-        // `:let`. The `: type` annotation is parsed and discarded (the vim9 type
-        // system — checking/coercion, immutability of `:final`/`:const`, and
-        // default-init of a type-only `var x: number` — is deferred). RUST-PORT
-        // NOTE: real Vim rejects `:var`/`:final` in a legacy script (E1124); this
-        // leaf accepts the vim9 form everywhere, a benign superset.
-        "var" | "final" => parse_let(&strip_vim9_type(rest)),
+        // vim9 `:var {name}[: type] = {expr}` declare-and-assign like `:let`. The
+        // `: type` annotation is parsed and discarded (checking/coercion deferred).
+        // A type-only `:var x: number` (no initializer) default-inits to the
+        // type's zero value ([`vim9_var_decl`]). RUST-PORT NOTE: real Vim rejects
+        // `:var` in a legacy script (E1124); this leaf accepts it everywhere.
+        "var" => parse_let(&vim9_var_decl(rest)),
+        // `:final {name}[: type] = {expr}` — like `:var` but a value is REQUIRED
+        // (real Vim: E1125 on a type-only `:final`), so no default-init here.
+        "final" => parse_let(&strip_vim9_type(rest)),
         // A `:function` that reaches here (not caught as a block opener in
         // `parse_one` — e.g. behind a modifier, `silent function`) with no
         // parameter-list `(` is the listing/show command, not a definition:
@@ -276,6 +278,13 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
         {
             Ok(Stmt::ExCmd(line.to_string()))
         }
+        // vim9 bare assignment to an already-declared variable: `name = expr`,
+        // `name += expr`, `d[key] = expr`, `g:x = expr` — vim9 assigns without a
+        // `:let`/`:var` keyword. Legacy vimscript requires `:let`, so this fires
+        // only in a vim9 region; [`is_vim9_assignment`] rejects user commands
+        // (`MyCmd key=val`) and comparisons. Kept ahead of the uppercase
+        // user-command arm so a CamelCase script var (`Total = 0`) assigns.
+        _ if vim9_active() && is_vim9_assignment(line) => parse_let(line),
         // A command word starting with an uppercase letter is a user-command
         // invocation (`:Foo args`), resolved at run time. A name immediately
         // followed by `(` is a funcref call expression, not a command.
@@ -1291,6 +1300,117 @@ fn strip_vim9_type(rest: &str) -> String {
     }
 }
 
+/// vim9 `:var` declaration LHS → a `:let`-compatible string for [`parse_let`].
+/// With an initializer (`var x: T = e`) the `: T` annotation is stripped
+/// ([`strip_vim9_type`]). A type-only declaration (`var x: T`, no `=`)
+/// default-inits to `T`'s zero value (`:help vim9-declaration`), producing
+/// `x = <default>`. Defaults are binary-verified against Vim 9.2:
+/// `string ''`, `number 0`, `float 0.0`, `bool v:false`, `list []`, `dict {}`,
+/// `blob 0z`, `any 0`. Opaque types real Vim rejects or has no literal for
+/// (`func` → E1017, `job`/`channel`/class names) pass through unchanged so the
+/// existing error path is preserved.
+fn vim9_var_decl(rest: &str) -> String {
+    if find_top_eq(rest).is_some() {
+        return strip_vim9_type(rest);
+    }
+    let trimmed = rest.trim();
+    // A list-unpack LHS (`[a, b]`) is never a type-only scalar declaration.
+    if trimmed.starts_with('[') {
+        return rest.to_string();
+    }
+    let Some(p) = find_top_colon(trimmed) else {
+        return rest.to_string();
+    };
+    let name = trimmed[..p].trim_end();
+    // Outermost type constructor: the leading identifier of the annotation,
+    // up to `<` (list<…>/dict<…>), `(` (func(…)), whitespace, or a `#` comment.
+    let outer: String = trimmed[p + 1..]
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    let default = match outer.as_str() {
+        "string" => "''",
+        "number" => "0",
+        "float" => "0.0",
+        "bool" => "v:false",
+        "list" => "[]",
+        "dict" => "{}",
+        "blob" => "0z",
+        "any" => "0",
+        _ => return rest.to_string(),
+    };
+    format!("{name} = {default}")
+}
+
+/// True when `line` (in a vim9 region) is a bare assignment to an already-declared
+/// variable — `name = expr`, `name += expr`, `d[key] = expr`, `g:x = expr`,
+/// `obj.field = expr`, etc. vim9 assigns without a `:let`/`:var` keyword
+/// (`:help vim9-declaration`); legacy vimscript requires `:let`, so the caller
+/// gates this on [`vim9_active`]. Detection scans a valid lvalue (identifier with
+/// optional scope `:`, chained `[...]` subscripts and `.field` members) and
+/// requires an assignment operator (`= += -= *= /= %= ..=`) as the next token —
+/// a space before the operator (as in a user command `MyCmd key=val`) or a `==`/
+/// `=~` comparison is rejected. Routed through [`parse_let`], which handles every
+/// assignment operator and lvalue form.
+fn is_vim9_assignment(line: &str) -> bool {
+    let b = line.as_bytes();
+    // An lvalue starts with an identifier char; anything else is not an assignment.
+    match b.first() {
+        Some(&c) if c.is_ascii_alphabetic() || c == b'_' => {}
+        _ => return false,
+    }
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            c if c.is_ascii_alphanumeric() || c == b'_' => i += 1,
+            b':' => i += 1, // scope separator: g:, b:, s:, …
+            b'[' => {
+                // Skip a bracketed subscript, tracking nesting and strings.
+                let mut depth = 0i32;
+                let mut quote: Option<u8> = None;
+                while i < b.len() {
+                    let c = b[i];
+                    i += 1;
+                    match quote {
+                        Some(q) => {
+                            if c == q {
+                                quote = None;
+                            }
+                        }
+                        None => match c {
+                            b'\'' | b'"' => quote = Some(c),
+                            b'[' => depth += 1,
+                            b']' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        },
+                    }
+                }
+            }
+            // `.field` member access (not the `..` concat / `..=` operator).
+            b'.' if b
+                .get(i + 1)
+                .is_some_and(|&c| c.is_ascii_alphabetic() || c == b'_') =>
+            {
+                i += 1
+            }
+            _ => break,
+        }
+    }
+    let op = line[i..].trim_start().as_bytes();
+    match op.first() {
+        Some(b'=') => !matches!(op.get(1), Some(b'=') | Some(b'~')),
+        Some(b'+') | Some(b'-') | Some(b'*') | Some(b'%') | Some(b'/') => op.get(1) == Some(&b'='),
+        Some(b'.') => op.get(1) == Some(&b'.') && op.get(2) == Some(&b'='),
+        _ => false,
+    }
+}
+
 fn parse_function(cur: &mut Lines, header: &str) -> Result<Stmt, VimlError> {
     // A legacy `:function … endfunction` body is legacy even inside a
     // `:vim9script`: its dict literals use expression keys, not vim9 bare keys.
@@ -1544,7 +1664,13 @@ fn parse_let(rest: &str) -> Result<Stmt, VimlError> {
         Some(b'.') => Some(ArithOp::Concat),
         _ => None,
     };
-    let lhs_end = if op.is_some() { eq - 1 } else { eq };
+    // vim9 string concat-assign is `..=` (two dots); legacy is `.=` (one). The
+    // op char sits at `eq - 1`; for `..=` a second dot precedes it, so strip both.
+    let lhs_end = match op {
+        Some(ArithOp::Concat) if eq >= 2 && rest.as_bytes()[eq - 2] == b'.' => eq - 2,
+        Some(_) => eq - 1,
+        None => eq,
+    };
     let lhs = rest[..lhs_end].trim();
     let rhs = rest[eq + 1..].trim();
     let target = if let Some(inner) = lhs.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
