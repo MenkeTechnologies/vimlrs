@@ -15,6 +15,13 @@ call assert_equal(1, has('reltime'))
 call assert_equal(1, has('iconv'))
 call assert_equal(1, has('digraphs'))
 
+" --- syntax-version features: vimlrs runs both legacy Vim script and Vim9
+" script (var/def/typed params), so it reports vimscript-1 and vim9script,
+" matching real Vim 9.2 which returns 1 for both.
+call assert_equal(1, has('vimscript-1'))
+call assert_equal(1, has('vim9script'))
+call assert_equal(has('vim9script'), has('VIM9SCRIPT'))
+
 " --- feature names are matched case-insensitively (Vim uses STRICMP)
 call assert_equal(has('eval'), has('EVAL'))
 call assert_equal(has('unix'), has('Unix'))

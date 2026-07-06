@@ -1211,9 +1211,9 @@ pub fn f_has(argvars: &[typval_T], rettv: &mut typval_T) {
         // working builtin or core behaviour). Editor features Neovim's has_list[]
         // claims — windows, syntax, folding, mouse, statusline, … — are
         // deliberately omitted: vimlrs is a standalone eval engine without them.
-        "eval" | "float" | "vimlrs" | "lambda" | "num64" | "vimscript-1" | "multi_byte"
-        | "reltime" | "nanotime" | "iconv" | "digraphs" | "modify_fname" | "gettext"
-        | "byte_offset" => true,
+        "eval" | "float" | "vimlrs" | "lambda" | "num64" | "vimscript-1" | "vim9script"
+        | "multi_byte" | "reltime" | "nanotime" | "iconv" | "digraphs" | "modify_fname"
+        | "gettext" | "byte_offset" => true,
         _ => false,
     };
     rettv.vval = v_number(n as varnumber_T);
