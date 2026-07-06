@@ -3176,10 +3176,6 @@ pub fn take_last_result() -> Option<typval_T> {
 
 /// Reset per-run state (refpool, last result, `did_emsg`).
 pub fn reset_run() {
-    // Seed the v: variable store (vimvars[]) once per top-level script run.
-    // Nested function-call VMs do NOT call reset_run(), so the store persists
-    // across user-function calls (same lifetime model as the refpool below).
-    crate::ported::eval::vars::evalvars_init();
     REFPOOL.with(|p| p.borrow_mut().clear());
     LAST_RESULT.with(|r| *r.borrow_mut() = None);
     PENDING_EXC.with(|p| *p.borrow_mut() = None);
@@ -3526,12 +3522,8 @@ pub fn install(vm: &mut VM) {
     if std::env::var_os("VIMLRS_NO_JIT").is_none() && !SUPPRESS_JIT.with(|c| c.get()) {
         vm.enable_tracing_jit();
     }
-    // NOTE: the v: variable store (vimvars[]) is seeded once per top-level run in
-    // `reset_run()`, NOT here. `install()` also runs on every nested
-    // function-call VM (`run_chunk_nested`); re-seeding there would reset every
-    // v: var (v:colornames, v:errors, …) each time a user function is called,
-    // discarding writes the caller made (e.g. colors/lists/default.vim populating
-    // v:colornames, then a nested s:Cleanup() call wiping it back to empty).
+    // Seed the v: variable store (vimvars[]) before any script runs.
+    crate::ported::eval::vars::evalvars_init();
     vm.register_builtin(VIML_GETVAR, b_getvar);
     vm.register_builtin(VIML_SETVAR, b_setvar);
     vm.register_builtin(VIML_SETENV, b_setenv);

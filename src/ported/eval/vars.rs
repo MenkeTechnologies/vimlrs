@@ -280,10 +280,6 @@ pub mod vv {
         VV_EXITREASON,
         VV_USERACTIVE,
         VV_STARTREASON,
-        // vim-only v: var (vim 8.1.0729+), absent from the neovim-derived base
-        // above; appended so the neovim VimVarIndex order of the preceding
-        // entries is preserved byte-for-byte.
-        VV_COLORNAMES,
     );
 }
 use vv::*;
@@ -411,11 +407,6 @@ const VIMVARS_DEF: [(&str, VarType, u8); VV_LEN] = [
     ("exitreason", VAR_STRING, VV_RO),
     ("useractive", VAR_NUMBER, VV_RO),
     ("startreason", VAR_STRING, VV_RO),
-    // c (vim evalvars.c:155): {VV_NAME("colornames", VAR_DICT), VV_RO}. vim-only
-    // (neovim has no v:colornames); appended last to keep the neovim-derived
-    // indices above unchanged. Empty writable Dict — colors/lists/*.vim populate
-    // it via extend()/indexed assignment; the VV_RO binding blocks reassignment.
-    ("colornames", VAR_DICT, VV_RO),
 ];
 
 thread_local! {
@@ -532,14 +523,6 @@ pub fn evalvars_init() {
             v_type: VAR_LIST,
             v_lock: VarLockStatus::VAR_UNLOCKED,
             vval: v_list(Some(tv_list_alloc(0))),
-        };
-        // c: set_vim_var_dict(VV_COLORNAMES, dict_alloc()) — an empty writable
-        // Dict (colors/lists/*.vim populate it via extend()); the binding is
-        // VV_RO (can't reassign v:colornames) but its contents stay mutable.
-        v[VV_COLORNAMES].vv_tv = typval_T {
-            v_type: VAR_DICT,
-            v_lock: VarLockStatus::VAR_UNLOCKED,
-            vval: v_dict(Some(tv_dict_alloc())),
         };
 
         v[VV_STDERR].vv_tv = num(2); // CHAN_STDERR
