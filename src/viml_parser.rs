@@ -734,6 +734,34 @@ impl Lines {
         let mut k = 0;
         while k < raw.len() {
             let lineno = (k + 1) as u32;
+            // Script-language heredoc (`:python3 << EOF … EOF`, and the same for
+            // `:python`/`:perl`/`:ruby`/`:lua`/`:tcl`/`:mzscheme`). Vim's
+            // `script_get()` (ex_docmd.c) sees the command arg begin with `<<`
+            // and calls `heredoc_get(…, script_get=true)`, which reads every
+            // subsequent line into the embedded interpreter until the end marker
+            // — a missing marker defaults to `.` (vendor/eval/vars.c:791). The
+            // interface is uncompiled here, so the body is never run; skip it to
+            // the marker so its lines are NOT mis-parsed as vimscript. The opener
+            // line itself stays as a no-op'd Ex command.
+            if let Some((trim, marker)) = script_lang_heredoc_marker(raw[k]) {
+                let cmd_indent: String = raw[k].chars().take_while(|c| c.is_whitespace()).collect();
+                let mut j = k + 1;
+                while j < raw.len() {
+                    let bl = raw[j];
+                    let probe = if trim {
+                        bl.strip_prefix(cmd_indent.as_str()).unwrap_or(bl)
+                    } else {
+                        bl
+                    };
+                    j += 1;
+                    if probe == marker {
+                        break;
+                    }
+                }
+                collapsed.push((lineno, raw[k].to_string()));
+                k = j;
+                continue;
+            }
             if let Some((prefix, trim, _eval, marker)) = heredoc_opener(raw[k]) {
                 // With `trim`, the end marker may be indented to match the `:let`
                 // command line; record that indent so it can be skipped.
@@ -2175,6 +2203,66 @@ fn heredoc_opener(line: &str) -> Option<(String, bool, bool, String)> {
         return None;
     }
     Some((prefix, trim, eval, marker.to_string()))
+}
+
+/// If `line` invokes a plain script-language interface command whose argument
+/// begins with `<<`, return `(trim, marker)` for the heredoc that follows.
+/// Mirrors Vim's `script_get()` (ex_docmd.c): only the bare interpreter
+/// commands (`:python`/`:py`, `:python3`/`:py3`, `:pythonx`/`:pyx`, `:perl`,
+/// `:ruby`, `:lua`, `:tcl`, `:mzscheme`/`:mz`) read an embedded script — the
+/// `do`/`file` variants take an expression / filename, not a heredoc. The arg
+/// (leading whitespace skipped) must start with `<<`; after it, `heredoc_get`
+/// (vendor/eval/vars.c) reads the optional `trim`/`eval` words then the marker
+/// word, defaulting to `.` when the marker is missing (script_get case).
+fn script_lang_heredoc_marker(line: &str) -> Option<(bool, String)> {
+    // The interpreter name may carry a trailing digit (`python3`, `py3`), which
+    // `cmd_word` (ASCII-letter split) would truncate — split on the alphanumeric
+    // run instead, matching `is_script_lang_cmd`.
+    let line = line.trim_start();
+    let end = line
+        .find(|c: char| !c.is_ascii_alphanumeric())
+        .unwrap_or(line.len());
+    let (cmd, rest) = (&line[..end], line[end..].trim_start());
+    if !matches!(
+        cmd,
+        "python"
+            | "py"
+            | "python3"
+            | "py3"
+            | "pythonx"
+            | "pyx"
+            | "perl"
+            | "ruby"
+            | "lua"
+            | "tcl"
+            | "mzscheme"
+            | "mz"
+    ) {
+        return None;
+    }
+    let mut r = rest.strip_prefix("<<")?.trim_start();
+    let mut trim = false;
+    loop {
+        let kw = |s: &str, w: &str| -> bool {
+            s.strip_prefix(w)
+                .is_some_and(|t| t.is_empty() || t.starts_with(char::is_whitespace))
+        };
+        if kw(r, "trim") {
+            trim = true;
+            r = r[4..].trim_start();
+        } else if kw(r, "eval") {
+            r = r[4..].trim_start();
+        } else {
+            break;
+        }
+    }
+    // The marker is the next word; a missing or comment-only remainder means the
+    // `.` default (only reached for script_get, which this always is).
+    let marker = match r.split_whitespace().next() {
+        Some(m) if !m.starts_with('"') => m.to_string(),
+        _ => ".".to_string(),
+    };
+    Some((trim, marker))
 }
 
 /// Parse one `:unlet` argument into a bare name or a List/Dict element target.
