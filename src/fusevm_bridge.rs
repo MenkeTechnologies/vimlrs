@@ -2055,6 +2055,12 @@ fn b_set_return(vm: &mut VM, _: u8) -> Value {
 /// through this so a `:function` definition, a `:call`, an expression call,
 /// `exists('*…')`, `function('…')`, and `:delfunction` all agree on one key.
 fn canon_func_name(name: &str) -> std::borrow::Cow<'_, str> {
+    // A leading `g:` scope is the default (global) namespace for a function, so
+    // Vim stores/looks up a `g:`-prefixed name under its bare form — e.g.
+    // `function! g:Baz()` is found by `exists('*Baz')` and `exists('*g:Baz')`
+    // alike. Strip it first so define/call/exists/find/remove all key the bare
+    // name (verified against `/opt/homebrew/bin/vim` 9.2).
+    let name = name.strip_prefix("g:").unwrap_or(name);
     let marker = name
         .get(..5)
         .filter(|m| m.eq_ignore_ascii_case("<SID>") || m.eq_ignore_ascii_case("<SNR>"));
