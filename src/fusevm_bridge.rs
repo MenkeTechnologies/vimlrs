@@ -2632,9 +2632,75 @@ fn b_doautocmd(vm: &mut VM, _: u8) -> Value {
 
 /// Run one Ex command against the buffer; an unrecognized command (or a
 /// `:global` sub-command that isn't an Ex command) runs as an ordinary
+/// The command words for file/buffer/window ex-commands. vimlrs "handles" these
+/// against its internal scratch buffer, which is meaningless when embedded (the
+/// host bridges getline/setline to its own real buffer), so an installed host
+/// hook is offered these FIRST — see [`exec_ex_or_stmt`].
+fn is_host_editor_cmd(line: &str) -> bool {
+    let word = line
+        .trim_start_matches([':', ' '])
+        .split(|c: char| c.is_whitespace() || c == '!')
+        .next()
+        .unwrap_or("");
+    matches!(
+        word,
+        "edit"
+            | "e"
+            | "ed"
+            | "ex"
+            | "badd"
+            | "ba"
+            | "buffer"
+            | "buf"
+            | "bu"
+            | "b"
+            | "bnext"
+            | "bn"
+            | "bNext"
+            | "bprevious"
+            | "bp"
+            | "bprev"
+            | "bfirst"
+            | "blast"
+            | "bmodified"
+            | "cd"
+            | "chdir"
+            | "lcd"
+            | "lchdir"
+            | "tcd"
+            | "tchdir"
+            | "split"
+            | "sp"
+            | "vsplit"
+            | "vs"
+            | "vsp"
+            | "new"
+            | "vnew"
+            | "enew"
+            | "tabedit"
+            | "tabe"
+            | "tabnew"
+            | "drop"
+            | "find"
+            | "sfind"
+            | "pedit"
+            | "pbuffer"
+            | "view"
+            | "sview"
+            | "sbuffer"
+            | "sb"
+    )
+}
+
 /// statement. Used by `b_excmd` and for each `:global`-matched line.
 fn exec_ex_or_stmt(line: &str) {
     use crate::ported::eval::funcs::{do_excmd, ExCmdResult};
+    // Give an embedding editor's host hook priority for file/buffer/window
+    // commands, whose vimlrs-internal handlers act on a scratch buffer the host
+    // bridges around. If the host claims the line, don't also run the stub.
+    if is_host_editor_cmd(line) && fire_excmd_host_hook(line) {
+        return;
+    }
     match do_excmd(line) {
         ExCmdResult::Handled => {}
         ExCmdResult::NotEx => {
@@ -2658,7 +2724,9 @@ fn exec_ex_or_stmt(line: &str) {
             {
                 // Unrecognized command word after a `%`/`!` range (`%foobar`).
                 message::semsg(&format!("E492: Not an editor command: {stmt}"));
-            } else {
+            } else if !fire_excmd_host_hook(stmt) {
+                // The embedding editor didn't claim it as one of its own `:`
+                // commands, so fall back to Vimscript statement evaluation.
                 let _ = run_source_nested(stmt);
             }
         }
@@ -3116,6 +3184,29 @@ thread_local! {
 /// embedding editor can apply the mapping to its real keymap.
 pub fn install_map_hook(f: Box<dyn Fn(&str)>) {
     MAP_HOST_HOOK.with(|h| *h.borrow_mut() = Some(f));
+}
+
+thread_local! {
+    /// Host hook fired with an ex-command line that vimlrs itself does not
+    /// implement (`:edit`, `:cd`, `:badd`, `:buffer`, …) BEFORE the line is
+    /// retried as a Vimscript statement. Returns `true` if the host handled it
+    /// (so vimlrs stops), `false` to fall through to statement evaluation. Lets an
+    /// embedding editor run its own `:` commands from a sourced script / session
+    /// file. EXTENSION — no `vendor/` counterpart; a bridge seam.
+    #[allow(clippy::type_complexity)]
+    static EXCMD_HOST_HOOK: RefCell<Option<Box<dyn Fn(&str) -> bool>>> = const { RefCell::new(None) };
+}
+
+/// Install a host callback fired with an ex-command line vimlrs doesn't handle
+/// (see [`EXCMD_HOST_HOOK`]). Return `true` to claim the line, `false` to let
+/// vimlrs fall back to statement evaluation.
+pub fn install_excmd_hook(f: Box<dyn Fn(&str) -> bool>) {
+    EXCMD_HOST_HOOK.with(|h| *h.borrow_mut() = Some(f));
+}
+
+/// Offer `line` to the installed ex-command host hook; `true` if it was claimed.
+fn fire_excmd_host_hook(line: &str) -> bool {
+    EXCMD_HOST_HOOK.with(|h| h.borrow().as_ref().map(|f| f(line)).unwrap_or(false))
 }
 
 // ── COLORSCHEME / HIGHLIGHT / SYNTAX / FILETYPE HOST HOOKS ────────────────────
