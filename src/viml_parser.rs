@@ -307,18 +307,28 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
         // `:'<,'>s/…`) — never a bare string, which isn't a valid statement. Route
         // it to `do_excmd` so it parses; otherwise `parse_expr` reads it as an
         // unterminated string literal and aborts the enclosing `:function`.
-        // A line beginning with an ASCII digit is a line-range Ex command: Vim's
-        // `do_one_cmd` reads a leading number as the range's first address
-        // (`1print`, `1,1fold`, `5`), so it is an Ex command, never an expression
-        // statement (a bare number line moves the cursor, `:h {address}`).
-        // `do_excmd`/`parse_line_range` already parse the range and dispatch (or
-        // no-op) the command; routing here lets such a line in a `:function` body
-        // parse instead of falling through to `parse_expr`, which chokes on the
-        // trailing command word and aborts the whole definition.
+        // A line beginning with an ASCII digit is *usually* a line-range Ex
+        // command: Vim's `do_one_cmd` reads a leading number as the range's first
+        // address (`1print`, `1,1fold`), so a body line like `1,1print` must
+        // route to `do_excmd` instead of falling through to `parse_expr`, which
+        // chokes on the trailing command word and aborts the enclosing
+        // `:function`. But vimlrs's eval entrypoint also evaluates a bare
+        // top-level expression, and `3 + 4` / `2 * 8` parse as *complete*
+        // expressions. Prefer the expression reading whenever the whole line
+        // parses as one (no trailing tokens); only a line the expression grammar
+        // rejects — a range comma or a trailing command word (`1,1print`,
+        // `1print`) — falls through to `do_excmd`.
+        _ if line.starts_with(|c: char| c.is_ascii_digit()) => match parse_expr(line) {
+            Ok(e) => Ok(Stmt::Expr(e)),
+            Err(_) => Ok(Stmt::ExCmd(line.to_string())),
+        },
+        // A `:`-prefixed line, a `%`-prefixed line (`%s/…`), a bang (`:!{cmd}`),
+        // or a mark-address line (`'<,'>s/…`) is an Ex command with an optional
+        // range — none can begin a valid expression statement, so routing them to
+        // `do_excmd` is safe.
         _ if line.starts_with(':')
             || line.starts_with('!')
             || line.starts_with('\'')
-            || line.starts_with(|c: char| c.is_ascii_digit())
             || (line.starts_with('%')
                 && line[1..].starts_with(|c: char| c.is_ascii_alphabetic())) =>
         {
