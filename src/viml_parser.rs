@@ -293,7 +293,7 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
         // (no-op'd by `do_excmd`) so a `:ruby …` line inside a not-taken branch
         // (ftplugin/ruby.vim's `if has('ruby') && has('win32')`) does not fail to
         // parse and drop its whole enclosing `:if` block via the tolerant parser.
-        _ if is_script_lang_cmd(&line) => Ok(Stmt::ExCmd(line.to_string())),
+        _ if is_script_lang_cmd(line) => Ok(Stmt::ExCmd(line.to_string())),
         // A `:`-prefixed line, or a `%`-prefixed line (`%s/…`), is an Ex command
         // with an optional line range. Neither can begin a valid expression
         // statement, so this is safe; unrecognized Ex commands fall back to
