@@ -37,9 +37,13 @@ for the full option list:
 .BR \-\-lsp ,
 .BR \-\-dap ,
 .BR \-\-disasm ,
+.BR \-\-repl ,
 .BR \-V / \-\-version ,
 .BR \-h / \-\-help .
-With no arguments a REPL is started (one statement per line; Ctrl-D exits).
+With no arguments (or \fB\-\-repl\fR) an interactive REPL is started: on a
+terminal, a reedline line editor with a live stats banner, Tab completion and
+\fB~/.vimlrs/history\fR; on a pipe, a plain one-statement-per-line reader.
+Ctrl-D exits.
 .SH "DESIGN: PORT, DON'T REINVENT"
 The language semantics are ported faithfully from Neovim's C
 .I eval/*

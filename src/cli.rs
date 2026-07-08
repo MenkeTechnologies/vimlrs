@@ -6,7 +6,7 @@
 //! - `vimlrs FILE.vim` — source a script file.
 //! - `vimlrs` (no args) — read-eval-print loop on stdin.
 
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -20,13 +20,8 @@ use crate::script_cache;
 use crate::viml_lexer::VimlError;
 
 // ── MenkeTechnologies house `--help` (cyberpunk style; see `tp -h`) ──────────
-// ANSI-Shadow "VIMLRS" wordmark, cyan → magenta → red.
-const B1: &str = "██╗   ██╗██╗███╗   ███╗██╗     ██████╗ ███████╗";
-const B2: &str = "██║   ██║██║████╗ ████║██║     ██╔══██╗██╔════╝";
-const B3: &str = "██║   ██║██║██╔████╔██║██║     ██████╔╝███████╗";
-const B4: &str = "╚██╗ ██╔╝██║██║╚██╔╝██║██║     ██╔══██╗╚════██║";
-const B5: &str = " ╚████╔╝ ██║██║ ╚═╝ ██║███████╗██║  ██║███████║";
-const B6: &str = "  ╚═══╝  ╚═╝╚═╝     ╚═╝╚══════╝╚═╝  ╚═╝╚══════╝";
+// ANSI-Shadow "VIMLRS" wordmark glyphs live in `crate::banner::LOGO` (single
+// source of truth shared with the REPL/stats banner) — cyan → magenta → red.
 
 /// clap help template: yellow `USAGE:` + cyan section rules around the green-`//`
 /// option and positional lists, with the banner/footer supplied at runtime.
@@ -37,11 +32,13 @@ const HELP_TEMPLATE: &str = "\n{before-help}\n{about}\n\n\x1b[33m  USAGE:\x1b[0m
 fn banner() -> String {
     const BOX_W: usize = 50;
     let ver = env!("CARGO_PKG_VERSION");
+    let l = crate::banner::LOGO;
+    let (b1, b2, b3, b4, b5, b6) = (l[0], l[1], l[2], l[3], l[4], l[5]);
     let status = format!(" STATUS: ONLINE  // SIGNAL: ████████░░ // v{ver}");
     let space = " ".repeat(BOX_W.saturating_sub(status.chars().count()));
     let rule = "─".repeat(BOX_W);
     format!(
-        "\n\x1b[36m {B1}\x1b[0m\n\x1b[36m {B2}\x1b[0m\n\x1b[35m {B3}\x1b[0m\n\x1b[35m {B4}\x1b[0m\n\x1b[31m {B5}\x1b[0m\n\x1b[31m {B6}\x1b[0m\n \x1b[36m┌{rule}┐\x1b[0m\n \x1b[36m│\x1b[0m{status}{space}\x1b[36m│\x1b[0m\n \x1b[36m└{rule}┘\x1b[0m\n\x1b[35m  >> VIML INTERPRETER ON FUSEVM // FULL SPECTRUM <<\x1b[0m"
+        "\n\x1b[36m {b1}\x1b[0m\n\x1b[36m {b2}\x1b[0m\n\x1b[35m {b3}\x1b[0m\n\x1b[35m {b4}\x1b[0m\n\x1b[31m {b5}\x1b[0m\n\x1b[31m {b6}\x1b[0m\n \x1b[36m┌{rule}┐\x1b[0m\n \x1b[36m│\x1b[0m{status}{space}\x1b[36m│\x1b[0m\n \x1b[36m└{rule}┘\x1b[0m\n\x1b[35m  >> VIML INTERPRETER ON FUSEVM // FULL SPECTRUM <<\x1b[0m"
     )
 }
 
@@ -49,7 +46,7 @@ fn banner() -> String {
 fn footer() -> String {
     let ver = env!("CARGO_PKG_VERSION");
     format!(
-        "\x1b[36m  ── SYSTEM ─────────────────────────────────────────\x1b[0m\n  \x1b[35mv{ver} \x1b[0m// \x1b[33m(c) MenkeTechnologies\x1b[0m\n  \x1b[35mThe script is compiled. The runtime is vast.\x1b[0m\n  \x1b[33m>>> JACK IN. SOURCE THE SCRIPT. RUN VIML EVERYWHERE. <<<\x1b[0m\n \x1b[36m░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░\x1b[0m"
+        "\x1b[36m  ── SYSTEM ─────────────────────────────────────────\x1b[0m\n  \x1b[35mv{ver} \x1b[0m// \x1b[33m(c) MenkeTechnologies\x1b[0m\n  \x1b[35mThe script is compiled. The runtime is vast.\x1b[0m\n  \x1b[32m//\x1b[0m run \x1b[36mvimlrs --repl\x1b[0m (or bare \x1b[36mvimlrs\x1b[0m in a terminal) for the interactive REPL\n  \x1b[33m>>> JACK IN. SOURCE THE SCRIPT. RUN VIML EVERYWHERE. <<<\x1b[0m\n \x1b[36m░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░\x1b[0m"
     )
 }
 
@@ -125,6 +122,14 @@ pub struct Cli {
         help = "\x1b[32m//\x1b[0m Print the fusevm bytecode listing before running"
     )]
     disasm: bool,
+
+    /// Force the interactive reedline REPL (banner, live stats, Tab completion,
+    /// history). Implied when stdin is a terminal and no other mode is given.
+    #[arg(
+        long = "repl",
+        help = "\x1b[32m//\x1b[0m Force the interactive REPL (banner, Tab completion, history)"
+    )]
+    pub repl: bool,
 
     /// VimL script file(s) to source (cached). With --build, the inputs to bake.
     #[arg(
@@ -251,7 +256,16 @@ pub fn run() -> ExitCode {
         return exit_for_errors();
     }
 
-    repl()
+    // No mode selected: run the interactive reedline REPL when asked (`--repl`)
+    // or when stdin is a terminal. It MUST run inline on this (worker) thread —
+    // interpreter globals are thread-local, so spawning eval elsewhere would
+    // reset state between turns. When stdin is a pipe/file, fall back to the
+    // line-oriented `repl()` below (no reedline, no TTY control sequences).
+    if cli.repl || io::stdin().is_terminal() {
+        crate::repl::run()
+    } else {
+        repl()
+    }
 }
 
 /// Report a parse/compile error (runtime `emsg`s already printed to stderr).

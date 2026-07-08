@@ -79,6 +79,14 @@ Run the Debug Adapter Protocol server on stdio (for editors).
 .B \-\-disasm
 Print the fusevm bytecode listing before running.
 .TP
+.B \-\-repl
+Force the interactive REPL: a \fBreedline\fR line editor with a live ASCII
+stats banner, Tab completion drawn from the builtin/ex-command/\fBv:\fR-var
+wordlist, command history in \fB~/.vimlrs/history\fR, and an emacs or vi edit
+mode (set via \fB~/.vimlrs/config.toml\fR \fB[repl] mode\fR or the
+\fBVIMLRS_REPL_MODE\fR environment variable). Implied when no other mode is
+given and standard input is a terminal.
+.TP
 .BR \-V ", " \-\-version
 Print version and exit.
 .TP
@@ -87,9 +95,10 @@ Print usage and exit.
 .PP
 With no arguments,
 .B vimlrs
-starts a read-eval-print loop on stdin: each line is one statement \(em a bare
+starts a read-eval-print loop: each line is one statement \(em a bare
 expression prints its value, an \fB:echo\fR/\fB:let\fR runs for effect. Ctrl-D
-exits.
+exits. On a terminal this is the full interactive REPL (see \fB\-\-repl\fR);
+when standard input is a pipe or file it is a plain line-oriented reader.
 .SH ENVIRONMENT
 .TP
 .B VIMLRS_JIT_STATS

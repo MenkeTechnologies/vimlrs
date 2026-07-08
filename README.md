@@ -59,7 +59,8 @@ In active development.
 | Native `Op::ReturnValue` (whole function bodies block-compile) + per-loop (not per-chunk) slot scoping | In progress (next) |
 | Expression engine — arithmetic, comparison, logic, ternary, index/slice, lists/dicts | Working |
 | Builtin function surface | Partial (`len`/`type`/`string`/`empty`/`abs`/`str2nr`/`str2float`/`float2nr`; full `funcs.c` pending) |
-| Standalone `vimlrs` binary (`-e` / `-c` / file / REPL) | Working |
+| Standalone `vimlrs` binary (`-e` / `-c` / file / `--repl`) | Working |
+| Interactive REPL (`vimlrs --repl`, or bare `vimlrs` in a terminal) — reedline line editor with a live ASCII stats banner, Tab completion (the LSP wordlist), `~/.vimlrs/history`, and emacs/vi edit mode (`~/.vimlrs/config.toml` `[repl] mode`, `VIMLRS_REPL_MODE` override). Piped/non-TTY stdin falls back to the line-oriented reader. | Working |
 | rkyv bytecode script cache (`~/.cache/vimlrs/scripts.rkyv`, mmap zero-copy) | Working |
 | AOT build (`--build` bakes scripts into a self-contained executable) | Working |
 | Bytecode disassembler (`--disasm`) | Working |

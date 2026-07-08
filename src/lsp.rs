@@ -197,6 +197,36 @@ fn compute_diagnostics(text: &str) -> Vec<Diagnostic> {
 
 // ── completion ──
 
+/// Flat, sorted, deduped list of every completion word — the union of the four
+/// completion sources ([`BUILTIN_DOCS`] names, [`EX_COMMANDS`], [`V_VARS`], and
+/// the parser's [`PHASE3_BUILTINS`]). This is the single source of truth for
+/// bare names; the LSP's [`completions`] enriches the same union with
+/// signatures/docs/kinds, while the interactive REPL (`crate::repl`) feeds this
+/// flat list straight into its completion menu. Keeping both on this union
+/// means the editor and the REPL always offer the same surface.
+pub fn completion_words() -> Vec<String> {
+    let mut v: Vec<String> = Vec::with_capacity(BUILTIN_DOCS.len() + 32);
+    for (name, _, _) in BUILTIN_DOCS {
+        v.push((*name).to_string());
+    }
+    for (cmd, _) in EX_COMMANDS {
+        v.push((*cmd).to_string());
+    }
+    for (var, _) in V_VARS {
+        v.push((*var).to_string());
+    }
+    for name in PHASE3_BUILTINS {
+        v.push((*name).to_string());
+    }
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// LSP `textDocument/completion`. Builds rich `CompletionItem`s from the same
+/// four sources as [`completion_words`] (builtins + ex-commands + `v:` vars +
+/// Phase-3 builtins), preserving per-item signature/doc/kind detail. The set of
+/// names offered here is identical to [`completion_words`].
 fn completions(_docs: &Docs, _params: CompletionParams) -> CompletionResponse {
     let mut items = Vec::new();
     for (name, sig, doc) in BUILTIN_DOCS {

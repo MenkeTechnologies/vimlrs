@@ -26,6 +26,7 @@ pub mod ported;
 
 // Synthesis carve-outs (no `vendor/` counterpart).
 pub mod aot;
+pub mod banner;
 pub mod builtin_docs;
 pub mod cli;
 pub mod compile_viml;
@@ -33,6 +34,7 @@ pub mod dap;
 pub mod fusevm_bridge;
 pub mod fusevm_disasm;
 pub mod lsp;
+pub mod repl;
 pub mod script_cache;
 pub mod viml_ast;
 pub mod viml_lexer;
