@@ -1,19 +1,19 @@
-.\" Manpage for vimlrs.
+.\" Manpage for viml (the vimlrs VimL interpreter).
 .\" Contact https://github.com/MenkeTechnologies/vimlrs to correct errors or omissions.
-.TH VIMLRS 1 "2026-07-08" "vimlrs 0.1.3" "User Commands"
+.TH VIML 1 "2026-07-08" "viml 0.2.0" "User Commands"
 .SH NAME
-vimlrs \- VimL (Vimscript) interpreter that runs .vim scripts standalone, outside Vim
+viml \- VimL (Vimscript) interpreter that runs .vim scripts standalone, outside Vim
 .SH SYNOPSIS
-.B vimlrs
+.B viml
 [\fIOPTIONS\fR] [\fIFILE\fR ...]
 .br
-.B vimlrs
+.B viml
 \fB\-e\fR \fIEXPR\fR
 .br
-.B vimlrs
+.B viml
 \fB\-c\fR \fICMD\fR
 .SH DESCRIPTION
-.B vimlrs
+.B viml
 is the first compiled standalone VimL interpreter: it takes Vim's eval engine
 out of the editor and runs
 .B .vim
@@ -22,7 +22,7 @@ Neovim's C
 .I eval/*
 tree \(em the C source is the spec \(em rather than re-invented.
 .PP
-.B vimlrs
+.B viml
 carries no VM or JIT of its own. It lexes and parses VimL to an AST, lowers that
 to
 .B fusevm
@@ -94,7 +94,7 @@ Print version and exit.
 Print usage and exit.
 .PP
 With no arguments,
-.B vimlrs
+.B viml
 starts a read-eval-print loop: each line is one statement \(em a bare
 expression prints its value, an \fB:echo\fR/\fB:let\fR runs for effect. Ctrl-D
 exits. On a terminal this is the full interactive REPL (see \fB\-\-repl\fR);
@@ -107,7 +107,7 @@ When set, report how many loop traces were JIT-compiled.
 .B VIMLRS_NO_JIT
 When set, force the bytecode interpreter baseline (disable the Cranelift JIT).
 .SH EXIT STATUS
-.B vimlrs
+.B viml
 exits 0 on success and non-zero if a file cannot be sourced, an expression fails
 to parse/compile, or evaluation raises an error (\fBemsg\fR).
 .SH EXAMPLES
@@ -115,7 +115,7 @@ Evaluate an expression:
 .PP
 .RS
 .nf
-vimlrs \-e 'map(range(5), {_, v -> v * v})'   \(rh [0, 1, 4, 9, 16]
+viml \-e 'map(range(5), {_, v -> v * v})'   \(rh [0, 1, 4, 9, 16]
 .fi
 .RE
 .PP
@@ -123,7 +123,7 @@ Run one ex command:
 .PP
 .RS
 .nf
-vimlrs \-c 'echo "hello" . " world"'
+viml \-c 'echo "hello" . " world"'
 .fi
 .RE
 .PP
@@ -131,7 +131,7 @@ Source a script:
 .PP
 .RS
 .nf
-vimlrs script.vim
+viml script.vim
 .fi
 .RE
 .PP
@@ -139,11 +139,11 @@ Observe the JIT on a hot loop:
 .PP
 .RS
 .nf
-VIMLRS_JIT_STATS=1 vimlrs loop.vim
+VIMLRS_JIT_STATS=1 viml loop.vim
 .fi
 .RE
 .SH SEE ALSO
-.BR vimlrsall (1).
+.BR vimlall (1).
 Reference and engineering report: https://menketechnologies.github.io/vimlrs/ .
 .B fusevm:
 https://github.com/MenkeTechnologies/fusevm .

@@ -3,7 +3,7 @@
 //! Every `examples/*.vim` is a self-testing script: it exercises a feature,
 //! asserts the expected results with the built-in `assert_*` framework, and its
 //! epilogue `throw`s (→ non-zero exit) if `v:errors` is non-empty. This harness
-//! just runs each script through the built `vimlrs` binary and requires it to
+//! just runs each script through the built `viml` binary and requires it to
 //!   1. exit successfully, and
 //!   2. emit no Vim error (`E<num>: …`) on stderr.
 //!
@@ -12,7 +12,7 @@
 //! A `tests/fixtures/<name>.in` file, when present, is piped to stdin (used by
 //! the interactive example); otherwise stdin is empty (EOF).
 //!
-//! The binary path comes from `CARGO_BIN_EXE_vimlrs`, which Cargo sets for
+//! The binary path comes from `CARGO_BIN_EXE_viml`, which Cargo sets for
 //! integration tests — so the build the test exercises is always current.
 
 use std::fs::{self, File};
@@ -43,7 +43,7 @@ fn has_vim_error(line: &str) -> bool {
 #[test]
 fn examples_self_tests_pass() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let bin = env!("CARGO_BIN_EXE_vimlrs");
+    let bin = env!("CARGO_BIN_EXE_viml");
     let ex_dir = root.join("examples");
     let fixtures = root.join("tests/fixtures");
 
@@ -63,7 +63,7 @@ fn examples_self_tests_pass() {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
-            .expect("spawn vimlrs");
+            .expect("spawn viml");
         let stderr = String::from_utf8_lossy(&out.stderr);
 
         if !out.status.success() {

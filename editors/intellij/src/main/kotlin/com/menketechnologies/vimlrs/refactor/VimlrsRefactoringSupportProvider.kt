@@ -27,7 +27,7 @@ import org.eclipse.lsp4j.jsonrpc.messages.Either
 /**
  * Bridges IntelliJ's keymap-driven refactoring actions (Cmd-Opt-M /
  * Cmd-Opt-V / Cmd-Opt-C / Ctrl-T "Refactor This") into the LSP code
- * actions returned by `vimlrs --lsp`.
+ * actions returned by `viml --lsp`.
  *
  * IntelliJ's LSP integration only surfaces code actions via Alt-Enter
  * intentions. The dedicated refactoring keymaps go through a separate

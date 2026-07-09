@@ -55,12 +55,12 @@ In active development.
 | Numeric ternary (`cond ? a : b`) — the test lowers through the native condition path and a numeric ternary is itself a Number, so `s += cond ? x : 0` loops trace | Working |
 | Value-position comparison (`let s += i > 5`) — native compare reified to VimL's `0`/`1` with a branch (no `CallBuiltin`), so counting loops trace | Working |
 | Logical-not of an integer (`!x` / `!(i % 2)`) → native `x == 0` reified to `0`/`1`, so it stays trace-eligible | Working |
-| Observable from the real CLI: `VIMLRS_JIT_STATS=1 vimlrs script.vim` reports loop traces compiled; `VIMLRS_NO_JIT=1` forces the interpreter baseline | Working — a 20M-iteration loop runs **~15–100× faster** with the JIT |
+| Observable from the real CLI: `VIMLRS_JIT_STATS=1 viml script.vim` reports loop traces compiled; `VIMLRS_NO_JIT=1` forces the interpreter baseline | Working — a 20M-iteration loop runs **~15–100× faster** with the JIT |
 | Native `Op::ReturnValue` (whole function bodies block-compile) + per-loop (not per-chunk) slot scoping | In progress (next) |
 | Expression engine — arithmetic, comparison, logic, ternary, index/slice, lists/dicts | Working |
 | Builtin function surface | Partial (`len`/`type`/`string`/`empty`/`abs`/`str2nr`/`str2float`/`float2nr`; full `funcs.c` pending) |
-| Standalone `vimlrs` binary (`-e` / `-c` / file / `--repl`) | Working |
-| Interactive REPL (`vimlrs --repl`, or bare `vimlrs` in a terminal) — reedline line editor with a live ASCII stats banner, Tab completion (the LSP wordlist), `~/.vimlrs/history`, and emacs/vi edit mode (`~/.vimlrs/config.toml` `[repl] mode`, `VIMLRS_REPL_MODE` override). Piped/non-TTY stdin falls back to the line-oriented reader. | Working |
+| Standalone `viml` binary (`-e` / `-c` / file / `--repl`) | Working |
+| Interactive REPL (`viml --repl`, or bare `viml` in a terminal) — reedline line editor with a live ASCII stats banner, Tab completion (the LSP wordlist), `~/.vimlrs/history`, and emacs/vi edit mode (`~/.vimlrs/config.toml` `[repl] mode`, `VIMLRS_REPL_MODE` override). Piped/non-TTY stdin falls back to the line-oriented reader. | Working |
 | rkyv bytecode script cache (`~/.cache/vimlrs/scripts.rkyv`, mmap zero-copy) | Working |
 | AOT build (`--build` bakes scripts into a self-contained executable) | Working |
 | Bytecode disassembler (`--disasm`) | Working |

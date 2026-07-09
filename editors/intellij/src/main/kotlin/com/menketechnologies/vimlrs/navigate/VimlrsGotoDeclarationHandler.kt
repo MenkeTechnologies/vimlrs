@@ -34,7 +34,7 @@ import org.eclipse.lsp4j.jsonrpc.messages.Either
  * only for languages with PSI references. vimlrs's flat parser has
  * none, so we drive ShowUsages ourselves when GTD would be empty OR
  * when the LSP returns a self-target (same uri + same line as the
- * cursor — `vimlrs --lsp` does the latter; the platform doesn't bridge
+ * cursor — `viml --lsp` does the latter; the platform doesn't bridge
  * to ShowUsages for either case on its own).
  *
  * Refs:

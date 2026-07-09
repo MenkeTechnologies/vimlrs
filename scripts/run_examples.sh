@@ -1,5 +1,5 @@
 #!/bin/sh
-# run_examples.sh — run every examples/*.vim through the vimlrs binary and fail
+# run_examples.sh — run every examples/*.vim through the viml binary and fail
 # if any exits non-zero. Each example self-checks with the built-in assert_*
 # framework and `throw`s (non-zero exit) on a failed assertion, so this is the
 # example-script regression gate used by CI (the `examples` job).
@@ -7,9 +7,9 @@
 # A tests/fixtures/<name>.in file, when present, is piped to the script's stdin
 # (the interactive example). Otherwise stdin is empty (EOF).
 #
-# Binary resolution: $VIMLRS, else target/release/vimlrs, else target/debug/vimlrs.
+# Binary resolution: $VIMLRS, else target/release/viml, else target/debug/viml.
 #   sh scripts/run_examples.sh
-#   VIMLRS=/path/to/vimlrs sh scripts/run_examples.sh
+#   VIMLRS=/path/to/viml sh scripts/run_examples.sh
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -17,12 +17,12 @@ cd "$ROOT"
 
 BIN="${VIMLRS:-}"
 if [ -z "$BIN" ]; then
-  if [ -x target/release/vimlrs ]; then
-    BIN=target/release/vimlrs
-  elif [ -x target/debug/vimlrs ]; then
-    BIN=target/debug/vimlrs
+  if [ -x target/release/viml ]; then
+    BIN=target/release/viml
+  elif [ -x target/debug/viml ]; then
+    BIN=target/debug/viml
   else
-    echo "no vimlrs binary found — build first (cargo build --release)" >&2
+    echo "no viml binary found — build first (cargo build --release)" >&2
     exit 2
   fi
 fi

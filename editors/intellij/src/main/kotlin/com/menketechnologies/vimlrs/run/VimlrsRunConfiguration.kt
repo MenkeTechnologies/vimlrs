@@ -39,7 +39,7 @@ class VimlrsRunConfiguration(
         object : CommandLineState(env) {
             override fun startProcess(): ProcessHandler {
                 val exe = VimlrsSettings.getInstance().vimlrsExecutable
-                    ?.takeIf { it.isNotBlank() } ?: "vimlrs"
+                    ?.takeIf { it.isNotBlank() } ?: "viml"
                 val cmd = GeneralCommandLine()
                     .withExePath(exe)
                     .withCharset(Charsets.UTF_8)

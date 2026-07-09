@@ -13,15 +13,15 @@
                 file association with syntax highlighting (keywords, ex commands,
                 builtin functions, scope/special variables, options, registers,
                 environment variables).</li>
-            <li><b>LSP integration</b> via <code>vimlrs --lsp</code>: completion,
+            <li><b>LSP integration</b> via <code>viml --lsp</code>: completion,
                 hover docs, goto-definition, find-references, rename, document
                 symbols, folding, formatting, diagnostics (Vim-style
                 <code>E121: Undefined variable</code> messages).</li>
             <li><b>Run configurations</b> for any VimL script — runs
-                <code>vimlrs FILE.vim</code> (positional file argument) with an
+                <code>viml FILE.vim</code> (positional file argument) with an
                 optional <code>--disasm</code> bytecode listing, working
                 directory, and interpreter / script args.</li>
-            <li><b>Debugger</b> wired to <code>vimlrs --dap</code> over stdio:
+            <li><b>Debugger</b> wired to <code>viml --dap</code> over stdio:
                 line breakpoints, step over/into/out, frames, scopes, variables,
                 evaluate.</li>
             <li><b>Color settings page</b> with a slot for every token category.</li>
@@ -42,8 +42,8 @@
         <h3>0.1.0</h3>
         <ul>
             <li>Initial release. .vim + vimrc-family file types, hand-rolled
-                lexer-based highlighting, LSP client over <code>vimlrs --lsp</code>,
-                DAP debugger over <code>vimlrs --dap</code>, run configurations,
+                lexer-based highlighting, LSP client over <code>viml --lsp</code>,
+                DAP debugger over <code>viml --dap</code>, run configurations,
                 color scheme, <code>"</code> line comments.</li>
         </ul>
     ]]></change-notes>

@@ -24,7 +24,7 @@ import com.intellij.psi.tree.IElementType
  *   * operators (`==` `!=` `=~` `..` `->` `+=` …), brackets, comma, `|` bar,
  *     and the line-continuation `\` at the start of a continued line
  *
- * The LSP server (`vimlrs --lsp`) overlays semantic tokens; this lexer
+ * The LSP server (`viml --lsp`) overlays semantic tokens; this lexer
  * provides instant feedback before the LSP turn-around.
  */
 class VimlrsLexer : LexerBase() {

@@ -118,7 +118,7 @@ class VimlrsLspServerDescriptor(project: Project) :
         settings.vimlrsExecutable
             ?.takeIf { it.isNotBlank() && File(it).canExecute() }
             ?.let { return it }
-        return findOnPath("vimlrs") ?: "vimlrs"
+        return findOnPath("viml") ?: "viml"
     }
 
     private fun findOnPath(name: String): String? {

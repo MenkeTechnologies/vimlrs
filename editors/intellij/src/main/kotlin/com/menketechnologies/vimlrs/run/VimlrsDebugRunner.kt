@@ -21,12 +21,12 @@ import com.menketechnologies.vimlrs.dap.VimlrsDebugProcess
 import java.io.OutputStream
 
 /**
- * Debug executor for [VimlrsRunConfiguration]. Spawns `vimlrs --dap` (a DAP
+ * Debug executor for [VimlrsRunConfiguration]. Spawns `viml --dap` (a DAP
  * server over **stdio**), then constructs an [XDebugProcess] that speaks DAP
  * over the launched process's stdout / stdin while the debuggee's program
  * output flows back as DAP `output` events into the Debug Console.
  *
- * vimlrs's DAP server is stdio-only (`vimlrs --dap`, no host:port) — there
+ * viml's DAP server is stdio-only (`viml --dap`, no host:port) — there
  * is no TCP loopback to accept. The launched process's stdout carries the
  * protocol frames exclusively, so the process handler here deliberately does
  * NOT decode stdout (that would steal the stream the DAP client reads and
@@ -42,7 +42,7 @@ class VimlrsDebugRunner : DefaultProgramRunner() {
     override fun doExecute(state: RunProfileState, env: ExecutionEnvironment): RunContentDescriptor? {
         val cfg = env.runProfile as VimlrsRunConfiguration
         val exe = VimlrsSettings.getInstance().vimlrsExecutable
-            ?.takeIf { it.isNotBlank() } ?: "vimlrs"
+            ?.takeIf { it.isNotBlank() } ?: "viml"
 
         val cmd = GeneralCommandLine()
             .withExePath(exe)
@@ -114,7 +114,7 @@ class VimlrsDebugRunner : DefaultProgramRunner() {
 }
 
 /**
- * Lifecycle-only process handler for the `vimlrs --dap` server. Pumps
+ * Lifecycle-only process handler for the `viml --dap` server. Pumps
  * **stderr** into the Debug Console and reports termination, but never
  * touches stdout — that is the DAP protocol stream owned by the DAP client.
  * The console's actual program output arrives via DAP `output` events

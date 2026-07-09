@@ -15,13 +15,13 @@ class VimlrsSettingsConfigurable : Configurable {
 
     private val executableField = TextFieldWithBrowseButton().apply {
         addBrowseFolderListener(
-            "vimlrs Executable",
-            "Path to the vimlrs binary",
+            "viml Executable",
+            "Path to the viml binary",
             null,
             FileChooserDescriptorFactory.createSingleFileNoJarsDescriptor(),
         )
     }
-    private val lspEnabledBox = JBCheckBox("Enable LSP (uses `vimlrs --lsp`)")
+    private val lspEnabledBox = JBCheckBox("Enable LSP (uses `viml --lsp`)")
     private val extraLspArgsField = JBTextField()
     private val disableLexerBox = JBCheckBox("Disable lexer highlighting (rely on LSP semantic tokens only)")
     private val fileExtensionsField = JBTextField()
@@ -45,8 +45,8 @@ class VimlrsSettingsConfigurable : Configurable {
     override fun createComponent(): JComponent {
         val p = FormBuilder.createFormBuilder()
             .addComponent(sectionHeader("Interpreter"))
-            .addLabeledComponent(JBLabel("vimlrs executable:"), executableField, 1, false)
-            .addTooltip("Leave blank to use the first `vimlrs` on \$PATH.")
+            .addLabeledComponent(JBLabel("viml executable:"), executableField, 1, false)
+            .addTooltip("Leave blank to use the first `viml` on \$PATH.")
 
             .addComponent(sectionHeader("LSP"))
             .addComponent(lspEnabledBox)

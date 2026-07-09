@@ -6,14 +6,14 @@ below is a **reproduced divergence** between `vimlrs` and **Vim 9.2**.
 Repro helpers:
 
 ```sh
-V=./target/debug/vimlrs
+V=./target/debug/viml
 vimref() { vim -es -u NONE -i NONE -c 'redir! > /tmp/vr.txt' \
   -c "silent! echo $1" -c 'redir END' -c 'qa!' >/dev/null 2>&1; sed '1{/^$/d;}' /tmp/vr.txt; }
 # usage: vimref "'abc' ==? 'ABC'"   ;   $V -e "'abc' ==? 'ABC'"
 ```
 
-(Note: `vimlrs -e` mis-parses an expression that *starts* with `-` as a CLI flag,
-e.g. `vimlrs -e '-3/2'`; use `-c 'echo -3/2'` instead. That is a CLI-parsing quirk,
+(Note: `viml -e` mis-parses an expression that *starts* with `-` as a CLI flag,
+e.g. `viml -e '-3/2'`; use `-c 'echo -3/2'` instead. That is a CLI-parsing quirk,
 not a language bug, and is excluded below.)
 
 ---

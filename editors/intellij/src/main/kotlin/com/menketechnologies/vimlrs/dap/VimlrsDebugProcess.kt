@@ -13,7 +13,7 @@ import java.io.InputStream
 import java.io.OutputStream
 
 /**
- * [XDebugProcess] speaking DAP over the `vimlrs --dap` server's stdio.
+ * [XDebugProcess] speaking DAP over the `viml --dap` server's stdio.
  *
  * Unlike a TCP adapter, vimlrs multiplexes the debuggee's own `:echo` /
  * `:echomsg` output as DAP `output` events on the same stdout that carries

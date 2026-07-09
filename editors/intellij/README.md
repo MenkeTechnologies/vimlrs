@@ -11,7 +11,7 @@
 
 ## `[BUILT FOR VIMLRS]`
 
-A JetBrains-platform plugin that drives the LSP and DAP servers compiled into the `vimlrs` binary — a standalone VimL (Vimscript) interpreter on the fusevm bytecode VM. Hand-rolled lexer for instant highlighting, semantic-token overlay from the LSP, hover cards, a full breakpoint debugger over DAP, run configs that auto-create from any `.vim` / vimrc-family file, and Extract / Rename refactors routed through the LSP. Talks to the in-tree `src/lsp.rs` + `src/dap.rs` over JSON-RPC; no upstream `lsp-server` / `dap-types` crates anywhere in the build.
+A JetBrains-platform plugin that drives the LSP and DAP servers compiled into the `viml` binary — a standalone VimL (Vimscript) interpreter on the fusevm bytecode VM. Hand-rolled lexer for instant highlighting, semantic-token overlay from the LSP, hover cards, a full breakpoint debugger over DAP, run configs that auto-create from any `.vim` / vimrc-family file, and Extract / Rename refactors routed through the LSP. Talks to the in-tree `src/lsp.rs` + `src/dap.rs` over JSON-RPC; no upstream `lsp-server` / `dap-types` crates anywhere in the build.
 
 ### [`vimlrs`](https://github.com/MenkeTechnologies/vimlrs) · [`fusevm`](https://github.com/MenkeTechnologies/fusevm) · [`strykelang`](https://github.com/MenkeTechnologies/strykelang)
 
@@ -39,7 +39,7 @@ A JetBrains-platform plugin that drives the LSP and DAP servers compiled into th
 
 ## [0x00] OVERVIEW
 
-vimlrs ships an **LSP server** and **DAP debug adapter** built into the `vimlrs` binary (`vimlrs --lsp`, `vimlrs --dap`, both over stdio). This plugin is the JetBrains-side driver:
+vimlrs ships an **LSP server** and **DAP debug adapter** built into the `viml` binary (`viml --lsp`, `viml --dap`, both over stdio). This plugin is the JetBrains-side driver:
 
 - Spawns the LSP / DAP servers on demand, frames JSON-RPC over stdio, and renders responses through the IDE's native UI affordances (gutter breakpoints, intentions popup, refactor menu, semantic-tokens layer).
 - Adds **zero new language code paths**. Everything the user sees in the editor comes from one of two sources: the hand-rolled `VimlrsLexer.kt` (instant first-paint highlighting) or the `textDocument/semanticTokens` overlay (LSP-driven full classification).
@@ -93,7 +93,7 @@ The `vimlrs` binary must be on `$PATH`, or configured under *Settings → Tools 
 
 ## [0x03] LSP
 
-The LSP server is in-process inside the `vimlrs` binary — `vimlrs --lsp` spawns it over stdio. Plugin side starts it via `VimlrsLspServerSupportProvider.kt`; descriptor in `VimlrsLspServerDescriptor.kt`.
+The LSP server is in-process inside the `viml` binary — `viml --lsp` spawns it over stdio. Plugin side starts it via `VimlrsLspServerSupportProvider.kt`; descriptor in `VimlrsLspServerDescriptor.kt`.
 
 ### Capabilities
 
@@ -128,7 +128,7 @@ LSP `refactor.extract` code actions surface under **Alt-Enter** (intentions popu
 
 | Surface | Behavior |
 |---------|----------|
-| **Run config** (`VimlrsRunConfigurationType`) | runs `vimlrs FILE.vim` (positional file argument); toggle for `--disasm` (fusevm bytecode listing); working directory + script args + interpreter args |
+| **Run config** (`VimlrsRunConfigurationType`) | runs `viml FILE.vim` (positional file argument); toggle for `--disasm` (fusevm bytecode listing); working directory + script args + interpreter args |
 | **Context menu** | *Run with vimlrs* on any `.vim` file in the editor or project view; auto-creates a config |
 | **Producer** | `VimlrsRunConfigurationProducer` materializes a run config from the active file |
 | **Output** | Standard `ConsoleView` — `echo` / `echomsg` stream in real time |
@@ -136,7 +136,7 @@ LSP `refactor.extract` code actions surface under **Alt-Enter** (intentions popu
 
 ### Debug
 
-DAP-backed, over the `vimlrs --dap` server's stdio. The plugin spawns `vimlrs --dap`; the protocol frames flow over the process's stdout/stdin while the debuggee's own output arrives as DAP `output` events.
+DAP-backed, over the `viml --dap` server's stdio. The plugin spawns `viml --dap`; the protocol frames flow over the process's stdout/stdin while the debuggee's own output arrives as DAP `output` events.
 
 | Feature | Notes |
 |---------|-------|
@@ -153,7 +153,7 @@ DAP-backed, over the `vimlrs --dap` server's stdio. The plugin spawns `vimlrs --
 
 Plugin side (`com.menketechnologies.vimlrs.dap`):
 
-1. `VimlrsDebugRunner.doExecute` spawns `vimlrs --dap` and keeps its stdio for the DAP protocol.
+1. `VimlrsDebugRunner.doExecute` spawns `viml --dap` and keeps its stdio for the DAP protocol.
 2. `VimlrsDapClient` reads Content-Length-framed JSON-RPC from the process stdout — **byte-based, not char-based** — so multi-byte UTF-8 in variable reprs doesn't desync framing.
 3. On `stopped` event, `onStopped` synchronously fetches `stackTrace` + `scopes` + `variables`, builds `VimlrsStackFrame` objects with pre-populated children, then calls `session.positionReached`.
 4. `VimlrsEvaluator` sends `evaluate` requests for the Evaluate dialog.
@@ -274,7 +274,7 @@ editors/intellij/
         └── icons/vimlrs.svg
 ```
 
-The Rust side lives in `vimlrs/src/lsp.rs` (LSP server, `vimlrs --lsp`) and `vimlrs/src/dap.rs` (DAP server, `vimlrs --dap`).
+The Rust side lives in `vimlrs/src/lsp.rs` (LSP server, `viml --lsp`) and `vimlrs/src/dap.rs` (DAP server, `viml --dap`).
 
 ---
 

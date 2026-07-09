@@ -1,10 +1,10 @@
-//! `vimlrs` command-line driver.
+//! `viml` command-line driver (the `vimlrs` crate's binary).
 //!
 //! Modes:
-//! - `vimlrs --expr 'EXPR'` — evaluate one expression, print its value.
-//! - `vimlrs --cmd 'echo …'` — run one ex command line.
-//! - `vimlrs FILE.vim` — source a script file.
-//! - `vimlrs` (no args) — read-eval-print loop on stdin.
+//! - `viml --expr 'EXPR'` — evaluate one expression, print its value.
+//! - `viml --cmd 'echo …'` — run one ex command line.
+//! - `viml FILE.vim` — source a script file.
+//! - `viml` (no args) — read-eval-print loop on stdin.
 
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
@@ -46,14 +46,14 @@ fn banner() -> String {
 fn footer() -> String {
     let ver = env!("CARGO_PKG_VERSION");
     format!(
-        "\x1b[36m  ── SYSTEM ─────────────────────────────────────────\x1b[0m\n  \x1b[35mv{ver} \x1b[0m// \x1b[33m(c) MenkeTechnologies\x1b[0m\n  \x1b[35mThe script is compiled. The runtime is vast.\x1b[0m\n  \x1b[32m//\x1b[0m run \x1b[36mvimlrs --repl\x1b[0m (or bare \x1b[36mvimlrs\x1b[0m in a terminal) for the interactive REPL\n  \x1b[33m>>> JACK IN. SOURCE THE SCRIPT. RUN VIML EVERYWHERE. <<<\x1b[0m\n \x1b[36m░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░\x1b[0m"
+        "\x1b[36m  ── SYSTEM ─────────────────────────────────────────\x1b[0m\n  \x1b[35mv{ver} \x1b[0m// \x1b[33m(c) MenkeTechnologies\x1b[0m\n  \x1b[35mThe script is compiled. The runtime is vast.\x1b[0m\n  \x1b[32m//\x1b[0m run \x1b[36mviml --repl\x1b[0m (or bare \x1b[36mviml\x1b[0m in a terminal) for the interactive REPL\n  \x1b[33m>>> JACK IN. SOURCE THE SCRIPT. RUN VIML EVERYWHERE. <<<\x1b[0m\n \x1b[36m░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░\x1b[0m"
     )
 }
 
 /// Parsed command line.
 #[derive(Parser, Debug)]
 #[command(
-    name = "vimlrs",
+    name = "viml",
     version,
     about = "VimL (Vimscript) interpreter on the fusevm bytecode VM"
 )]
@@ -170,7 +170,7 @@ pub fn run() -> ExitCode {
         return match crate::lsp::run_stdio() {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                eprintln!("vimlrs: lsp: {e}");
+                eprintln!("viml: lsp: {e}");
                 ExitCode::FAILURE
             }
         };
@@ -180,7 +180,7 @@ pub fn run() -> ExitCode {
         return match crate::dap::run_stdio() {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                eprintln!("vimlrs: dap: {e}");
+                eprintln!("viml: dap: {e}");
                 ExitCode::FAILURE
             }
         };
@@ -191,7 +191,7 @@ pub fn run() -> ExitCode {
     if cli.clear_cache {
         if let Some(cache) = script_cache::CACHE.as_ref() {
             if let Err(e) = cache.clear() {
-                eprintln!("vimlrs: clear-cache: {e}");
+                eprintln!("viml: clear-cache: {e}");
                 return ExitCode::FAILURE;
             }
         }
@@ -280,7 +280,7 @@ fn repl() -> ExitCode {
     let stdin = io::stdin();
     let mut out = io::stdout();
     let prompt = |out: &mut io::Stdout| {
-        let _ = write!(out, "vimlrs> ");
+        let _ = write!(out, "viml> ");
         let _ = out.flush();
     };
     prompt(&mut out);

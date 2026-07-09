@@ -85,7 +85,7 @@ const DEFAULT_CONFIG_TOML: &str = r#"# vimlrs REPL config — auto-generated on 
 #             h/j/k/l navigation, dd/cc/yy/x, /-search, etc.
 #
 # Tab + Shift+Tab cycle the completion menu in either mode.
-# Override per-session with `VIMLRS_REPL_MODE=vi vimlrs`.
+# Override per-session with `VIMLRS_REPL_MODE=vi viml`.
 # mode = "emacs"
 "#;
 
@@ -267,7 +267,7 @@ fn render_status_bar(cmd_count: u64) -> String {
 
     let left = format!(" {} ", now_hms());
     let mid = format!(" command {} ", cmd_count);
-    let right = format!(" vimlrs {} ", VIMLRS_VERSION);
+    let right = format!(" viml {} ", VIMLRS_VERSION);
 
     // Plain-text widths for layout math (segments carry no ANSI yet).
     // `frame_chars` = display width of every literal frame char emitted below
@@ -317,7 +317,7 @@ impl Prompt for VimlPrompt {
         let prompt = Style::new()
             .fg(NuColor::Cyan)
             .bold()
-            .paint("vimlrs")
+            .paint("viml")
             .to_string();
         Cow::Owned(format!("{}\n{}", bar, prompt))
     }

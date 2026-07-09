@@ -4,7 +4,7 @@ Standalone `.vim` scripts that run outside any editor:
 
 ```sh
 cargo build
-./target/debug/vimlrs examples/fizzbuzz.vim
+./target/debug/viml examples/fizzbuzz.vim
 ```
 
 | Script | Shows |
