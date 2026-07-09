@@ -81,18 +81,20 @@ jobs:
 
       - name: Build (native)
         if: '!matrix.use_cross'
-        run: cargo build --release --locked --target ${{ matrix.target }} --bin vimlrs
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin viml
 
       - name: Build (cross)
         if: matrix.use_cross
-        run: cross build --release --locked --target ${{ matrix.target }} --bin vimlrs
+        run: cross build --release --locked --target ${{ matrix.target }} --bin viml
 
       - name: Package
         shell: bash
         run: |
+          # Tarball keeps the `vimlrs-` name (the release/repo is vimlrs); the
+          # binary inside it is `viml` (renamed at v0.2.0).
           cd target/${{ matrix.target }}/release
-          strip vimlrs 2>/dev/null || true
-          tar czf ../../../vimlrs-${{ github.ref_name }}-${{ matrix.target }}.tar.gz vimlrs
+          strip viml 2>/dev/null || true
+          tar czf ../../../vimlrs-${{ github.ref_name }}-${{ matrix.target }}.tar.gz viml
           cd ../../..
 
       - uses: actions/upload-artifact@v6
@@ -182,10 +184,10 @@ jobs:
               printf '  on_linux do\n%s\n  end\n\n' "$linux_blocks"
             fi
             printf '  def install\n'
-            printf '    bin.install "vimlrs"\n'
+            printf '    bin.install "viml"\n'
             printf '  end\n\n'
             printf '  test do\n'
-            printf '    assert_match "vimlrs", shell_output("#{bin}/vimlrs --version")\n'
+            printf '    assert_match "viml", shell_output("#{bin}/viml --version")\n'
             printf '  end\n'
             # musl tarballs as trailing comment — Homebrew has no
             # on_libc gate, so static binaries are referenced by URL
