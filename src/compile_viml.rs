@@ -2304,14 +2304,13 @@ fn bitwise_native_op(name: &str, argc: usize) -> Option<Op> {
     }
 }
 
-/// Reject a builtin call whose argument count is outside the range Vim accepts.
-/// Vim validates this at parse time (E118 too many / E119 too few) against the
-/// `funcs[]` table before the leaf `f_*` runs; we mirror that with the generated
-/// [`BUILTIN_ARGC`] table so a mis-arity call is reported here instead of
-/// panicking in a leaf that indexes `argvars[]` assuming the count was checked.
-/// Names absent from the table (vimlrs-only builtins) are left unchecked.
-/// The accepted `(min, max)` argument count for a builtin, or `None` when the
-/// name is not in the generated table (vimlrs-only builtins, left unchecked).
+/// The accepted `(min, max)` argument count for a builtin, or `None` when the name is
+/// not in the generated table (vimlrs-only builtins, left unchecked).
+///
+/// Vim checks this when it *parses the expression*, i.e. when the command runs — so a
+/// mis-arity call compiles to a runtime raise (see `VIML_RAISE`) rather than being
+/// rejected at compile time, which would make an unreachable bad call abort the whole
+/// script. The check still guards the leaf `f_*` from indexing a short `argvars[]`.
 pub(crate) fn builtin_argc_range(name: &str) -> Option<(u8, u8)> {
     use crate::ported::eval::funcs_argc::BUILTIN_ARGC;
     BUILTIN_ARGC
@@ -2332,13 +2331,6 @@ pub(crate) fn builtin_argc_error(name: &str, argc: usize) -> Option<String> {
         Some(format!("E118: Too many arguments for function: {name}"))
     } else {
         None
-    }
-}
-
-fn check_builtin_argc(name: &str, argc: usize) -> Result<(), VimlError> {
-    match builtin_argc_error(name, argc) {
-        Some(msg) => Err(VimlError::msg(msg)),
-        None => Ok(()),
     }
 }
 

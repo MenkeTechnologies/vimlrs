@@ -765,6 +765,48 @@ fn gen_call(rng: &mut Rng, funcs: &[(&str, &[Shape])]) -> String {
 // divergence in control flow, error handling, or output shows up as a plain value
 // mismatch.
 
+/// Statement shapes beyond a bare `:echo`/`:let` — the surfaces the generator was
+/// blind to: user functions (arguments, defaults, varargs, closures, recursion),
+/// compound and unpacking `:let`, indexed assignment, `:unlet`, `:for` over a Dict
+/// or String, and string interpolation. Each is a complete snippet; `%E` is
+/// substituted with a generated expression.
+const STMT_SHAPES: &[&str] = &[
+    // user functions: argument scope, defaults, varargs, return
+    "function! F(a) \n return a:a \n endfunction \n echo F(%E)",
+    "function! F(a, b = 2) \n return a:b \n endfunction \n echo F(1)",
+    "function! F(...) \n return a:0 \n endfunction \n echo F(%E, 2)",
+    "function! F(...) \n return a:000 \n endfunction \n echo F(%E)",
+    "function! F(a) \n if a:a > 0 \n return 'p' \n endif \n return 'n' \n endfunction \n echo F(1)",
+    // a closure over a local
+    "function! F() closure \n return 1 \n endfunction \n echo F()",
+    "let l:x = %E | let Fn = {-> l:x} | echo Fn()",
+    // compound assignment
+    "let x = 1 | let x += %E | echo x",
+    "let s = 'a' | let s .= 'b' | echo s",
+    "let n = 10 | let n -= 3 | echo n",
+    // unpacking
+    "let [a, b] = [1, 2] | echo a + b",
+    "let [a; rest] = [1, 2, 3] | echo rest",
+    // indexed / member assignment
+    "let l = [1,2,3] | let l[0] = %E | echo l",
+    "let d = {'a': 1} | let d.a = %E | echo d",
+    "let d = {'a': 1} | let d['b'] = 2 | echo d",
+    "let l = [1,2,3] | let l[0:1] = [9,9] | echo l",
+    // unlet
+    "let g:tmp = 1 | unlet g:tmp | echo exists('g:tmp')",
+    "let d = {'a':1,'b':2} | unlet d.a | echo d",
+    // :for over the containers
+    "for [k, v] in items({'a':1}) | echo k . v | endfor",
+    "for c in split('ab', '\\zs') | echo c | endfor",
+    "for b in 0z0102 | echo b | endfor",
+    "for i in range(3) | if i == 1 | continue | endif | echo i | endfor",
+    "for i in range(5) | if i == 2 | break | endif | echo i | endfor",
+    // string interpolation
+    "let x = %E | echo $'v={x}'",
+    // while
+    "let i = 0 | while i < 3 | let i += 1 | endwhile | echo i",
+];
+
 /// One VimL *command*, for use inside a statement snippet.
 fn gen_cmd(rng: &mut Rng, funcs: &[(&str, &[Shape])], depth: u32) -> String {
     let e = |rng: &mut Rng| gen_expr(rng, funcs, depth);
@@ -790,7 +832,14 @@ fn gen_cmd(rng: &mut Rng, funcs: &[(&str, &[Shape])], depth: u32) -> String {
 /// single-quoted VimL string, which `execute()` treats as separate command lines —
 /// that is how the multi-line `:try` form is reached.
 fn gen_stmt(rng: &mut Rng, funcs: &[(&str, &[Shape])], depth: u32) -> String {
-    let cmd = gen_cmd(rng, funcs, depth);
+    // Half the snippets come from the shape table (user functions, `:let` targets,
+    // `:for` forms …), half from the free-form command generator.
+    let cmd = if rng.chance(1, 2) {
+        rng.pick(STMT_SHAPES)
+            .replace("%E", &gen_expr(rng, funcs, depth.min(1)))
+    } else {
+        gen_cmd(rng, funcs, depth)
+    };
     // `execute()` takes the command text; a literal newline cannot appear inside a
     // single-quoted VimL string, so the generator emits the two-character escape
     // `\n` and `execute()` splits on it.
