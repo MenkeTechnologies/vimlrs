@@ -213,3 +213,20 @@ matchstr('a[x','[')	'['
 match('a]b','[]a]')	0
 match('abc','[^x]')	0
 substitute('aaa','\\Mc\\=\\[\\?','X','g')	'aaa'
+
+# --- round 14: misplaced multi (E866) and zero-width repetition ---
+match('aaa','*')	-1
+match('aaa','\\M\\*')	-1
+match('aaa','\\+')	-1
+match('aaa','\\{2}')	-1
+match('aaa','a\\|*b')	-1
+match('aaa','\\(*\\)')	-1
+match('aaa','a\\|\\+b')	-1
+match('aaa','\\M\\.\\*')	-1
+match('aaa','a\\+')	-1
+match('aaa','\\%(\\.\\?\\)\\{2}')	-1
+matchstr('aaa','\\%(a\\?\\)\\{2}')	''
+matchstr('bbb','\\%(a\\?\\)\\{2}')	''
+matchstr('aaa','a\\{2}')	''
+matchstr('aaa','\\(a\\)\\{3}')	''
+match('abc','a\\%(\\.\\?\\)\\{2}')	-1

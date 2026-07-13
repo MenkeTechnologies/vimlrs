@@ -929,13 +929,28 @@ An unterminated collection is not a collection at all: Vim treats the `[` as a
 first `]` may still appear right after `[` or `[^` (`[]a]` holds `]` and `a`), so the
 scan starts past it.
 
-Regex fuzz after round 13: **326 → 34 gaps** (10 distinct), 0 panics.
+### R12-7. A misplaced multi was accepted — ✅ FIXED
+`\+` or `\{2}` at the start of a branch has nothing to repeat: Vim rejects it (E866).
+The subtlety is that a **bare `*` there is not an error** — magic treats a leading star
+as a literal (`match('a*b', '*')` finds it) — while the *nomagic* special star `\M\*`
+IS a multi and is rejected. Both become a magic `*` once the pattern is translated, so
+the parser can no longer tell them apart; `preprocess_magic` is the only place that
+still can, and it reports that one.
+
+### R12-8. A group that can match empty could not satisfy `\{n}` — ✅ FIXED
+`match('aaa', '\%(\.\?\)\{2}')` → Vim `0` (an empty match at 0), vimlrs `-1`. The
+matcher counted a zero-width match **once** and stopped, so a group that matches empty
+could never reach a `min` above 1. Repeating an empty match is still legal — it simply
+never advances — so it now satisfies `min` and then stops, which is what keeps it from
+looping forever.
+
+Regex fuzz after round 14: **326 → 20 gaps** (9 distinct), 0 panics.
 
 ## Still open
 
-- The remaining regex gaps (10 distinct) are deeply-nested quantifier and backtracking
-  corners — non-greedy `\{-}` inside a repeated group, and `split()` on a pattern that
-  can match empty.
+- The remaining regex gaps (9 distinct) are deeply-nested backtracking corners —
+  non-greedy `\{-}` inside a repeated group, and `split()` on a pattern that can match
+  empty.
 - `nr2char(2147483647)` → Vim emits the raw replacement bytes, vimlrs `''`. Same
   string-representation root cause as R5-D1 (Vim strings are byte arrays), which
   remains the one structural divergence.

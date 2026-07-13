@@ -274,15 +274,26 @@ const INF: u32 = u32::MAX;
 /// `( ) | + ? = { } < >`. `\v` switches very-magic on for the rest of the
 /// pattern; `\m` switches back. Character classes `[...]` are copied verbatim.
 /// (Exotic `\v` atoms — `@`, `&`, `%[` — are left as-is; not yet modelled.)
-fn preprocess_magic(pat: &str) -> String {
+/// Translate a pattern into the magic dialect the parser reads, and report a
+/// misplaced multi that only the *translation* can see.
+///
+/// A bare `*` at the start of a branch is a literal star in magic (`match('a*b','*')`
+/// finds it), but in nomagic the special star is written `\*` — and there it IS a
+/// multi, so `\M\*` has nothing to repeat and Vim rejects it (E866). Both end up as
+/// a magic `*` after translation, so the parser can no longer tell them apart; this is
+/// the only place that still can.
+fn preprocess_magic(pat: &str) -> (String, Option<String>) {
     // Nothing to do for the default (magic) dialect, which is what the parser reads.
     if !pat.contains("\\v") && !pat.contains("\\M") && !pat.contains("\\V") {
-        return pat.to_string();
+        return (pat.to_string(), None);
     }
     let chars: Vec<char> = pat.chars().collect();
     let mut out = String::new();
     let mut i = 0;
     let mut mode = Dialect::Magic;
+    // Whether an atom has been emitted in the current branch — a multi needs one.
+    let mut atom_before = false;
+    let mut err: Option<String> = None;
     const OPS: &str = "(){}+?=|<>";
     while i < chars.len() {
         let c = chars[i];
@@ -338,10 +349,20 @@ fn preprocess_magic(pat: &str) -> String {
                 if c == '\\' {
                     match chars.get(i + 1) {
                         Some(&n) if swapped.contains(n) => {
+                            // c: "E866: (NFA regexp) Misplaced *" — the nomagic special
+                            // star is a multi, and there is nothing before it to repeat.
+                            if n == '*' && !atom_before && err.is_none() {
+                                err = Some("E866: (NFA regexp) Misplaced *".to_string());
+                            }
+                            if n != '*' {
+                                atom_before = true;
+                            }
                             out.push(n); // `\.` in nomagic IS the magic `.`
                             i += 2;
                         }
                         Some(&n) => {
+                            // `\|` and `\(` open a new branch: the multi rule restarts.
+                            atom_before = !matches!(n, '|' | '(');
                             out.push('\\');
                             out.push(n);
                             i += 2;
@@ -360,10 +381,12 @@ fn preprocess_magic(pat: &str) -> String {
                         }
                     }
                 } else if swapped.contains(c) {
+                    atom_before = true;
                     out.push('\\'); // a bare `.` in nomagic is a literal dot
                     out.push(c);
                     i += 1;
                 } else {
+                    atom_before = true;
                     out.push(c);
                     i += 1;
                 }
@@ -428,7 +451,7 @@ fn preprocess_magic(pat: &str) -> String {
             }
         }
     }
-    out
+    (out, err)
 }
 
 /// The four pattern dialects (`:help /magic`). The parser reads [`Dialect::Magic`];
@@ -500,6 +523,20 @@ impl Parser {
                 (None, _) => break,
                 (Some('\\'), Some('|')) | (Some('\\'), Some(')')) => break,
                 _ => {}
+            }
+            // c: "E866: (NFA regexp) Misplaced +" — a multi at the start of a branch has
+            // nothing to repeat. (A bare `*` there is NOT an error: magic treats a
+            // leading star as a literal, which is why `match('a*b', '*')` finds it.
+            // The nomagic special star `\*` IS a multi and is caught in
+            // `preprocess_magic`, which is the only place that can still tell them
+            // apart.)
+            if atoms.is_empty() && self.peek() == Some('\\') {
+                if let Some(m) = self.peek2() {
+                    if matches!(m, '+' | '=' | '?' | '{') {
+                        self.fail(&format!("E866: (NFA regexp) Misplaced {m}"));
+                        break;
+                    }
+                }
             }
             match self.quantified(atoms.is_empty()) {
                 Some(a) => atoms.push(a),
@@ -960,7 +997,7 @@ impl Regex {
     /// Compile a Vim magic-mode pattern. Always succeeds (a malformed tail is
     /// treated literally, as Vim is lenient).
     pub fn compile(pat: &str) -> Regex {
-        let pat = preprocess_magic(pat);
+        let (pat, pre_err) = preprocess_magic(pat);
         let mut parser = Parser {
             p: pat.chars().collect(),
             i: 0,
@@ -969,6 +1006,9 @@ impl Regex {
             closed: Vec::new(),
             err: None,
         };
+        if let Some(e) = pre_err {
+            parser.fail(&e);
+        }
         let branches = parser.alternation();
         // `concat` stops at a `\)`, so anything left over at the top level is a `\)`
         // that never had a `\(` — c: "E55: Unmatched \)".
@@ -1083,9 +1123,18 @@ impl Regex {
                     cur = next;
                     count += 1;
                 }
-                // Zero-width match: count it once, then stop (avoid looping).
-                Some(next) if next == cur && count < atom.min => {
-                    positions.push(next);
+                // Zero-width match. Repeating it is still legal — an empty match can
+                // be taken as many times as `min` demands, it simply never advances —
+                // so satisfy `min` here and then stop, because iterating further would
+                // loop forever without moving. Counting it only *once* meant a group
+                // that can match empty could never reach a `min` above 1:
+                // `match('aaa', '\%(\.\?\)\{2}')` is 0 in Vim (an empty match at 0)
+                // and was -1 here.
+                Some(next) if next == cur => {
+                    while count < atom.min {
+                        positions.push(cur);
+                        count += 1;
+                    }
                     break;
                 }
                 _ => break,
