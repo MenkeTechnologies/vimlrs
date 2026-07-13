@@ -85,15 +85,18 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
     // `silent!` is not just noise: it suppresses the error message of the command
     // it prefixes (`emsg_silent`), which is why `silent! call Foo()` is everywhere
     // in real vimrcs. Keep that one bit and strip the rest of the modifiers.
-    let bang_silent = starts_with_silent_bang(line.trim());
+    let silent = leading_silent(line.trim());
     let line = strip_command_modifiers(line.trim());
     if line.is_empty() {
         return Ok(Stmt::Expr(Expr::Number(0)));
     }
-    if bang_silent {
+    if let Some(bang) = silent {
         // Re-parse the remainder as the wrapped command.
         let inner = parse_stmt(line)?;
-        return Ok(Stmt::Silent(Box::new(inner)));
+        return Ok(Stmt::Silent {
+            bang,
+            stmt: Box::new(inner),
+        });
     }
     // `:vim9script [noclear]` — switches the script to vim9 mode (a no-op leaf;
     // the mode's parse effects are applied in `Lines::new`). Matched here because
@@ -417,27 +420,31 @@ const CMD_MODIFIERS: &[&str] = &[
 /// the remaining command text. Each modifier is a standalone word (optionally
 /// with a `!`, e.g. `silent!`); `verbose`/`tab` may carry a numeric count
 /// (`verbose 15 …`). A line that is only modifiers strips to empty.
-/// Whether the line's leading modifier run contains `silent!` (with the bang).
-fn starts_with_silent_bang(mut line: &str) -> bool {
+/// `Some(bang)` when the line's leading modifier run contains `silent` — `bang` is
+/// true for `silent!`. (`:silent` silences the command's output; the bang also
+/// silences its errors.)
+fn leading_silent(mut line: &str) -> Option<bool> {
     loop {
         line = line.trim_start();
         let end = line
             .find(|c: char| !c.is_ascii_alphabetic())
             .unwrap_or(line.len());
         if end == 0 {
-            return false;
+            return None;
         }
         let word = &line[..end];
         if !CMD_MODIFIERS.contains(&word) {
-            return false;
+            return None;
         }
         let after = &line[end..];
+        let bang = after.starts_with('!');
+        if word == "silent" {
+            return Some(bang);
+        }
         match after.chars().next() {
-            Some('!') if word == "silent" => return true,
             Some('!') => line = &after[1..],
             Some(c) if c.is_whitespace() => line = after,
-            None => return false,
-            _ => return false,
+            _ => return None,
         }
     }
 }
@@ -692,7 +699,31 @@ pub fn parse_program_lines(src: &str) -> Result<Vec<(u32, Stmt)>, VimlError> {
             out.push((lineno, s));
         }
     }
-    Ok(out)
+    Ok(group_by_line(out))
+}
+
+/// Wrap each run of statements that share a source line — i.e. the `|`-separated
+/// commands of one command line — in [`Stmt::LineGroup`], so the compiler can
+/// abandon the rest of the line when one of them errors, as Vim does. Runs of one
+/// are left alone.
+fn group_by_line(stmts: Vec<(u32, Stmt)>) -> Vec<(u32, Stmt)> {
+    let mut out: Vec<(u32, Stmt)> = Vec::with_capacity(stmts.len());
+    let mut i = 0;
+    while i < stmts.len() {
+        let line = stmts[i].0;
+        let end = stmts[i..]
+            .iter()
+            .position(|(l, _)| *l != line)
+            .map_or(stmts.len(), |n| i + n);
+        if end - i > 1 {
+            let group: Vec<Stmt> = stmts[i..end].iter().map(|(_, s)| s.clone()).collect();
+            out.push((line, Stmt::LineGroup(group)));
+        } else {
+            out.push(stmts[i].clone());
+        }
+        i = end;
+    }
+    out
 }
 
 /// The result of [`parse_program_lines_tolerant`]: the top-level statements that
@@ -1240,11 +1271,13 @@ type ParseBlockResult = Result<(Vec<Stmt>, Option<(String, String)>), VimlError>
 /// Parse statements until a terminator in `terms`. Returns the body and the
 /// terminator `(cmd, rest)` it stopped on (`None` at EOF).
 fn parse_block(cur: &mut Lines, terms: &[&str]) -> ParseBlockResult {
-    let mut stmts = Vec::new();
+    // Collected with their source lines so a `|`-separated run inside a block body
+    // is grouped exactly as it is at top level (see `group_by_line`).
+    let mut stmts: Vec<(u32, Stmt)> = Vec::new();
     loop {
         cur.skip_blanks();
         let Some(line) = cur.peek() else {
-            return Ok((stmts, None));
+            return Ok((strip_lines(stmts), None));
         };
         let (cmd, rest) = cmd_word(&line);
         // Compare (and hand back) the canonical keyword so an abbreviated
@@ -1252,13 +1285,21 @@ fn parse_block(cur: &mut Lines, terms: &[&str]) -> ParseBlockResult {
         let ck = canon_block_kw(cmd);
         if terms.contains(&ck) {
             cur.bump();
-            return Ok((stmts, Some((ck.to_string(), rest.to_string()))));
+            return Ok((strip_lines(stmts), Some((ck.to_string(), rest.to_string()))));
         }
         if is_block_terminator(cmd) {
             return Err(VimlError::msg(format!("E580: unexpected `:{cmd}`")));
         }
-        stmts.extend(parse_one(cur)?);
+        let lineno = cur.line_no();
+        for s in parse_one(cur)? {
+            stmts.push((lineno, s));
+        }
     }
+}
+
+/// Group a block body by source line, then drop the line numbers.
+fn strip_lines(stmts: Vec<(u32, Stmt)>) -> Vec<Stmt> {
+    group_by_line(stmts).into_iter().map(|(_, s)| s).collect()
 }
 
 const IF_TERMS: &[&str] = &["elseif", "else", "endif"];
@@ -3317,13 +3358,28 @@ mod tests {
         // `silent!` is NOT merely stripped: it wraps the command, because the bang
         // suppresses the command's error message (`emsg_silent`). The command
         // itself survives inside the wrapper.
-        let Stmt::Silent(inner) = parse_stmt("silent! colorscheme molokai").unwrap() else {
+        let Stmt::Silent { bang, stmt } = parse_stmt("silent! colorscheme molokai").unwrap() else {
             panic!("`silent!` must wrap the command it silences");
         };
-        assert!(matches!(*inner, Stmt::Colorscheme(n) if n == "molokai"));
-        // Stacked modifiers, a `verbose` count, and abbreviations.
+        assert!(bang, "the bang is what also silences the command's errors");
+        assert!(matches!(*stmt, Stmt::Colorscheme(n) if n == "molokai"));
+        // `:silent` without the bang still wraps (it silences output, not errors).
+        let Stmt::Silent { bang, .. } = parse_stmt("silent echo 'x'").unwrap() else {
+            panic!("`silent` must wrap the command it silences");
+        };
+        assert!(!bang);
+        // Stacked modifiers, a `verbose` count, and abbreviations: the non-`silent`
+        // modifiers are still stripped, and the `silent` wraps what is left.
+        let Stmt::Silent { bang, stmt } =
+            parse_stmt("silent noautocmd verbose 9 set number").unwrap()
+        else {
+            panic!("a leading `silent` must wrap the command");
+        };
+        assert!(!bang);
+        assert!(matches!(*stmt, Stmt::Set(a) if a == "number"));
+        // A modifier run with no `silent` is stripped away entirely, as before.
         assert!(matches!(
-            parse_stmt("silent noautocmd verbose 9 set number").unwrap(),
+            parse_stmt("noautocmd verbose 9 set number").unwrap(),
             Stmt::Set(a) if a == "number"
         ));
         // A bare modifier is a no-op, not an error.
@@ -3418,13 +3474,17 @@ mod tests {
             parse_program("if 1 | echo 'y' | endif").unwrap().as_slice(),
             [Stmt::If { .. }]
         ));
-        // A leaf command then a one-line block: two statements.
+        // A leaf command then a one-line block: two statements — and because they
+        // are on ONE line, they form a `LineGroup`, so an error in the first
+        // abandons the second (Vim's do_cmdline abandons the rest of the line).
         match parse_program("let x = 5 | if x > 3 | echo 'big' | endif")
             .unwrap()
             .as_slice()
         {
-            [Stmt::Let { .. }, Stmt::If { .. }] => {}
-            s => panic!("expected [Let, If], got {s:?}"),
+            [Stmt::LineGroup(g)] => {
+                assert!(matches!(g.as_slice(), [Stmt::Let { .. }, Stmt::If { .. }]));
+            }
+            s => panic!("expected [LineGroup([Let, If])], got {s:?}"),
         }
         // A `for` one-liner.
         assert!(matches!(
@@ -3433,8 +3493,11 @@ mod tests {
                 .as_slice(),
             [Stmt::For { .. }]
         ));
-        // A plain bar line (no block) is still two leaf statements.
-        assert_eq!(parse_program("let a = 1 | echo a").unwrap().len(), 2);
+        // A plain bar line is one `LineGroup` holding the two leaf statements.
+        match parse_program("let a = 1 | echo a").unwrap().as_slice() {
+            [Stmt::LineGroup(g)] => assert_eq!(g.len(), 2),
+            s => panic!("expected [LineGroup(2)], got {s:?}"),
+        }
     }
 
     #[test]

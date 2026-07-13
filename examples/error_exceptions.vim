@@ -89,6 +89,17 @@ let s:keep = 'orig'
 silent! let s:keep = [1] . 'x'
 call assert_equal('orig', s:keep)
 
+" --- an error abandons the REST OF THE COMMAND LINE: the `|`-separated commands
+"     after the failing one do not run, and execution resumes at the next line
+let s:ran = 0
+silent! echo [1] . 'x' | let s:ran = 1
+call assert_equal(0, s:ran)
+
+" --- ...but a line whose commands all succeed runs every one of them
+let s:n = 0
+let s:n = 1 | let s:n = s:n + 1
+call assert_equal(2, s:n)
+
 if len(v:errors) > 0
   for err in v:errors
     echo err

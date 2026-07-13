@@ -311,10 +311,20 @@ pub enum Stmt {
     },
     /// `:throw {expr}`.
     Throw(Expr),
-    /// `:silent! CMD` — run `CMD` with error messages suppressed (`emsg_silent`).
-    /// The command still *fails*; it just does not report. (`:silent` without the
-    /// bang suppresses ordinary output, not errors, and is still a no-op here.)
-    Silent(Box<Stmt>),
+    /// A run of commands that came from ONE source line, separated by `|`.
+    ///
+    /// Vim aborts the *rest of the command line* when one of them errors — so
+    /// `echo 'a' | echo [1] . 'x' | echo 'never'` prints `a`, reports E730, and
+    /// never runs the third command, resuming at the next line. Keeping the group
+    /// in the AST is what lets the compiler reproduce that; a single-command line
+    /// is not wrapped (there is nothing to abandon).
+    LineGroup(Vec<Stmt>),
+    /// `:silent CMD` / `:silent! CMD`.
+    ///
+    /// `:silent` suppresses the command's **output** (`msg_silent`): `silent echo
+    /// 'x'` prints nothing. The bang additionally suppresses its **errors**
+    /// (`emsg_silent`) — the command still fails, it just says nothing about it.
+    Silent { bang: bool, stmt: Box<Stmt> },
     /// `:execute expr …` — concatenate the values (space-separated) and run the
     /// result as an ex command line.
     Execute(Vec<Expr>),

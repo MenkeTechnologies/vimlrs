@@ -769,8 +769,43 @@ front, so text Vim would have evaluated became a parse error instead. It now par
 the leading expression (`parse_expr_prefix`), evaluates it, and reports E488
 afterwards — so `eval('1 2')` is E488 and `eval('nosuchvar')` is E121, as in Vim.
 
+---
+
+# Round 11 — statement-level parity (found by fuzzing *statements*, not expressions)
+
+The fuzzer only ever generated **expressions**, and the two worst bugs of the whole
+effort (`:try` not catching errors, a failed `:let` corrupting a variable) were
+found by hand instead. Driving statement snippets through `execute()` — which
+returns a command's output as a string, so they fit the existing expression
+pipeline — exposed the rest of that blind spot immediately.
+
+### R11-1. An error did not abandon the rest of the command line — ✅ FIXED
+```vim
+echo 'a' | echo [1] . 'x' | echo 'never'
+```
+Vim prints `a`, reports E730, and **never runs the third command**, resuming at the
+next line (`do_cmdline` abandons the rest of the command line). vimlrs ran it.
+
+The parser now keeps the `|`-separated commands of one source line together
+(`Stmt::LineGroup`, grouped by line number — a one-line `if …|…|endif` still
+collapses into its single block statement, so blocks are unaffected), and the
+compiler abandons the group when one of its commands errors. A line holding a
+single command is not wrapped: there is nothing to abandon, and no cost.
+
+### R11-2. `:silent` did not silence output — ✅ FIXED
+Round 9 implemented the bang (`:silent!` → `emsg_silent`, suppressing *errors*) but
+missed the plain form: `:silent` raises `msg_silent`, which suppresses the command's
+**output** — `silent echo 'x'` prints nothing. The bang does both.
+
 ## Still open
 
+- **An *error* inside a one-line `try | … | catch | … | endtry` is caught by vimlrs
+  but not by Vim.** Vim abandons the rest of the command line, which takes the
+  `:catch` with it, so the exception escapes to an enclosing handler; a `:throw` on
+  the same line *is* caught, and a multi-line `:try` catches errors normally. So
+  vimlrs is more forgiving than Vim here — the dangerous direction, since a plugin
+  that looks protected under vimlrs would not be under Vim. Reproducing it means
+  modelling the line-abandon *through* the try block's structure.
 - `nr2char(2147483647)` → Vim emits the raw replacement bytes, vimlrs `''`. Same
   string-representation root cause as R5-D1 (Vim strings are byte arrays), which
   remains the one structural divergence.

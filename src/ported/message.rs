@@ -31,6 +31,12 @@ thread_local! {
     /// recovered value that Vim never prints.
     pub static err_count: Cell<u64> = const { Cell::new(0) };
 
+    /// C global `int msg_silent` (`globals.h`) — while non-zero, ordinary message
+    /// output is suppressed. `:silent` raises it, which is why `silent echo 'x'`
+    /// prints nothing. (`emsg_silent`, in `ex_eval`, is the error-message
+    /// counterpart that `:silent!` raises.)
+    pub static msg_silent: Cell<i32> = const { Cell::new(0) };
+
     /// When `Some`, each `emsg` text is captured here instead of printed —
     /// modelling `emsg_silent` + the saved error list that `assert_fails()`
     /// inspects in `message.c`/`testing.c`. `None` is the normal (print) path.

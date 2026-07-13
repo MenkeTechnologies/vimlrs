@@ -1439,13 +1439,23 @@ fn b_err_since(_vm: &mut VM, _: u8) -> Value {
     Value::Bool(message::err_count.with(|d| d.get()) > ERR_MARK.with(|m| m.get()))
 }
 
-fn b_silent_enter(_vm: &mut VM, _: u8) -> Value {
-    crate::ported::ex_eval::emsg_silent.with(|e| e.set(e.get() + 1));
+/// `:silent` raises `msg_silent` (output); `:silent!` also raises `emsg_silent`
+/// (errors). The bang arrives on the stack.
+fn b_silent_enter(vm: &mut VM, _: u8) -> Value {
+    let bang = tv_get_number_chk(&pop_tv(vm), None) != 0;
+    message::msg_silent.with(|m| m.set(m.get() + 1));
+    if bang {
+        crate::ported::ex_eval::emsg_silent.with(|e| e.set(e.get() + 1));
+    }
     Value::Undef
 }
 
-fn b_silent_leave(_vm: &mut VM, _: u8) -> Value {
-    crate::ported::ex_eval::emsg_silent.with(|e| e.set((e.get() - 1).max(0)));
+fn b_silent_leave(vm: &mut VM, _: u8) -> Value {
+    let bang = tv_get_number_chk(&pop_tv(vm), None) != 0;
+    message::msg_silent.with(|m| m.set((m.get() - 1).max(0)));
+    if bang {
+        crate::ported::ex_eval::emsg_silent.with(|e| e.set((e.get() - 1).max(0)));
+    }
     Value::Undef
 }
 
@@ -2005,6 +2015,10 @@ fn echo_impl(vm: &mut VM, argc: u8, newline: bool) {
     // because a `:silent!` error still aborts the command even though it is not
     // reported (`silent! echo [1] . 'x'` prints nothing in Vim).
     if message::err_count.with(|d| d.get()) > ERR_MARK.with(|m| m.get()) {
+        return;
+    }
+    // c: `msg_silent` — `:silent` suppresses the command's output entirely.
+    if message::msg_silent.with(|m| m.get()) != 0 {
         return;
     }
     let sep = if newline { " " } else { "" };

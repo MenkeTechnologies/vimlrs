@@ -1069,13 +1069,46 @@ impl Compiler {
                 self.emit(Op::Pop);
                 Ok(())
             }
+            // c: `do_cmdline` abandons the REST OF THE COMMAND LINE when a command
+            // errors — the `|`-separated commands after the failing one do not run,
+            // and execution resumes at the next line:
+            //
+            //   echo 'a' | echo [1] . 'x' | echo 'never'
+            //   → prints `a`, reports E730, never prints `never`.
+            //
+            // Each command marks the error count, and if it rose, the group jumps to
+            // its end. (This is also why an *error* inside a one-line
+            // `try | … | catch | … | endtry` is not caught in Vim: the abandoned
+            // line takes the `:catch` with it. That refinement is not modelled —
+            // see BUGS.md.)
+            Stmt::LineGroup(stmts) => {
+                let mut to_end = Vec::new();
+                for (i, inner) in stmts.iter().enumerate() {
+                    self.emit(Op::CallBuiltin(h::VIML_ERR_MARK, 0));
+                    self.emit(Op::Pop);
+                    self.stmt(inner)?;
+                    // The last command has no successors to abandon.
+                    if i + 1 < stmts.len() {
+                        self.emit(Op::CallBuiltin(h::VIML_ERR_SINCE, 0));
+                        to_end.push(self.emit(Op::JumpIfTrue(0)));
+                    }
+                }
+                let end = self.b.current_pos();
+                for j in to_end {
+                    self.b.patch_jump(j, end);
+                }
+                Ok(())
+            }
             // c: `:silent!` raises `emsg_silent` for the duration of the command, so
             // the error is raised (and still aborts the command) but not reported.
-            Stmt::Silent(inner) => {
-                self.emit(Op::CallBuiltin(h::VIML_SILENT_ENTER, 0));
+            Stmt::Silent { bang, stmt } => {
+                let flag = i64::from(*bang);
+                self.emit(Op::LoadInt(flag));
+                self.emit(Op::CallBuiltin(h::VIML_SILENT_ENTER, 1));
                 self.emit(Op::Pop);
-                self.stmt(inner)?;
-                self.emit(Op::CallBuiltin(h::VIML_SILENT_LEAVE, 0));
+                self.stmt(stmt)?;
+                self.emit(Op::LoadInt(flag));
+                self.emit(Op::CallBuiltin(h::VIML_SILENT_LEAVE, 1));
                 self.emit(Op::Pop);
                 Ok(())
             }
