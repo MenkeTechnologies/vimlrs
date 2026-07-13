@@ -230,3 +230,15 @@ matchstr('bbb','\\%(a\\?\\)\\{2}')	''
 matchstr('aaa','a\\{2}')	''
 matchstr('aaa','\\(a\\)\\{3}')	''
 match('abc','a\\%(\\.\\?\\)\\{2}')	-1
+
+# --- round 15: nomagic \_ prefix and \%( branch start ---
+match('ünïcø∂é','\\M\\_.\\+')	-1
+matchstr('abc','\\M\\_.')	''
+matchstr('abc','\\V\\_[a-z]')	''
+matchstr('a b','\\M\\_s')	''
+match('aaa','\\M\\%(\\*\\)')	-1
+match('aaa','\\M\\%(a\\*\\)')	-1
+match('aaa','\\M\\%[ab]')	-1
+match('aaa','\\M\\%d97')	-1
+match('aaa','\\M\\%(\\*a\\)')	-1
+match('aaa','\\M\\(\\*\\)')	-1

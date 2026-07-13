@@ -366,10 +366,18 @@ fn preprocess_magic(pat: &str) -> (String, Option<String>) {
                             out.push('\\');
                             out.push(n);
                             i += 2;
-                            // `\%[`, `\%(`, `\%d97` — the char after `%` belongs to the
-                            // escape and must not be literal-ized on the next pass.
-                            if n == '%' {
+                            // `\%[`, `\%(`, `\%d97` and `\_.`, `\_[a-z]`, `\_s` — the
+                            // char after `%` or `_` belongs to the escape, so it must be
+                            // copied raw. Literal-izing it turned `\M\_.` into `\_\.`
+                            // (an "any char incl newline" followed by a literal dot),
+                            // which matched nothing.
+                            if n == '%' || n == '_' {
                                 if let Some(&after) = chars.get(i) {
+                                    // `\%(` opens a group — a new branch, so a multi
+                                    // right after it again has nothing to repeat.
+                                    if n == '%' {
+                                        atom_before = after != '(';
+                                    }
                                     out.push(after);
                                     i += 1;
                                 }

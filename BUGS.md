@@ -944,13 +944,25 @@ could never reach a `min` above 1. Repeating an empty match is still legal — i
 never advances — so it now satisfies `min` and then stops, which is what keeps it from
 looping forever.
 
-Regex fuzz after round 14: **326 → 20 gaps** (9 distinct), 0 panics.
+### R12-9. `\_x` and `\%(` broke under `\M`/`\V` — ✅ FIXED
+`match('ünïcø∂é', '\M\_.\+')` → Vim `0`, vimlrs `-1`. `\_` is a two-character prefix, so
+the char after it belongs to the atom — and the nomagic translation was literal-izing
+it, turning `\M\_.` into `\_\.` ("any char including newline" followed by a *literal*
+dot), which matches nothing. Same root cause as the `\%d97` case fixed earlier: a
+multi-character escape has to be copied whole.
+
+Relatedly `\%(` opens a group, so a multi right after it again has nothing to repeat —
+`\M\%(\*\)` is E866, and the translation was not resetting the branch state for the
+non-capturing form.
+
+Regex fuzz after round 15: **326 → 12 gaps** (5 distinct), 0 panics.
 
 ## Still open
 
-- The remaining regex gaps (9 distinct) are deeply-nested backtracking corners —
-  non-greedy `\{-}` inside a repeated group, and `split()` on a pattern that can match
-  empty.
+- The remaining regex gaps (5 distinct) are deeply-nested backtracking corners —
+  non-greedy `\{-}` inside a repeated group, and the *order* in which two errors in one
+  pattern are reported (vimlrs reports the first it parses, Vim the first its NFA
+  rejects).
 - `nr2char(2147483647)` → Vim emits the raw replacement bytes, vimlrs `''`. Same
   string-representation root cause as R5-D1 (Vim strings are byte arrays), which
   remains the one structural divergence.
