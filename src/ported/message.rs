@@ -41,6 +41,7 @@ thread_local! {
     /// modelling `emsg_silent` + the saved error list that `assert_fails()`
     /// inspects in `message.c`/`testing.c`. `None` is the normal (print) path.
     static ERROR_CAPTURE: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
+
 }
 
 /// Begin capturing `emsg` text (suppressing stderr output), as `assert_fails()`
@@ -63,6 +64,14 @@ pub fn capture_errors_take() -> Vec<String> {
 pub fn emsg(s: &str) {
     // Counted first: this one tracks *every* error, whatever happens to it next.
     err_count.with(|d| d.set(d.get() + 1));
+    // Observed second, before any of the paths that suppress or divert the message.
+    // The observer lives in the synthesis zone (it has no C counterpart) and, unlike
+    // a capture, changes nothing about what happens next.
+    crate::fusevm_bridge::observe_error(s);
+    // Observed second, before any of the paths that suppress or divert the message.
+    // The observer lives in the synthesis zone (it has no C counterpart) and, unlike
+    // a capture, changes nothing about what happens next.
+    crate::fusevm_bridge::observe_error(s);
     let captured = ERROR_CAPTURE.with(|c| {
         if let Some(list) = c.borrow_mut().as_mut() {
             list.push(s.to_string());

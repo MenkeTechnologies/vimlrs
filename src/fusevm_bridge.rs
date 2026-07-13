@@ -179,6 +179,10 @@ pub const VIML_TONUMBER: u16 = 3004;
 /// its effect when the expression it depends on failed, the way the C's `FAIL`
 /// return unwinds the command.
 pub const VIML_ERR_SINCE: u16 = 3043;
+/// Push `Bool(the pending exception came from an ERROR, not from `:throw`)`.
+/// A one-line `try | … | catch | … | endtry` catches a `:throw` but NOT an error:
+/// the error abandons the command line, taking the `:catch` with it.
+pub const VIML_EXC_IS_ERR: u16 = 3044;
 pub const VIML_SILENT_ENTER: u16 = 3040;
 pub const VIML_SILENT_LEAVE: u16 = 3041;
 pub const VIML_SET_CMDNAME: u16 = 3042;
@@ -1435,6 +1439,15 @@ fn b_set_cmdname(vm: &mut VM, _: u8) -> Value {
     Value::Undef
 }
 
+thread_local! {
+    /// Whether the pending exception was raised by an error (rather than `:throw`).
+    static EXC_FROM_ERR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn b_exc_is_err(_vm: &mut VM, _: u8) -> Value {
+    Value::Bool(PENDING_EXC.with(|p| p.borrow().is_some()) && EXC_FROM_ERR.with(|e| e.get()))
+}
+
 fn b_err_since(_vm: &mut VM, _: u8) -> Value {
     Value::Bool(message::err_count.with(|d| d.get()) > ERR_MARK.with(|m| m.get()))
 }
@@ -1477,6 +1490,48 @@ fn b_try_leave(_vm: &mut VM, _: u8) -> Value {
 /// The compiled program does not carry the ex-command name down to the point an
 /// error is raised, so the tag here is the bare `Vim:` form; a pattern matching the
 /// error number (`catch /E730/`, the common form) is unaffected.
+thread_local! {
+    /// A read-only observer of error messages, for the differential fuzzer.
+    static ERROR_OBSERVER: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
+}
+
+/// Record an error message for an active observer — and change nothing else.
+///
+/// This is deliberately NOT `capture_errors_begin`: capturing is Vim's
+/// `emsg_silent` path, and a silenced error is never converted to an exception
+/// (`cause_errthrow` declines), so a tool that *captured* errors in order to read
+/// them would silently disable `:try`/`:catch` in everything it ran — which is
+/// exactly the bug this replaced: the fuzzer reported "vimlrs does not catch
+/// runtime errors" for a dozen cases the real binary catches fine.
+pub fn observe_error(msg: &str) {
+    ERROR_OBSERVER.with(|o| {
+        if let Some(list) = o.borrow_mut().as_mut() {
+            list.push(msg.to_string());
+        }
+    });
+}
+
+/// Start observing error messages (see [`observe_error`]).
+pub fn observe_errors_begin() {
+    ERROR_OBSERVER.with(|o| *o.borrow_mut() = Some(Vec::new()));
+}
+
+/// Stop observing and return everything seen since [`observe_errors_begin`].
+pub fn observe_errors_take() -> Vec<String> {
+    ERROR_OBSERVER.with(|o| o.borrow_mut().take().unwrap_or_default())
+}
+
+/// Forget the errors observed so far — called when a `:catch` handles the pending
+/// exception, alongside the `did_emsg` reset it already does. A handled error is
+/// not the outcome of anything, so an observer must not keep reporting it.
+fn observe_errors_clear() {
+    ERROR_OBSERVER.with(|o| {
+        if let Some(list) = o.borrow_mut().as_mut() {
+            list.clear();
+        }
+    });
+}
+
 pub fn errthrow(msg: &str) -> bool {
     if crate::ported::ex_eval::trylevel.with(|t| t.get()) == 0 {
         return false;
@@ -1500,6 +1555,7 @@ pub fn errthrow(msg: &str) -> bool {
     V_EXCEPTION.with(|e| *e.borrow_mut() = exc.clone());
     set_vim_var_string(VV_EXCEPTION, &exc);
     PENDING_EXC.with(|p| *p.borrow_mut() = Some(exc));
+    EXC_FROM_ERR.with(|e| e.set(true));
     true
 }
 
@@ -1509,6 +1565,8 @@ fn b_throw(vm: &mut VM, _: u8) -> Value {
     V_EXCEPTION.with(|e| *e.borrow_mut() = v.clone());
     set_vim_var_string(VV_EXCEPTION, &v);
     PENDING_EXC.with(|p| *p.borrow_mut() = Some(v));
+    // An explicit `:throw`, not an error — a one-line `:try` DOES catch this.
+    EXC_FROM_ERR.with(|e| e.set(false));
     Value::Undef
 }
 
@@ -1533,14 +1591,26 @@ fn b_catch_match(vm: &mut VM, _: u8) -> Value {
         // did_emsg, got_int, did_throw". Handling the error clears the error state,
         // which is why a script that catches an error still exits successfully.
         message::did_emsg.with(|d| d.set(0));
+        observe_errors_clear();
     }
     Value::Bool(matched)
 }
 
 fn b_report_uncaught(_vm: &mut VM, _: u8) -> Value {
     if let Some(exc) = PENDING_EXC.with(|p| p.borrow_mut().take()) {
-        // c: E605 when an exception reaches the top level uncaught.
-        message::semsg(&format!("E605: Exception not caught: {exc}"));
+        // c: E605 is for an uncaught `:throw`. An uncaught exception that *began* as
+        // an error is reported as the error itself — Vim shows `E730: Using a List
+        // as a String`, not an E605 wrapper around it — so strip the `Vim(cmd):`
+        // tag the throw machinery added and report the original message.
+        if EXC_FROM_ERR.with(|e| e.get()) {
+            let msg = exc
+                .split_once(':')
+                .filter(|(head, _)| head.starts_with("Vim"))
+                .map_or(exc.as_str(), |(_, rest)| rest);
+            message::semsg(msg);
+        } else {
+            message::semsg(&format!("E605: Exception not caught: {exc}"));
+        }
     }
     Value::Undef
 }
@@ -2015,10 +2085,6 @@ fn echo_impl(vm: &mut VM, argc: u8, newline: bool) {
     // because a `:silent!` error still aborts the command even though it is not
     // reported (`silent! echo [1] . 'x'` prints nothing in Vim).
     if message::err_count.with(|d| d.get()) > ERR_MARK.with(|m| m.get()) {
-        return;
-    }
-    // c: `msg_silent` — `:silent` suppresses the command's output entirely.
-    if message::msg_silent.with(|m| m.get()) != 0 {
         return;
     }
     let sep = if newline { " " } else { "" };
@@ -3653,8 +3719,16 @@ fn echo_write(s: &str) {
     ECHO_SINK.with(|sink| {
         let mut sink = sink.borrow_mut();
         match sink.as_mut() {
+            // A capture is active (`execute()`, `:redir`): the text is collected
+            // whatever `msg_silent` says. `:silent` suppresses the *display* of a
+            // message, not its existence — which is exactly why
+            // `execute('silent echo "x"')` still returns "\nx" in Vim.
             Some(buf) => buf.push_str(s),
             None => {
+                // c: `msg_silent` — nothing is shown while `:silent` is in effect.
+                if message::msg_silent.with(|m| m.get()) != 0 {
+                    return;
+                }
                 use std::io::Write;
                 let out = std::io::stdout();
                 let _ = out.lock().write_all(s.as_bytes());
@@ -4780,6 +4854,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_SET_RETURN, b_set_return);
     vm.register_builtin(VIML_THROW, b_throw);
     vm.register_builtin(VIML_ERR_SINCE, b_err_since);
+    vm.register_builtin(VIML_EXC_IS_ERR, b_exc_is_err);
     vm.register_builtin(VIML_SILENT_ENTER, b_silent_enter);
     vm.register_builtin(VIML_SILENT_LEAVE, b_silent_leave);
     vm.register_builtin(VIML_SET_CMDNAME, b_set_cmdname);

@@ -70,9 +70,10 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use vimlrs::fusevm_bridge::{observe_errors_begin, observe_errors_take};
 use vimlrs::ported::eval::encode::encode_tv2string;
 use vimlrs::ported::eval::funcs_argc::BUILTIN_ARGC;
-use vimlrs::ported::message::{capture_errors_begin, capture_errors_take};
+use vimlrs::ported::message::did_emsg;
 
 // ─── Resource guards ────────────────────────────────────────────────────────
 // A fuzzer that can take the machine down with it is not a fuzzer. Both sides
@@ -750,6 +751,52 @@ fn gen_call(rng: &mut Rng, funcs: &[(&str, &[Shape])]) -> String {
     format!("{name}({})", args.join(","))
 }
 
+// ─── Statement generation ───────────────────────────────────────────────────
+//
+// The generator above only ever produced *expressions*, and the two worst bugs
+// this harness's targets ever had — `:try` not catching a runtime error, and a
+// failed `:let` storing a corrupted value — live at the **statement** level and
+// had to be found by hand.
+//
+// A statement snippet is compared through the very same three-engine pipeline by
+// wrapping it in `execute()`, which runs the commands and returns their output as
+// a string. So `let x = 1 | echo x` becomes the expression
+// `execute("let x = 1 | echo x")`, whose value is "\n1" in every engine — and any
+// divergence in control flow, error handling, or output shows up as a plain value
+// mismatch.
+
+/// One VimL *command*, for use inside a statement snippet.
+fn gen_cmd(rng: &mut Rng, funcs: &[(&str, &[Shape])], depth: u32) -> String {
+    let e = |rng: &mut Rng| gen_expr(rng, funcs, depth);
+    match rng.below(12) {
+        0 => format!("echo {}", e(rng)),
+        1 => format!("let x = {}", e(rng)),
+        2 => format!("let g:l = {}", e(rng)),
+        3 => format!("echo {} | echo {}", e(rng), e(rng)),
+        // The `|`-separated line: Vim abandons the rest of it when one errors.
+        4 => format!("echo {} | echo 'tail'", e(rng)),
+        5 => format!("if {} | echo 'y' | else | echo 'n' | endif", e(rng)),
+        6 => format!("for i in {} | echo i | endfor", rng.pick(LISTS)),
+        7 => format!("try | echo {} | catch | echo 'caught' | endtry", e(rng)),
+        8 => format!("try\necho {}\ncatch\necho 'caught'\nendtry", e(rng)),
+        9 => format!("silent! echo {}", e(rng)),
+        10 => format!("let d = {} | echo d", e(rng)),
+        _ => format!("call add(g:l, {}) | echo g:l", e(rng)),
+    }
+}
+
+/// A statement snippet, wrapped as `execute('…')` so it rides the expression
+/// pipeline (see the note above). Newlines inside the snippet become `\n` in the
+/// single-quoted VimL string, which `execute()` treats as separate command lines —
+/// that is how the multi-line `:try` form is reached.
+fn gen_stmt(rng: &mut Rng, funcs: &[(&str, &[Shape])], depth: u32) -> String {
+    let cmd = gen_cmd(rng, funcs, depth);
+    // `execute()` takes the command text; a literal newline cannot appear inside a
+    // single-quoted VimL string, so the generator emits the two-character escape
+    // `\n` and `execute()` splits on it.
+    format!("execute({})", vim_quote(&cmd))
+}
+
 /// One expression, recursively. `depth` bounds nesting so the corpus stays
 /// human-readable when a case has to be pasted into a bug report.
 fn gen_expr(rng: &mut Rng, funcs: &[(&str, &[Shape])], depth: u32) -> String {
@@ -849,21 +896,35 @@ fn enumber(msg: &str) -> String {
 /// first. Panics are caught and reported rather than killing the run.
 fn eval_one(expr: &str) -> Outcome {
     let r = panic::catch_unwind(AssertUnwindSafe(|| {
-        capture_errors_begin();
+        // OBSERVE, don't capture. `capture_errors_begin` is Vim's `emsg_silent`
+        // path, and a silenced error is deliberately never turned into an exception
+        // (`cause_errthrow` declines) — so capturing in order to *read* the error
+        // silently disabled `:try`/`:catch` in everything the fuzzer ran, and it
+        // duly reported "vimlrs does not catch runtime errors" for a dozen cases the
+        // real binary catches fine. The observer reads the message and changes
+        // nothing.
+        observe_errors_begin();
         for line in PRELUDE {
             let _ = vimlrs::eval_source(line);
         }
-        let _ = capture_errors_take();
+        let _ = observe_errors_take();
 
-        capture_errors_begin();
+        // `did_emsg` is the "an error was reported and NOT handled" flag: `:catch`
+        // resets it (c: ex_catch), and `:silent!` never sets it. So it — not the
+        // presence of an observed message — is what decides whether this expression
+        // ends in an error, exactly as it decides a script's exit status.
+        did_emsg.with(|d| d.set(0));
+        observe_errors_begin();
         let out = vimlrs::eval_expr(expr);
-        let errs = capture_errors_take();
+        let errs = observe_errors_take();
+        let unhandled = did_emsg.with(|d| d.get()) != 0;
         match out {
-            // An expression can produce a value *and* have raised an error
-            // (Vim's evaluator recovers with an empty value); the error is the
-            // observable outcome, so it wins.
-            Ok(v) if errs.is_empty() => Outcome::Val(encode_tv2string(&v)),
-            Ok(_) => Outcome::Err(enumber(&errs[0])),
+            Ok(v) if !unhandled => Outcome::Val(encode_tv2string(&v)),
+            // The FIRST unhandled message: Vim reports an error and abandons the
+            // command, so the first one is what it shows. This VM keeps evaluating
+            // and can raise more, and a `:catch` clears the ones it handled — so
+            // what is left here begins with the error Vim would have reported.
+            Ok(_) => Outcome::Err(enumber(errs.first().map_or("E?", |s| s.as_str()))),
             Err(e) => Outcome::Err(enumber(&e.to_string())),
         }
     }));
@@ -1174,6 +1235,9 @@ struct Args {
     only: Vec<String>,
     corpus: Option<String>,
     verbose: bool,
+    /// Generate *statements* (`:let`, `:if`, `:for`, `:try`, `|`-separated lines)
+    /// instead of expressions, compared through `execute()`.
+    stmts: bool,
 }
 
 fn parse_args() -> Args {
@@ -1184,6 +1248,7 @@ fn parse_args() -> Args {
         only: Vec::new(),
         corpus: None,
         verbose: false,
+        stmts: false,
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -1210,6 +1275,7 @@ fn parse_args() -> Args {
                 a.corpus = Some(next(i));
                 i += 1;
             }
+            "--stmts" => a.stmts = true,
             "--verbose" | "-v" => a.verbose = true,
             "--help" | "-h" => {
                 println!(
@@ -1220,6 +1286,7 @@ fn parse_args() -> Args {
                      --seed S      PRNG seed; same seed → same corpus (default 1)\n\
                      --depth D     max expression nesting depth (default 2)\n\
                      --only LIST   restrict generation to these builtins\n\
+                     --stmts       fuzz STATEMENTS (:let/:if/:for/:try/`|` lines) via execute()\n\
                      --corpus FILE append confirmed gaps as `expr<TAB>expected` lines\n\
                      --verbose     list every case, not just divergences"
                 );
@@ -1262,7 +1329,11 @@ fn main() {
     let mut rng = Rng(args.seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
     let mut exprs: Vec<String> = Vec::with_capacity(args.count);
     while exprs.len() < args.count {
-        let e = gen_expr(&mut rng, &funcs, args.depth);
+        let e = if args.stmts {
+            gen_stmt(&mut rng, &funcs, args.depth)
+        } else {
+            gen_expr(&mut rng, &funcs, args.depth)
+        };
         // A newline or NUL in a generated literal would break the line-oriented
         // oracle transport, not the interpreter — drop those rather than report
         // a transport artifact as a bug.

@@ -797,15 +797,39 @@ Round 9 implemented the bang (`:silent!` → `emsg_silent`, suppressing *errors*
 missed the plain form: `:silent` raises `msg_silent`, which suppresses the command's
 **output** — `silent echo 'x'` prints nothing. The bang does both.
 
+### R11-3. The fuzzer's own error capture disabled `:try` in everything it ran — ✅ FIXED (harness)
+The harness read each expression's error with `capture_errors_begin`, which is Vim's
+**`emsg_silent`** path — and a silenced error is deliberately never converted into an
+exception (`cause_errthrow` declines). So `:try`/`:catch` could not work in anything
+the fuzzer ran, and it duly reported "vimlrs does not catch runtime errors" for a
+dozen statement cases the real binary catches perfectly well. A tool that changes
+the behavior it is measuring is worse than no tool.
+
+The harness now *observes* errors (`observe_error`, a read-only hook in the synthesis
+zone that suppresses nothing) and decides the outcome from `did_emsg` — the flag that
+`:catch` resets and `:silent!` never sets, i.e. the one that actually means "an error
+was reported and not handled". It also takes the **first** unhandled error, since Vim
+reports one and abandons the command while this VM keeps evaluating and can raise
+more.
+
+### R11-4. An error in a one-line `:try` was caught (Vim lets it escape) — ✅ FIXED
+```vim
+try | echo [1] . 'x' | catch | echo 'caught' | endtry
+```
+Vim does **not** catch this: the error abandons the command line, which takes the
+`:catch` with it, and the exception escapes to an enclosing handler. An explicit
+`:throw` on the same line *is* caught (the block works — it is the abandoned line
+that skips the `:catch`), and a multi-line `:try` catches errors normally.
+
+vimlrs caught it, i.e. it was **more forgiving than Vim** — the dangerous direction,
+since a plugin that looks protected under vimlrs would not be under Vim. The parser
+now records whether a `:try` was written on one line, the runtime records whether the
+pending exception came from an error or from `:throw`, and an inline `:try` skips its
+`:catch` clauses for the former. An uncaught error-exception is also reported as the
+error itself (`E730: …`), not wrapped in E605 — E605 is for an uncaught `:throw`.
+
 ## Still open
 
-- **An *error* inside a one-line `try | … | catch | … | endtry` is caught by vimlrs
-  but not by Vim.** Vim abandons the rest of the command line, which takes the
-  `:catch` with it, so the exception escapes to an enclosing handler; a `:throw` on
-  the same line *is* caught, and a multi-line `:try` catches errors normally. So
-  vimlrs is more forgiving than Vim here — the dangerous direction, since a plugin
-  that looks protected under vimlrs would not be under Vim. Reproducing it means
-  modelling the line-abandon *through* the try block's structure.
 - `nr2char(2147483647)` → Vim emits the raw replacement bytes, vimlrs `''`. Same
   string-representation root cause as R5-D1 (Vim strings are byte arrays), which
   remains the one structural divergence.

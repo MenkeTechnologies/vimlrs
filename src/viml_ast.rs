@@ -301,6 +301,13 @@ pub enum Stmt {
         vim9: bool,
     },
     /// `:try … :catch {pat} … :finally … :endtry`.
+    /// `:try` … `:endtry`.
+    ///
+    /// `inline` is true when the whole construct was written on ONE source line
+    /// (`try | … | catch | … | endtry`). Vim treats that case differently: an
+    /// **error** abandons the rest of the command line, which takes the `:catch`
+    /// with it, so the error is NOT caught and escapes to an enclosing handler. An
+    /// explicit `:throw` on the same line still *is* caught.
     Try {
         /// Protected body.
         body: Vec<Stmt>,
@@ -308,6 +315,8 @@ pub enum Stmt {
         catches: Vec<(Option<String>, Vec<Stmt>)>,
         /// `finally` body, always run.
         finally: Option<Vec<Stmt>>,
+        /// Written on one source line (see above).
+        inline: bool,
     },
     /// `:throw {expr}`.
     Throw(Expr),

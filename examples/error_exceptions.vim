@@ -100,6 +100,22 @@ let s:n = 0
 let s:n = 1 | let s:n = s:n + 1
 call assert_equal(2, s:n)
 
+" --- a ONE-LINE `try | … | catch | … | endtry` does not catch an ERROR: the error
+"     abandons the command line, which takes the `:catch` with it, so it escapes to
+"     the enclosing handler. (An explicit `:throw` on the same line IS caught — the
+"     block itself works; it is the abandoned line that skips the `:catch`.)
+let s:esc = ''
+try
+  try | echo [1] . 'x' | catch | call assert_report('an error must NOT be caught inline') | endtry
+catch
+  let s:esc = v:exception
+endtry
+call assert_match('E730', s:esc)
+
+let s:inline_throw = ''
+try | throw 'boom' | catch | let s:inline_throw = v:exception | endtry
+call assert_equal('boom', s:inline_throw)
+
 if len(v:errors) > 0
   for err in v:errors
     echo err

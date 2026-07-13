@@ -1122,7 +1122,8 @@ impl Compiler {
                 body,
                 catches,
                 finally,
-            } => self.try_stmt(body, catches, finally),
+                inline,
+            } => self.try_stmt(body, catches, finally, *inline),
         }
     }
 
@@ -1135,6 +1136,7 @@ impl Compiler {
         body: &[Stmt],
         catches: &[(Option<String>, Vec<Stmt>)],
         finally: &Option<Vec<Stmt>>,
+        inline: bool,
     ) -> Result<(), VimlError> {
         // c: `:try` raises `trylevel`, which is what makes an error inside the body
         // a catchable exception rather than a printed message (`cause_errthrow`).
@@ -1149,6 +1151,17 @@ impl Compiler {
         let catch_dispatch = self.b.current_pos();
         for j in body_frame {
             self.b.patch_jump(j, catch_dispatch);
+        }
+        // A one-line `try | … | catch | … | endtry`: an ERROR abandons the command
+        // line, which takes the `:catch` with it — so the error is not caught here
+        // and propagates to an enclosing handler. An explicit `:throw` on the same
+        // line still reaches the catch. Skipping straight to the finally leaves the
+        // exception pending, and the propagation check after the finally carries it
+        // outward.
+        let mut skip_catches = None;
+        if inline {
+            self.emit(Op::CallBuiltin(h::VIML_EXC_IS_ERR, 0));
+            skip_catches = Some(self.emit(Op::JumpIfTrue(0)));
         }
 
         // Catch arms. `to_finally` collects every jump that should land at the
@@ -1177,6 +1190,9 @@ impl Compiler {
         // again. An error raised inside a `:catch`/`:finally` body is therefore
         // only catchable by an *enclosing* `:try`, as in Vim.
         let finally_start = self.b.current_pos();
+        if let Some(j) = skip_catches {
+            self.b.patch_jump(j, finally_start);
+        }
         self.emit(Op::CallBuiltin(h::VIML_TRY_LEAVE, 0));
         self.emit(Op::Pop);
         if let Some(j) = prev_no_match {

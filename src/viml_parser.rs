@@ -1014,6 +1014,14 @@ impl Lines {
         self.lines.get(self.i).map(|(n, _)| *n).unwrap_or(0)
     }
 
+    /// The source line of the segment just consumed (the `:endtry`, say).
+    fn prev_line_no(&self) -> u32 {
+        self.lines
+            .get(self.i.saturating_sub(1))
+            .map(|(n, _)| *n)
+            .unwrap_or(0)
+    }
+
     /// Advance the cursor past the whole block that began at logical-line index
     /// `start` (a block-opener line), leaving `i` just after the matching final
     /// terminator. The tolerant parser calls this when a block's body fails to
@@ -2018,6 +2026,10 @@ fn parse_def(cur: &mut Lines, header: &str) -> Result<Stmt, VimlError> {
 
 fn parse_try(cur: &mut Lines) -> Result<Stmt, VimlError> {
     const TRY_TERMS: &[&str] = &["catch", "finally", "endtry"];
+    // The `:try` keyword's own source line — if `:endtry` is on the same one, the
+    // whole construct was a `|`-separated one-liner, which Vim handles differently
+    // (an error abandons the line and is therefore NOT caught). See `Stmt::Try`.
+    let open_line = cur.line_no();
     let (body, mut term) = parse_block(cur, TRY_TERMS)?;
     let mut catches = Vec::new();
     let mut finally = None;
@@ -2049,10 +2061,14 @@ fn parse_try(cur: &mut Lines) -> Result<Stmt, VimlError> {
             Some((c, _)) => return Err(VimlError::msg(format!("E580: unexpected `:{c}` in :try"))),
         }
     }
+    // `line_no()` now points just past `:endtry`; the construct was a one-liner if
+    // nothing advanced to a new source line.
+    let inline = cur.prev_line_no() == open_line;
     Ok(Stmt::Try {
         body,
         catches,
         finally,
+        inline,
     })
 }
 
