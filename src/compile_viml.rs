@@ -2142,7 +2142,17 @@ impl Compiler {
                 }
                 match builtin_fn_id(name) {
                     Some(id) => {
-                        check_builtin_argc(name, args.len())?;
+                        // A wrong argument count is an error Vim raises when it parses
+                        // the expression — i.e. when the command runs. Rejecting it at
+                        // compile time made an *unreachable* bad call abort the whole
+                        // script (`if 0 | echo strlen('a','b') | endif` loads fine in
+                        // Vim), so compile it to a runtime raise instead. Vim never
+                        // evaluates the arguments of such a call, and neither does this.
+                        if let Some(msg) = builtin_argc_error(name, args.len()) {
+                            self.load_str(&msg);
+                            self.emit(Op::CallBuiltin(h::VIML_RAISE, 1));
+                            return Ok(());
+                        }
                         for a in args {
                             self.expr(a)?;
                         }
@@ -2175,7 +2185,13 @@ impl Compiler {
             }
             Expr::Method { base, name, args } => match builtin_fn_id(name) {
                 Some(id) => {
-                    check_builtin_argc(name, args.len() + 1)?;
+                    // See the note on the plain-call path: a mis-arity call raises at
+                    // runtime, not at compile time.
+                    if let Some(msg) = builtin_argc_error(name, args.len() + 1) {
+                        self.load_str(&msg);
+                        self.emit(Op::CallBuiltin(h::VIML_RAISE, 1));
+                        return Ok(());
+                    }
                     self.expr(base)?;
                     for a in args {
                         self.expr(a)?;

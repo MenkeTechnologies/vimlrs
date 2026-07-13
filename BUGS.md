@@ -812,6 +812,22 @@ was reported and not handled". It also takes the **first** unhandled error, sinc
 reports one and abandons the command while this VM keeps evaluating and can raise
 more.
 
+### R11-6. A bad-arity call in DEAD CODE aborted the whole script — ✅ FIXED
+```vim
+if 0
+  echo strlen('a', 'b')   " never runs
+endif
+echo 'reached'
+```
+Vim loads and runs this: a wrong argument count is an error it raises when it *parses
+that expression*, i.e. when the command actually runs. vimlrs rejected the call at
+**compile** time, so the script failed to load at all (`E118`, exit 1) — and any real
+vimrc that guards a call behind `if has(…)` for another Vim version would have died
+the same way. The call now compiles to a runtime raise, so an unreachable bad call is
+harmless and a reachable one is a normal catchable error (E118/E119, verified
+catchable in both engines). Vim does not evaluate the arguments of such a call, and
+neither does this.
+
 ### R11-5. Which errors a one-line `:catch` sees — ✅ FIXED (corrected R11-4)
 R11-4 got the rule half right, and the statement fuzzer caught it. The line is not
 "inline `:try` never catches an error" — it is **where the error came from**:

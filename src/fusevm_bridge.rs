@@ -191,6 +191,14 @@ pub const VIML_EXC_IS_HARD: u16 = 3044;
 /// *reported* (`:silent!` never reports, and Vim carries on past a silenced error),
 /// or a hard failure, which abandons regardless.
 pub const VIML_LINE_ABORT: u16 = 3045;
+/// Raise the Vim error whose message is on the stack, and yield 0.
+///
+/// A builtin call with the wrong number of arguments is an error Vim raises when it
+/// *parses that expression* — i.e. when the command actually runs. Rejecting it at
+/// compile time instead made an unreachable bad call abort the whole script:
+/// `if 0 | echo strlen('a','b') | endif` failed to load in vimlrs and runs fine in
+/// Vim. The call now compiles to this, so the error arrives if and when it is reached.
+pub const VIML_RAISE: u16 = 3046;
 pub const VIML_SILENT_ENTER: u16 = 3040;
 pub const VIML_SILENT_LEAVE: u16 = 3041;
 pub const VIML_SET_CMDNAME: u16 = 3042;
@@ -1483,6 +1491,12 @@ fn eval_op<T>(f: impl FnOnce() -> T) -> T {
 
 fn b_exc_is_hard(_vm: &mut VM, _: u8) -> Value {
     Value::Bool(PENDING_EXC.with(|p| p.borrow().is_some()) && HARD_ERR.with(|h| h.get()))
+}
+
+fn b_raise(vm: &mut VM, _: u8) -> Value {
+    let msg = tv_get_string(&pop_tv(vm));
+    message::emsg(&msg);
+    Value::Int(0)
 }
 
 fn b_line_abort(_vm: &mut VM, _: u8) -> Value {
@@ -4916,6 +4930,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_ERR_SINCE, b_err_since);
     vm.register_builtin(VIML_EXC_IS_HARD, b_exc_is_hard);
     vm.register_builtin(VIML_LINE_ABORT, b_line_abort);
+    vm.register_builtin(VIML_RAISE, b_raise);
     vm.register_builtin(VIML_SILENT_ENTER, b_silent_enter);
     vm.register_builtin(VIML_SILENT_LEAVE, b_silent_leave);
     vm.register_builtin(VIML_SET_CMDNAME, b_set_cmdname);

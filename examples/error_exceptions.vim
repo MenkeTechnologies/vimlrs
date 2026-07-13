@@ -105,7 +105,7 @@ call assert_equal(2, s:n)
 func! s:CatchInline(cmd) abort
   let s:got = 'escaped'
   try
-    execute 'try | ' . a:cmd . ' | catch | let s:got = "caught" | endtry'
+    execute 'try | ' . a:cmd . ' | catch | let s:got = "caught" . matchstr(v:exception, "E\\d\\+") | endtry'
   catch
     " the error escaped the inline :catch and reached this (multi-line) one
   endtry
@@ -129,9 +129,9 @@ call assert_equal('boom', s:inline_throw)
 "     that line never runs. An error raised *inside a called builtin* (E117 above,
 "     E684 from insert()) does not fail the evaluator and IS caught. A multi-line
 "     `:try`, whose `:catch` is on another line, catches both; see the block above.
-call assert_equal('caught', s:CatchInline('call nosuchfn()')) " builtin → soft
-call assert_equal('caught', s:CatchInline('echo insert([1],{},100000)')) " builtin → soft
-call assert_equal('caught', s:CatchInline('echo deepcopy({})[2]')) " E716 → soft
+call assert_match('^caught', s:CatchInline('call nosuchfn()')) " builtin → soft
+call assert_match('^caught', s:CatchInline('echo insert([1],{},100000)')) " builtin → soft
+call assert_match('^caught', s:CatchInline('echo deepcopy({})[2]')) " E716 → soft
 call assert_equal('escaped', s:CatchInline('echo [1] . "x"')) " eval5 pre-check → HARD
 call assert_equal('escaped', s:CatchInline('echo 0z11 - 1')) " eval5 pre-check → HARD
 call assert_equal('escaped', s:CatchInline('echo log10(-3.25)[-5:0]')) " unindexable → HARD
@@ -153,6 +153,20 @@ call assert_equal('not-run', s:hard)
 let s:soft = 'not-run'
 silent! call nosuchfn() | let s:soft = 'ran'
 call assert_equal('ran', s:soft)
+
+" --- a builtin call with the WRONG NUMBER OF ARGUMENTS is an error Vim raises when it
+"     runs the command, not when it loads the script. So an unreachable bad call is
+"     harmless — the script still loads — and a reachable one is a catchable error.
+"     (Rejecting it at load time would break every script whose dead branch guards a
+"     call for another Vim version.)
+let s:unreached = 'ok'
+if 0
+  echo strlen('a', 'b')
+endif
+call assert_equal('ok', s:unreached)
+
+call assert_match('E118', s:CatchInline('echo strlen("a","b")'))
+call assert_match('E119', s:CatchInline('echo strlen()'))
 
 if len(v:errors) > 0
   for err in v:errors
