@@ -245,6 +245,10 @@ pub struct Regex {
     ngroups: usize,
     /// Forced case from `\c` (Some(true)) / `\C` (Some(false)); else None.
     forced_ic: Option<bool>,
+    /// The pattern was invalid: the error has been reported and this regex matches
+    /// nothing, so every caller falls back to its no-match result — which is what
+    /// Vim's functions return once they have raised the error.
+    dead: bool,
 }
 
 /// A successful match: char-index span plus per-group spans (index 0 = whole).
@@ -271,94 +275,170 @@ const INF: u32 = u32::MAX;
 /// pattern; `\m` switches back. Character classes `[...]` are copied verbatim.
 /// (Exotic `\v` atoms — `@`, `&`, `%[` — are left as-is; not yet modelled.)
 fn preprocess_magic(pat: &str) -> String {
-    if !pat.contains("\\v") {
+    // Nothing to do for the default (magic) dialect, which is what the parser reads.
+    if !pat.contains("\\v") && !pat.contains("\\M") && !pat.contains("\\V") {
         return pat.to_string();
     }
     let chars: Vec<char> = pat.chars().collect();
     let mut out = String::new();
     let mut i = 0;
-    let mut very = false;
+    let mut mode = Magic::Magic;
     const OPS: &str = "(){}+?=|<>";
     while i < chars.len() {
         let c = chars[i];
-        if c == '\\' && i + 1 < chars.len() {
-            match chars[i + 1] {
-                'v' => {
-                    very = true;
+        // A mode switch can appear anywhere in the pattern and applies from there on.
+        if c == '\\' {
+            match chars.get(i + 1) {
+                Some('v') => {
+                    mode = Magic::VeryMagic;
                     i += 2;
                     continue;
                 }
-                'm' => {
-                    very = false;
+                Some('m') => {
+                    mode = Magic::Magic;
+                    i += 2;
+                    continue;
+                }
+                Some('M') => {
+                    mode = Magic::NoMagic;
+                    i += 2;
+                    continue;
+                }
+                Some('V') => {
+                    mode = Magic::VeryNoMagic;
                     i += 2;
                     continue;
                 }
                 _ => {}
             }
         }
-        if !very {
-            out.push(c);
-            i += 1;
-            continue;
-        }
-        match c {
-            '\\' => {
-                if let Some(&n) = chars.get(i + 1) {
-                    if OPS.contains(n) {
-                        out.push(n); // `\(` → literal '(' (bare in magic)
-                    } else {
-                        out.push('\\'); // keep `\d`, `\zs`, `\1`, `\\`, …
-                        out.push(n);
-                    }
-                    i += 2;
-                } else {
-                    out.push('\\');
+        match mode {
+            Magic::Magic => {
+                // Already the dialect the parser reads: copy an escape pair whole so a
+                // following char is never mistaken for a bare one.
+                out.push(c);
+                i += 1;
+                if c == '\\' && i < chars.len() {
+                    out.push(chars[i]);
                     i += 1;
                 }
             }
-            '[' => {
-                // Copy the class verbatim (internals are mode-independent).
-                out.push('[');
-                i += 1;
-                if chars.get(i) == Some(&'^') {
-                    out.push('^');
+            // `\M` (nomagic) and `\V` (very nomagic) differ from magic only in WHICH
+            // characters are special (`:help /magic`): in nomagic `.` `*` `~` `[` are
+            // literal and `\.` `\*` … are the special ones — the escaping is simply
+            // swapped. Very nomagic swaps `^` and `$` as well, so `\V^` is a literal
+            // caret. Everything else (`\(`, `\|`, `\zs`, `\d`, …) is identical in
+            // all four, which is why translating into magic is enough for the parser.
+            Magic::NoMagic | Magic::VeryNoMagic => {
+                let swapped: &str = if mode == Magic::NoMagic {
+                    ".*~["
+                } else {
+                    ".*~[^$"
+                };
+                if c == '\\' {
+                    match chars.get(i + 1) {
+                        Some(&n) if swapped.contains(n) => {
+                            out.push(n); // `\.` in nomagic IS the magic `.`
+                            i += 2;
+                        }
+                        Some(&n) => {
+                            out.push('\\');
+                            out.push(n);
+                            i += 2;
+                            // `\%[`, `\%(`, `\%d97` — the char after `%` belongs to the
+                            // escape and must not be literal-ized on the next pass.
+                            if n == '%' {
+                                if let Some(&after) = chars.get(i) {
+                                    out.push(after);
+                                    i += 1;
+                                }
+                            }
+                        }
+                        None => {
+                            out.push('\\');
+                            i += 1;
+                        }
+                    }
+                } else if swapped.contains(c) {
+                    out.push('\\'); // a bare `.` in nomagic is a literal dot
+                    out.push(c);
+                    i += 1;
+                } else {
+                    out.push(c);
                     i += 1;
                 }
-                if chars.get(i) == Some(&']') {
-                    out.push(']');
-                    i += 1;
-                }
-                while i < chars.len() && chars[i] != ']' {
-                    if chars[i] == '\\' && i + 1 < chars.len() {
-                        out.push('\\');
-                        out.push(chars[i + 1]);
+            }
+            Magic::VeryMagic => {
+                match c {
+                    '\\' => {
+                        if let Some(&n) = chars.get(i + 1) {
+                            if OPS.contains(n) {
+                                out.push(n); // `\(` → literal '(' (bare in magic)
+                            } else {
+                                out.push('\\'); // keep `\d`, `\zs`, `\1`, `\\`, …
+                                out.push(n);
+                            }
+                            i += 2;
+                        } else {
+                            out.push('\\');
+                            i += 1;
+                        }
+                    }
+                    '[' => {
+                        // Copy the class verbatim (internals are mode-independent).
+                        out.push('[');
+                        i += 1;
+                        if chars.get(i) == Some(&'^') {
+                            out.push('^');
+                            i += 1;
+                        }
+                        if chars.get(i) == Some(&']') {
+                            out.push(']');
+                            i += 1;
+                        }
+                        while i < chars.len() && chars[i] != ']' {
+                            if chars[i] == '\\' && i + 1 < chars.len() {
+                                out.push('\\');
+                                out.push(chars[i + 1]);
+                                i += 2;
+                            } else {
+                                out.push(chars[i]);
+                                i += 1;
+                            }
+                        }
+                        if i < chars.len() {
+                            out.push(']');
+                            i += 1;
+                        }
+                    }
+                    '%' if chars.get(i + 1) == Some(&'(') => {
+                        out.push_str("\\%("); // non-capturing group
                         i += 2;
-                    } else {
-                        out.push(chars[i]);
+                    }
+                    _ if OPS.contains(c) => {
+                        out.push('\\'); // operator → magic backslash form
+                        out.push(c);
+                        i += 1;
+                    }
+                    _ => {
+                        out.push(c); // . * ^ $ ~ and word chars are the same in both
                         i += 1;
                     }
                 }
-                if i < chars.len() {
-                    out.push(']');
-                    i += 1;
-                }
-            }
-            '%' if chars.get(i + 1) == Some(&'(') => {
-                out.push_str("\\%("); // non-capturing group
-                i += 2;
-            }
-            _ if OPS.contains(c) => {
-                out.push('\\'); // operator → magic backslash form
-                out.push(c);
-                i += 1;
-            }
-            _ => {
-                out.push(c); // . * ^ $ ~ and word chars are the same in both
-                i += 1;
             }
         }
     }
     out
+}
+
+/// The four pattern dialects (`:help /magic`). The parser reads [`Magic::Magic`];
+/// `preprocess_magic` translates the other three into it.
+#[derive(Clone, Copy, PartialEq)]
+enum Magic {
+    VeryMagic,
+    Magic,
+    NoMagic,
+    VeryNoMagic,
 }
 
 // ── parser (magic mode) ──
@@ -368,9 +448,22 @@ struct Parser {
     i: usize,
     ngroups: usize,
     forced_ic: Option<bool>,
+    /// The first `E<nnn>` the pattern violates. Vim *rejects* an invalid pattern —
+    /// a backreference to a group that does not exist, a quantifier on `\zs`, a
+    /// quantifier on a quantifier, an unclosed `\(` — and every function that takes
+    /// one raises the error rather than quietly finding nothing, which is what this
+    /// engine used to do.
+    err: Option<String>,
 }
 
 impl Parser {
+    /// Record the first violation; later ones are noise once the pattern is invalid.
+    fn fail(&mut self, msg: &str) {
+        if self.err.is_none() {
+            self.err = Some(msg.to_string());
+        }
+    }
+
     fn peek(&self) -> Option<char> {
         self.p.get(self.i).copied()
     }
@@ -415,7 +508,29 @@ impl Parser {
     /// An atom plus an optional quantifier. `at_start` enables `^` as anchor.
     fn quantified(&mut self, at_start: bool) -> Option<Atom> {
         let node = self.atom(at_start)?;
+        let before = self.i;
         let (min, max, greedy) = self.quantifier();
+        let quantified = self.i != before;
+        if quantified {
+            // c: "E888: (NFA regexp) cannot repeat \zs" — a zero-width match-bound
+            // marker cannot be *repeated*. `\?`/`\=` (which only make it optional,
+            // max 1) are accepted: `\zs\?` is fine in Vim, `\zs*` and `\zs\{2}`
+            // are not.
+            let repeats = max > 1;
+            if repeats {
+                match node {
+                    Node::MatchStart => self.fail("E888: (NFA regexp) cannot repeat \\zs"),
+                    Node::MatchEnd => self.fail("E888: (NFA regexp) cannot repeat \\ze"),
+                    _ => {}
+                }
+            }
+            // c: "E871: (NFA regexp) Can't have a multi follow a multi" — `a*\+`.
+            let after = self.i;
+            let (_, _, _) = self.quantifier();
+            if self.i != after {
+                self.fail("E871: (NFA regexp) Can't have a multi follow a multi");
+            }
+        }
         Some(Atom {
             node,
             min,
@@ -678,8 +793,15 @@ impl Parser {
                 self.forced_ic = Some(false);
                 return self.atom(false);
             }
-            // `\1`..`\9` — backreference to a previously captured group.
-            d @ '1'..='9' => Node::BackRef(d as usize - '0' as usize),
+            // `\1`..`\9` — backreference to a group that must already be open.
+            // c: Vim rejects `\1` with no group, and a *forward* reference too.
+            d @ '1'..='9' => {
+                let n = d as usize - '0' as usize;
+                if n > self.ngroups {
+                    self.fail("E65: Illegal back reference");
+                }
+                Node::BackRef(n)
+            }
             't' => Node::Lit('\t'),
             'n' => Node::Lit('\n'),
             'r' => Node::Lit('\r'),
@@ -691,6 +813,9 @@ impl Parser {
     fn close_group(&mut self) {
         if self.peek() == Some('\\') && self.peek2() == Some(')') {
             self.i += 2;
+        } else {
+            // c: "E54: Unmatched \(" — the group was never closed.
+            self.fail("E54: Unmatched \\(");
         }
     }
 
@@ -805,12 +930,28 @@ impl Regex {
             i: 0,
             ngroups: 0,
             forced_ic: None,
+            err: None,
         };
         let branches = parser.alternation();
+        // An invalid pattern is an *error* in Vim, raised by every function that
+        // takes one (`match()`, `substitute()`, `split()`, …) — not a pattern that
+        // quietly matches nothing, which is what this engine used to do. Report it
+        // and hand back a regex that matches nothing, so each caller falls through to
+        // the result it returns once the error has been raised.
+        if let Some(msg) = parser.err {
+            crate::ported::message::emsg(&msg);
+            return Regex {
+                branches: Vec::new(),
+                ngroups: 0,
+                forced_ic: None,
+                dead: true,
+            };
+        }
         Regex {
             branches,
             ngroups: parser.ngroups,
             forced_ic: parser.forced_ic,
+            dead: false,
         }
     }
 
@@ -828,6 +969,11 @@ impl Regex {
     /// still anchor to the absolute string start (this is Vim's `startcol`
     /// search, used by `match()`/`matchstr()` with a `{count}` argument).
     pub fn find_from(&self, text: &[char], ic: bool, from: usize) -> Option<Captures> {
+        // An invalid pattern matches nothing (the error was already reported at
+        // compile time) — an empty branch list would otherwise match the empty string.
+        if self.dead {
+            return None;
+        }
         let ic = self.effective_ic(ic);
         for start in from..=text.len() {
             // Two extra trailing slots hold the `\zs`/`\ze` positions, if any.
@@ -1101,8 +1247,12 @@ pub fn regex_search_nth(
                 .groups
                 .iter()
                 .map(|g| match g {
-                    Some((gs, ge)) => chars[*gs..*ge].iter().collect(),
-                    None => String::new(),
+                    // A group's span can come back inverted when `\zs` inside it moved
+                    // the match start past where the group closed — Vim rejects such a
+                    // pattern outright (E888), but the matcher must not panic on the
+                    // slice while getting there.
+                    Some((gs, ge)) if gs <= ge => chars[*gs..*ge].iter().collect(),
+                    _ => String::new(),
                 })
                 .collect();
             groups.resize(10, String::new());

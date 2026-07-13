@@ -174,3 +174,26 @@ eval('[1,2]')	[1, 2]
 eval('1 + ')	!E15
 eval('"a" . "b"')	'ab'
 eval('{"a":1}')	{'a': 1}
+
+# --- round 12: regex magic modes (\M/\V) and pattern validation ---
+match('a.c','\\M\\.')	-1
+match('a.c','\\M.')	-1
+match('ab','\\Ma\\*')	-1
+match('a[x','\\V[')	-1
+match('axc','\\V\\.')	-1
+match('a^b','\\V^')	-1
+match('ab','\\V^a')	-1
+match('a.c[x','\\Vx')	-1
+match('abc','\\V\\%[abc]')	-1
+matchstr('a.c','\\M\\.\\+')	''
+substitute('a.c','\\V.','X','g')	'a.c'
+match('aaa','\\1')	-1
+match('aaa','\\2\\+')	-1
+match('aaa','\\(a\\)\\1')	-1
+match('aaa','\\zs*')	-1
+match('aaa','\\ze\\{2}')	-1
+match('aaa','a*\\+')	-1
+match('aaa','\\(a')	-1
+match('aaa','\\zs\\?')	-1
+match('aaa','\\ze\\?')	-1
+matchend('abc','\\(\\zs\\?\\)\\{2}')	-1

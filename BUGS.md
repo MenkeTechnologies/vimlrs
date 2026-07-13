@@ -866,8 +866,57 @@ pending exception came from an error or from `:throw`, and an inline `:try` skip
 `:catch` clauses for the former. An uncaught error-exception is also reported as the
 error itself (`E730: …`), not wrapped in E605 — E605 is for an uncaught `:throw`.
 
+---
+
+# Round 12 — the regex engine (a grammar-based pattern fuzzer)
+
+`viml_regex` is the largest hand-written carve-out in the crate: it reproduces Vim's
+pattern *dialect* from the documentation rather than porting `regexp_bt.c` /
+`regexp_nfa.c`. Drawing patterns from a fixed list only ever exercises the shapes
+somebody already thought of, so the fuzzer now **builds patterns from a grammar**
+(atoms × quantifiers × groups × alternation × magic prefixes) and runs each through
+every API that reaches the engine — `match`, `matchstr`, `matchend`, `matchlist`,
+`substitute` (plain, `g`, `[&]`) and `split` — against a subject pool that straddles
+the boundaries (empty, ASCII, multibyte, combining, punctuation, digits).
+
+The first 800 cases produced **326 divergences and a crash** — a 40% failure rate, by
+far the worst surface in the interpreter.
+
+### R12-1. Inverted capture span crashed the matcher — ✅ FIXED
+`matchend('abc', '\(\zs\?\)\{2}')` panicked with "slice index starts at 1 but ends
+at 0": a group's span came back inverted when a `\zs` inside it moved the match start
+past where the group closed.
+
+### R12-2. An invalid pattern matched nothing instead of raising — ✅ FIXED
+Vim **rejects** a bad pattern, and every function that takes one raises the error:
+- `\1` with no such group (and a *forward* reference) → E65
+- a quantifier that repeats `\zs`/`\ze` (`\zs*`, `\ze\{2}`) → E888. Note `\zs\?` is
+  legal: `\?`/`\=` only make it optional, they do not repeat it.
+- a quantifier on a quantifier (`a*\+`) → E871
+- an unclosed `\(` → E54
+
+vimlrs silently treated all of them as patterns that happened to match nothing. Now
+the pattern is reported at compile time and the regex matches nothing thereafter, so
+every caller returns what Vim returns once it has raised the error.
+
+### R12-3. `\M` and `\V` were not implemented at all — ✅ FIXED
+`match('a.c[x', '\Vx')` → Vim `4`, vimlrs `-1`. Nomagic and very-nomagic were simply
+absent from `preprocess_magic`, so the `\V` was parsed as an escaped literal `V` and
+the rest of the pattern was garbage. `\V` is common in real vimrcs (it is how you
+match literal text), so this was a feature gap, not an edge case.
+
+The four dialects differ only in *which* characters are special (`:help /magic`): in
+nomagic `.` `*` `~` `[` are literal and `\.` `\*` … are the special ones — the
+escaping is simply swapped — and very-nomagic swaps `^` and `$` as well, so `\V^` is a
+literal caret. Everything else (`\(`, `\|`, `\zs`, `\d`, …) is identical in all four,
+so translating into the magic dialect the parser already reads is enough.
+
+Regex fuzz after these: **326 → 77 gaps, 0 panics.**
+
 ## Still open
 
+- The remaining regex gaps (26 distinct) are mostly deeply-nested quantifier and
+  backtracking corners, plus a few where Vim rejects a pattern vimlrs still accepts.
 - `nr2char(2147483647)` → Vim emits the raw replacement bytes, vimlrs `''`. Same
   string-representation root cause as R5-D1 (Vim strings are byte arrays), which
   remains the one structural divergence.

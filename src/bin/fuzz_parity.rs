@@ -765,6 +765,149 @@ fn gen_call(rng: &mut Rng, funcs: &[(&str, &[Shape])]) -> String {
 // divergence in control flow, error handling, or output shows up as a plain value
 // mismatch.
 
+// ─── Regex generation ───────────────────────────────────────────────────────
+//
+// `viml_regex` is the largest hand-written carve-out in the crate: it reproduces
+// Vim's pattern *dialect* from the documentation rather than porting
+// `regexp_bt.c`/`regexp_nfa.c`. That makes it the most likely place for a
+// divergence to hide, and drawing patterns from a fixed list (as `PATS` does) only
+// ever exercises the shapes someone already thought of.
+//
+// So build patterns from a grammar instead, and check each one through every API
+// that reaches the engine — `match()` (the index), `matchstr()` (the text),
+// `matchlist()` (the capture groups), `substitute()` (the rewrite, with the
+// zero-width and `\zs` rules) and `split()` — against a subject pool chosen to
+// straddle the boundaries: empty, ASCII, multibyte, combining, punctuation, digits.
+
+/// Subjects a generated pattern is matched against.
+const RX_SUBJECTS: &[&str] = &[
+    "''",
+    "'a'",
+    "'abc'",
+    "'aaa'",
+    "'abcabc'",
+    "'a1b2c3'",
+    "'Hello World'",
+    "'  spaced  '",
+    "'a.b*c'",
+    "'foo_bar-baz'",
+    "'ünïcø∂é'",
+    "'日本語abc'",
+    "'e\u{0301}combining'",
+    "'tab\there'",
+    "'AbCdEf'",
+];
+
+/// A regex *atom* — the leaves of the grammar.
+fn rx_atom(rng: &mut Rng) -> String {
+    match rng.below(14) {
+        0 => rng
+            .pick(&["a", "b", "c", "x", "1", "_", "-", ".", "é"])
+            .to_string(),
+        1 => ".".into(),
+        2 => rng
+            .pick(&[
+                "\\d", "\\D", "\\w", "\\W", "\\s", "\\S", "\\a", "\\l", "\\u", "\\x", "\\o", "\\h",
+                "\\k", "\\p", "\\i",
+            ])
+            .to_string(),
+        3 => rng
+            .pick(&[
+                "[abc]", "[^abc]", "[a-z]", "[A-Z0-9]", "[^0-9]", "[.*]", "[]a]",
+            ])
+            .to_string(),
+        4 => rng
+            .pick(&[
+                "[[:alpha:]]",
+                "[[:digit:]]",
+                "[[:space:]]",
+                "[[:punct:]]",
+                "[[:upper:]]",
+                "[[:alnum:]]",
+            ])
+            .to_string(),
+        5 => format!("\\({}\\)", rx_branch(rng, 0)),
+        6 => format!("\\%({}\\)", rx_branch(rng, 0)),
+        7 => rng.pick(&["\\<", "\\>", "^", "$"]).to_string(),
+        8 => rng.pick(&["\\zs", "\\ze"]).to_string(),
+        9 => rng
+            .pick(&["\\%d97", "\\%x62", "\\%o143", "\\%u0061"])
+            .to_string(),
+        10 => rng.pick(&["\\_.", "\\_s", "\\_a", "\\_[a-z]"]).to_string(),
+        11 => format!("\\%[{}]", rng.pick(&["abc", "ab", "xyz"])),
+        12 => rng.pick(&["\\1", "\\2"]).to_string(),
+        _ => rng.pick(&["\\.", "\\*", "\\[", "\\\\"]).to_string(),
+    }
+}
+
+/// An atom plus an optional quantifier.
+fn rx_piece(rng: &mut Rng, depth: u32) -> String {
+    let atom = if depth > 0 && rng.chance(1, 5) {
+        format!("\\({}\\)", rx_branch(rng, depth - 1))
+    } else {
+        rx_atom(rng)
+    };
+    match rng.below(9) {
+        0 => format!("{atom}*"),
+        1 => format!("{atom}\\+"),
+        2 => format!("{atom}\\?"),
+        3 => format!("{atom}\\="),
+        4 => format!("{atom}\\{{2}}"),
+        5 => format!("{atom}\\{{1,3}}"),
+        6 => format!("{atom}\\{{-}}"),
+        7 => format!("{atom}\\{{-1,}}"),
+        _ => atom,
+    }
+}
+
+/// A concatenation, possibly with alternation.
+fn rx_branch(rng: &mut Rng, depth: u32) -> String {
+    let n = 1 + rng.below(3);
+    let mut out = String::new();
+    for _ in 0..n {
+        out.push_str(&rx_piece(rng, depth));
+    }
+    if rng.chance(1, 4) {
+        out.push_str("\\|");
+        out.push_str(&rx_piece(rng, depth));
+    }
+    out
+}
+
+/// One generated pattern, wrapped as a single-quoted VimL string.
+fn rx_pattern(rng: &mut Rng) -> String {
+    let body = rx_branch(rng, 1);
+    // Occasionally force case control or a magic-mode switch — both change how the
+    // whole pattern is read.
+    let prefix = match rng.below(8) {
+        0 => "\\c",
+        1 => "\\C",
+        2 => "\\v",
+        3 => "\\V",
+        4 => "\\M",
+        _ => "",
+    };
+    format!("'{prefix}{body}'")
+}
+
+/// One regex case: a generated pattern, a subject, and one of the APIs that reach
+/// the engine. Comparing several APIs matters — a pattern can match in the same
+/// place yet report different capture groups or rewrite differently.
+fn gen_regex(rng: &mut Rng) -> String {
+    let pat = rx_pattern(rng);
+    let subj = rng.pick(RX_SUBJECTS);
+    match rng.below(8) {
+        0 => format!("match({subj}, {pat})"),
+        1 => format!("matchstr({subj}, {pat})"),
+        2 => format!("matchend({subj}, {pat})"),
+        3 => format!("matchlist({subj}, {pat})"),
+        4 => format!("substitute({subj}, {pat}, 'X', '')"),
+        5 => format!("substitute({subj}, {pat}, 'X', 'g')"),
+        6 => format!("substitute({subj}, {pat}, '[&]', 'g')"),
+        _ => format!("split({subj}, {pat})"),
+    }
+}
+
 /// Statement shapes beyond a bare `:echo`/`:let` — the surfaces the generator was
 /// blind to: user functions (arguments, defaults, varargs, closures, recursion),
 /// compound and unpacking `:let`, indexed assignment, `:unlet`, `:for` over a Dict
@@ -1287,6 +1430,9 @@ struct Args {
     /// Generate *statements* (`:let`, `:if`, `:for`, `:try`, `|`-separated lines)
     /// instead of expressions, compared through `execute()`.
     stmts: bool,
+    /// Generate *regex* cases: grammar-built patterns through match/matchstr/
+    /// matchlist/substitute/split.
+    regex: bool,
 }
 
 fn parse_args() -> Args {
@@ -1298,6 +1444,7 @@ fn parse_args() -> Args {
         corpus: None,
         verbose: false,
         stmts: false,
+        regex: false,
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -1325,6 +1472,7 @@ fn parse_args() -> Args {
                 i += 1;
             }
             "--stmts" => a.stmts = true,
+            "--regex" => a.regex = true,
             "--verbose" | "-v" => a.verbose = true,
             "--help" | "-h" => {
                 println!(
@@ -1336,6 +1484,7 @@ fn parse_args() -> Args {
                      --depth D     max expression nesting depth (default 2)\n\
                      --only LIST   restrict generation to these builtins\n\
                      --stmts       fuzz STATEMENTS (:let/:if/:for/:try/`|` lines) via execute()\n\
+                     --regex       fuzz REGEX: grammar-built patterns x subjects x APIs\n\
                      --corpus FILE append confirmed gaps as `expr<TAB>expected` lines\n\
                      --verbose     list every case, not just divergences"
                 );
@@ -1378,7 +1527,9 @@ fn main() {
     let mut rng = Rng(args.seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
     let mut exprs: Vec<String> = Vec::with_capacity(args.count);
     while exprs.len() < args.count {
-        let e = if args.stmts {
+        let e = if args.regex {
+            gen_regex(&mut rng)
+        } else if args.stmts {
             gen_stmt(&mut rng, &funcs, args.depth)
         } else {
             gen_expr(&mut rng, &funcs, args.depth)
