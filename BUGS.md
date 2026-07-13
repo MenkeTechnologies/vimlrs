@@ -733,16 +733,49 @@ judged before the right operand), for a Float, and for a statically-numeric left
 operand — which can never fail the check, so `i + 1` keeps its native-arithmetic
 fast path.
 
+---
+
+# Round 10 — command abort, and `eval()`'s evaluation order
+
+### R10-1. A failed `:let` stored a corrupted value — ✅ FIXED
+```vim
+let g:v = 'orig'
+silent! let g:v = [1] . 'x'   " E730
+echo g:v                      " Vim: 'orig'   vimlrs (before): '0x'
+```
+Vim **abandons a command whose expression raised an error**, so the assignment never
+happens. vimlrs stored whatever the evaluator had recovered with and the script
+carried on with corrupted data — the worst kind of divergence, because nothing
+reports it. `:echo` already had this guard; `:let` did not.
+
+The guard is skipped when the right-hand side provably cannot raise (a literal, or
+an expression the compiler already proved numeric — the same judgement the
+native-arithmetic fast path relies on), so `let i = i + 1` keeps its
+`CallBuiltin`-free loop body and stays JIT-traceable. The bytecode-shape tests
+(`*_traces_on_jit`) enforce that and caught the first version of this change, which
+had put two builtin calls into every `:let`.
+
+### R10-2. An erroring command still printed its recovered value under `:silent!` — ✅ FIXED
+The `:echo` abort guard keyed on `did_emsg`, which `:silent!` deliberately leaves
+alone — so a silenced error slipped past it and `silent! echo [1] . 'x'` printed
+`0x` where Vim prints nothing. It now keys on a counter of *every* error raised,
+which is what "did this command fail?" actually means.
+
+### R10-3. `eval()` rejected trailing text before evaluating (was R5-O2) — ✅ FIXED
+`eval("nl\nhere")` → Vim E121 (undefined variable `nl`), vimlrs E15. The C's `f_eval`
+runs `eval1()` on the string, **evaluates what it parsed**, and only then reports
+what is left over (`E488: Trailing characters`). vimlrs compiled the whole string up
+front, so text Vim would have evaluated became a parse error instead. It now parses
+the leading expression (`parse_expr_prefix`), evaluates it, and reports E488
+afterwards — so `eval('1 2')` is E488 and `eval('nosuchvar')` is E121, as in Vim.
+
 ## Still open
 
-- **Vim aborts the erroring command; vimlrs finishes it.** `silent! echo [1] . 'x'`
-  prints nothing in Vim (the command is abandoned) but prints the recovered value in
-  vimlrs. Inside a `:try` this is invisible (the unwind happens at the statement
-  boundary); outside one, the statement runs to completion after its error. A second
-  error from the same statement is swallowed so the *first* one is still what
-  `:catch` and `v:exception` see.
 - `nr2char(2147483647)` → Vim emits the raw replacement bytes, vimlrs `''`. Same
-  string-representation root cause as R5-D1 (Vim strings are byte arrays).
-- `eval()` rejects trailing text before evaluating (R5-O2) — same compile-first root
-  cause as the ordering class.
-- Byte-vs-character string indexing (R5-D1) remains the other structural divergence.
+  string-representation root cause as R5-D1 (Vim strings are byte arrays), which
+  remains the one structural divergence.
+- `matchbufline(-9223372036854775808, …)` → Vim E475, vimlrs E158. The C truncates
+  the buffer number to `int`, and what that yields for INT64_MIN is undefined
+  behavior; not worth reproducing.
+- `execute()` of a command that errors captures the error text in Vim but not in
+  Neovim. vimlrs follows Neovim, its port target — no single spec.

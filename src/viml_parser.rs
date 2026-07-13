@@ -2438,6 +2438,24 @@ fn parse_expr_list(src: &str) -> Result<Vec<Expr>, VimlError> {
 }
 
 /// Parse a single expression string into an [`Expr`].
+/// Parse the *leading* expression of `src` and report where it stopped (a byte
+/// offset into `src`).
+///
+/// `eval()` needs this: the C's `f_eval` runs `eval1()` on the string, **evaluates
+/// the result**, and only then complains about whatever is left over
+/// (`E488: Trailing characters`). Parsing the whole string up front instead
+/// reported a parse error (E15) for text Vim would have evaluated first —
+/// `eval("nl\nhere")` is E121 (undefined variable `nl`) in Vim, not E15.
+pub fn parse_expr_prefix(src: &str) -> Result<(Expr, usize), VimlError> {
+    let toks = lex(src)?;
+    let mut p = Parser::new(toks, src);
+    let e = p.eval1()?;
+    // The next token's start is where the expression ended; `Eof` means it ran to
+    // the end of the string.
+    let rest_at = p.peek_span().unwrap_or(src.len());
+    Ok((e, rest_at))
+}
+
 pub fn parse_expr(src: &str) -> Result<Expr, VimlError> {
     let toks = lex(src)?;
     let mut p = Parser::new(toks, src);
@@ -2448,6 +2466,14 @@ pub fn parse_expr(src: &str) -> Result<Expr, VimlError> {
         ));
     }
     Ok(e)
+}
+
+impl Parser {
+    /// Byte offset of the current token, or `None` at `Eof`.
+    fn peek_span(&self) -> Option<usize> {
+        let t = self.toks.get(self.i)?;
+        (!matches!(t.kind, Tok::Eof)).then_some(t.span)
+    }
 }
 
 struct Parser {

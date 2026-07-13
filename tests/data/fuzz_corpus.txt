@@ -164,3 +164,13 @@ strwidth("a\nb")	3
 matchbufline(1,'a',-5,-9)	!E475
 matchbufline(1,'a',0,1)	!E475
 matchbufline(1,'a',2,1)	!E475
+
+# --- round 10: eval() evaluates the leading expression before rejecting trailing text ---
+eval("nl\nhere")	!E121
+eval('1 2')	!E488
+eval('1+1')	2
+eval('nosuchvar')	!E121
+eval('[1,2]')	[1, 2]
+eval('1 + ')	!E15
+eval('"a" . "b"')	'ab'
+eval('{"a":1}')	{'a': 1}

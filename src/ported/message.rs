@@ -18,6 +18,19 @@ thread_local! {
     /// since the eval engine runs single-threaded per evaluation.
     pub static did_emsg: Cell<u64> = const { Cell::new(0) };
 
+    /// Every error raised, including the ones `:silent!` suppresses and the ones
+    /// `assert_fails()` captures — unlike `did_emsg`, which those two paths skip
+    /// and `:catch` resets.
+    ///
+    /// RUST-PORT NOTE: the C propagates "this command failed" as a `FAIL` return
+    /// value up the call chain, which unwinds the command. This VM has no such
+    /// unwind, so a statement asks "did an error happen while I evaluated my
+    /// arguments?" by comparing this counter against a mark taken at its start
+    /// (`VIML_ERR_MARK`). `did_emsg` cannot answer that: `:silent!` deliberately
+    /// leaves it alone, and an erroring `silent! echo` would then print the
+    /// recovered value that Vim never prints.
+    pub static err_count: Cell<u64> = const { Cell::new(0) };
+
     /// When `Some`, each `emsg` text is captured here instead of printed —
     /// modelling `emsg_silent` + the saved error list that `assert_fails()`
     /// inspects in `message.c`/`testing.c`. `None` is the normal (print) path.
@@ -42,6 +55,8 @@ pub fn capture_errors_take() -> Vec<String> {
 /// capture is active (`assert_fails`), in which case the text is collected and
 /// not printed, like Vim's `emsg_silent` path.
 pub fn emsg(s: &str) {
+    // Counted first: this one tracks *every* error, whatever happens to it next.
+    err_count.with(|d| d.set(d.get() + 1));
     let captured = ERROR_CAPTURE.with(|c| {
         if let Some(list) = c.borrow_mut().as_mut() {
             list.push(s.to_string());

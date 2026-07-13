@@ -1460,11 +1460,52 @@ impl Compiler {
         Ok(())
     }
 
+    /// Whether evaluating `expr` could raise a Vim error. A literal cannot; an
+    /// expression the compiler has already proved numeric cannot either (that is the
+    /// same judgement the native-arithmetic fast path relies on).
+    fn expr_can_error(expr: &Expr) -> bool {
+        !matches!(
+            expr,
+            Expr::Number(_) | Expr::Float(_) | Expr::Str(_) | Expr::NullFunc
+        )
+    }
+
     fn let_stmt(&mut self, target: &LetTarget, expr: &Expr) -> Result<(), VimlError> {
         match target {
             LetTarget::Var(name) => {
-                self.expr(expr)?;
-                self.set_var(name);
+                // Vim abandons a command whose expression raised an error, so a
+                // failed `:let` leaves the variable ALONE:
+                //
+                //   let g:v = 'orig'
+                //   silent! let g:v = [1] . 'x'   " E730
+                //   echo g:v                      " still 'orig' in Vim
+                //
+                // Without this the recovered value ('0x') was stored and the script
+                // carried on with corrupted data. An expression that cannot raise
+                // (a literal, or arithmetic the compiler already proved numeric)
+                // skips the guard, so `let i = i + 1` keeps its native fast path.
+                // `expr_is_num` is the same judgement the native-arithmetic fast
+                // path already relies on: an expression it proves numeric is
+                // compiled to raw ops that cannot raise, so guarding it would only
+                // put `CallBuiltin`s back into loop bodies the JIT needs to trace.
+                if Self::expr_can_error(expr) && !self.expr_is_num(expr) {
+                    self.emit(Op::CallBuiltin(h::VIML_ERR_MARK, 0));
+                    self.emit(Op::Pop);
+                    self.expr(expr)?;
+                    self.emit(Op::CallBuiltin(h::VIML_ERR_SINCE, 0));
+                    let j_failed = self.emit(Op::JumpIfTrue(0));
+                    self.set_var(name);
+                    let j_done = self.emit(Op::Jump(0));
+                    // Failed: drop the recovered value, leave the variable as it was.
+                    let here = self.b.current_pos();
+                    self.b.patch_jump(j_failed, here);
+                    self.emit(Op::Pop);
+                    let after = self.b.current_pos();
+                    self.b.patch_jump(j_done, after);
+                } else {
+                    self.expr(expr)?;
+                    self.set_var(name);
+                }
                 Ok(())
             }
             LetTarget::Env(name) => {

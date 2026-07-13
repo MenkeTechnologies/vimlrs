@@ -175,6 +175,10 @@ pub const VIML_TONUMBER: u16 = 3004;
 /// NOTE: 3020..=3029 are the comparison ops and 3030..=3039 are reserved for their
 /// ignore-case forms (see `VIML_CMP_BASE` / `VIML_CMP_IC_OFFSET` above) — new ids
 /// go at 3040+.
+/// Push `Bool(an error was raised since `VIML_ERR_MARK`)` — lets a statement skip
+/// its effect when the expression it depends on failed, the way the C's `FAIL`
+/// return unwinds the command.
+pub const VIML_ERR_SINCE: u16 = 3043;
 pub const VIML_SILENT_ENTER: u16 = 3040;
 pub const VIML_SILENT_LEAVE: u16 = 3041;
 pub const VIML_SET_CMDNAME: u16 = 3042;
@@ -1431,6 +1435,10 @@ fn b_set_cmdname(vm: &mut VM, _: u8) -> Value {
     Value::Undef
 }
 
+fn b_err_since(_vm: &mut VM, _: u8) -> Value {
+    Value::Bool(message::err_count.with(|d| d.get()) > ERR_MARK.with(|m| m.get()))
+}
+
 fn b_silent_enter(_vm: &mut VM, _: u8) -> Value {
     crate::ported::ex_eval::emsg_silent.with(|e| e.set(e.get() + 1));
     Value::Undef
@@ -1991,10 +1999,12 @@ fn echo_impl(vm: &mut VM, argc: u8, newline: bool) {
         parts.push(pop_tv(vm));
     }
     parts.reverse();
-    // Vim aborts a command whose expression raised an error: if `did_emsg` rose
-    // since VIML_ERR_MARK (set just before the args were evaluated), print
-    // nothing — no spurious fallback value after the error message.
-    if message::did_emsg.with(|d| d.get()) > ERR_MARK.with(|m| m.get()) {
+    // Vim aborts a command whose expression raised an error: if an error was raised
+    // since VIML_ERR_MARK (set just before the args were evaluated), print nothing —
+    // no spurious fallback value after the error. `err_count`, not `did_emsg`,
+    // because a `:silent!` error still aborts the command even though it is not
+    // reported (`silent! echo [1] . 'x'` prints nothing in Vim).
+    if message::err_count.with(|d| d.get()) > ERR_MARK.with(|m| m.get()) {
         return;
     }
     let sep = if newline { " " } else { "" };
@@ -2255,7 +2265,7 @@ fn b_unlet_index(vm: &mut VM, _: u8) -> Value {
 /// `VIML_ERR_MARK` — record the current `did_emsg` so a following `:echo` can
 /// tell whether evaluating its arguments raised an error.
 fn b_err_mark(_vm: &mut VM, _: u8) -> Value {
-    ERR_MARK.with(|m| m.set(message::did_emsg.with(|d| d.get())));
+    ERR_MARK.with(|m| m.set(message::err_count.with(|d| d.get())));
     Value::Undef
 }
 
@@ -2576,13 +2586,34 @@ fn stage_deferred_funcs(funcs: Vec<crate::compile_viml::UserFuncDef>) {
 
 fn b_eval(vm: &mut VM, _: u8) -> Value {
     let src = tv_get_string(&pop_tv(vm));
-    match compile_expr_chunk(&src) {
-        Ok(chunk) => run_chunk_capture(chunk).map_or(Value::Int(0), tv_to_value),
+    // c: `f_eval` (c:1235) runs `eval1()` on the string, **evaluates** what it
+    // parsed, and only then reports what is left over:
+    //   `if (eval1(&s, rettv, &EVALARG_EVALUATE) == FAIL) semsg(e_invexpr2, …);`
+    //   `else if (*s != NUL) semsg(_(e_trailing_arg), s);`
+    // Compiling the whole string up front instead turned text Vim would have
+    // evaluated into a parse error: `eval("nl\nhere")` is E121 (undefined variable
+    // `nl`) in Vim, and was E15 here.
+    let (expr, rest_at) = match crate::viml_parser::parse_expr_prefix(&src) {
+        Ok(v) => v,
         Err(e) => {
             message::semsg(&format!("{e}"));
-            Value::Undef
+            return Value::Undef;
         }
+    };
+    let chunk = match crate::compile_viml::compile_program(&[Stmt::Expr(expr)]) {
+        Ok(p) => p.main,
+        Err(e) => {
+            message::semsg(&format!("{e}"));
+            return Value::Undef;
+        }
+    };
+    let out = run_chunk_capture(chunk).map_or(Value::Int(0), tv_to_value);
+    // c: `else if (*s != NUL) semsg(_(e_trailing_arg), s);` — after evaluating.
+    let rest = src[rest_at..].trim();
+    if !rest.is_empty() {
+        message::semsg(&format!("E488: Trailing characters: {rest}"));
     }
+    out
 }
 
 /// The `\=` substitute-expression evaluator (installed into the regex engine's
@@ -4734,6 +4765,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_ERR_MARK, b_err_mark);
     vm.register_builtin(VIML_SET_RETURN, b_set_return);
     vm.register_builtin(VIML_THROW, b_throw);
+    vm.register_builtin(VIML_ERR_SINCE, b_err_since);
     vm.register_builtin(VIML_SILENT_ENTER, b_silent_enter);
     vm.register_builtin(VIML_SILENT_LEAVE, b_silent_leave);
     vm.register_builtin(VIML_SET_CMDNAME, b_set_cmdname);

@@ -82,6 +82,13 @@ call assert_equal(1, s:after)
 "     (assert_fails runs the command and captures the error it raises)
 call assert_fails('echo [1] . "x"', 'E730')
 
+" --- a command whose expression errored is ABANDONED: its effect does not happen.
+"     A failed `:let` therefore leaves the variable exactly as it was, rather than
+"     storing whatever value the evaluator recovered with.
+let s:keep = 'orig'
+silent! let s:keep = [1] . 'x'
+call assert_equal('orig', s:keep)
+
 if len(v:errors) > 0
   for err in v:errors
     echo err
