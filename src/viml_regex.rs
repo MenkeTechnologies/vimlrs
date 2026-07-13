@@ -885,7 +885,7 @@ impl Regex {
             Node::Lit(c) => {
                 let ch = *text.get(pos)?;
                 if char_eq(ch, *c, ic) {
-                    Some(pos + 1)
+                    Some(cluster_end(text, pos))
                 } else {
                     None
                 }
@@ -893,7 +893,7 @@ impl Regex {
             Node::Any => {
                 let ch = *text.get(pos)?;
                 if ch != '\n' {
-                    Some(pos + 1)
+                    Some(cluster_end(text, pos))
                 } else {
                     None
                 }
@@ -901,7 +901,7 @@ impl Regex {
             Node::Class(cl) => {
                 let ch = *text.get(pos)?;
                 if cl.matches(ch, ic) {
-                    Some(pos + 1)
+                    Some(cluster_end(text, pos))
                 } else {
                     None
                 }
@@ -972,6 +972,24 @@ impl Regex {
             }
         }
     }
+}
+
+/// One character *including its composing marks* — the end index of the cluster
+/// starting at `pos`.
+///
+/// A matching atom in Vim consumes a whole character as `mb_ptr2len`/`utfc_ptr2len`
+/// measures it, which is the base codepoint plus any combining marks that follow.
+/// Advancing a single `char` instead split `é` (`e` + U+0301) down the middle, so
+/// `matchstr("é…", '\l')` returned the bare `e` where Vim returns `é`.
+fn cluster_end(text: &[char], pos: usize) -> usize {
+    let mut end = pos + 1;
+    while text
+        .get(end)
+        .is_some_and(|c| crate::ported::strings::utf_iscomposing(*c))
+    {
+        end += 1;
+    }
+    end
 }
 
 fn char_eq(a: char, b: char, ic: bool) -> bool {
@@ -1319,9 +1337,15 @@ pub fn regex_split(subject: &str, pat: &str, ic: bool, keepempty: bool) -> Vec<S
         if m.is_none() {
             break;
         }
-        // c: advance past the match; on a zero-width match step one char so the
-        // next search makes progress.
-        col = if endp > str { 0 } else { 1 };
+        // c: advance past the match; on a zero-width match step one *character* so
+        // the next search makes progress — and a character is a base codepoint
+        // plus its composing marks (`mb_ptr2len`), so `split(s, '\zs')` keeps
+        // `é` (e + U+0301) whole instead of splitting the accent off.
+        col = if endp > str {
+            0
+        } else {
+            cluster_end(&chars, str) - str
+        };
         str = endp;
     }
     out

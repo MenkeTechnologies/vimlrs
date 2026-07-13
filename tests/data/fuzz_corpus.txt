@@ -112,3 +112,21 @@ keys({'alpha':1,'beta':2,'gamma':3,'delta':4,'epsilon':5})	['delta', 'alpha', 'e
 values({'x':1,'b':2,'q':3,'a':4})	[3, 2, 4, 1]
 string(extend({'x':1,'b':2},{'q':3,'a':4}))	'{''q'': 3, ''b'': 2, ''a'': 4, ''x'': 1}'
 keys(filter({'alpha':1,'beta':2,'gamma':3,'delta':4},{k,v -> v % 2}))	['alpha', 'gamma']
+
+# --- round 6: \u/\U escapes, nan, fnameescape, tr, funcref, composing chars ---
+string("\U0001F600")	'''😀'''
+strchars("\u00e9", 1)	1
+strlen("\u00e9")	2
+"\u41" . "\x42"	'AB'
+0.0/0.0 . ""	'nan'
+fnameescape('ünïcø∂é')	'ünïcø∂é'
+fnameescape('a b')	'a\ b'
+tr('-7','hello world','x')	!E475
+tr('abc','ab','xy')	'xyc'
+funcref('nosuchfn')	!E700
+function('nosuchfn')	!E700
+funcref('a,b,,c')	!E475
+funcref('')	!E129
+matchstr('e\u0301combining', '\\l')	''
+split('e\u0301combining', '\\zs')[0]	'e\u0301combining'
+matchstr('e\u0301x', '.')	'e'

@@ -176,42 +176,15 @@ pub fn f_float2nr(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.vval = v_number(n);
 }
 
-/// Port of `f_function()` from `Src/eval/funcs.c` — a Funcref to the named
-/// function.
+/// Port of `f_function()` from `Src/eval/funcs.c` — a Funcref/Partial for the
+/// named function.
+///
+/// c: `common_function(argvars, rettv, false)`. It used to build the Funcref
+/// directly and skip every check `common_function` does, so `function('nosuchfn')`
+/// happily produced a reference to a function that does not exist instead of
+/// raising E700.
 pub fn f_function(argvars: &[typval_T], rettv: &mut typval_T) {
-    let name = tv_get_string(&argvars[0]);
-    // c: with no extra args this is a plain Funcref.
-    if argvars.len() < 2 {
-        rettv.v_type = VAR_FUNC;
-        rettv.vval = v_string(name);
-        return;
-    }
-    // c: function(name, [args]) / function(name, {dict}) / both → a Partial.
-    let mut pt_argv: Vec<typval_T> = Vec::new();
-    let mut pt_dict = None;
-    for a in &argvars[1..] {
-        match (a.v_type, &a.vval) {
-            (VAR_LIST, v_list(Some(l))) => {
-                pt_argv = l
-                    .borrow()
-                    .lv_items
-                    .iter()
-                    .map(|it| it.li_tv.clone())
-                    .collect();
-            }
-            (VAR_DICT, v_dict(Some(d))) => pt_dict = Some(d.clone()),
-            _ => {}
-        }
-    }
-    rettv.v_type = VAR_PARTIAL;
-    rettv.vval = v_partial(Some(std::rc::Rc::new(
-        crate::ported::eval::typval_defs_h::partial_T {
-            pt_refcount: 1,
-            pt_name: name,
-            pt_argv,
-            pt_dict,
-        },
-    )));
+    common_function(argvars, rettv, false);
 }
 
 /// Port of `f_char2nr()` from `Src/eval/funcs.c` — code point of the first char.
@@ -2869,7 +2842,10 @@ pub fn f_garbagecollect(_argvars: &[typval_T], _rettv: &mut typval_T) {}
 /// Port of `f_funcref()` from `Src/eval/funcs.c` — like `function()` but binds by
 /// reference; in vimlrs it builds the same Partial as [`f_function`].
 pub fn f_funcref(argvars: &[typval_T], rettv: &mut typval_T) {
-    f_function(argvars, rettv);
+    // c: `common_function(argvars, rettv, true)` — the `is_funcref` flag is the
+    // difference that matters: funcref() resolves through `find_func`, so it takes
+    // a *user* function only and reports E700 for a builtin.
+    common_function(argvars, rettv, true);
 }
 
 /// Port of `f_id()` from `Src/eval/funcs.c` — a unique id string for a container.
@@ -3136,12 +3112,15 @@ pub fn f_fnameescape(argvars: &[typval_T], rettv: &mut typval_T) {
     const ESC: &[u8] = b" \t\n*?[{`$\\%#'\"|!<";
     let name = tv_get_string(&argvars[0]);
     let mut out = String::with_capacity(name.len() + 2);
-    for (i, b) in name.bytes().enumerate() {
+    // Walk *characters*, not bytes: every escapable char is ASCII, and pushing a
+    // raw UTF-8 byte as a `char` reinterpreted it as Latin-1 — `fnameescape('ünï…')`
+    // came back as `'Ã¼nÃ¯…'`.
+    for (i, c) in name.chars().enumerate() {
         // A leading '+' or '>' is also escaped (would start a different arg).
-        if ESC.contains(&b) || (i == 0 && (b == b'+' || b == b'>')) {
+        if (c.is_ascii() && ESC.contains(&(c as u8))) || (i == 0 && (c == '+' || c == '>')) {
             out.push('\\');
         }
-        out.push(b as char);
+        out.push(c);
     }
     *rettv = typval_T::from(out);
 }
@@ -9774,7 +9753,16 @@ pub fn common_function(argvars: &[typval_T], rettv: &mut typval_T, is_funcref: b
     let has_autoload = s
         .as_deref()
         .is_some_and(|x| x.as_bytes().contains(&crate::ported::eval::AUTOLOAD_CHAR));
-    if (use_string && !has_autoload) || is_funcref {
+    // A script-local name (`s:F`, `<SID>F`) is resolved further down by
+    // `get_scriptlocal_funcname`. It must not go through `save_function_name`
+    // first: that calls `trans_function_name`, which in this port's single-script
+    // model has no script id and so reports E81 for every `<SID>` name (c:2138
+    // `current_sctx.sc_sid <= 0`). Skipping the pre-parse keeps `function('s:F')`
+    // working while every other name still gets validated.
+    let script_local = s
+        .as_deref()
+        .is_some_and(|x| x.starts_with("s:") || x.starts_with("<SID>"));
+    if ((use_string && !has_autoload) || is_funcref) && !script_local {
         let orig = s.clone().unwrap_or_default();
         let mut name: &str = &orig;
         trans_name = crate::ported::eval::userfunc::save_function_name(
@@ -9794,7 +9782,8 @@ pub fn common_function(argvars: &[typval_T], rettv: &mut typval_T, is_funcref: b
         .as_deref()
         .and_then(|x| x.bytes().next())
         .is_some_and(|b| b.is_ascii_digit());
-    if s_empty || (use_string && s_digit) || (is_funcref && trans_name.is_none()) {
+    if !script_local && (s_empty || (use_string && s_digit) || (is_funcref && trans_name.is_none()))
+    {
         // c:1685 semsg(_(e_invarg2), use_string ? tv_get_string(&argvars[0]) : s);
         let arg = if use_string {
             tv_get_string(&argvars[0])
@@ -9824,8 +9813,13 @@ pub fn common_function(argvars: &[typval_T], rettv: &mut typval_T, is_funcref: b
     // c:1694 build the result.
     let sname = s.unwrap_or_default();
     // c:1697 expand s:/<SID> into <SNR>nr_.
+    // c:1697 expand s:/<SID> into <SNR>nr_. This port has no script-id table, so
+    // `get_scriptlocal_funcname` yields None and the *literal* name is kept —
+    // which is how script-local functions are registered here, so `function('s:F')`
+    // still resolves. (Defaulting to "" instead produced a Funcref to nothing.)
     let name: String = if sname.starts_with("s:") || sname.starts_with("<SID>") {
-        crate::ported::eval::userfunc::get_scriptlocal_funcname(Some(&sname)).unwrap_or_default()
+        crate::ported::eval::userfunc::get_scriptlocal_funcname(Some(&sname))
+            .unwrap_or_else(|| sname.clone())
     } else {
         sname.clone()
     };
@@ -9836,11 +9830,15 @@ pub fn common_function(argvars: &[typval_T], rettv: &mut typval_T, is_funcref: b
     let mut list: Option<
         std::rc::Rc<std::cell::RefCell<crate::ported::eval::typval_defs_h::list_T>>,
     > = None;
-    if argvars[1].v_type != VAR_UNKNOWN {
-        if argvars[2].v_type != VAR_UNKNOWN {
+    // c reads `argvars[1]`/`argvars[2]` freely because the C array is terminated
+    // by a VAR_UNKNOWN entry; the Rust slice simply ends, so ask for the type
+    // through `get` and treat "absent" as VAR_UNKNOWN.
+    let argtype = |i: usize| argvars.get(i).map_or(VAR_UNKNOWN, |a| a.v_type);
+    if argtype(1) != VAR_UNKNOWN {
+        if argtype(2) != VAR_UNKNOWN {
             arg_idx = 1; // c:1710 function(name, [args], dict)
             dict_idx = 2;
-        } else if argvars[1].v_type == VAR_DICT {
+        } else if argtype(1) == VAR_DICT {
             dict_idx = 1; // c:1713 function(name, dict)
         } else {
             arg_idx = 1; // c:1716 function(name, [args])

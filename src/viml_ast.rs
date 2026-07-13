@@ -16,6 +16,12 @@ pub enum Expr {
     Float(f64),
     /// String literal (already unescaped).
     Str(String),
+    /// vim9 `null_function` / `null_partial` — a Funcref with an empty name.
+    ///
+    /// It is a *constant*, not a call: `function('')` raises E129 in Vim (a
+    /// function name is required), so lowering the constant to that call made the
+    /// constant an error too.
+    NullFunc,
     /// Interpolated string `$'…{expr}…'` / `$"…{expr}…"` — each segment (literal
     /// chunk or embedded expression) is echo-stringified and the results are
     /// concatenated left to right, always yielding a String.

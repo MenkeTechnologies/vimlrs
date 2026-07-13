@@ -2691,10 +2691,7 @@ impl Parser {
                             name: "list2blob".to_string(),
                             args: vec![Expr::List(Vec::new())],
                         }),
-                        "null_function" | "null_partial" => Ok(Expr::Call {
-                            name: "function".to_string(),
-                            args: vec![Expr::Str(String::new())],
-                        }),
+                        "null_function" | "null_partial" => Ok(Expr::NullFunc),
                         _ => Ok(Expr::Var(name)),
                     }
                 } else {

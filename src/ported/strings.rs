@@ -274,17 +274,37 @@ pub fn f_tr(argvars: &[typval_T], rettv: &mut typval_T) {
     // c: a {src} char found in {fromstr} at index i maps to {tostr}[i]; if {tostr}
     // has no such character the sets do not correspond — E475, returning "".
     let mut out = String::new();
+    // c: `bool first = true;` — the length check below runs at most once.
+    let mut first = true;
     for c in src.chars() {
         match from.iter().position(|&f| f == c) {
             Some(i) => match to.get(i) {
                 Some(&t) => out.push(t),
+                // c: `if (*p == NUL) { goto error; }  // tostr is shorter than fromstr.`
                 None => {
-                    crate::ported::message::semsg(&format!("E475: Invalid argument: {fromstr}"));
+                    semsg(&format!("E475: Invalid argument: {fromstr}"));
                     rettv.vval = v_string(String::new());
                     return;
                 }
             },
-            None => out.push(c),
+            None => {
+                // c: `if (first && cpstr == in_str) { … if (idx != 0) goto error; }`
+                // — "Check that fromstr and tostr have the same number of
+                // (multi-byte) characters. Done only once when a character of
+                // in_str doesn't appear in fromstr." Without it, mismatched sets
+                // went unreported whenever no input character happened to be
+                // translated: `tr('-7', 'hello world', 'x')` returned '-7'
+                // instead of raising E475.
+                if first {
+                    first = false;
+                    if from.len() != to.len() {
+                        semsg(&format!("E475: Invalid argument: {fromstr}"));
+                        rettv.vval = v_string(String::new());
+                        return;
+                    }
+                }
+                out.push(c);
+            }
         }
     }
     rettv.vval = v_string(out);

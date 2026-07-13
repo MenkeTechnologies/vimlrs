@@ -27,6 +27,16 @@ use crate::ported::eval::typval_defs_h::{
 /// Rust's `{:e}` already renders the exponent the way neovim does *after* it
 /// strips libc's `+`/leading-zero padding, so no exponent fixup is needed here.
 pub(crate) fn vim_float_g(f: f64, precision: Option<i32>) -> String {
+    // c: `vim_snprintf` prints the non-finite values as lowercase words, and Rust's
+    // `{}`/`{:.6}` render NaN as `NaN` — so `string(0.0/0.0)` came out `NaN` where
+    // Vim says `nan`. (printf's `%F`/`%E`/`%G` uppercase them; that lives in
+    // `f_printf`'s own non-finite path, not here.)
+    if f.is_nan() {
+        return "nan".to_string();
+    }
+    if f.is_infinite() {
+        return if f < 0.0 { "-inf" } else { "inf" }.to_string();
+    }
     // c: double abs_f = f < 0 ? -f : f;
     let abs_f = f.abs();
     // c (g/G branch): fixed form when abs_f is in [0.001, 1e7) or zero, else exp.

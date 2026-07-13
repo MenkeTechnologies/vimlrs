@@ -171,6 +171,7 @@ fn collect_free_vars(
         Expr::Number(_)
         | Expr::Float(_)
         | Expr::Str(_)
+        | Expr::NullFunc
         | Expr::Option(_)
         | Expr::Env(_)
         | Expr::Register(_) => {}
@@ -1662,6 +1663,9 @@ impl Compiler {
                 self.emit(Op::LoadFloat(*f));
             }
             Expr::Str(s) => self.load_str(s),
+            // A Funcref is carried as a tagged string in the VM (see
+            // `tv_to_value`); the null one is that tag with an empty name.
+            Expr::NullFunc => self.load_str("\u{1}func\u{1}"),
             Expr::Interp(segs) => {
                 // Echo-stringify each segment (`VIML_STR_INTERP`) and concatenate
                 // left to right; an empty interpolation is the empty string.

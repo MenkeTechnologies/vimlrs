@@ -546,12 +546,6 @@ E892. The C's `tvs_get_float` raises one error for *any* non-numeric argument to
 
 ## Still open (found in round 5, not yet fixed)
 
-### R5-O1. `matchlist()` splits a composing character
-`matchlist('é' . 'combining', '\l')` (where `é` is `e` + U+0301) → Vim matches the
-composed `é`, vimlrs matches only the base `e`. The regex engine treats a combining
-mark as its own character; Vim treats a base + its combining marks as one. Affects
-`matchstr`/`match`/`substitute` on decomposed text.
-
 ### R5-O2. `eval()` rejects trailing text before evaluating
 `eval("nl\nhere")` → Vim E121 (it evaluates `nl`, an undefined variable), vimlrs E15
 (the parser rejects the trailing tokens up front). Vim's `f_eval` parses ONE
@@ -589,3 +583,71 @@ Areas probed in round 5 that PASSED (a sample of the 1151/1200 agreeing cases):
 `reduce`/`indexof` with lambdas, `matchstrpos`/`matchlist`/`matchend`, blob slicing and
 `blob2list`/`list2blob`, `json_encode`/`json_decode`, float math domains and inf/nan,
 `and`/`or`/`xor`/`invert`, comparison operators in all three case forms (`==`, `==#`, `==?`).
+
+
+---
+
+# Round 6 — the fuzzer widened (funcrefs, `\`-escapes, 15 more builtins)
+
+Round 5 fuzzed a fixed set of ~110 pure builtins over operator trees. Round 6 gave
+the generator three surfaces it could not reach before — **funcref values**
+(`function('strlen')`, partials), **double-quoted escape strings** (`"\<Esc>"`,
+`"\u00e9"`, `"\x41"`), and 15 more pure builtins (`tr`, `slice`, `sha256`,
+`call`, `js_encode`, `matchfuzzypos`, …) — and found 27 more distinct divergences
+in the first 1500 expressions.
+
+### R6-1. `\u` / `\U` string escapes were not implemented — ✅ FIXED
+`"\U0001F600"` → Vim `😀`, vimlrs the literal text `U0001F600`; `"\u00e9"` was five
+characters instead of `é`. The lexer handled `\x`/`\X` but had no `\u`/`\U` arm, so
+the letter fell through to the "unknown escape" path and was emitted literally.
+(c: eval.c:3590 — `\x` takes 2 hex digits, `\u` 4, `\U` 8; fewer is fine, and *no*
+hex digit means it is not an escape at all, which is what Vim's `"a\uZZb"` → `auZZb`
+shows. The ported `eval_string` already had this; only the compiled path was blind.)
+
+### R6-2. `string()` of NaN was `NaN`, not `nan` — ✅ FIXED
+A regression introduced in round 5: routing `tv_get_string` through `vim_float_g`
+dropped the non-finite handling, and Rust's `{:.6}` renders NaN as `NaN`. The
+fuzzer caught it on the very next run.
+
+### R6-3. `fnameescape()` returned mojibake for non-ASCII — ✅ FIXED
+`fnameescape('ünïcø∂é')` → `'Ã¼nÃ¯cÃ¸âÃ©'`: the loop walked *bytes* and pushed each
+one as a `char`, reinterpreting UTF-8 as Latin-1. Every escapable character is
+ASCII, so it now walks characters.
+
+### R6-4. `tr()` never checked that {from} and {to} are the same length — ✅ FIXED
+`tr('-7', 'hello world', 'x')` → Vim E475, vimlrs returned `'-7'`. The C checks the
+set lengths the first time an input character is *not* found in {from}
+(`if (first && cpstr == in_str) … if (idx != 0) goto error;`), which the port had
+skipped — so a mismatched pair went unreported whenever nothing happened to be
+translated.
+
+### R6-5. `function()` / `funcref()` validated nothing — ✅ FIXED
+`funcref('nosuchfn')` happily produced a reference to a function that does not
+exist. The faithful port (`common_function`) was **written but never wired up**:
+`f_function` was an ad-hoc duplicate that skipped every check, and `f_funcref`
+delegated to it. Now both route through `common_function`, so:
+- `function('nosuchfn')` / `funcref('nosuchfn')` → E700 (unknown function)
+- `funcref('a,b,,c')`, `funcref('x y')` → E475 (invalid argument)
+- `funcref('')`, `funcref('1234')`, `funcref('  padded  ')` → E129 (function name required)
+- `funcref('strlen')` → E700: funcref() resolves through `find_func`, so it takes a
+  *user* function only, and a builtin is "unknown" to it.
+
+vim9's `null_function`/`null_partial` used to be lowered to `function('')` — which
+is now (correctly) E129 — so they became a real AST constant, `Expr::NullFunc`.
+
+### R6-6. Regex atoms split composing characters — ✅ FIXED (was R5-O1)
+`matchstr("é…", '\l')` (with `é` = `e` + U+0301) → Vim `é`, vimlrs the bare `e`. A
+matching atom consumes a whole character as `mb_ptr2len`/`utfc_ptr2len` measures it
+— the base codepoint *plus* its combining marks — while the engine advanced a single
+`char`. Fixed for `.`, literals and classes, and for `split(s, '\zs')`, whose
+zero-width step advances one character too.
+
+## Still open (round 6)
+
+- `nr2char(2147483647)` → Vim emits the raw replacement bytes, vimlrs `''`. Same
+  string-representation root cause as R5-D1 (Vim strings are byte arrays).
+- `list2str([0])` → Vim `''` (a NUL ends the C string), vimlrs a one-NUL string.
+- `strdisplaywidth("a\nb")` counts a control character as 1 cell; Vim counts the 2
+  cells it displays as (`^J`).
+- `matchbufline()` does not validate `lnum`/`end` (Vim: E475 for a negative line).
+- `slice()` on a Bool/Number returns the stringified value instead of Vim's `0`.

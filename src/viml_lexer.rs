@@ -438,9 +438,19 @@ impl<'a> Lexer<'a> {
                     out.push(ch);
                 }
             }
-            b'x' | b'X' => {
+            // c (eval.c:3590): `\x`/`\X` take 2 hex digits and store the raw
+            // byte; `\u` takes 4 and `\U` 8, storing the codepoint as UTF-8.
+            // Fewer digits is fine (`"\u41"` is `A`); *no* hex digit at all means
+            // the escape is not one, and the letter is emitted literally
+            // (`"a\uZZb"` is `auZZb`) — which is what the fallback arm does.
+            b'x' | b'X' | b'u' | b'U' if (self.peek() as char).is_ascii_hexdigit() => {
+                let maxlen = match e {
+                    b'x' | b'X' => 2,
+                    b'u' => 4,
+                    _ => 8,
+                };
                 let mut n = 0u32;
-                for _ in 0..2 {
+                for _ in 0..maxlen {
                     let d = self.peek();
                     if (d as char).is_ascii_hexdigit() {
                         n = n * 16 + (d as char).to_digit(16).unwrap();

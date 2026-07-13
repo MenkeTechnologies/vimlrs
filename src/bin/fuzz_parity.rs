@@ -210,6 +210,8 @@ enum Shape {
     Repl,
     /// `sort()`/`uniq()` comparison flag: `'i'`, `'n'`, `'N'`, `'l'`, `1`, `0`.
     SortFlag,
+    /// A funcref — `function('strlen')` or a lambda — for `call`/`funcref`.
+    Func,
     /// A *size*: how many elements/copies to materialize (`range`, `repeat`,
     /// `flatten` depth). Bounded on purpose — `range(9223372036854775807)`
     /// allocates without bound in **real Vim and Neovim too**, so it is a
@@ -271,6 +273,13 @@ const FUNCS: &[(&str, &[Shape])] = &[
     ("strspn", &[Str, Str]),
     ("strcspn", &[Str, Str]),
     ("eval", &[Str]),
+    ("tr", &[Str, Str, Str]),
+    ("slice", &[Any, Num, Num]),
+    ("sha256", &[Str]),
+    ("charclass", &[Str]),
+    ("strutf16len", &[Str, Bool]),
+    ("utf16idx", &[Str, Num, Bool, Bool]),
+    ("byteidxcomp", &[Str, Num]),
     ("string", &[Any]),
     ("iconv", &[Str, Str, Str]),
     ("keytrans", &[Str]),
@@ -339,6 +348,11 @@ const FUNCS: &[(&str, &[Shape])] = &[
     ("items", &[Dict]),
     ("has_key", &[Dict, Str]),
     ("zip", &[List, List]),
+    ("extendnew", &[List, List, Num]),
+    ("mapnew", &[Any, Lambda]),
+    ("call", &[Func, List]),
+    ("funcref", &[Str, List]),
+    ("matchfuzzypos", &[StrList, Str]),
     // ── blobs ───────────────────────────────────────────────────────────────
     ("blob2list", &[Blob]),
     ("list2blob", &[NumList]),
@@ -349,6 +363,8 @@ const FUNCS: &[(&str, &[Shape])] = &[
     ("typename", &[Any]),
     ("json_encode", &[Any]),
     ("json_decode", &[Str]),
+    ("js_encode", &[Any]),
+    ("js_decode", &[Str]),
     ("msgpackdump", &[List]),
     ("id", &[Any]),
 ];
@@ -378,6 +394,15 @@ const STRINGS: &[&str] = &[
     "\"nl\\nhere\"",
     "'*.[]^$\\'",
     "'\\d\\+'",
+    // Double-quoted escapes — a lexer/eval_string surface a single-quoted pool
+    // can never reach (`\<Esc>` is what R5-13 was).
+    "\"\\<Esc>\"",
+    "\"\\<C-A>\"",
+    "\"\\<Space>x\"",
+    "\"\\x41\\x42\"",
+    "\"\\101\\102\"",
+    "\"\\u00e9\"",
+    "\"a\\\\b\"",
 ];
 
 const NUMS: &[&str] = &[
@@ -401,6 +426,17 @@ const NUMS: &[&str] = &[
     "0b1011",
     "017",
     "100000",
+];
+
+/// Funcref values: a named builtin, a lambda, and a partial.
+const FUNCS_REF: &[&str] = &[
+    "function('strlen')",
+    "function('toupper')",
+    "function('abs')",
+    "function('add')",
+    "{x -> x}",
+    "{x -> type(x)}",
+    "function('printf', ['%d'])",
 ];
 
 /// Bounded sizes for [`Shape::Count`] slots — still covering the interesting
@@ -666,6 +702,7 @@ fn shaped(rng: &mut Rng, s: Shape) -> String {
         Repl => rng.pick(REPLS).to_string(),
         SortFlag => rng.pick(SORT_FLAGS).to_string(),
         Count => rng.pick(COUNTS).to_string(),
+        Func => rng.pick(FUNCS_REF).to_string(),
         Any => any_value(rng),
     }
 }
