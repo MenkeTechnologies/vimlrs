@@ -311,6 +311,10 @@ pub enum Stmt {
     },
     /// `:throw {expr}`.
     Throw(Expr),
+    /// `:silent! CMD` — run `CMD` with error messages suppressed (`emsg_silent`).
+    /// The command still *fails*; it just does not report. (`:silent` without the
+    /// bang suppresses ordinary output, not errors, and is still a no-op here.)
+    Silent(Box<Stmt>),
     /// `:execute expr …` — concatenate the values (space-separated) and run the
     /// result as an ex command line.
     Execute(Vec<Expr>),

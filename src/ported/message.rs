@@ -42,7 +42,6 @@ pub fn capture_errors_take() -> Vec<String> {
 /// capture is active (`assert_fails`), in which case the text is collected and
 /// not printed, like Vim's `emsg_silent` path.
 pub fn emsg(s: &str) {
-    did_emsg.with(|d| d.set(d.get() + 1));
     let captured = ERROR_CAPTURE.with(|c| {
         if let Some(list) = c.borrow_mut().as_mut() {
             list.push(s.to_string());
@@ -51,7 +50,29 @@ pub fn emsg(s: &str) {
             false
         }
     });
-    if !captured {
+    if captured {
+        did_emsg.with(|d| d.set(d.get() + 1));
+        return;
+    }
+    // c: `emsg_silent` (raised by `:silent!`) returns before the message is shown
+    // *or* counted. The command still fails, but the error neither prints nor marks
+    // the script as having errored — which is why `silent! call Foo()` on a missing
+    // function leaves a sourced script exiting 0.
+    if crate::ported::ex_eval::emsg_silent.with(|e| e.get()) != 0 {
+        return;
+    }
+    did_emsg.with(|d| d.set(d.get() + 1));
+    // c: `emsg_multiline` → `cause_errthrow()` → the message becomes a *catchable
+    // exception* when a `:try` is active, instead of being printed:
+    //
+    //   try | echo [1] . 'x' | catch | echo v:exception | endtry
+    //   → "Vim(echo):E730: Using a List as a String"
+    //
+    // The pending-exception slot lives in the VM bridge (the synthesis zone), so the
+    // throw itself does: `errthrow` returns true when it took ownership of the
+    // message, in which case nothing is printed here — the exception carries it.
+    // Outside a `:try` it declines and the error prints as before.
+    if !crate::fusevm_bridge::errthrow(s) {
         eprintln!("{s}");
     }
 }

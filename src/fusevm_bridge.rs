@@ -91,8 +91,8 @@ use crate::ported::eval::list::{
     FILTER_MAP_CMD_HOOK, FILTER_MAP_EVAL_HOOK,
 };
 use crate::ported::eval::typval::{
-    f_blob2list, f_join, f_list2blob, f_sort, f_uniq, tv_list_slice_or_index, CALL_FUNC_HOOK,
-    FUNC_EXISTS_HOOK, SORT_FUNCREF_HOOK,
+    f_blob2list, f_join, f_list2blob, f_sort, f_uniq, tv_check_num, tv_check_str,
+    tv_list_slice_or_index, CALL_FUNC_HOOK, FUNC_EXISTS_HOOK, SORT_FUNCREF_HOOK,
 };
 use crate::ported::eval::typval::{
     tv_get_float, tv_get_number_chk, tv_get_string, tv_list_alloc, tv_list_append_tv,
@@ -160,6 +160,29 @@ pub const VIML_BOOLNUM: u16 = 3003;
 /// `range()` bound into a native counter loop.
 pub const VIML_TONUMBER: u16 = 3004;
 /// `+`
+/// `eval5`'s pre-check of the LEFT operand of `+` / `-` / `.` (c:2405). The C
+/// type-checks it **before it even parses the right operand**, "to avoid side
+/// effects after an error", so the left operand's error is the one that surfaces.
+/// Each pops the value, checks it, and pushes it back unchanged.
+/// `:try` bookkeeping — the runtime `trylevel` (`ex_eval.c`) that decides whether
+/// an error becomes a catchable exception.
+/// Records the ex-command a statement is, so an error raised while it runs can be
+/// tagged the way Vim tags it (`Vim(echo):E730: …`). Emitted only in programs that
+/// use exceptions, since that is the only place the tag is observable.
+/// `:silent!` — raise/lower `emsg_silent` (`message.c`), which suppresses the
+/// error message of the command it wraps.
+///
+/// NOTE: 3020..=3029 are the comparison ops and 3030..=3039 are reserved for their
+/// ignore-case forms (see `VIML_CMP_BASE` / `VIML_CMP_IC_OFFSET` above) — new ids
+/// go at 3040+.
+pub const VIML_SILENT_ENTER: u16 = 3040;
+pub const VIML_SILENT_LEAVE: u16 = 3041;
+pub const VIML_SET_CMDNAME: u16 = 3042;
+pub const VIML_TRY_ENTER: u16 = 3008;
+pub const VIML_TRY_LEAVE: u16 = 3009;
+pub const VIML_CHECK_LHS_ADD: u16 = 3005;
+pub const VIML_CHECK_LHS_SUB: u16 = 3006;
+pub const VIML_CHECK_LHS_CONCAT: u16 = 3007;
 pub const VIML_ADD: u16 = 3010;
 /// `-`
 pub const VIML_SUB: u16 = 3011;
@@ -1396,6 +1419,72 @@ fn pop_tv(vm: &mut VM) -> typval_T {
 
 // ── handlers ──
 
+thread_local! {
+    /// The ex-command currently executing (`echo`, `call`, `let`, …), for the
+    /// `Vim(cmd):` tag on an error-turned-exception.
+    static CUR_CMDNAME: RefCell<String> = const { RefCell::new(String::new()) };
+}
+
+fn b_set_cmdname(vm: &mut VM, _: u8) -> Value {
+    let name = tv_get_string(&pop_tv(vm));
+    CUR_CMDNAME.with(|c| *c.borrow_mut() = name);
+    Value::Undef
+}
+
+fn b_silent_enter(_vm: &mut VM, _: u8) -> Value {
+    crate::ported::ex_eval::emsg_silent.with(|e| e.set(e.get() + 1));
+    Value::Undef
+}
+
+fn b_silent_leave(_vm: &mut VM, _: u8) -> Value {
+    crate::ported::ex_eval::emsg_silent.with(|e| e.set((e.get() - 1).max(0)));
+    Value::Undef
+}
+
+fn b_try_enter(_vm: &mut VM, _: u8) -> Value {
+    crate::ported::ex_eval::trylevel.with(|t| t.set(t.get() + 1));
+    Value::Undef
+}
+
+fn b_try_leave(_vm: &mut VM, _: u8) -> Value {
+    crate::ported::ex_eval::trylevel.with(|t| t.set((t.get() - 1).max(0)));
+    Value::Undef
+}
+
+/// The `emsg` → exception conversion (`cause_errthrow`, ex_eval.c:189): inside a
+/// `:try`, an error message is *thrown* rather than printed, so `:catch` can see
+/// it. Outside one, decline and let it print.
+///
+/// The C tags the exception with the command that raised it (`Vim(echo):E730: …`).
+/// The compiled program does not carry the ex-command name down to the point an
+/// error is raised, so the tag here is the bare `Vim:` form; a pattern matching the
+/// error number (`catch /E730/`, the common form) is unaffected.
+pub fn errthrow(msg: &str) -> bool {
+    if crate::ported::ex_eval::trylevel.with(|t| t.get()) == 0 {
+        return false;
+    }
+    // c: the C aborts the command the moment an error is thrown, so no *later*
+    // error from the same statement can exist. This VM finishes evaluating the
+    // statement, so a second error can still arrive — keep the first, which is the
+    // one Vim would have reported, and swallow the rest.
+    if PENDING_EXC.with(|p| p.borrow().is_some()) {
+        return true;
+    }
+    // c: the exception carries the command that raised the error — `Vim(echo):E730`.
+    let exc = CUR_CMDNAME.with(|c| {
+        let c = c.borrow();
+        if c.is_empty() {
+            format!("Vim:{msg}")
+        } else {
+            format!("Vim({c}):{msg}")
+        }
+    });
+    V_EXCEPTION.with(|e| *e.borrow_mut() = exc.clone());
+    set_vim_var_string(VV_EXCEPTION, &exc);
+    PENDING_EXC.with(|p| *p.borrow_mut() = Some(exc));
+    true
+}
+
 fn b_throw(vm: &mut VM, _: u8) -> Value {
     let v = tv_get_string(&pop_tv(vm));
     // c: throw_exception — set current_exception and v:exception.
@@ -1422,6 +1511,10 @@ fn b_catch_match(vm: &mut VM, _: u8) -> Value {
         PENDING_EXC.with(|p| *p.borrow_mut() = None);
         set_vim_var_string(VV_EXCEPTION, &exc);
         V_EXCEPTION.with(|e| *e.borrow_mut() = exc);
+        // c: ex_catch (ex_eval.c:116) — "Make this ':catch' clause active and reset
+        // did_emsg, got_int, did_throw". Handling the error clears the error state,
+        // which is why a script that catches an error still exits successfully.
+        message::did_emsg.with(|d| d.set(0));
     }
     Value::Bool(matched)
 }
@@ -1531,6 +1624,48 @@ fn arith_float(tv: &typval_T) -> f64 {
     match tv.v_type {
         VAR_FLOAT => tv_get_float(tv),
         _ => tv_get_number_chk(tv, None) as f64,
+    }
+}
+
+/// c: eval5 (c:2405):
+/// ```c
+/// if ((op != '+' || (rettv->v_type != VAR_LIST && rettv->v_type != VAR_BLOB))
+///     && (op == '.' || rettv->v_type != VAR_FLOAT) && evaluate) {
+///   if ((op == '.' && !tv_check_str(rettv)) || (op != '.' && !tv_check_num(rettv))) {
+///     return FAIL;
+///   }
+/// }
+/// ```
+/// `+` on a List/Blob is exempt — "an illegal use of the first operand as a number
+/// cannot be determined before evaluating the 2nd operand: if this is also a list,
+/// all is ok" — and so is a Float under `+`/`-`.
+///
+/// On failure the check has already emitted the error; it leaves a Number 0 behind
+/// so the operator itself does not then raise a second, misleading one.
+fn b_check_lhs_add(vm: &mut VM, _: u8) -> Value {
+    let v = pop_tv(vm);
+    if matches!(v.v_type, VAR_LIST | VAR_BLOB | VAR_FLOAT) || tv_check_num(&v) {
+        tv_to_value(v)
+    } else {
+        Value::Int(0)
+    }
+}
+
+fn b_check_lhs_sub(vm: &mut VM, _: u8) -> Value {
+    let v = pop_tv(vm);
+    if v.v_type == VAR_FLOAT || tv_check_num(&v) {
+        tv_to_value(v)
+    } else {
+        Value::Int(0)
+    }
+}
+
+fn b_check_lhs_concat(vm: &mut VM, _: u8) -> Value {
+    let v = pop_tv(vm);
+    if tv_check_str(&v) {
+        tv_to_value(v)
+    } else {
+        Value::Int(0)
     }
 }
 
@@ -4007,6 +4142,9 @@ pub fn install(vm: &mut VM) {
     crate::ported::eval::userfunc::REMOVE_FUNC_HOOK
         .with(|h| *h.borrow_mut() = Some(remove_func_hook));
     vm.register_builtin(VIML_FN_REDUCE, |vm, n| call_func(vm, n, f_reduce));
+    vm.register_builtin(VIML_CHECK_LHS_ADD, b_check_lhs_add);
+    vm.register_builtin(VIML_CHECK_LHS_SUB, b_check_lhs_sub);
+    vm.register_builtin(VIML_CHECK_LHS_CONCAT, b_check_lhs_concat);
     vm.register_builtin(VIML_FN_EVAL, b_eval);
     crate::viml_regex::SUBST_EXPR_HOOK.with(|h| *h.borrow_mut() = Some(subst_expr_eval));
     vm.register_builtin(VIML_FN_EXECUTE, b_execute);
@@ -4596,6 +4734,11 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_ERR_MARK, b_err_mark);
     vm.register_builtin(VIML_SET_RETURN, b_set_return);
     vm.register_builtin(VIML_THROW, b_throw);
+    vm.register_builtin(VIML_SILENT_ENTER, b_silent_enter);
+    vm.register_builtin(VIML_SILENT_LEAVE, b_silent_leave);
+    vm.register_builtin(VIML_SET_CMDNAME, b_set_cmdname);
+    vm.register_builtin(VIML_TRY_ENTER, b_try_enter);
+    vm.register_builtin(VIML_TRY_LEAVE, b_try_leave);
     vm.register_builtin(VIML_CHECK_EXC, b_check_exc);
     vm.register_builtin(VIML_CATCH_MATCH, b_catch_match);
     vm.register_builtin(VIML_REPORT_UNCAUGHT, b_report_uncaught);

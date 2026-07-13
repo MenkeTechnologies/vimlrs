@@ -792,8 +792,33 @@ impl Compiler {
     /// Compile a statement sequence, emitting an unwind check after each
     /// statement when exceptions are in play (so a pending exception jumps to
     /// the innermost boundary).
+    /// The ex-command name a statement raises errors under — Vim tags an
+    /// error-turned-exception with it (`Vim(echo):E730: …`).
+    fn stmt_cmdname(s: &Stmt) -> Option<&'static str> {
+        Some(match s {
+            Stmt::Echo(_) => "echo",
+            Stmt::Echon(_) => "echon",
+            Stmt::Let { .. } => "let",
+            Stmt::Call(_) => "call",
+            Stmt::Return(_) => "return",
+            Stmt::Throw(_) => "throw",
+            Stmt::Execute(_) => "execute",
+            Stmt::Unlet(_) => "unlet",
+            _ => return None,
+        })
+    }
+
     fn compile_stmts(&mut self, stmts: &[Stmt]) -> Result<(), VimlError> {
         for s in stmts {
+            // Only programs that use exceptions can observe the tag, and they are
+            // the only ones that pay for it.
+            if self.exc {
+                if let Some(cmd) = Self::stmt_cmdname(s) {
+                    self.load_str(cmd);
+                    self.emit(Op::CallBuiltin(h::VIML_SET_CMDNAME, 1));
+                    self.emit(Op::Pop);
+                }
+            }
             self.stmt(s)?;
             if self.exc {
                 self.emit(Op::CallBuiltin(h::VIML_CHECK_EXC, 0));
@@ -1044,6 +1069,16 @@ impl Compiler {
                 self.emit(Op::Pop);
                 Ok(())
             }
+            // c: `:silent!` raises `emsg_silent` for the duration of the command, so
+            // the error is raised (and still aborts the command) but not reported.
+            Stmt::Silent(inner) => {
+                self.emit(Op::CallBuiltin(h::VIML_SILENT_ENTER, 0));
+                self.emit(Op::Pop);
+                self.stmt(inner)?;
+                self.emit(Op::CallBuiltin(h::VIML_SILENT_LEAVE, 0));
+                self.emit(Op::Pop);
+                Ok(())
+            }
             Stmt::Throw(e) => {
                 self.expr(e)?;
                 self.emit(Op::CallBuiltin(h::VIML_THROW, 1));
@@ -1068,6 +1103,10 @@ impl Compiler {
         catches: &[(Option<String>, Vec<Stmt>)],
         finally: &Option<Vec<Stmt>>,
     ) -> Result<(), VimlError> {
+        // c: `:try` raises `trylevel`, which is what makes an error inside the body
+        // a catchable exception rather than a printed message (`cause_errthrow`).
+        self.emit(Op::CallBuiltin(h::VIML_TRY_ENTER, 0));
+        self.emit(Op::Pop);
         // Protected body — its unwind frame targets the catch dispatch.
         self.unwind.push(Vec::new());
         self.compile_stmts(body)?;
@@ -1100,7 +1139,13 @@ impl Compiler {
             prev_no_match = Some(jf);
         }
 
+        // Every path out of the body — normal completion, a matched catch, and "no
+        // catch matched" — converges here, so this is where the try level drops
+        // again. An error raised inside a `:catch`/`:finally` body is therefore
+        // only catchable by an *enclosing* `:try`, as in Vim.
         let finally_start = self.b.current_pos();
+        self.emit(Op::CallBuiltin(h::VIML_TRY_LEAVE, 0));
+        self.emit(Op::Pop);
         if let Some(j) = prev_no_match {
             self.b.patch_jump(j, finally_start); // no catch matched → finally
         }
@@ -1890,6 +1935,26 @@ impl Compiler {
                     return Ok(());
                 }
                 self.expr(lhs)?;
+                // c: eval5 (c:2405) type-checks the LEFT operand of `+`, `-` and `.`
+                // *before it even parses the right one*, "to avoid side effects after
+                // an error" — so `0z - remove(d, k)` reports the Blob (E974) and never
+                // runs the removal. `*`, `/` and `%` do NOT do this: the C evaluates
+                // their right operand first too, so they already agree.
+                //
+                // A statically-numeric left operand can never fail either check
+                // (a Number passes both tv_check_num and tv_check_str), so the check
+                // is skipped there and `i + 1` keeps its native-arithmetic fast path.
+                if !self.expr_is_num(lhs) {
+                    let chk = match op {
+                        ArithOp::Add => Some(h::VIML_CHECK_LHS_ADD),
+                        ArithOp::Sub => Some(h::VIML_CHECK_LHS_SUB),
+                        ArithOp::Concat => Some(h::VIML_CHECK_LHS_CONCAT),
+                        _ => None,
+                    };
+                    if let Some(chk) = chk {
+                        self.emit(Op::CallBuiltin(chk, 1));
+                    }
+                }
                 self.expr(rhs)?;
                 let id = match op {
                     ArithOp::Add => h::VIML_ADD,

@@ -691,18 +691,56 @@ Relatedly an unprintable C1 char (`0x80`–`0x9f`) shows as `<80>` — four cell
 `matchbufline(1, 'a', 0, 1)` → Vim E475 ("Invalid value for argument lnum"), vimlrs
 an empty list. Line numbers are 1-based; `end < lnum` is E475 on `end_lnum`.
 
+---
+
+# Round 9 — errors as exceptions, `:silent!`, and operand order
+
+### R9-1. A runtime error inside `:try` was not catchable — ✅ FIXED
+```vim
+try | echo [1] . 'x' | catch | echo v:exception | endtry
+```
+Vim catches `Vim(echo):E730: Using a List as a String`. vimlrs **printed the error,
+kept running the protected block, and never entered `:catch`** — so the single most
+common plugin idiom (`try | call Foo() | catch /E117/ | endtry`) did not work.
+
+The machinery was all there and simply not connected: `cause_errthrow` (ex_eval.c)
+was ported but nothing called it, and `emsg` just printed. Now `emsg` converts the
+message into a pending exception whenever a `:try` is active (a runtime `trylevel`,
+raised by `:try` and dropped when the body's paths converge), the existing
+per-statement unwind checks carry it to the `:catch`, and the exception is tagged
+with the ex-command that raised it (`Vim(echo):`, `Vim(call):`) exactly as Vim tags
+it. Catching also resets `did_emsg` (c: `ex_catch`, ex_eval.c:116 — "reset did_emsg,
+got_int, did_throw"), so a script that *handles* an error still exits 0.
+
+Covered by `examples/error_exceptions.vim`, whose assertions pass unmodified in
+Vim 9.2 and Neovim 0.12.
+
+### R9-2. `:silent!` did nothing — ✅ FIXED
+The parser *stripped* command modifiers, so `silent! call Foo()` on a missing
+function still printed E117 and marked the script as errored. `silent!` raises
+`emsg_silent` for the command it wraps: the command still fails, but the error is
+neither shown nor counted (which is why a sourced script with a silenced error
+exits 0). Real vimrcs lean on this constantly.
+
+### R9-3. Operand-order errors (was R5-D3) — ✅ FIXED
+`eval5` type-checks the **left** operand of `+`, `-` and `.` *before it even parses
+the right one* (c:2405) — "to avoid side effects after an error" — so
+`0z - remove(d, k)` reports the Blob (E974) and never runs the removal, where vimlrs
+reported the removal's error. The check is now emitted between the two operands.
+`*`, `/` and `%` do **not** do this (the C evaluates their right operand first too),
+and it is skipped for a List/Blob under `+` (list concat is legal and cannot be
+judged before the right operand), for a Float, and for a statically-numeric left
+operand — which can never fail the check, so `i + 1` keeps its native-arithmetic
+fast path.
+
 ## Still open
 
-- **Error ordering (R5-D3) — the largest remaining class.** Vim's `eval5`
-  type-checks the *left* operand of an arithmetic/concat operator **before it even
-  parses the right one** (c:2406-2414), so `0z - remove(g:d, {})` reports E974 (Blob
-  as Number, the left operand) where vimlrs reports the right operand's E731. Same
-  for `extend(…) .. strspn()` (E730 vs E117). vimlrs compiles both operands and
-  then applies the op, so whichever *runs* first wins. Fixing it means emitting a
-  type-check of the left operand between the two operand evaluations — a VM
-  operation on **every** arithmetic and concat op, i.e. a hot-path cost, in exchange
-  for error-message ordering in already-erroring scripts. The values are identical
-  either way. Deliberately not taken without a call on that trade.
+- **Vim aborts the erroring command; vimlrs finishes it.** `silent! echo [1] . 'x'`
+  prints nothing in Vim (the command is abandoned) but prints the recovered value in
+  vimlrs. Inside a `:try` this is invisible (the unwind happens at the statement
+  boundary); outside one, the statement runs to completion after its error. A second
+  error from the same statement is swallowed so the *first* one is still what
+  `:catch` and `v:exception` see.
 - `nr2char(2147483647)` → Vim emits the raw replacement bytes, vimlrs `''`. Same
   string-representation root cause as R5-D1 (Vim strings are byte arrays).
 - `eval()` rejects trailing text before evaluating (R5-O2) — same compile-first root

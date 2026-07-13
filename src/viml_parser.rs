@@ -82,9 +82,18 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
     // `noautocmd`, `keepjumps`, …). They change how a command runs, not what it
     // is, and real vimrcs use them constantly (`silent! colorscheme x`). A bare
     // modifier with no command (`silent`) becomes a no-op.
+    // `silent!` is not just noise: it suppresses the error message of the command
+    // it prefixes (`emsg_silent`), which is why `silent! call Foo()` is everywhere
+    // in real vimrcs. Keep that one bit and strip the rest of the modifiers.
+    let bang_silent = starts_with_silent_bang(line.trim());
     let line = strip_command_modifiers(line.trim());
     if line.is_empty() {
         return Ok(Stmt::Expr(Expr::Number(0)));
+    }
+    if bang_silent {
+        // Re-parse the remainder as the wrapped command.
+        let inner = parse_stmt(line)?;
+        return Ok(Stmt::Silent(Box::new(inner)));
     }
     // `:vim9script [noclear]` — switches the script to vim9 mode (a no-op leaf;
     // the mode's parse effects are applied in `Lines::new`). Matched here because
@@ -408,6 +417,31 @@ const CMD_MODIFIERS: &[&str] = &[
 /// the remaining command text. Each modifier is a standalone word (optionally
 /// with a `!`, e.g. `silent!`); `verbose`/`tab` may carry a numeric count
 /// (`verbose 15 …`). A line that is only modifiers strips to empty.
+/// Whether the line's leading modifier run contains `silent!` (with the bang).
+fn starts_with_silent_bang(mut line: &str) -> bool {
+    loop {
+        line = line.trim_start();
+        let end = line
+            .find(|c: char| !c.is_ascii_alphabetic())
+            .unwrap_or(line.len());
+        if end == 0 {
+            return false;
+        }
+        let word = &line[..end];
+        if !CMD_MODIFIERS.contains(&word) {
+            return false;
+        }
+        let after = &line[end..];
+        match after.chars().next() {
+            Some('!') if word == "silent" => return true,
+            Some('!') => line = &after[1..],
+            Some(c) if c.is_whitespace() => line = after,
+            None => return false,
+            _ => return false,
+        }
+    }
+}
+
 fn strip_command_modifiers(mut line: &str) -> &str {
     loop {
         line = line.trim_start();
@@ -3254,11 +3288,13 @@ mod tests {
 
     #[test]
     fn command_modifiers_are_stripped() {
-        // `silent!` + a real command → the command survives.
-        assert!(matches!(
-            parse_stmt("silent! colorscheme molokai").unwrap(),
-            Stmt::Colorscheme(n) if n == "molokai"
-        ));
+        // `silent!` is NOT merely stripped: it wraps the command, because the bang
+        // suppresses the command's error message (`emsg_silent`). The command
+        // itself survives inside the wrapper.
+        let Stmt::Silent(inner) = parse_stmt("silent! colorscheme molokai").unwrap() else {
+            panic!("`silent!` must wrap the command it silences");
+        };
+        assert!(matches!(*inner, Stmt::Colorscheme(n) if n == "molokai"));
         // Stacked modifiers, a `verbose` count, and abbreviations.
         assert!(matches!(
             parse_stmt("silent noautocmd verbose 9 set number").unwrap(),
