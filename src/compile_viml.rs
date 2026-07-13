@@ -1089,7 +1089,10 @@ impl Compiler {
                     self.stmt(inner)?;
                     // The last command has no successors to abandon.
                     if i + 1 < stmts.len() {
-                        self.emit(Op::CallBuiltin(h::VIML_ERR_SINCE, 0));
+                        // Not `ERR_SINCE`: a `:silent!` error is not *reported*, and
+                        // Vim carries on with the rest of the line after one. A hard
+                        // failure abandons the line even when silenced.
+                        self.emit(Op::CallBuiltin(h::VIML_LINE_ABORT, 0));
                         to_end.push(self.emit(Op::JumpIfTrue(0)));
                     }
                 }
@@ -1160,7 +1163,7 @@ impl Compiler {
         // outward.
         let mut skip_catches = None;
         if inline {
-            self.emit(Op::CallBuiltin(h::VIML_EXC_IS_ERR, 0));
+            self.emit(Op::CallBuiltin(h::VIML_EXC_IS_HARD, 0));
             skip_catches = Some(self.emit(Op::JumpIfTrue(0)));
         }
 

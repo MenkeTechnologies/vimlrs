@@ -179,10 +179,18 @@ pub const VIML_TONUMBER: u16 = 3004;
 /// its effect when the expression it depends on failed, the way the C's `FAIL`
 /// return unwinds the command.
 pub const VIML_ERR_SINCE: u16 = 3043;
-/// Push `Bool(the pending exception came from an ERROR, not from `:throw`)`.
-/// A one-line `try | … | catch | … | endtry` catches a `:throw` but NOT an error:
-/// the error abandons the command line, taking the `:catch` with it.
-pub const VIML_EXC_IS_ERR: u16 = 3044;
+/// Push `Bool(the pending exception is a HARD failure)`.
+///
+/// A hard failure is the `eval5` left-operand pre-check (`[1] . 'x'`, `0z11 - 1`):
+/// the expression fails outright, and Vim abandons the command line *without* the
+/// error being catchable by a `:catch` on that same line — while an ordinary runtime
+/// error (E117, E684, E745, …) on that line IS caught by it. Verified against both
+/// engines; see BUGS.md.
+pub const VIML_EXC_IS_HARD: u16 = 3044;
+/// Push `Bool(this command line must be abandoned)` — an error that was actually
+/// *reported* (`:silent!` never reports, and Vim carries on past a silenced error),
+/// or a hard failure, which abandons regardless.
+pub const VIML_LINE_ABORT: u16 = 3045;
 pub const VIML_SILENT_ENTER: u16 = 3040;
 pub const VIML_SILENT_LEAVE: u16 = 3041;
 pub const VIML_SET_CMDNAME: u16 = 3042;
@@ -1442,10 +1450,44 @@ fn b_set_cmdname(vm: &mut VM, _: u8) -> Value {
 thread_local! {
     /// Whether the pending exception was raised by an error (rather than `:throw`).
     static EXC_FROM_ERR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Whether the error in flight is a HARD failure (the `eval5` pre-check).
+    static HARD_ERR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// `did_emsg` at the start of the current command (see `VIML_LINE_ABORT`).
+    static EMSG_MARK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-fn b_exc_is_err(_vm: &mut VM, _: u8) -> Value {
-    Value::Bool(PENDING_EXC.with(|p| p.borrow().is_some()) && EXC_FROM_ERR.with(|e| e.get()))
+/// Mark the error in flight as a HARD failure — see [`VIML_EXC_IS_HARD`].
+fn set_hard_err() {
+    HARD_ERR.with(|h| h.set(true));
+}
+
+/// Run an *evaluator-level* operation and mark any error it raises as hard.
+///
+/// This is the line Vim draws. The expression evaluator's own type checks —
+/// coercing a condition (`tv_get_number_chk`), indexing (`check_can_index`, a
+/// missing Dict key), the unary operators, the `eval5` operand pre-check — make
+/// `eval1()` return **FAIL**, and a command whose argument failed to evaluate takes
+/// the whole command line down with it, so a `:catch` on that line never runs. An
+/// error raised *inside a called builtin* (`E117` unknown function, `E684` from
+/// `insert()`) does not fail the evaluator, and IS caught by that same `:catch`.
+///
+/// Both engines agree on every case in this split; see `examples/error_exceptions.vim`.
+fn eval_op<T>(f: impl FnOnce() -> T) -> T {
+    let before = message::err_count.with(|c| c.get());
+    let out = f();
+    if message::err_count.with(|c| c.get()) > before {
+        set_hard_err();
+    }
+    out
+}
+
+fn b_exc_is_hard(_vm: &mut VM, _: u8) -> Value {
+    Value::Bool(PENDING_EXC.with(|p| p.borrow().is_some()) && HARD_ERR.with(|h| h.get()))
+}
+
+fn b_line_abort(_vm: &mut VM, _: u8) -> Value {
+    let reported = message::did_emsg.with(|d| d.get()) > EMSG_MARK.with(|m| m.get());
+    Value::Bool(reported || HARD_ERR.with(|h| h.get()))
 }
 
 fn b_err_since(_vm: &mut VM, _: u8) -> Value {
@@ -1482,14 +1524,6 @@ fn b_try_leave(_vm: &mut VM, _: u8) -> Value {
     Value::Undef
 }
 
-/// The `emsg` → exception conversion (`cause_errthrow`, ex_eval.c:189): inside a
-/// `:try`, an error message is *thrown* rather than printed, so `:catch` can see
-/// it. Outside one, decline and let it print.
-///
-/// The C tags the exception with the command that raised it (`Vim(echo):E730: …`).
-/// The compiled program does not carry the ex-command name down to the point an
-/// error is raised, so the tag here is the bare `Vim:` form; a pattern matching the
-/// error number (`catch /E730/`, the common form) is unaffected.
 thread_local! {
     /// A read-only observer of error messages, for the differential fuzzer.
     static ERROR_OBSERVER: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
@@ -1532,6 +1566,12 @@ fn observe_errors_clear() {
     });
 }
 
+/// The `emsg` → exception conversion (`cause_errthrow`, ex_eval.c:189): inside a
+/// `:try`, an error message is *thrown* rather than printed, so `:catch` can see it.
+/// Outside one, decline and let it print.
+///
+/// The exception is tagged with the ex-command that raised it, as the C tags it
+/// (`Vim(echo):E730: …`) — see `VIML_SET_CMDNAME`.
 pub fn errthrow(msg: &str) -> bool {
     if crate::ported::ex_eval::trylevel.with(|t| t.get()) == 0 {
         return false;
@@ -1735,6 +1775,9 @@ fn b_check_lhs_add(vm: &mut VM, _: u8) -> Value {
     if matches!(v.v_type, VAR_LIST | VAR_BLOB | VAR_FLOAT) || tv_check_num(&v) {
         tv_to_value(v)
     } else {
+        // c: eval5 returns FAIL here — the expression is abandoned outright, and a
+        // `:catch` on the same command line never sees it (VIML_EXC_IS_HARD).
+        set_hard_err();
         Value::Int(0)
     }
 }
@@ -1744,6 +1787,9 @@ fn b_check_lhs_sub(vm: &mut VM, _: u8) -> Value {
     if v.v_type == VAR_FLOAT || tv_check_num(&v) {
         tv_to_value(v)
     } else {
+        // c: eval5 returns FAIL here — the expression is abandoned outright, and a
+        // `:catch` on the same command line never sees it (VIML_EXC_IS_HARD).
+        set_hard_err();
         Value::Int(0)
     }
 }
@@ -1753,6 +1799,9 @@ fn b_check_lhs_concat(vm: &mut VM, _: u8) -> Value {
     if tv_check_str(&v) {
         tv_to_value(v)
     } else {
+        // c: eval5 returns FAIL here — the expression is abandoned outright, and a
+        // `:catch` on the same command line never sees it (VIML_EXC_IS_HARD).
+        set_hard_err();
         Value::Int(0)
     }
 }
@@ -2346,6 +2395,8 @@ fn b_unlet_index(vm: &mut VM, _: u8) -> Value {
 /// tell whether evaluating its arguments raised an error.
 fn b_err_mark(_vm: &mut VM, _: u8) -> Value {
     ERR_MARK.with(|m| m.set(message::err_count.with(|d| d.get())));
+    EMSG_MARK.with(|m| m.set(message::did_emsg.with(|d| d.get())));
+    HARD_ERR.with(|h| h.set(false));
     Value::Undef
 }
 
@@ -3608,8 +3659,14 @@ fn index_value(base: &typval_T, index: &typval_T) -> typval_T {
         }
         // Everything else is un-indexable, and *which* error says so is part of
         // the contract: E695 Funcref, E806 Float, E909 Bool/Special.
+        //
+        // This is an evaluator-level failure (`check_can_index` makes `eval_index`
+        // return FAIL), so it abandons the command line and a `:catch` on that line
+        // does not see it — unlike E716 (key not present), which is raised *after*
+        // the subscript is accepted and IS catchable. Both engines agree.
         _ => {
             check_can_index(base, true, true);
+            set_hard_err();
             tv_special()
         }
     }
@@ -3701,13 +3758,16 @@ fn slice_value(base: &typval_T, from: &typval_T, to: &typval_T) -> typval_T {
             rettv
         }
         // A Dict can be subscripted but never sliced (c:3249); everything else
-        // reports whichever error `check_can_index` says applies.
+        // reports whichever error `check_can_index` says applies. Both are
+        // evaluator-level failures — see the note in `index_value`.
         (VAR_DICT, _) => {
             message::emsg("E719: Cannot slice a Dictionary");
+            set_hard_err();
             tv_special()
         }
         _ => {
             check_can_index(base, true, true);
+            set_hard_err();
             tv_special()
         }
     }
@@ -4140,9 +4200,9 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_GETVAR, b_getvar);
     vm.register_builtin(VIML_SETVAR, b_setvar);
     vm.register_builtin(VIML_SETENV, b_setenv);
-    vm.register_builtin(VIML_TRUTHY, b_truthy);
-    vm.register_builtin(VIML_BOOLNUM, b_boolnum);
-    vm.register_builtin(VIML_TONUMBER, b_tonumber);
+    vm.register_builtin(VIML_TRUTHY, |vm, n| eval_op(|| b_truthy(vm, n)));
+    vm.register_builtin(VIML_BOOLNUM, |vm, n| eval_op(|| b_boolnum(vm, n)));
+    vm.register_builtin(VIML_TONUMBER, |vm, n| eval_op(|| b_tonumber(vm, n)));
     vm.register_builtin(VIML_ADD, b_add);
     vm.register_builtin(VIML_SUB, b_sub);
     vm.register_builtin(VIML_MUL, b_mul);
@@ -4854,7 +4914,8 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_SET_RETURN, b_set_return);
     vm.register_builtin(VIML_THROW, b_throw);
     vm.register_builtin(VIML_ERR_SINCE, b_err_since);
-    vm.register_builtin(VIML_EXC_IS_ERR, b_exc_is_err);
+    vm.register_builtin(VIML_EXC_IS_HARD, b_exc_is_hard);
+    vm.register_builtin(VIML_LINE_ABORT, b_line_abort);
     vm.register_builtin(VIML_SILENT_ENTER, b_silent_enter);
     vm.register_builtin(VIML_SILENT_LEAVE, b_silent_leave);
     vm.register_builtin(VIML_SET_CMDNAME, b_set_cmdname);

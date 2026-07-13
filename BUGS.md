@@ -812,7 +812,29 @@ was reported and not handled". It also takes the **first** unhandled error, sinc
 reports one and abandons the command while this VM keeps evaluating and can raise
 more.
 
-### R11-4. An error in a one-line `:try` was caught (Vim lets it escape) — ✅ FIXED
+### R11-5. Which errors a one-line `:catch` sees — ✅ FIXED (corrected R11-4)
+R11-4 got the rule half right, and the statement fuzzer caught it. The line is not
+"inline `:try` never catches an error" — it is **where the error came from**:
+
+| error raised by | example | eval1() | one-line `:catch` |
+|---|---|---|---|
+| a called builtin | `nosuchfn()` (E117), `insert([1],{},100000)` (E684) | OK | **catches** |
+| a missing Dict key | `deepcopy({})[2]` (E716) | OK | **catches** |
+| the `eval5` operand pre-check | `[1] . 'x'` (E730), `0z11 - 1` (E974) | FAIL | escapes |
+| an unindexable value | `log10(-3.25)[-5:0]` (E806) | FAIL | escapes |
+| coercing a condition | `sort(…) ? v:true : [1]` (E745) | FAIL | escapes |
+
+The expression evaluator's **own type checks** make `eval1()` return FAIL, and a
+command whose argument failed to evaluate takes the whole command line with it — so
+the `:catch` on that line never runs. An error raised *inside* a called function does
+not fail the evaluator, and is caught. A multi-line `:try` catches both, since its
+`:catch` is on another line. Such a "hard" failure also abandons the rest of the line
+**even under `:silent!`**, while an ordinary silenced error lets the line continue.
+
+Every row is verified against both engines and pinned in
+`examples/error_exceptions.vim`.
+
+### R11-4. An error in a one-line `:try` was caught (Vim lets it escape) — ✅ FIXED (superseded by R11-5)
 ```vim
 try | echo [1] . 'x' | catch | echo 'caught' | endtry
 ```
