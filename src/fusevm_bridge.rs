@@ -18,6 +18,7 @@ use std::cell::RefCell;
 use fusevm::{Value, VM};
 
 use crate::compile_viml::compile_program;
+use crate::ported::eval::check_can_index;
 use crate::ported::eval::encode::{encode_tv2echo, encode_tv2string};
 use crate::ported::eval::fs::{
     f_browse, f_browsedir, f_chdir, f_delete, f_executable, f_exepath, f_expand, f_expandcmd,
@@ -1518,6 +1519,21 @@ fn b_tonumber(vm: &mut VM, _: u8) -> Value {
     Value::Int(tv_get_number_chk(&pop_tv(vm), None))
 }
 
+/// The float value of an arithmetic operand, per `eval_addsub_number` (c:2323)
+/// and `eval_multdiv_number` (c:2464): a Float is taken as-is, and **every other
+/// type goes through `tv_get_number_chk`** and is only then promoted.
+///
+/// This is not the same as `tv_get_float`, and the difference is observable: a
+/// Bool/Special operand is a Number to arithmetic (`1.5 - v:false` is `1.5`),
+/// while `tv_get_float` would reject it with E362/E907. `tv_get_float` is
+/// correct for *comparison* (c:1204), which really does float-check both sides.
+fn arith_float(tv: &typval_T) -> f64 {
+    match tv.v_type {
+        VAR_FLOAT => tv_get_float(tv),
+        _ => tv_get_number_chk(tv, None) as f64,
+    }
+}
+
 fn b_add(vm: &mut VM, _: u8) -> Value {
     let b = pop_tv(vm);
     let a = pop_tv(vm);
@@ -1529,7 +1545,7 @@ fn b_add(vm: &mut VM, _: u8) -> Value {
         return tv_to_value(blob_concat(&a, &b));
     }
     if a.v_type == VAR_FLOAT || b.v_type == VAR_FLOAT {
-        tv_to_value(tv_flt(tv_get_float(&a) + tv_get_float(&b)))
+        tv_to_value(tv_flt(arith_float(&a) + arith_float(&b)))
     } else {
         tv_to_value(tv_num(
             tv_get_number_chk(&a, None).wrapping_add(tv_get_number_chk(&b, None)),
@@ -1542,7 +1558,7 @@ fn b_sub(vm: &mut VM, _: u8) -> Value {
     let a = pop_tv(vm);
     // c: eval5 — numeric subtraction (float if either is Float).
     if a.v_type == VAR_FLOAT || b.v_type == VAR_FLOAT {
-        tv_to_value(tv_flt(tv_get_float(&a) - tv_get_float(&b)))
+        tv_to_value(tv_flt(arith_float(&a) - arith_float(&b)))
     } else {
         tv_to_value(tv_num(
             tv_get_number_chk(&a, None).wrapping_sub(tv_get_number_chk(&b, None)),
@@ -1555,7 +1571,7 @@ fn b_mul(vm: &mut VM, _: u8) -> Value {
     let a = pop_tv(vm);
     // c: eval6 — `*`.
     if a.v_type == VAR_FLOAT || b.v_type == VAR_FLOAT {
-        tv_to_value(tv_flt(tv_get_float(&a) * tv_get_float(&b)))
+        tv_to_value(tv_flt(arith_float(&a) * arith_float(&b)))
     } else {
         tv_to_value(tv_num(
             tv_get_number_chk(&a, None).wrapping_mul(tv_get_number_chk(&b, None)),
@@ -1568,7 +1584,7 @@ fn b_div(vm: &mut VM, _: u8) -> Value {
     let a = pop_tv(vm);
     // c: eval6 — `/`: float division, else num_divide.
     if a.v_type == VAR_FLOAT || b.v_type == VAR_FLOAT {
-        tv_to_value(tv_flt(tv_get_float(&a) / tv_get_float(&b)))
+        tv_to_value(tv_flt(arith_float(&a) / arith_float(&b)))
     } else {
         tv_to_value(tv_num(crate::ported::eval::num_divide(
             tv_get_number_chk(&a, None),
@@ -1580,16 +1596,25 @@ fn b_div(vm: &mut VM, _: u8) -> Value {
 fn b_mod(vm: &mut VM, _: u8) -> Value {
     let b = pop_tv(vm);
     let a = pop_tv(vm);
-    // c: eval6 — `%` is integer-only; a Float operand is an error (unlike `*`/`/`
-    // which fall back to float arithmetic).
+    // c: eval6 (c:2464) — `%` is integer-only, but the operands are coerced
+    // left-to-right *before* the float check fires. The order is observable:
+    // `0z61 % 2.5` reports E974 (Blob as Number) for the left operand, not the
+    // E804 that a float-check-first reading would give.
+    let n1 = if a.v_type == VAR_FLOAT {
+        0
+    } else {
+        tv_get_number_chk(&a, None)
+    };
+    let n2 = if b.v_type == VAR_FLOAT {
+        0
+    } else {
+        tv_get_number_chk(&b, None)
+    };
     if a.v_type == VAR_FLOAT || b.v_type == VAR_FLOAT {
         message::emsg("E804: Cannot use '%' with Float");
         return tv_to_value(tv_num(0));
     }
-    tv_to_value(tv_num(crate::ported::eval::num_modulus(
-        tv_get_number_chk(&a, None),
-        tv_get_number_chk(&b, None),
-    )))
+    tv_to_value(tv_num(crate::ported::eval::num_modulus(n1, n2)))
 }
 
 fn b_concat(vm: &mut VM, _: u8) -> Value {
@@ -1619,8 +1644,14 @@ fn b_uplus(vm: &mut VM, _: u8) -> Value {
 
 fn b_not(vm: &mut VM, _: u8) -> Value {
     let v = pop_tv(vm);
-    // c: eval7_leader — `!`: logical NOT of tv_get_number.
-    tv_to_value(tv_num((tv_get_number_chk(&v, None) == 0) as varnumber_T))
+    // c: eval7_leader (c:2818) — `!` on a Float tests the float against 0.0 and
+    // yields a Number (`!(0.5)` is `0`); it does NOT run the Float through
+    // tv_get_number, which would raise E805. Every other type is `!tv_get_number`.
+    let n = match (v.v_type, &v.vval) {
+        (VAR_FLOAT, v_float(f)) => (*f == 0.0) as varnumber_T,
+        _ => (tv_get_number_chk(&v, None) == 0) as varnumber_T,
+    };
+    tv_to_value(tv_num(n))
 }
 
 /// Shared comparison body: `typval_compare(&mut a, &b, type, ic)` writes the
@@ -1735,7 +1766,7 @@ fn b_setindex(vm: &mut VM, _: u8) -> Value {
             if i >= 0 && i < len {
                 l.borrow_mut().lv_items[i as usize].li_tv = value;
             } else {
-                message::emsg("E684: list index out of range");
+                message::emsg("E684: List index out of range");
             }
         }
         (VAR_BLOB, v_blob(Some(b))) => {
@@ -2078,7 +2109,7 @@ fn b_unlet_index(vm: &mut VM, _: u8) -> Value {
             if i >= 0 && i < len {
                 tv_list_item_remove(&mut l.borrow_mut(), i as usize);
             } else {
-                message::emsg("E684: list index out of range");
+                message::emsg("E684: List index out of range");
             }
         }
         _ => message::emsg("E689: Can only index a List, Dictionary or Blob"),
@@ -3298,13 +3329,17 @@ fn index_value(base: &typval_T, index: &typval_T) -> typval_T {
                 }
             }
         }
-        (VAR_STRING, v_string(s)) => {
+        // `eval_index_inner` (c:3263) runs VAR_NUMBER through the *same* branch
+        // as VAR_STRING: the number is rendered with `tv_get_string` and then
+        // indexed as that string, so `strlen('ab')[0]` is `'2'`, not an error.
+        (VAR_STRING, _) | (VAR_NUMBER, _) => {
+            let s = tv_get_string(base);
             let chars: Vec<char> = s.chars().collect();
             let len = chars.len() as varnumber_T;
-            let mut i = tv_get_number_chk(index, None);
-            if i < 0 {
-                i += len;
-            }
+            let i = tv_get_number_chk(index, None);
+            // c:3298 — "If the index is too big or negative the result is
+            // empty." A single index does NOT wrap around from the end (only a
+            // *slice* bound does).
             if i < 0 || i >= len {
                 tv_str(String::new())
             } else {
@@ -3325,8 +3360,10 @@ fn index_value(base: &typval_T, index: &typval_T) -> typval_T {
             );
             rettv
         }
+        // Everything else is un-indexable, and *which* error says so is part of
+        // the contract: E695 Funcref, E806 Float, E909 Bool/Special.
         _ => {
-            message::emsg("E909: Cannot index this type");
+            check_can_index(base, true, true);
             tv_special()
         }
     }
@@ -3375,18 +3412,21 @@ fn slice_value(base: &typval_T, from: &typval_T, to: &typval_T) -> typval_T {
             let _ = tv_list_slice_or_index(l, true, n1, n2, false, &mut rettv, true);
             rettv
         }
-        (VAR_STRING, v_string(s)) => {
+        // As with a subscript, `eval_index_inner` slices VAR_NUMBER through the
+        // VAR_STRING branch (c:3263), so `or(256,7)[2:]` slices `'263'`.
+        (VAR_STRING, _) | (VAR_NUMBER, _) => {
+            let s = tv_get_string(base);
             let chars: Vec<char> = s.chars().collect();
             let len = chars.len() as varnumber_T;
             let (lo, hi) = (lower(len, from), upper(len, to));
-            if lo > hi || len == 0 {
+            // c:3283 — "If the indexes are out of range the result is empty."
+            // Note `hi < 0` is its own reject (a `-9` upper bound on a 3-char
+            // string stays negative after the wrap and yields '', it does not
+            // clamp up to 0).
+            if lo >= len || hi < 0 || lo > hi {
                 tv_str(String::new())
             } else {
-                tv_str(
-                    chars[lo as usize..=(hi as usize).min(chars.len() - 1)]
-                        .iter()
-                        .collect(),
-                )
+                tv_str(chars[lo as usize..=(hi as usize)].iter().collect())
             }
         }
         (VAR_BLOB, v_blob(Some(b))) => {
@@ -3414,8 +3454,14 @@ fn slice_value(base: &typval_T, from: &typval_T, to: &typval_T) -> typval_T {
             );
             rettv
         }
+        // A Dict can be subscripted but never sliced (c:3249); everything else
+        // reports whichever error `check_can_index` says applies.
+        (VAR_DICT, _) => {
+            message::emsg("E719: Cannot slice a Dictionary");
+            tv_special()
+        }
         _ => {
-            message::emsg("E909: Cannot slice this type");
+            check_can_index(base, true, true);
             tv_special()
         }
     }

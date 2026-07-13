@@ -37,6 +37,10 @@ pub mod grid;
 /// Port of `src/nvim/strings.c` (the Vimscript string builtins `f_string`,
 /// `f_strlen`, `f_byteidx`, `f_tr`, …). Home file not under the vendored
 /// `vendor/eval/` tree; see `tests/data/fake_fn_allowlist.txt`.
+/// Port of `src/nvim/keycodes.c` (subset: `trans_special`/`find_special_key`
+/// behind the `"\<Esc>"` string escape, and `get_special_key_name` behind
+/// `keytrans()` — the character-valued keys only; see the module docs).
+pub mod keycodes;
 /// Port of `src/nvim/mark.c` (subset: the mark store behind setmark_pos/getpos).
 pub mod mark;
 /// Port of `src/nvim/mbyte.c` (subset: the UTF-8 codec helpers `utf_ptr2char`,

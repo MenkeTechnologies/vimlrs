@@ -309,9 +309,19 @@ impl<'a> Lexer<'a> {
             && text.starts_with('0')
             && text.bytes().all(|b| (b'0'..=b'7').contains(&b))
         {
-            return Tok::Number(i64::from_str_radix(text, 8).unwrap_or(0));
+            return Tok::Number(Self::saturating_literal(i64::from_str_radix(text, 8)));
         }
-        Tok::Number(text.parse::<i64>().unwrap_or(0))
+        Tok::Number(Self::saturating_literal(text.parse::<i64>()))
+    }
+
+    /// A too-large integer literal **saturates** at `VARNUMBER_MAX`, it does not
+    /// become 0: `vim_str2nr` stops accumulating once the value would overflow and
+    /// hands back the maximum, so Vim reads `9223372036854775808` as
+    /// `9223372036854775807`. Returning 0 turned an out-of-range index into a valid
+    /// one (`insert([1], 9, -9223372036854775808)` inserted at 0 instead of raising
+    /// E684).
+    fn saturating_literal(parsed: Result<i64, std::num::ParseIntError>) -> i64 {
+        parsed.unwrap_or(i64::MAX)
     }
 
     /// Lex a Blob literal `0z` followed by an even number of hex digits (Vim
@@ -351,6 +361,9 @@ impl<'a> Lexer<'a> {
         let digits = &self.s[digits_start..self.pos];
         match i64::from_str_radix(digits, radix) {
             Ok(n) => Tok::Number(n),
+            // An empty digit run is not a radix literal at all (rewind and let
+            // `0` stand); a digit run that overflows saturates, as in decimal.
+            Err(_) if !digits.is_empty() => Tok::Number(i64::MAX),
             Err(_) => {
                 self.pos = start + 1;
                 Tok::Number(0)
@@ -438,6 +451,20 @@ impl<'a> Lexer<'a> {
                 }
                 if let Some(ch) = char::from_u32(n) {
                     out.push(ch);
+                }
+            }
+            // `\<Esc>`, `\<C-A>`, `\<Space>`, … — the special-key escape
+            // (c: eval_string case '<' → trans_special). A key with no character
+            // form (`\<Up>`, `\<F1>`: K_SPECIAL byte sequences) is not
+            // translated and the `<` stays literal, as it did before.
+            b'<' => {
+                let rest = &self.s[self.pos - 1..];
+                match crate::ported::keycodes::trans_special(rest) {
+                    Some((c, used)) => {
+                        out.push(c);
+                        self.pos += used - 1; // the '<' was already consumed
+                    }
+                    None => out.push('<'),
                 }
             }
             0 => return Err(VimlError::msg("E114: Missing quote")),

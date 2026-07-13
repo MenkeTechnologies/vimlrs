@@ -16,6 +16,7 @@ use crate::ported::eval::typval::{
     tv_list_append_tv,
 };
 use crate::ported::eval::typval_defs_h::{typval_T, typval_vval_union::*, varnumber_T, VarType::*};
+use crate::ported::message::{emsg, semsg};
 use crate::ported::option::get_option_value;
 
 /// "string(expr)" function — the `string()` rendering of `expr`.
@@ -36,7 +37,10 @@ pub fn f_str2nr(argvars: &[typval_T], rettv: &mut typval_T) {
         .map(|t| tv_get_number_chk(t, None))
         .unwrap_or(10);
     if !matches!(base, 2 | 8 | 10 | 16) {
-        return; // c: emsg(e_invarg); leaves rettv at 0
+        // c: `emsg(_(e_invarg)); return;` — an unsupported base is an error, not
+        // a silent 0.
+        emsg("E474: Invalid argument");
+        return;
     }
     // c: switch(base) { case 2: STR2NR_BIN|FORCE; case 8: STR2NR_OCT|OOCT|FORCE;
     //     case 16: STR2NR_HEX|FORCE; } (base 10 stays plain decimal, what == 0)
@@ -107,22 +111,27 @@ pub fn f_strpart(argvars: &[typval_T], rettv: &mut typval_T) {
     let slen = bytes.len() as varnumber_T;
     // c: nbyte = start; len = {len} present ? that : slen - nbyte.
     let mut nbyte = tv_get_number_chk(&argvars[1], None);
+    // The C does all of this in `varnumber_T` (int64) and *relies on the
+    // two's-complement wrap* at the extremes: with `start` = INT64_MIN,
+    // `slen - nbyte` and the later `len += nbyte` each wrap once and cancel, so
+    // `strpart('abc', -9223372036854775808)` is `'abc'` in Vim. Rust's `-`/`+`
+    // panic there instead (debug overflow check), so spell the wrap out.
     let mut len = if argvars.len() >= 3 {
         tv_get_number_chk(&argvars[2], None)
     } else {
-        slen - nbyte
+        slen.wrapping_sub(nbyte)
     };
     // c: a negative start clamps to 0 but folds its offset into the length, so
     // strpart('hello', -2, 3) keeps only the first character.
     if nbyte < 0 {
-        len += nbyte;
+        len = len.wrapping_add(nbyte);
         nbyte = 0;
     } else if nbyte > slen {
         nbyte = slen;
     }
     if len < 0 {
         len = 0;
-    } else if nbyte + len > slen {
+    } else if nbyte.saturating_add(len) > slen {
         len = slen - nbyte;
     }
     // c: with {chars} ({4}) set, reinterpret the byte-clamped {len} as a
@@ -150,12 +159,21 @@ pub fn f_stridx(argvars: &[typval_T], rettv: &mut typval_T) {
     let start = argvars
         .get(2)
         .map_or(0, |t| tv_get_number_chk(t, None).max(0) as usize);
-    let idx = if start <= hay.len() {
-        hay[start..]
-            .find(&needle)
-            .map(|i| (i + start) as varnumber_T)
-    } else {
+    // c: `haystack += start_idx; pos = strstr(haystack, needle)` — a *byte*
+    // offset and a byte-wise search, returning the offset from the start of the
+    // haystack. Slicing the `str` (`hay[start..]`) panicked when `start` split a
+    // multibyte char (`stridx('日本語', 'x', 1)`), so walk the bytes as C does.
+    // An empty needle matches immediately, as `strstr` does.
+    let (hb, nb) = (hay.as_bytes(), needle.as_bytes());
+    let idx = if start > hb.len() {
         None
+    } else if nb.is_empty() {
+        Some(start as varnumber_T)
+    } else {
+        hb[start..]
+            .windows(nb.len())
+            .position(|w| w == nb)
+            .map(|i| (i + start) as varnumber_T)
     };
     rettv.vval = v_number(idx.unwrap_or(-1));
 }
@@ -178,6 +196,15 @@ pub fn f_trim(argvars: &[typval_T], rettv: &mut typval_T) {
         .get(2)
         .filter(|t| t.v_type != VAR_UNKNOWN)
         .map_or(0, |t| tv_get_number_chk(t, None));
+    // c: `if (dir < 0 || dir > 2) { semsg(_(e_invarg2), tv_get_string(&argvars[2])); return; }`
+    // — anything outside 0..2 is E475, quoting the offending value.
+    if !(0..=2).contains(&dir) {
+        semsg(&format!(
+            "E475: Invalid argument: {}",
+            tv_get_string(&argvars[2])
+        ));
+        return;
+    }
     let trimmed = match dir {
         1 => s.trim_start_matches(pred),
         2 => s.trim_end_matches(pred),

@@ -37,6 +37,14 @@ path = "src/main.rs"
 name = "gen-docs"
 path = "src/bin/gen_docs.rs"
 
+# Differential fuzzer: generates VimL expressions and diffs vimlrs against real
+# nvim + vim. Development tool — needs both editors on PATH, so it is never run
+# by CI; its findings are frozen into tests/data/fuzz_corpus.txt, which
+# tests/fuzz_corpus.rs replays with no editor installed.
+[[bin]]
+name = "fuzz-parity"
+path = "src/bin/fuzz_parity.rs"
+
 [dependencies]
 # Language-agnostic bytecode VM + 3-tier Cranelift JIT. VimL has no local
 # vm.rs / jit.rs: lex/parse → AST → lower to fusevm bytecode → fusevm runs it,

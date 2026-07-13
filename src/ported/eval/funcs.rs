@@ -64,7 +64,10 @@ pub fn f_len(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.vval = match (arg.v_type, &arg.vval) {
         // c: VAR_STRING/VAR_NUMBER → strlen(tv_get_string(...)) — byte length.
         (VAR_STRING, v_string(s)) => v_number(s.len() as varnumber_T),
-        (VAR_NUMBER, _) | (VAR_FLOAT, _) => v_number(tv_get_string(arg).len() as varnumber_T),
+        // c: only VAR_NUMBER shares the VAR_STRING branch — VAR_FLOAT is listed
+        // with the *error* cases, so `len(0.0)` is E701, not the width of the
+        // float's rendering.
+        (VAR_NUMBER, _) => v_number(tv_get_string(arg).len() as varnumber_T),
         (VAR_LIST, v_list(Some(l))) => v_number(tv_list_len(&l.borrow()) as varnumber_T),
         (VAR_DICT, v_dict(Some(d))) => v_number(tv_dict_len(&d.borrow()) as varnumber_T),
         (VAR_BLOB, v_blob(Some(b))) => v_number(tv_blob_len(&b.borrow()) as varnumber_T),
@@ -890,6 +893,23 @@ pub fn f_range(argvars: &[typval_T], rettv: &mut typval_T) {
             tv_get_number_chk(&argvars[2], None),
         ),
     };
+    // c: `if (stride == 0) { emsg(_("E726: Stride is zero")); return; }` — a zero
+    // stride is an error, not an empty list (the loop would never terminate).
+    if stride == 0 {
+        emsg("E726: Stride is zero");
+        return;
+    }
+    // c: `if (stride > 0 ? end + 1 < start : end - 1 > start)` — a range that
+    // runs the wrong way is E727, not an empty list: `range(10, 5, 1)` errors.
+    // (`end + 1 == start` is the legitimate empty range, e.g. `range(0)`.)
+    if if stride > 0 {
+        end + 1 < start
+    } else {
+        end - 1 > start
+    } {
+        emsg("E727: Start past end");
+        return;
+    }
     let l = tv_list_alloc_ret(rettv, 0);
     let mut lb = l.borrow_mut();
     if stride > 0 {
@@ -898,7 +918,7 @@ pub fn f_range(argvars: &[typval_T], rettv: &mut typval_T) {
             tv_list_append_number(&mut lb, i);
             i += stride;
         }
-    } else if stride < 0 {
+    } else {
         let mut i = start;
         while i >= end {
             tv_list_append_number(&mut lb, i);
@@ -1247,6 +1267,12 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
     let mut out = String::new();
     let mut i = 0usize;
     let mut arg = 1usize;
+    // c (`vim_vsnprintf_typval`, via `tvs_get_number`/`tvs_get_string`): reading
+    // past the last supplied argument is E766, and any argument the format never
+    // consumed is E767. `used_max` is the highest `argvars` index a conversion
+    // actually read, so a positional spec (`%2$s`) counts toward it too.
+    let mut missing = false;
+    let mut used_max = 0usize;
     while i < bytes.len() {
         if bytes[i] != '%' {
             out.push(bytes[i]);
@@ -1296,7 +1322,16 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
         let mut width = 0usize;
         if i < bytes.len() && bytes[i] == '*' {
             i += 1;
-            let w = argvars.get(arg).map_or(0, |t| tv_get_number_chk(t, None));
+            let w = match argvars.get(arg) {
+                Some(t) => {
+                    used_max = used_max.max(arg);
+                    tv_get_number_chk(t, None)
+                }
+                None => {
+                    missing = true;
+                    0
+                }
+            };
             arg += 1;
             if w < 0 {
                 left = true;
@@ -1316,7 +1351,16 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
             i += 1;
             if i < bytes.len() && bytes[i] == '*' {
                 i += 1;
-                let p = argvars.get(arg).map_or(0, |t| tv_get_number_chk(t, None));
+                let p = match argvars.get(arg) {
+                    Some(t) => {
+                        used_max = used_max.max(arg);
+                        tv_get_number_chk(t, None)
+                    }
+                    None => {
+                        missing = true;
+                        0
+                    }
+                };
                 arg += 1;
                 prec = Some(p.max(0) as usize);
             } else {
@@ -1356,7 +1400,26 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
             out.push('%');
             continue;
         }
-        let cur = argvars.get(explicit_idx.unwrap_or(arg));
+        let want = explicit_idx.unwrap_or(arg);
+        let cur = argvars.get(want);
+        // c (`tvs_get_float`): a float conversion reports ONE error for any
+        // non-numeric argument — "E807: Expected Float argument for printf()" —
+        // rather than the per-type error `tv_get_float` would raise (E892 String,
+        // E893 List, …). The integer conversions do keep `tv_get_number`'s
+        // per-type errors (`printf('%d', [1])` is E745), so this is specific to
+        // the float family.
+        if matches!(conv, 'f' | 'F' | 'e' | 'E' | 'g' | 'G')
+            && cur.is_some_and(|t| !matches!(t.v_type, VAR_NUMBER | VAR_FLOAT))
+        {
+            emsg("E807: Expected Float argument for printf()");
+            rettv.vval = v_string(String::new());
+            return;
+        }
+        if cur.is_some() {
+            used_max = used_max.max(want);
+        } else {
+            missing = true;
+        }
         // c (vim_vsnprintf_typval): inf/nan render as fixed words, lowercase for
         // the lowercase float conversions (f/e/g), uppercase for the uppercase
         // ones (F/E/G); negative infinity keeps a leading '-', nan is unsigned;
@@ -1557,6 +1620,20 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
             }
         }
     }
+    // c: a conversion that ran off the end of the argument list is E766, and an
+    // argument the format never consumed is E767. C reports these from
+    // `vim_vsnprintf_typval`, and `f_printf` then leaves the result NULL — so the
+    // value is the empty string, not the half-formatted text.
+    if missing {
+        emsg("E766: Insufficient arguments for printf()");
+        rettv.vval = v_string(String::new());
+        return;
+    }
+    if used_max + 1 < argvars.len() {
+        emsg("E767: Too many arguments to printf()");
+        rettv.vval = v_string(String::new());
+        return;
+    }
     rettv.vval = v_string(out);
 }
 
@@ -1655,7 +1732,7 @@ pub fn f_insert(argvars: &[typval_T], rettv: &mut typval_T) {
     // index (other than == len, which appends) is E684.
     let idx = if orig < 0 { orig + len } else { orig };
     if orig != len && (idx < 0 || idx >= len) {
-        crate::ported::message::semsg(&format!("E684: list index out of range: {orig}"));
+        crate::ported::message::semsg(&format!("E684: List index out of range: {orig}"));
         return;
     }
     lb.lv_items.insert(
@@ -4482,6 +4559,28 @@ pub fn f_getregionpos(_argvars: &[typval_T], rettv: &mut typval_T) {
 /// lines `{lnum}`..`{end}` as a List of `{lnum, byteidx, text}` (single buffer,
 /// so `{buf}` is ignored).
 pub fn f_matchbufline(argvars: &[typval_T], rettv: &mut typval_T) {
+    // c: `buf = tv_get_buf(&argvars[0], false); if (buf == NULL) { semsg(
+    // _(e_invalid_buffer_name_str), ...); return; }` — a buffer that does not
+    // exist is E158, not an empty result list.
+    //
+    // Standalone, the line store is the single current buffer that `getbufinfo()`
+    // reports as `bufnr: 1`, and it is not on the `buf_T` list `tv_get_buf` walks
+    // (that list is populated by an editor host). So the current buffer — `0`,
+    // `1`, `''` or `'%'` — resolves here even with no host attached; every other
+    // designator is E158, as in Vim.
+    let designates_curbuf = match (&argvars[0].v_type, &argvars[0].vval) {
+        (VAR_NUMBER, v_number(n)) => *n == 0 || *n == 1,
+        (VAR_STRING, v_string(s)) => s.is_empty() || s == "%",
+        _ => false,
+    };
+    if !designates_curbuf && tv_get_buf(&argvars[0], false).is_none() {
+        crate::ported::message::semsg(&format!(
+            "E158: Invalid buffer name: {}",
+            tv_get_string(&argvars[0])
+        ));
+        tv_list_alloc_ret(rettv, 0);
+        return;
+    }
     let pat = tv_get_string(&argvars[1]);
     let lnum = tv_get_lnum(&argvars[2]);
     let end = tv_get_lnum(&argvars[3]);
@@ -5801,8 +5900,33 @@ pub fn f_stdpath(argvars: &[typval_T], rettv: &mut typval_T) {
 }
 /// Port of `f_keytrans()` (funcs.c) — translate key codes to a readable form;
 /// plain text (the standalone case) passes through unchanged.
+/// Port of `f_keytrans()` (`Src/eval/funcs.c`) — render a string in Vim's key
+/// notation, i.e. `str2special_save(str, replace_spaces = true, replace_others)`
+/// (`Src/message.c`), which maps each character through `get_special_key_name()`
+/// (`Src/keycodes.c`) when it is a special key, a C0 control character, or a
+/// space.
+///
+/// For the characters a *script* string can hold, that reduces to the rules
+/// below (verified identical in Vim 9.2 and Neovim 0.12):
+///
+/// - `' '` → `<Space>`, `'<'` → `<lt>` (the `replace_spaces` / `replace_others`
+///   cases; `|` and `\` are **not** replaced by this caller);
+/// - a C0 control character → its table name (`<Tab>`, `<NL>`, `<CR>`, `<Esc>`)
+///   or, with no table entry, `c + '@'` under the CTRL modifier: `0x01` → `<C-A>`,
+///   `0x1f` → `<C-_>` (`get_special_key_name`: "if (table_idx < 0 && !vim_isprintc(c)
+///   && c < ' ') { c += '@'; modifiers |= MOD_MASK_CTRL; }");
+/// - everything else, including `0x7f` and multibyte text, passes through.
+///
+/// The `K_SPECIAL`-escaped terminal-key sequences that `str2special` also decodes
+/// cannot occur here: they are produced by the terminal input layer, and a
+/// standalone interpreter never sees one.
 pub fn f_keytrans(argvars: &[typval_T], rettv: &mut typval_T) {
-    *rettv = typval_T::from(tv_get_string(&argvars[0]));
+    let s = tv_get_string(&argvars[0]);
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        out.push_str(&crate::ported::keycodes::get_special_key_name(c));
+    }
+    *rettv = typval_T::from(out);
 }
 /// Port of `f_luaeval()` (funcs.c) — no Lua provider standalone → v:null.
 pub fn f_luaeval(_argvars: &[typval_T], rettv: &mut typval_T) {

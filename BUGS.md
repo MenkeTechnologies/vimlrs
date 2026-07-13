@@ -421,3 +421,164 @@ spaced/`..` dot**, `nr2char(…,1)`/`char2nr(…,1)`/`strgetchar`/`strchars(skip
 `escape`/`tr`(ranges)/`split('\d')`/`join('')`/`repeat([..])`, `eval(string(…))` round-trip,
 `:while`/`:break`/`:continue`, nested `:try`/`:finally` rethrow, `execute "let …"`, script-local
 `s:` vars across calls.
+
+---
+
+# Round 5 — found by the differential fuzzer (`fuzz-parity`)
+
+Rounds 1–4 were hand-probed. Round 5 is machine-found: `cargo run --bin fuzz-parity`
+generates random VimL expressions, runs each through vimlrs **and** `nvim` **and**
+`vim`, and reports a bug only when **both** engines agree and vimlrs differs (see
+`docs/FUZZING.md`). A first run of 1500 expressions produced 3 crashes and 248
+divergences (155 distinct); the fixes below took that to **0 crashes and 10
+divergences**, none of them crashes.
+
+Every fix is pinned by an oracle-recorded case in `tests/data/fuzz_corpus.txt`,
+replayed by `tests/fuzz_corpus.rs` with no editor installed.
+
+## Crashes (vimlrs panicked; Vim does not)
+
+### R5-1. `filter()` on a Blob that removes bytes panicked — ✅ FIXED
+`filter(0z0011, {_,v -> 0})` → index-out-of-bounds panic. `filter_map_blob` hoisted
+the blob's length out of the loop and indexed the *shrinking* blob with the
+un-rewound index. The C (`list.c`) re-reads `b->bv_ga.ga_len` every iteration and
+does `i--` on removal so the next `i++` re-examines the shifted-down byte.
+
+### R5-2. `stridx()` with a start index inside a multibyte char panicked — ✅ FIXED
+`stridx('日本語', 'x', 1)` → "byte index 1 is not a char boundary". The C advances a
+byte pointer and calls `strstr`; the port sliced a Rust `str`. Now searches bytes.
+
+### R5-3. `str2float()` on short multibyte text panicked — ✅ FIXED
+`str2float('日本語')` → "byte index 4 is not a char boundary": the `inf`/`nan` prefix
+test sliced `text[..4]`. Now compares bytes.
+
+### R5-4. `strpart()` with an INT64_MIN start panicked — ✅ FIXED
+`strpart('abc', -9223372036854775808)` → "attempt to subtract with overflow". The C
+does this arithmetic in `varnumber_T` and *relies on the two's-complement wrap*
+(the two wraps cancel), so it yields `'abc'`. Ported with explicit wrapping ops.
+(Vim and Neovim disagree on this expression, so it is not in the corpus gate:
+Neovim gives `'abc'`, Vim `'bc'`. vimlrs follows Neovim, its port target.)
+
+## Wrong results
+
+### R5-5. Indexing/slicing a Number was E909 — ✅ FIXED
+`strlen('ab')[0]` → Vim `'2'`, vimlrs E909. `eval_index_inner` (c:3263) runs
+VAR_NUMBER through the **same branch as VAR_STRING**: the number is rendered with
+`tv_get_string` and then indexed as that text. Also: a Float subscript is E806, a
+Funcref E695, a Bool/Special E909, and a Dict *slice* is E719 — the port emitted a
+blanket E909 for all of them.
+
+### R5-6. A negative string subscript wrapped from the end — ✅ FIXED
+`'hello'[-1]` → Vim `''`, vimlrs `'o'`. c:3296: "If the index is too big or negative
+the result is empty." Only a *slice* bound counts from the end. `examples/string_index.vim`
+had asserted the wrong (vimlrs) behavior and was corrected.
+
+### R5-7. Float → String used Rust's `Display` — ✅ FIXED
+`round(0.5) .. 'x'` → Vim `'1.0x'`, vimlrs `'1x'`; `1.0e-10` came out as
+`0.0000000001`. Vim's `vim_snprintf("%g")` is not C's `%g` — it keeps the `.0` and
+writes `1.0e-10`. `vim_float_g` (already used by `string()`/`printf`) is that
+formatter; `tv_get_string_buf_chk` now uses it.
+
+### R5-8. Dict/Blob in string context reported E730 — ✅ FIXED
+`'x' . {'a':1}` → Vim E731, `'x' . 0zFF` → Vim E976; vimlrs said E730 (the *List*
+error) for all three. The C indexes a per-type `str_errors[]` table (c:4135).
+
+### R5-9. Float operands rejected Bool/Special, and reported the wrong code — ✅ FIXED
+`1.5 - v:false` → Vim `1.5`, vimlrs E808. Arithmetic coerces the non-Float operand
+with `tv_get_number_chk` and *then* promotes (c:2323) — it never calls
+`tv_get_float`, which is why a Bool is a Number there. Relatedly `tv_get_float`
+emitted a blanket E808 where the C has a per-type table: E891 Funcref, E892 String,
+E893 List, E894 Dict, E362 Bool, E907 Special, E975 Blob.
+
+### R5-10. `!` on a Float was E805 — ✅ FIXED
+`!(0.5)` → Vim `0`, vimlrs E805. `eval7_leader` (c:2818) tests the float against
+`0.0` and yields a Number; it does not run the Float through `tv_get_number`.
+
+### R5-11. `%` reported E804 before checking its operands — ✅ FIXED
+`0z61 % 2.5` → Vim E974 (Blob as Number), vimlrs E804. The C coerces both operands
+left-to-right *before* the float check fires (c:2464), so operand order is
+observable.
+
+### R5-12. Over-large integer literals became `0` — ✅ FIXED
+`9223372036854775808` → Vim `9223372036854775807` (saturates at VARNUMBER_MAX),
+vimlrs `0`. Also hex/binary. This silently turned an out-of-range index into a valid
+one: `insert([1], 9, -9223372036854775808)` inserted at 0 instead of raising E684.
+
+### R5-13. `"\<Esc>"` and every other key escape was left literal — ✅ FIXED
+`char2nr("\<Esc>")` → Vim `27`, vimlrs `60` (`<`): the `\<Key>` escape was never
+translated, so `"\<Esc>"` was five characters. `src/ported/keycodes.rs` now ports
+`trans_special`/`find_special_key` for every key that *is* a character (`<Esc>`,
+`<Tab>`, `<CR>`, `<NL>`, `<Space>`, `<lt>`, `<Bar>`, `<Bslash>`, `<C-x>`, `<S-x>`,
+`<Char-N>`), and `keytrans()` (previously a pass-through stub) ports the inverse,
+`get_special_key_name`.
+
+### R5-14. Missing argument validation — ✅ FIXED
+- `printf('%.2f')` → E766 (insufficient args); `printf('%s', [], 'abc')` → E767 (too many). Neither was checked.
+- `range(10, 5, 1)` → E727 (start past end); `range(2, 5, 0)` → E726 (stride is zero). Both returned `[]`.
+- `str2nr('a', 15)` → E474: the base check existed but its `emsg` had been dropped, so it returned 0.
+- `trim('ab', 'a', 3)` → E475: the direction was never validated.
+- `len(0.0)` → E701: the C lists VAR_FLOAT with the *error* cases, not with VAR_NUMBER.
+- `matchbufline(99, …)` → E158: a nonexistent buffer returned `[]`.
+
+### R5-15. Regex codepoint atoms `\%d` / `\%o` / `\%x` / `\%u` / `\%U` — ✅ FIXED
+`matchstr('abc', '\%d97')` → Vim `'a'`, vimlrs `''`. (This was R3-11, still open.)
+
+### R5-16. `printf()` float conversions reported the per-type float error — ✅ FIXED
+`printf('%f', 'abc')` → Vim E807 ("Expected Float argument for printf()"), vimlrs
+E892. The C's `tvs_get_float` raises one error for *any* non-numeric argument to
+`%f`/`%e`/`%g`; the integer conversions do keep `tv_get_number`'s per-type errors
+(`printf('%d', [1])` is E745 in both).
+
+## Still open (found in round 5, not yet fixed)
+
+### R5-O1. `matchlist()` splits a composing character
+`matchlist('é' . 'combining', '\l')` (where `é` is `e` + U+0301) → Vim matches the
+composed `é`, vimlrs matches only the base `e`. The regex engine treats a combining
+mark as its own character; Vim treats a base + its combining marks as one. Affects
+`matchstr`/`match`/`substitute` on decomposed text.
+
+### R5-O2. `eval()` rejects trailing text before evaluating
+`eval("nl\nhere")` → Vim E121 (it evaluates `nl`, an undefined variable), vimlrs E15
+(the parser rejects the trailing tokens up front). Vim's `f_eval` parses ONE
+expression, evaluates it, and only then reports E488 for what is left over. Same
+root cause as R5-D3 below; fixing it needs a parser entry point that returns the
+leading expression plus the unconsumed rest.
+
+## Known divergences (NOT bugs to "fix" — recorded so the fuzzer's report stays readable)
+
+### R5-D1. Strings are indexed by character, Vim indexes by byte
+`'日本語'[0]` → Vim `'<e6>'` (one raw byte), vimlrs `'日'`. Vim strings are byte
+arrays; vimlrs stores them as Rust `String` (UTF-8 text), which cannot hold a lone
+`0xE6`. Fixing this means changing the string representation to `Vec<u8>` — a
+deliberate, separate decision, not a bug fix. Everything else about indexing (empty
+on out-of-range, no negative wrap, inclusive slices) now matches exactly.
+
+### R5-D2. Dict iteration order is insertion order; Vim's is hashtab bucket order
+`string({'x':1,'b':2,'q':3,'a':4})` → Vim (and Neovim, identically)
+`{'q': 3, 'b': 2, 'a': 4, 'x': 1}`; vimlrs `{'x': 1, 'b': 2, 'q': 3, 'a': 4}`.
+Affects `string()`, `keys()`, `values()`, `items()`, and `:for` over a Dict. Vim's
+order is neither sorted nor insertion — it is the bucket layout of `hashtab.c`, and
+reproducing it exactly requires porting that hashtab and backing `dict_T` with it
+(108 call sites). Tracked as its own piece of work; `indexmap` is what is there now.
+
+### R5-D3. Errors surface in a different order when two operands both fail
+`extend([[1,2]], [1], -1) .. strspn()` → Vim E730, vimlrs E117. Vim is a
+string-walking interpreter and type-checks the left operand of `.` *before* it
+parses the right one (c:2414); vimlrs parses and compiles the whole program first,
+so a parse error in a later subexpression wins. Same root cause makes vimlrs report
+E15 for `1e0` (an invalid literal in Vim too) where Vim reports the runtime error of
+an earlier subexpression it evaluated first. The *set* of errors is the same; which
+one is reported first is not.
+
+### R5-D4. `<M-a>`/`<A-a>`, `<Up>`, `<F1>`, `<BS>`, `<Del>`, `<C-@>` key escapes stay literal
+These have no character form — Vim encodes them as `K_SPECIAL` (0x80) byte sequences
+that are not valid UTF-8. Vim and Neovim do not even agree on the meta forms
+(`"\<M-a>"` is one byte `0xE1` in Vim, a four-byte sequence in Neovim). See
+`src/ported/keycodes.rs`.
+
+Areas probed in round 5 that PASSED (a sample of the 1151/1200 agreeing cases):
+`substitute` with `\=`/`\u`/`\U`/backrefs, `split`/`join`/`trim`/`escape`/`shellescape`,
+`printf` width/precision/`*`/positional/`%b`/`%x`/inf/nan, `sort`/`uniq`/`map`/`filter`/
+`reduce`/`indexof` with lambdas, `matchstrpos`/`matchlist`/`matchend`, blob slicing and
+`blob2list`/`list2blob`, `json_encode`/`json_decode`, float math domains and inf/nan,
+`and`/`or`/`xor`/`invert`, comparison operators in all three case forms (`==`, `==#`, `==?`).

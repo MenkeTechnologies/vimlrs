@@ -1,0 +1,104 @@
+# fuzz_corpus.txt — oracle-recorded expectations for the differential fuzzer's findings.
+#
+# GENERATED FROM THE ORACLES, NOT FROM vimlrs. Every line was produced by running
+# the expression through BOTH Vim 9.2 and Neovim 0.12 and keeping the result only
+# when the two agreed — so this file records *Vim's* behavior and can never be
+# "fixed" by changing vimlrs. A case where vim and nvim disagree is excluded (there
+# is no single spec to freeze), e.g. strpart() with an INT64_MIN start.
+#
+# Format:  <expression> TAB <expected>
+#   <expected> is string() of the value, or !E<num> for the error number raised.
+#   Blank lines and #-comments are ignored.
+#
+# Replayed by tests/fuzz_corpus.rs, in-process, with no editor installed — so this
+# is a CI-safe gate over behavior that real Vim defines. New cases come from
+# `cargo run --bin fuzz-parity`; see docs/FUZZING.md.
+
+filter(0z0011, {_,v -> 0})	0z
+filter(0z001122, {i,v -> i > 0})	0z1122
+filter(0z00112233, {i,v -> i % 2})	0z1133
+map(0z0011, {_,v -> v + 1})	0z0112
+stridx('日本語', 'x', 1)	-1
+stridx('日本語', '語')	6
+stridx('abcabc', 'c', 3)	5
+str2float('日本語')	0.0
+strpart('hello', -2, 3)	'h'
+strlen('ab')[0]	'2'
+or(256, 7)[2]	'3'
+float2nr(31.9)[1]	'1'
+'abc'[-1]	''
+'abc'[5]	''
+'abc'[1:99]	'bc'
+'abc'[-2:]	'bc'
+'abc'[2:1]	''
+{'a':1}[0:1]	!E719
+'x' . [1]	!E730
+'x' . {'a':1}	!E731
+'x' . 0zFF	!E976
+count('ABC', {'a':1})	!E731
+float2nr(1.0e-10) . round(0.5)	'01.0'
+'x' .. acos(-1.0)	'x3.141593'
+'x' .. round(0.5)	'x1.0'
+!(0.5)	0
+!(0.0)	1
+1.5 - v:false	1.5
+1.5 + v:true	2.5
+1.5 ># 'a'	!E892
+v:true ==? 2.75	!E362
+0z61 % 2.5	!E974
+2.5 % 2	!E804
+1.5 * [1]	!E745
+-(1.5)	-1.5
+printf('%.2f')	!E766
+printf('%s', [], 'abc')	!E767
+printf('abc', 1)	!E767
+printf('%s', 'a')	'a'
+printf('%*d', 5, 3)	'    3'
+range(10, 5, 1)	!E727
+range(2, 5, 0)	!E726
+range(5, 1, -2)	[5, 3, 1]
+range(3)	[0, 1, 2]
+str2nr('a', 15)	!E474
+str2nr('11', 2)	3
+trim('ab', 'a', 3)	!E475
+trim('ab', 'a', 2)	'ab'
+insert([1], 9, -9223372036854775808)	!E684
+insert([1], 9, 5)	!E684
+insert([1], 9, -99)	!E684
+9223372036854775808	9223372036854775807
+0xFFFFFFFFFFFFFFFFF	9223372036854775807
+len(0.0)	!E701
+len('abc')	3
+len([1,2])	2
+matchstr('abc123', '\%d97')	'a'
+matchstr('abc123', '\%x61')	'a'
+matchstr('abc123', '\%o141')	'a'
+matchstr('abc123', '\%u0061')	'a'
+matchstr('abc123', '\%d97\%d98')	'ab'
+keytrans('  padded  ')	'<Space><Space>padded<Space><Space>'
+keytrans('a<b')	'a<lt>b'
+keytrans("\t")	'<Tab>'
+keytrans("\<Esc>")	'<Esc>'
+matchbufline(99, 'x', 1, '$')	!E158
+
+# --- `\<Key>` string escapes (trans_special) ---
+char2nr("\<Esc>")	27
+char2nr("\<Tab>")	9
+char2nr("\<C-A>")	1
+char2nr("\<C-h>")	8
+char2nr("\<C-?>")	127
+char2nr("\<S-a>")	65
+char2nr("\<Char-65>")	65
+char2nr("\<Char-0x41>")	65
+strlen("\<Esc>")	1
+"\<Space>" . "\<lt>" . "\<Bar>"	' <|'
+keytrans("\<C-A>")	'<C-A>'
+keytrans("\<Esc>")	'<Esc>'
+
+# --- printf() argument type/count checks ---
+printf('%g',['a'])	!E807
+printf('%f','abc')	!E807
+printf('%f',{})	!E807
+printf('%d',[1])	!E745
+printf('%f',3)	'3.000000'
+printf('%g',2)	'2.0'

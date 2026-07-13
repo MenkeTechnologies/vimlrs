@@ -1,10 +1,9 @@
 " string_index.vim — character indexing and slicing of strings (eval.c).
 "
-" Mirrors the C helpers behind string subscripts: char_from_string() for
-" str[i] (a single character, negative index counts from the end), and
-" string_slice() for str[a:b] (an *inclusive* end, unlike slice()'s exclusive
-" end) and the open-ended str[a:]. Multibyte text is indexed by character, not
-" byte. Self-tests with assert_*; exits non-zero on any failure.
+" Mirrors eval_index_inner() (eval.c:3237): str[i] is a single character, and
+" str[a:b] is an *inclusive* range (unlike slice()'s exclusive end), including
+" the open-ended str[a:]. Self-tests with assert_*; exits non-zero on any
+" failure.
 "
 "   vimlrs examples/string_index.vim
 
@@ -12,9 +11,12 @@
 call assert_equal('h', 'hello'[0])
 call assert_equal('o', 'hello'[4])
 call assert_equal('', 'hello'[9])
-" negative index counts from the end (-1 is the last character)
-call assert_equal('o', 'hello'[-1])
-call assert_equal('h', 'hello'[-5])
+" A *negative* subscript does NOT count from the end — it is out of range, and
+" the result is the empty string. (eval.c:3296: "If the index is too big or
+" negative the result is empty.") Only a slice bound counts from the end; see
+" below. Vim 9.2 and Neovim 0.12 both return '' here.
+call assert_equal('', 'hello'[-1])
+call assert_equal('', 'hello'[-5])
 
 " ── str[a:b]: inclusive end; contrast slice()'s exclusive end ──
 call assert_equal('ell', 'hello'[1:3])
@@ -25,7 +27,11 @@ call assert_equal('bcd', 'abcdef'[1:3])
 " a reversed range is the empty string
 call assert_equal('', 'abc'[2:1])
 
-" ── multibyte: indices are characters, so the accented 'é' is one unit ──
+" ── multibyte: vimlrs indexes by character, Vim by byte (known divergence) ──
+" Vim's str[i] is a *byte* subscript, so 'héllo'[1] there is the first byte of
+" 'é'. vimlrs stores strings as UTF-8 text and indexes them by character, which
+" cannot produce a half-character; see BUGS.md ("byte-vs-character string
+" indexing"). Everything else in this file matches Vim exactly.
 let word = 'héllo'
 call assert_equal(5, strchars(word))
 call assert_equal('é', word[1])

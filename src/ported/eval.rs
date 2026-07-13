@@ -94,7 +94,12 @@ pub fn num_divide(n1: varnumber_T, n2: varnumber_T) -> varnumber_T {
 /// and the number of bytes consumed (0 if no number leads `text`).
 pub fn string2float(text: &str) -> (f64, usize) {
     // c: MS-Windows does not deal with "inf"/"nan" properly — handle explicitly.
-    let starts = |kw: &str| text.len() >= kw.len() && text[..kw.len()].eq_ignore_ascii_case(kw);
+    // Compare *bytes*: `text[..kw.len()]` panics when the cut lands inside a
+    // multibyte char (`str2float('日本語')` cut '日' in half at byte 4).
+    let starts = |kw: &str| {
+        let (t, k) = (text.as_bytes(), kw.as_bytes());
+        t.len() >= k.len() && t[..k.len()].eq_ignore_ascii_case(k)
+    };
     if starts("-inf") {
         return (f64::NEG_INFINITY, 4);
     }
@@ -4712,11 +4717,20 @@ pub fn eval_string(arg: &mut &str, rettv: &mut typval_T, evaluate: bool, interpo
                     }
                     out.push(char::from(val as u8));
                 }
-                // c:3640 special key "\<C-W>" — deferred (keycodes subsystem)
-                b'<' => {
-                    out.push('<');
-                    i += 1;
-                }
+                // c:3640 special key "\<C-W>" — `extra = trans_special(&p, name,
+                // FSK_KEYCODE | …)`. A key with no character form (`\<Up>`,
+                // `\<F1>`: K_SPECIAL byte sequences) is left literal; see
+                // `keycodes::trans_special`.
+                b'<' => match crate::ported::keycodes::trans_special(&src[i..]) {
+                    Some((ch, used)) => {
+                        out.push(ch);
+                        i += used;
+                    }
+                    None => {
+                        out.push('<');
+                        i += 1;
+                    }
+                },
                 _ => {
                     // c:3659 mb_copy_char
                     let ch = src[i..].chars().next().unwrap();

@@ -104,17 +104,28 @@ pub fn tv_get_bool(tv: &typval_T) -> varnumber_T {
     tv_get_number_chk(tv, None)
 }
 
-/// Port of `tv_get_float_chk()` from `Src/eval/typval.c`.
+/// Port of `tv_get_float()` from `Src/eval/typval.c` (c:4307).
 ///
-/// Float → itself; Number → promoted; otherwise `emsg` and 0.0.
+/// Float → itself; Number → promoted; every other type has its **own** error
+/// number (c:4316-4336) — the type is part of the message contract, so a String
+/// in float context is E892 and a Bool is E362. (A single blanket "E808: Number
+/// or Float required" was wrong for all six.)
 pub fn tv_get_float(tv: &typval_T) -> f64 {
     // c: switch (tv->v_type)
     match (tv.v_type, &tv.vval) {
         (VAR_NUMBER, v_number(n)) => *n as f64, // c: return (float_T)tv->vval.v_number;
         (VAR_FLOAT, v_float(f)) => *f,          // c: return tv->vval.v_float;
         _ => {
-            // c: emsg(_("E808: Number or Float required"));
-            emsg("E808: Number or Float required");
+            emsg(match tv.v_type {
+                VAR_PARTIAL | VAR_FUNC => "E891: Using a Funcref as a Float",
+                VAR_STRING => "E892: Using a String as a Float",
+                VAR_LIST => "E893: Using a List as a Float",
+                VAR_DICT => "E894: Using a Dictionary as a Float",
+                VAR_BOOL => "E362: Using a boolean value as a Float",
+                VAR_SPECIAL => "E907: Using a special value as a Float",
+                VAR_BLOB => "E975: Using a Blob as a Float",
+                _ => "E808: Number or Float required",
+            });
             0.0
         }
     }
@@ -130,15 +141,12 @@ pub fn tv_get_string_buf_chk(tv: &typval_T) -> Option<String> {
         // c: snprintf(buf, NUMBUFLEN, "%" PRIdVARNUMBER, tv->vval.v_number);
         (VAR_NUMBER, v_number(n)) => Some(n.to_string()),
         // c: vim_snprintf(buf, NUMBUFLEN, "%g", tv->vval.v_float);
-        // RUST-PORT NOTE: Rust has no printf-`%g`; default `f64` formatting is
-        // the closest equivalent for the magnitudes the eval engine sees.
-        (VAR_FLOAT, v_float(f)) => Some(if f.is_infinite() {
-            if *f < 0.0 { "-inf" } else { "inf" }.to_string()
-        } else if f.is_nan() {
-            "nan".to_string()
-        } else {
-            format!("{f}")
-        }),
+        // Vim's `vim_snprintf` `%g` is not C's `%g`: it keeps a `.0` on a whole
+        // float and writes the exponent form as `1.0e-10`, so `round(0.5) .. 'x'`
+        // is `'1.0x'`, not `'1x'`. `vim_float_g` is that formatter (already used
+        // by `string()` and `printf('%g')`); Rust's `Display` is NOT equivalent
+        // and produced `1` / `0.0000000001` here.
+        (VAR_FLOAT, v_float(f)) => Some(crate::ported::eval::encode::vim_float_g(*f, None)),
         // c: return tv->vval.v_string == NULL ? "" : v_string;
         (VAR_STRING, v_string(s)) => Some(s.clone()),
         (VAR_FUNC, v_string(s)) => Some(s.clone()),
@@ -154,8 +162,13 @@ pub fn tv_get_string_buf_chk(tv: &typval_T) -> Option<String> {
         // c: STRCPY(buf, encode_special_var_names[tv->vval.v_special]);
         (VAR_SPECIAL, _) => Some("v:null".to_string()),
         // c: emsg(_(str_errors[tv->v_type])); return NULL;
+        //
+        // `str_errors[]` (c:4135) is a per-type table, and the type is part of
+        // the message contract — a Dict in string context is E731 and a Blob is
+        // E976, not the E730 a List gets. `tv_check_str` already encodes exactly
+        // this table, so route through it rather than keep a second copy.
         _ => {
-            emsg("E730: Using a List/Dict/Funcref/Blob as a String");
+            tv_check_str(tv);
             None
         }
     }
@@ -467,7 +480,7 @@ pub fn tv_list_find_nr(l: &list_T, n: i32, ret_error: Option<&mut bool>) -> varn
 pub fn tv_list_find_str(l: &list_T, n: i32) -> Option<String> {
     match tv_list_find(l, n) {
         None => {
-            semsg(&format!("E684: list index out of range: {n}"));
+            semsg(&format!("E684: List index out of range: {n}"));
             None
         }
         Some(li) => Some(tv_get_string(&li.li_tv)),

@@ -543,6 +543,36 @@ impl Parser {
                 self.close_group();
                 Node::Group(branches, None)
             }
+            // Codepoint atoms — `\%d123` (decimal), `\%o40` (octal), `\%xff` /
+            // `\%u00e9` / `\%U0001f600` (hex). Each matches the single character
+            // with that code, so `\%d97` is the literal `a`. The digit run is
+            // capped at the width Vim allows for the radix, so `\%d97x` is `a`
+            // followed by a literal `x`.
+            '%' if matches!(self.peek(), Some('d' | 'o' | 'x' | 'u' | 'U')) => {
+                let kind = self.peek().expect("peeked above");
+                self.i += 1; // past the radix letter
+                let (radix, maxlen) = match kind {
+                    'd' => (10, 10),
+                    'o' => (8, 4),
+                    'x' => (16, 2),
+                    'u' => (16, 4),
+                    _ => (16, 8),
+                };
+                let mut n: u32 = 0;
+                let mut got = 0;
+                while got < maxlen {
+                    let Some(c) = self.peek() else { break };
+                    let Some(d) = c.to_digit(radix) else { break };
+                    n = n.saturating_mul(radix).saturating_add(d);
+                    self.i += 1;
+                    got += 1;
+                }
+                // No digits at all: Vim treats the atom as the literal letter.
+                match (got > 0).then(|| char::from_u32(n)).flatten() {
+                    Some(c) => Node::Lit(c),
+                    None => Node::Lit(kind),
+                }
+            }
             // `\%[atoms]` — optional-sequence atom (matches a greedy prefix).
             '%' if self.peek() == Some('[') => {
                 self.i += 1; // past '['

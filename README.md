@@ -131,6 +131,28 @@ cargo test
 The vendored Neovim C eval sources under `vendor/` are the porting spec and are
 excluded from the crate build.
 
+## Parity testing
+
+Parity with real Vim is checked two ways.
+
+Every `examples/*.vim` is a self-testing script whose assertions were written
+against Vim 9.2 / Neovim 0.12; `cargo test` runs all of them.
+
+On top of that, `fuzz-parity` is a **differential fuzzer**: it generates random
+VimL expressions, runs each through vimlrs *and* through `nvim` *and* `vim`, and
+reports a bug only when both engines agree and vimlrs differs — so a Vim-vs-Neovim
+behavior split is never mistaken for a vimlrs defect.
+
+```sh
+cargo run --bin fuzz-parity -- --count 1500 --seed 11
+```
+
+It needs both editors on `PATH`, so it is a development tool and does not run in
+CI. Its findings are frozen into `tests/data/fuzz_corpus.txt` as
+oracle-recorded expectations and replayed in-process by `tests/fuzz_corpus.rs`,
+which needs no editor installed. See [`docs/FUZZING.md`](docs/FUZZING.md), and
+`BUGS.md` for the divergences it has found and what remains open.
+
 ## Links
 
 - **Docs** — https://menketechnologies.github.io/vimlrs/

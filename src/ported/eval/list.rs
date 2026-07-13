@@ -490,13 +490,26 @@ fn filter_map_blob(
     } else {
         b.clone()
     };
-    let len = tv_blob_len(&b.borrow());
+    // c: `for (int i = 0, idx = 0; i < b->bv_ga.ga_len; i++)` — the bound is the
+    // blob's *live* length, re-read each iteration, because a filtered-out byte
+    // is removed from the blob as the loop runs. On removal C also does `i--`, so
+    // the next `i++` re-examines the index the tail shifted down into.
+    //
+    // Hoisting the length (and indexing the shrinking blob with the un-rewound
+    // `i`) read one past the end: `filter(0z0011, {_,v -> 0})` panicked.
+    //
+    // `idx` counts *examined* elements, not surviving ones — it is the element's
+    // original ordinal, and it is what `v:key` sees.
+    let prev_lock = b.borrow().bv_lock;
+    if prev_lock == VarLockStatus::VAR_UNLOCKED {
+        b.borrow_mut().bv_lock = VarLockStatus::VAR_LOCKED;
+    }
     let mut i = 0i32;
-    let mut removed = 0i32;
-    while i < len {
+    let mut idx = 0i32;
+    while i < tv_blob_len(&b.borrow()) {
         let val = tv_blob_get(&b.borrow(), i) as varnumber_T;
         let tv = nr_tv(val);
-        let key = nr_tv(i as varnumber_T);
+        let key = nr_tv(idx as varnumber_T);
         match filter_map_one(&tv, &key, expr, filtermap) {
             None => break,
             Some((newtv, rem)) => {
@@ -508,17 +521,19 @@ fn filter_map_blob(
                     if filtermap != FILTERMAP_FILTER {
                         let n = tv_get_number_chk(&newtv, None);
                         if n != val {
-                            tv_blob_set(&mut b_ret.borrow_mut(), i - removed, n as u8);
+                            tv_blob_set(&mut b_ret.borrow_mut(), i, n as u8);
                         }
                     } else if rem {
-                        b.borrow_mut().bv_ga.remove((i - removed) as usize);
-                        removed += 1;
+                        b.borrow_mut().bv_ga.remove(i as usize);
+                        i -= 1;
                     }
                 }
             }
         }
+        idx += 1;
         i += 1;
     }
+    b.borrow_mut().bv_lock = prev_lock;
 }
 
 /// Port of `filter_map_string()` from `Src/eval/list.c:216`.
