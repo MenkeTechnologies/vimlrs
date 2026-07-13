@@ -102,3 +102,13 @@ printf('%f',{})	!E807
 printf('%d',[1])	!E745
 printf('%f',3)	'3.000000'
 printf('%g',2)	'2.0'
+
+# --- Dict iteration order (hashtab bucket order, not insertion/sorted) ---
+string({'x':1,'b':2,'q':3,'a':4})	'{''q'': 3, ''b'': 2, ''a'': 4, ''x'': 1}'
+string({'z':1,'a':2,'m':3})	'{''a'': 2, ''z'': 1, ''m'': 3}'
+keys({'foo':1,'bar':2,'baz':3,'qux':4})	['foo', 'baz', 'bar', 'qux']
+items({'one':1,'two':2,'three':3})	[['one', 1], ['two', 2], ['three', 3]]
+keys({'alpha':1,'beta':2,'gamma':3,'delta':4,'epsilon':5})	['delta', 'alpha', 'epsilon', 'gamma', 'beta']
+values({'x':1,'b':2,'q':3,'a':4})	[3, 2, 4, 1]
+string(extend({'x':1,'b':2},{'q':3,'a':4}))	'{''q'': 3, ''b'': 2, ''a'': 4, ''x'': 1}'
+keys(filter({'alpha':1,'beta':2,'gamma':3,'delta':4},{k,v -> v % 2}))	['alpha', 'gamma']

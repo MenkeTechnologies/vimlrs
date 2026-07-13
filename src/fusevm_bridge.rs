@@ -6147,11 +6147,13 @@ mod tests {
 
     #[test]
     fn matchstrlist_fnameescape_shiftwidth() {
-        // matchstrlist — content verified against nvim (key order is vimlrs's
-        // deterministic IndexMap order; nvim's hashtab order differs cosmetically).
+        // matchstrlist — verified against nvim, key order included. The keys come
+        // out in hashtab bucket order (`byteidx`, `idx`, `text`), not the order
+        // the C inserts them in; that is now reproduced exactly, so this asserts
+        // Vim's real output rather than a "cosmetic" divergence from it.
         assert_eq!(
             run("echo matchstrlist(['a1','b2','cc'], '\\d')"),
-            "[{'idx': 0, 'byteidx': 1, 'text': '1'}, {'idx': 1, 'byteidx': 1, 'text': '2'}]\n"
+            "[{'byteidx': 1, 'idx': 0, 'text': '1'}, {'byteidx': 1, 'idx': 1, 'text': '2'}]\n"
         );
         // submatches padded to the 9 \1..\9 backrefs.
         assert_eq!(

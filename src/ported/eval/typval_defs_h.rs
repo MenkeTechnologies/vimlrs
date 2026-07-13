@@ -241,8 +241,10 @@ pub struct list_T {
 /// users observe and is deterministic for `string()`/`:echo`).
 #[derive(Debug, Default, Clone)]
 pub struct dict_T {
-    /// `hashtab_T dv_hashtab` contents: key → value. (c:258)
-    pub dv_hashtab: indexmap::IndexMap<String, typval_T>,
+    /// `hashtab_T dv_hashtab` — the real thing (`crate::ported::hashtab`), not a
+    /// stand-in: its bucket order is what `string()`/`keys()`/`items()`/`:for`
+    /// iterate a Dict in, and Vim's order is neither insertion nor sorted. (c:258)
+    pub dv_hashtab: crate::ported::hashtab::hashtab_T<typval_T>,
     /// `int dv_refcount` — reference count. (c:256)
     pub dv_refcount: i32,
     /// `VarLockStatus dv_lock` — whole-dict lock. (c:253)

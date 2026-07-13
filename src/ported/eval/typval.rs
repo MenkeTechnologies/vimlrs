@@ -1037,9 +1037,13 @@ pub fn tv_dict_equal(d1: &Rc<RefCell<dict_T>>, d2: &Rc<RefCell<dict_T>>, ic: boo
     if d1.dv_hashtab.len() != d2.dv_hashtab.len() {
         return false;
     }
-    d1.dv_hashtab
+    // Bound to a local: the `Ref`s above are dropped before a tail expression's
+    // temporaries, and the iterator borrows from them.
+    let equal = d1
+        .dv_hashtab
         .iter()
-        .all(|(k, v)| d2.dv_hashtab.get(k).is_some_and(|w| tv_equal(v, w, ic)))
+        .all(|(k, v)| d2.dv_hashtab.get(k).is_some_and(|w| tv_equal(v, w, ic)));
+    equal
 }
 
 // ── blobs ──

@@ -1053,7 +1053,7 @@ pub fn get_globvar_dict() -> dict_T {
 
 /// Port of `get_globvar_ht()` from `Src/eval/vars.c:1862` — the `g:` scope
 /// hashtable (read-snapshot, see [`get_globvar_dict`]).
-pub fn get_globvar_ht() -> indexmap::IndexMap<String, typval_T> {
+pub fn get_globvar_ht() -> crate::ported::hashtab::hashtab_T<typval_T> {
     get_globvar_dict().dv_hashtab
 }
 

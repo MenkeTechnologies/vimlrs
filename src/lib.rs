@@ -33,6 +33,9 @@ pub mod compile_viml;
 pub mod dap;
 pub mod fusevm_bridge;
 pub mod fusevm_disasm;
+/// Rust map API over the ported `hashtab_T` (see the module docs: the C has no
+/// `contains_key`/`iter_mut`, so the adapter lives in the synthesis zone).
+pub mod hashtab_map;
 pub mod lsp;
 pub mod repl;
 pub mod script_cache;

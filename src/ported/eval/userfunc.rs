@@ -1076,14 +1076,14 @@ pub fn get_funccal_args_dict() -> Option<crate::ported::eval::typval_defs_h::dic
 /// Port of `get_funccal_local_ht()` from `Src/eval/userfunc.c` — the hashtable
 /// of the current `l:` scope (read-snapshot), or `None`.
 pub fn get_funccal_local_ht(
-) -> Option<indexmap::IndexMap<String, crate::ported::eval::typval_defs_h::typval_T>> {
+) -> Option<crate::ported::hashtab::hashtab_T<crate::ported::eval::typval_defs_h::typval_T>> {
     get_funccal_local_dict().map(|d| d.dv_hashtab)
 }
 
 /// Port of `get_funccal_args_ht()` from `Src/eval/userfunc.c` — the hashtable of
 /// the current `a:` scope (read-snapshot), or `None`.
 pub fn get_funccal_args_ht(
-) -> Option<indexmap::IndexMap<String, crate::ported::eval::typval_defs_h::typval_T>> {
+) -> Option<crate::ported::hashtab::hashtab_T<crate::ported::eval::typval_defs_h::typval_T>> {
     get_funccal_args_dict().map(|d| d.dv_hashtab)
 }
 
@@ -1301,11 +1301,11 @@ pub fn get_funccal() -> Option<std::rc::Rc<std::cell::RefCell<funccall_T>>> {
 /// If `ht` is the hashtable for local variables in the current funccal, return
 /// the dict that contains it, otherwise `None`. RUST-PORT NOTE: the C compares
 /// `ht` by pointer identity against `&current_funccal->fc_l_vars.dv_hashtab`;
-/// the `IndexMap`-backed dict has no stable address to compare, so the current
-/// funccal's `l:` dict (read-snapshot) is returned whenever inside a function
-/// (its sole caller passes the `l:` ht).
+/// the Rust dict has no stable address to compare, so the current funccal's `l:`
+/// dict (read-snapshot) is returned whenever inside a function (its sole caller
+/// passes the `l:` ht).
 pub fn get_current_funccal_dict(
-    _ht: &indexmap::IndexMap<String, crate::ported::eval::typval_defs_h::typval_T>,
+    _ht: &crate::ported::hashtab::hashtab_T<crate::ported::eval::typval_defs_h::typval_T>,
 ) -> Option<crate::ported::eval::typval_defs_h::dict_T> {
     current_funccal.with(|c| c.borrow().as_ref().map(|fc| fc.borrow().fc_l_vars.clone()))
 }
@@ -3044,10 +3044,10 @@ mod tests {
     #[test]
     fn get_current_funccal_dict_reads_l_vars() {
         use crate::ported::eval::typval::tv_dict_add_nr;
-        use indexmap::IndexMap;
+        use crate::ported::hashtab::hashtab_T;
         current_funccal.with(|c| *c.borrow_mut() = None);
         // No active funccal → None regardless of the ht passed.
-        let empty: IndexMap<String, crate::ported::eval::typval_defs_h::typval_T> = IndexMap::new();
+        let empty: hashtab_T<crate::ported::eval::typval_defs_h::typval_T> = hashtab_T::default();
         assert!(get_current_funccal_dict(&empty).is_none());
 
         let fp = ufunc_T {

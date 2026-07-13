@@ -430,8 +430,8 @@ Rounds 1–4 were hand-probed. Round 5 is machine-found: `cargo run --bin fuzz-p
 generates random VimL expressions, runs each through vimlrs **and** `nvim` **and**
 `vim`, and reports a bug only when **both** engines agree and vimlrs differs (see
 `docs/FUZZING.md`). A first run of 1500 expressions produced 3 crashes and 248
-divergences (155 distinct); the fixes below took that to **0 crashes and 10
-divergences**, none of them crashes.
+divergences (155 distinct); the fixes below took that to **0 crashes and 8
+divergences**, all of them the two known-divergence classes below.
 
 Every fix is pinned by an oracle-recorded case in `tests/data/fuzz_corpus.txt`,
 replayed by `tests/fuzz_corpus.rs` with no editor installed.
@@ -523,6 +523,21 @@ translated, so `"\<Esc>"` was five characters. `src/ported/keycodes.rs` now port
 ### R5-15. Regex codepoint atoms `\%d` / `\%o` / `\%x` / `\%u` / `\%U` — ✅ FIXED
 `matchstr('abc', '\%d97')` → Vim `'a'`, vimlrs `''`. (This was R3-11, still open.)
 
+### R5-17. Dict iteration order was insertion order, not Vim's — ✅ FIXED
+`string({'x':1,'b':2,'q':3,'a':4})` → Vim (and Neovim, identically)
+`{'q': 3, 'b': 2, 'a': 4, 'x': 1}`; vimlrs printed insertion order. Dict order is
+observable in `string()`, `keys()`, `values()`, `items()` and `:for`, and Vim's is
+neither sorted nor insertion — it is the bucket layout of `hashtab.c`. `indexmap`
+could never reproduce it, so `hashtab.c` is now ported (`src/ported/hashtab.rs`:
+the `hash * 101 + byte` hash, the 16-slot initial array, the
+`idx = 5*idx + perturb + 1` probe, tombstones, and the grow-at-2/3-full policy) and
+`dict_T::dv_hashtab` is a real `hashtab_T`. Order now matches byte-for-byte,
+including after removals and across a grow-and-rehash.
+
+The Rust map API the port's ~108 call sites use (`contains_key`, `iter_mut`, …) has
+no C counterpart, so it lives in the synthesis zone (`src/hashtab_map.rs`) rather
+than being allowlisted as a fake ported name.
+
 ### R5-16. `printf()` float conversions reported the per-type float error — ✅ FIXED
 `printf('%f', 'abc')` → Vim E807 ("Expected Float argument for printf()"), vimlrs
 E892. The C's `tvs_get_float` raises one error for *any* non-numeric argument to
@@ -552,14 +567,6 @@ arrays; vimlrs stores them as Rust `String` (UTF-8 text), which cannot hold a lo
 `0xE6`. Fixing this means changing the string representation to `Vec<u8>` — a
 deliberate, separate decision, not a bug fix. Everything else about indexing (empty
 on out-of-range, no negative wrap, inclusive slices) now matches exactly.
-
-### R5-D2. Dict iteration order is insertion order; Vim's is hashtab bucket order
-`string({'x':1,'b':2,'q':3,'a':4})` → Vim (and Neovim, identically)
-`{'q': 3, 'b': 2, 'a': 4, 'x': 1}`; vimlrs `{'x': 1, 'b': 2, 'q': 3, 'a': 4}`.
-Affects `string()`, `keys()`, `values()`, `items()`, and `:for` over a Dict. Vim's
-order is neither sorted nor insertion — it is the bucket layout of `hashtab.c`, and
-reproducing it exactly requires porting that hashtab and backing `dict_T` with it
-(108 call sites). Tracked as its own piece of work; `indexmap` is what is there now.
 
 ### R5-D3. Errors surface in a different order when two operands both fail
 `extend([[1,2]], [1], -1) .. strspn()` → Vim E730, vimlrs E117. Vim is a
