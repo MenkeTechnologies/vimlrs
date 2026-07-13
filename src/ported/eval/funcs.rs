@@ -2054,12 +2054,23 @@ pub fn f_setenv(argvars: &[typval_T], _rettv: &mut typval_T) {
 /// default `do_special=false`: wrap in single quotes, `'` → `'\''`.)
 pub fn f_shellescape(argvars: &[typval_T], rettv: &mut typval_T) {
     let s = tv_get_string(&argvars[0]);
+    // c: `vim_strsave_shellescape(str, do_special, do_special)` — with {special}
+    // truthy, the items the `:!` command would expand (`!`, `%`, `#`) and a
+    // newline are preceded by a backslash, which `:!` then strips again
+    // (`:help shellescape`). The `<cword>`-style cmdline variables are also
+    // escaped in Vim; that needs the cmdline-var table and is not ported.
+    let special = argvars
+        .get(1)
+        .is_some_and(|t| tv_get_number_chk(t, None) != 0);
     let mut out = String::with_capacity(s.len() + 2);
     out.push('\'');
     for c in s.chars() {
         if c == '\'' {
             out.push_str("'\\''");
         } else {
+            if special && matches!(c, '!' | '%' | '#' | '\n') {
+                out.push('\\');
+            }
             out.push(c);
         }
     }
@@ -4568,7 +4579,20 @@ pub fn f_matchbufline(argvars: &[typval_T], rettv: &mut typval_T) {
     }
     let pat = tv_get_string(&argvars[1]);
     let lnum = tv_get_lnum(&argvars[2]);
+    // c: `if (slnum < 1) { semsg(_(e_invargval), "lnum"); return; }` and
+    // `if (elnum < 1 || elnum < slnum) { semsg(_(e_invargval), "end_lnum"); return; }`
+    // — line numbers are 1-based, so 0 or negative is an error, not an empty list.
+    if lnum < 1 {
+        crate::ported::message::semsg("E475: Invalid value for argument lnum");
+        tv_list_alloc_ret(rettv, 0);
+        return;
+    }
     let end = tv_get_lnum(&argvars[3]);
+    if end < 1 || end < lnum {
+        crate::ported::message::semsg("E475: Invalid value for argument end_lnum");
+        tv_list_alloc_ret(rettv, 0);
+        return;
+    }
     let ic = tv_get_number_chk(&get_option_value("ignorecase"), None) != 0;
     // c: optional {dict} with "submatches".
     let submatches = argvars.get(4).is_some_and(|d| match &d.vval {

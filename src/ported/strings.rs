@@ -622,6 +622,11 @@ fn utf_char2cells(c: char) -> usize {
     if let Some(w) = cw_value(u) {
         return w;
     }
+    // c: an unprintable C1 character has no glyph and is shown as `<80>` — four
+    // cells, and `strwidth()` counts them (`strwidth(nr2char(0x80))` is 4).
+    if (0x80..=0x9f).contains(&u) {
+        return 4;
+    }
     let wide = matches!(u,
         0x1100..=0x115F | 0x2329 | 0x232A | 0x2E80..=0x303E | 0x3041..=0x33FF
         | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xA000..=0xA4CF | 0xAC00..=0xD7A3
@@ -754,6 +759,11 @@ pub fn f_strdisplaywidth(argvars: &[typval_T], rettv: &mut typval_T) {
     for c in s.chars() {
         if c == '\t' {
             col += ts - (col % ts);
+        } else if (c as u32) < 0x20 || c == '\x7f' {
+            // c: a control character has no glyph — it *displays* as `^X` (`^J`,
+            // `^?`), which is two cells. `strdisplaywidth` measures the display,
+            // so it counts 2 where `strwidth` (which measures the text) counts 1.
+            col += 2;
         } else {
             col += utf_char2cells(c);
         }

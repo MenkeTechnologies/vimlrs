@@ -146,3 +146,21 @@ matchstr('1a','\\_a')	''
 matchstr('xa','\\_[a]')	''
 matchstr('a1','\\_d')	''
 matchstr('ab','\\_S')	''
+
+# --- round 8: shellescape {special}, strdisplaywidth control cells, matchbufline lnum ---
+# (shellescape of a newline is recorded via str2list: an expected value must be one line)
+str2list(shellescape("a\nb", 1))	[39, 97, 92, 10, 98, 39]
+str2list(shellescape("a\nb"))	[39, 97, 10, 98, 39]
+shellescape('a!b%c#d', 1)	'''a\!b\%c\#d'''
+shellescape('a b')	'''a b'''
+shellescape('a!b')	'''a!b'''
+strdisplaywidth("a\nb")	4
+strdisplaywidth("\x01")	2
+strdisplaywidth("\x7f")	2
+strdisplaywidth("a\tb")	9
+strwidth(nr2char(0x80))	4
+strdisplaywidth(nr2char(0x80))	4
+strwidth("a\nb")	3
+matchbufline(1,'a',-5,-9)	!E475
+matchbufline(1,'a',0,1)	!E475
+matchbufline(1,'a',2,1)	!E475

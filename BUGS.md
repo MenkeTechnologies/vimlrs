@@ -673,13 +673,38 @@ fails silently, leaving the Dict in place. Both are now ported, error-free.
 *negated* class would then exclude it), so it is modelled as what it is: an
 alternation of the atom and a literal newline.
 
+### R7-5. `shellescape()` ignored its {special} argument — ✅ FIXED
+`shellescape("a\nb", 1)` → Vim escapes the newline (`'a\<NL>b'`), and likewise `!`,
+`%`, `#` — the items `:!` would expand, which it strips again
+(`:help shellescape`). vimlrs ignored the argument entirely. (Vim also escapes the
+`<cword>`-style cmdline variables; that needs the cmdline-var table and is not
+ported.)
+
+### R7-6. `strdisplaywidth()` counted a control character as one cell — ✅ FIXED
+`strdisplaywidth("a\nb")` → Vim `4`, vimlrs `3`. A control character has no glyph
+and *displays* as `^J` — two cells. `strdisplaywidth` measures the display, so it
+counts 2 where `strwidth` (which measures the text) counts 1; both are now right.
+Relatedly an unprintable C1 char (`0x80`–`0x9f`) shows as `<80>` — four cells — and
+`strwidth` counts those.
+
+### R7-7. `matchbufline()` did not validate its line numbers — ✅ FIXED
+`matchbufline(1, 'a', 0, 1)` → Vim E475 ("Invalid value for argument lnum"), vimlrs
+an empty list. Line numbers are 1-based; `end < lnum` is E475 on `end_lnum`.
+
 ## Still open
 
+- **Error ordering (R5-D3) — the largest remaining class.** Vim's `eval5`
+  type-checks the *left* operand of an arithmetic/concat operator **before it even
+  parses the right one** (c:2406-2414), so `0z - remove(g:d, {})` reports E974 (Blob
+  as Number, the left operand) where vimlrs reports the right operand's E731. Same
+  for `extend(…) .. strspn()` (E730 vs E117). vimlrs compiles both operands and
+  then applies the op, so whichever *runs* first wins. Fixing it means emitting a
+  type-check of the left operand between the two operand evaluations — a VM
+  operation on **every** arithmetic and concat op, i.e. a hot-path cost, in exchange
+  for error-message ordering in already-erroring scripts. The values are identical
+  either way. Deliberately not taken without a call on that trade.
 - `nr2char(2147483647)` → Vim emits the raw replacement bytes, vimlrs `''`. Same
   string-representation root cause as R5-D1 (Vim strings are byte arrays).
-- `strdisplaywidth("a\nb")` counts a control character as 1 cell; Vim counts the 2
-  cells it displays as (`^J`).
-- `matchbufline()` does not validate `lnum`/`end` (Vim: E475 for a negative line).
-- `shellescape(s, 1)` does not escape a newline the way Vim does.
-- The error-*ordering* class (R5-D3) and byte-vs-character string indexing (R5-D1)
-  remain the two structural divergences.
+- `eval()` rejects trailing text before evaluating (R5-O2) — same compile-first root
+  cause as the ordering class.
+- Byte-vs-character string indexing (R5-D1) remains the other structural divergence.
