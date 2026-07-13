@@ -282,7 +282,7 @@ fn preprocess_magic(pat: &str) -> String {
     let chars: Vec<char> = pat.chars().collect();
     let mut out = String::new();
     let mut i = 0;
-    let mut mode = Magic::Magic;
+    let mut mode = Dialect::Magic;
     const OPS: &str = "(){}+?=|<>";
     while i < chars.len() {
         let c = chars[i];
@@ -290,22 +290,22 @@ fn preprocess_magic(pat: &str) -> String {
         if c == '\\' {
             match chars.get(i + 1) {
                 Some('v') => {
-                    mode = Magic::VeryMagic;
+                    mode = Dialect::VeryMagic;
                     i += 2;
                     continue;
                 }
                 Some('m') => {
-                    mode = Magic::Magic;
+                    mode = Dialect::Magic;
                     i += 2;
                     continue;
                 }
                 Some('M') => {
-                    mode = Magic::NoMagic;
+                    mode = Dialect::NoMagic;
                     i += 2;
                     continue;
                 }
                 Some('V') => {
-                    mode = Magic::VeryNoMagic;
+                    mode = Dialect::VeryNoMagic;
                     i += 2;
                     continue;
                 }
@@ -313,7 +313,7 @@ fn preprocess_magic(pat: &str) -> String {
             }
         }
         match mode {
-            Magic::Magic => {
+            Dialect::Magic => {
                 // Already the dialect the parser reads: copy an escape pair whole so a
                 // following char is never mistaken for a bare one.
                 out.push(c);
@@ -329,8 +329,8 @@ fn preprocess_magic(pat: &str) -> String {
             // swapped. Very nomagic swaps `^` and `$` as well, so `\V^` is a literal
             // caret. Everything else (`\(`, `\|`, `\zs`, `\d`, …) is identical in
             // all four, which is why translating into magic is enough for the parser.
-            Magic::NoMagic | Magic::VeryNoMagic => {
-                let swapped: &str = if mode == Magic::NoMagic {
+            Dialect::NoMagic | Dialect::VeryNoMagic => {
+                let swapped: &str = if mode == Dialect::NoMagic {
                     ".*~["
                 } else {
                     ".*~[^$"
@@ -368,7 +368,7 @@ fn preprocess_magic(pat: &str) -> String {
                     i += 1;
                 }
             }
-            Magic::VeryMagic => {
+            Dialect::VeryMagic => {
                 match c {
                     '\\' => {
                         if let Some(&n) = chars.get(i + 1) {
@@ -431,10 +431,10 @@ fn preprocess_magic(pat: &str) -> String {
     out
 }
 
-/// The four pattern dialects (`:help /magic`). The parser reads [`Magic::Magic`];
+/// The four pattern dialects (`:help /magic`). The parser reads [`Dialect::Magic`];
 /// `preprocess_magic` translates the other three into it.
 #[derive(Clone, Copy, PartialEq)]
-enum Magic {
+enum Dialect {
     VeryMagic,
     Magic,
     NoMagic,
