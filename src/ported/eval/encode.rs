@@ -602,6 +602,17 @@ pub fn encode_vim_to_json(tv: &typval_T) -> String {
                 out
             }
         },
+        // c: TYPVAL_ENCODE_CONV_BLOB (encode.c:751) — a Blob is a JSON *array of
+        // byte values*, `[0, 17, 34]`, not `null`. (Note the ", " separator: the
+        // JSON encoder spaces list items, unlike `string()`.)
+        (VAR_BLOB, v_blob(b)) => match b {
+            None => "[]".to_string(),
+            Some(b) => {
+                let b = b.borrow();
+                let items: Vec<String> = b.bv_ga.iter().map(|byte| byte.to_string()).collect();
+                format!("[{}]", items.join(", "))
+            }
+        },
         _ => "null".to_string(),
     }
 }

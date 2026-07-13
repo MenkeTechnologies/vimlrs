@@ -642,12 +642,44 @@ matching atom consumes a whole character as `mb_ptr2len`/`utfc_ptr2len` measures
 `char`. Fixed for `.`, literals and classes, and for `split(s, '\zs')`, whose
 zero-width step advances one character too.
 
-## Still open (round 6)
+---
+
+# Round 7 — the fuzzer's next pass
+
+### R7-1. `json_encode()` of a Blob was `null` — ✅ FIXED
+`json_encode(0zFF)` → Neovim `'[255]'`, vimlrs `'null'`. A Blob is a JSON *array of
+byte values* (c: `TYPVAL_ENCODE_CONV_BLOB`, encode.c:751); the encoder had no Blob
+arm and fell through to the catch-all. (Vim and Neovim differ on the separator —
+`'[0, 17]'` vs `'[0,17]'` — so this one is pinned to Neovim, the port target, and
+is not in the corpus gate.)
+
+### R7-2. `list2str()` did not stop at a NUL — ✅ FIXED
+`list2str([65, 0, 66])` → Neovim `'A'`, vimlrs `'A<NUL>B'`. The codepoints are
+written into a C string, so a 0 terminates it. (Vim gives `'AB'` here; vimlrs
+follows Neovim.)
+
+### R7-3. `slice()` mishandled every non-indexable type — ✅ FIXED
+`slice(v:true, 0)` → Vim `0`, vimlrs `'v:true'`; `slice({'a':1}, -255)` → Vim hands
+the Dict back unchanged, vimlrs raised E731. The C is
+`if (check_can_index(&argvars[0], true, false) != OK) return;` — note `verbose =
+false`: a Float/Bool/Special is *silently* rejected and the result stays the default
+Number 0, and a Dict copies through `eval_index_inner`, whose range branch also
+fails silently, leaving the Dict in place. Both are now ported, error-free.
+
+### R7-4. The `\_x` regex family was unimplemented — ✅ FIXED
+`matchstr(' x', '\_.')` → Vim `' '`, vimlrs `''` — and the same for `\_s`, `\_a`,
+`\_d`, `\_[…]` and the negated forms. `\_x` means "x, or a newline"
+(`:help /\_`), which cannot be done by adding NL to the class's item list (a
+*negated* class would then exclude it), so it is modelled as what it is: an
+alternation of the atom and a literal newline.
+
+## Still open
 
 - `nr2char(2147483647)` → Vim emits the raw replacement bytes, vimlrs `''`. Same
   string-representation root cause as R5-D1 (Vim strings are byte arrays).
-- `list2str([0])` → Vim `''` (a NUL ends the C string), vimlrs a one-NUL string.
 - `strdisplaywidth("a\nb")` counts a control character as 1 cell; Vim counts the 2
   cells it displays as (`^J`).
 - `matchbufline()` does not validate `lnum`/`end` (Vim: E475 for a negative line).
-- `slice()` on a Bool/Number returns the stringified value instead of Vim's `0`.
+- `shellescape(s, 1)` does not escape a newline the way Vim does.
+- The error-*ordering* class (R5-D3) and byte-vs-character string indexing (R5-D1)
+  remain the two structural divergences.

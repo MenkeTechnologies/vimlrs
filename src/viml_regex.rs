@@ -529,7 +529,55 @@ impl Parser {
     fn escape(&mut self) -> Option<Node> {
         self.i += 1; // past '\'
         let c = self.bump()?;
+        self.escaped(c)
+    }
+
+    /// The atom denoted by the character *after* a backslash (already consumed).
+    /// Split out from [`Self::escape`] so `\_x` can ask for the same atom `\x`
+    /// would produce and then wrap it (see the `'_'` arm).
+    fn escaped(&mut self, c: char) -> Option<Node> {
         Some(match c {
+            // `\_x` — "x, or a newline" (`:help /\_`). `\_.` is any character
+            // including NL, `\_s`/`\_a`/`\_d`/… are the class plus NL, and
+            // `\_[…]` is the collection plus NL. It applies to the *negated*
+            // classes too (`\_S` is "non-white, or NL"), so this cannot be done by
+            // adding NL to the class's item list — a negated class would then
+            // exclude it. Model it as what it is: an alternation of the atom and a
+            // literal newline.
+            '_' => {
+                let inner = match self.peek() {
+                    // `\_.` — the `.` atom does not reach `escape()`, so take it here.
+                    Some('.') => {
+                        self.i += 1;
+                        Node::Any
+                    }
+                    // `\_[…]` — a bracket collection.
+                    Some('[') => self.atom(false)?,
+                    // `\_s`, `\_d`, `\_S`, … — the escaped class atom that follows.
+                    Some(_) => {
+                        let c = self.bump()?;
+                        self.escaped(c)?
+                    }
+                    None => return None,
+                };
+                Node::Group(
+                    vec![
+                        vec![Atom {
+                            node: inner,
+                            min: 1,
+                            max: 1,
+                            greedy: true,
+                        }],
+                        vec![Atom {
+                            node: Node::Lit('\n'),
+                            min: 1,
+                            max: 1,
+                            greedy: true,
+                        }],
+                    ],
+                    None,
+                )
+            }
             '(' => {
                 let idx = self.ngroups + 1;
                 self.ngroups = idx;

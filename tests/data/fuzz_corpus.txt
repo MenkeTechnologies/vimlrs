@@ -130,3 +130,19 @@ funcref('')	!E129
 matchstr('e\u0301combining', '\\l')	''
 split('e\u0301combining', '\\zs')[0]	'e\u0301combining'
 matchstr('e\u0301x', '.')	'e'
+
+# --- round 7: json_encode(blob), list2str NUL, slice(), the \_ regex family ---
+json_encode(0zFF)	'[255]'
+json_encode(0z)	'[]'
+list2str([255,256,0])	'ÿĀ'
+slice({'a':1,'b':2},-255)	{'a': 1, 'b': 2}
+slice(v:true,0)	0
+slice(-1.0,0)	0
+slice(42,0)	'42'
+slice(0z001122,1)	0z1122
+matchstr(' x','\\_.')	''
+matchstr('a b','\\_s')	''
+matchstr('1a','\\_a')	''
+matchstr('xa','\\_[a]')	''
+matchstr('a1','\\_d')	''
+matchstr('ab','\\_S')	''

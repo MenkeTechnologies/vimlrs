@@ -1827,7 +1827,13 @@ pub fn f_list2str(argvars: &[typval_T], rettv: &mut typval_T) {
     let mut out = String::new();
     if let (VAR_LIST, v_list(Some(l))) = (argvars[0].v_type, &argvars[0].vval) {
         for it in &l.borrow().lv_items {
-            if let Some(c) = char::from_u32(tv_get_number_chk(&it.li_tv, None) as u32) {
+            let n = tv_get_number_chk(&it.li_tv, None);
+            // c: the codepoints are written into a C string, so a 0 terminates it —
+            // `list2str([65, 0, 66])` is `'A'`, not `'A<NUL>B'`.
+            if n == 0 {
+                break;
+            }
+            if let Some(c) = char::from_u32(n as u32) {
                 out.push(c);
             }
         }

@@ -16,6 +16,7 @@ use crate::ported::eval::typval::{
     tv_list_append_tv,
 };
 use crate::ported::eval::typval_defs_h::{typval_T, typval_vval_union::*, varnumber_T, VarType::*};
+use crate::ported::eval_h::OK;
 use crate::ported::message::{emsg, semsg};
 use crate::ported::option::get_option_value;
 
@@ -541,6 +542,20 @@ pub fn f_strtrans(argvars: &[typval_T], rettv: &mut typval_T) {
 /// -1 omits the last item; an omitted `{end}` runs to the end. Returns an empty
 /// value of the same type for an empty/invalid range.
 pub fn f_slice(argvars: &[typval_T], rettv: &mut typval_T) {
+    // c: `if (check_can_index(&argvars[0], true, false) != OK) { return; }` — note
+    // `verbose = false`: a Float/Bool/Special/Funcref is *silently* rejected and
+    // the result stays the default Number 0 (`slice(v:true, 0)` is `0`, not the
+    // stringified `'v:true'` this used to produce, and not an error either).
+    if crate::ported::eval::check_can_index(&argvars[0], true, false) != OK {
+        return;
+    }
+    // c: a Dict reaches `eval_index_inner`, whose range branch fails — silently,
+    // again because `verbose` is false — leaving the copied value in place. So
+    // slicing a Dict hands the Dict back unchanged rather than raising E731/E719.
+    if argvars[0].v_type == VAR_DICT {
+        *rettv = argvars[0].clone();
+        return;
+    }
     // Length of the sliced value, by type.
     let len: varnumber_T = match (argvars[0].v_type, &argvars[0].vval) {
         (VAR_LIST, v_list(Some(l))) => l.borrow().lv_items.len() as varnumber_T,
