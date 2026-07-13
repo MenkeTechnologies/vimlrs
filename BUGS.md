@@ -913,10 +913,29 @@ so translating into the magic dialect the parser already reads is enough.
 
 Regex fuzz after these: **326 → 77 gaps, 0 panics.**
 
+### R12-4. A backreference to an *unclosed* group was accepted — ✅ FIXED
+`\(a\1\)` is E65 in Vim: the group must be **complete** before it can be referred to.
+Counting *opened* groups was not enough — `\(\(a\)\2\)` is legal (group 2 closed) while
+`\(\(a\)\1\)` is not (group 1 still open). The parser now tracks which groups have
+closed.
+
+### R12-5. `[z-a]` and a stray `\)` were accepted — ✅ FIXED
+E944 (reverse range in a character class) and E55 (unmatched `\)`).
+
+### R12-6. An unterminated `[` was treated as a collection — ✅ FIXED
+`match('a[x', '[')` → Vim `1`, vimlrs `-1`; `match('a[x', '[abc')` → Vim `-1`, vimlrs `0`.
+An unterminated collection is not a collection at all: Vim treats the `[` as a
+**literal character**, so the pattern `[abc` looks for the literal text `[abc`. The
+first `]` may still appear right after `[` or `[^` (`[]a]` holds `]` and `a`), so the
+scan starts past it.
+
+Regex fuzz after round 13: **326 → 34 gaps** (10 distinct), 0 panics.
+
 ## Still open
 
-- The remaining regex gaps (26 distinct) are mostly deeply-nested quantifier and
-  backtracking corners, plus a few where Vim rejects a pattern vimlrs still accepts.
+- The remaining regex gaps (10 distinct) are deeply-nested quantifier and backtracking
+  corners — non-greedy `\{-}` inside a repeated group, and `split()` on a pattern that
+  can match empty.
 - `nr2char(2147483647)` → Vim emits the raw replacement bytes, vimlrs `''`. Same
   string-representation root cause as R5-D1 (Vim strings are byte arrays), which
   remains the one structural divergence.

@@ -197,3 +197,19 @@ match('aaa','\\(a')	-1
 match('aaa','\\zs\\?')	-1
 match('aaa','\\ze\\?')	-1
 matchend('abc','\\(\\zs\\?\\)\\{2}')	-1
+
+# --- round 13: backref closure (E65), E944/E55, unterminated [ is literal ---
+match('aaa','\\(a\\1\\)')	-1
+match('aaa','\\(a\\)\\1')	-1
+match('aaa','\\(a\\|\\1\\)')	-1
+match('aaa','\\(\\(a\\)\\2\\)')	-1
+match('aaa','\\(\\(a\\)\\1\\)')	-1
+match('aaa','[z-a]')	!E944
+match('aaa','a\\)')	-1
+match('aaa','\\(a\\)\\)')	-1
+match('a[x','[')	1
+match('a[x','[abc')	-1
+matchstr('a[x','[')	'['
+match('a]b','[]a]')	0
+match('abc','[^x]')	0
+substitute('aaa','\\Mc\\=\\[\\?','X','g')	'aaa'

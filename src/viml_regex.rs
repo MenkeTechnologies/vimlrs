@@ -448,6 +448,10 @@ struct Parser {
     i: usize,
     ngroups: usize,
     forced_ic: Option<bool>,
+    /// Groups that have been *closed* so far. A backreference is legal only once its
+    /// group is complete: Vim rejects `\(a\1\)` (E65) while `\(\(a\)\2\)` is fine, so
+    /// counting *opened* groups is not enough.
+    closed: Vec<usize>,
     /// The first `E<nnn>` the pattern violates. Vim *rejects* an invalid pattern —
     /// a backreference to a group that does not exist, a quantifier on `\zs`, a
     /// quantifier on a quantifier, an unclosed `\(` — and every function that takes
@@ -621,7 +625,11 @@ impl Parser {
                 self.i += 1;
                 Some(Node::Eol)
             }
-            '[' => {
+            // c: an *unterminated* collection is not a collection at all — Vim treats
+            // the `[` as a literal character (`match('a[x', '[')` is 1, and the
+            // pattern `[abc` looks for the literal text `[abc`). Only scan it as a
+            // collection when a closing `]` actually follows.
+            '[' if self.collection_closes() => {
                 self.i += 1;
                 Some(Node::Class(self.bracket()))
             }
@@ -698,6 +706,7 @@ impl Parser {
                 self.ngroups = idx;
                 let branches = self.alternation();
                 self.close_group();
+                self.closed.push(idx);
                 Node::Group(branches, Some(idx))
             }
             '%' if self.peek() == Some('(') => {
@@ -797,7 +806,9 @@ impl Parser {
             // c: Vim rejects `\1` with no group, and a *forward* reference too.
             d @ '1'..='9' => {
                 let n = d as usize - '0' as usize;
-                if n > self.ngroups {
+                // c: the group must be COMPLETE — `\(a\1\)` refers to a group that is
+                // still open, which Vim rejects, and so is a forward reference.
+                if !self.closed.contains(&n) {
                     self.fail("E65: Illegal back reference");
                 }
                 Node::BackRef(n)
@@ -817,6 +828,27 @@ impl Parser {
             // c: "E54: Unmatched \(" — the group was never closed.
             self.fail("E54: Unmatched \\(");
         }
+    }
+
+    /// Whether the `[` at the cursor opens a collection that is actually closed.
+    /// The first `]` may appear literally right after `[` or `[^` (`[]a]` is a
+    /// collection holding `]` and `a`), so start looking past it.
+    fn collection_closes(&self) -> bool {
+        let mut j = self.i + 1;
+        if self.p.get(j) == Some(&'^') {
+            j += 1;
+        }
+        if self.p.get(j) == Some(&']') {
+            j += 1;
+        }
+        while let Some(&c) = self.p.get(j) {
+            match c {
+                ']' => return true,
+                '\\' => j += 2, // an escaped char inside the collection
+                _ => j += 1,
+            }
+        }
+        false
     }
 
     fn bracket(&mut self) -> Class {
@@ -848,6 +880,10 @@ impl Parser {
             if self.peek() == Some('-') && self.peek2().is_some() && self.peek2() != Some(']') {
                 self.i += 1;
                 let hi = self.bump().unwrap();
+                // c: "E944: Reverse range in character class" — `[z-a]`.
+                if hi < c {
+                    self.fail("E944: Reverse range in character class");
+                }
                 items.push(ClassItem::Range(c, hi));
             } else {
                 items.push(ClassItem::Ch(c));
@@ -930,9 +966,15 @@ impl Regex {
             i: 0,
             ngroups: 0,
             forced_ic: None,
+            closed: Vec::new(),
             err: None,
         };
         let branches = parser.alternation();
+        // `concat` stops at a `\)`, so anything left over at the top level is a `\)`
+        // that never had a `\(` — c: "E55: Unmatched \)".
+        if parser.i < parser.p.len() {
+            parser.fail("E55: Unmatched \\)");
+        }
         // An invalid pattern is an *error* in Vim, raised by every function that
         // takes one (`match()`, `substitute()`, `split()`, …) — not a pattern that
         // quietly matches nothing, which is what this engine used to do. Report it
