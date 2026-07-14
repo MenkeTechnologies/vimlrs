@@ -57,7 +57,8 @@ fn is_vim_error(line: &str) -> bool {
 }
 
 /// The epilogue every script shares: throw on assertion failure, else `ALL_OK`.
-const EPILOGUE: &str = "\nif !empty(v:errors)\n  echo v:errors\n  throw 'intercept-test-fail'\nendif\necho 'ALL_OK'\n";
+const EPILOGUE: &str =
+    "\nif !empty(v:errors)\n  echo v:errors\n  throw 'intercept-test-fail'\nendif\necho 'ALL_OK'\n";
 
 #[test]
 fn intercept_before_and_after_fire_in_order_around_the_call() {

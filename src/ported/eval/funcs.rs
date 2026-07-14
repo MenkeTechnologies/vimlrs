@@ -2103,34 +2103,6 @@ pub fn f_getpid(_argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.vval = v_number(std::process::id() as varnumber_T);
 }
 
-/// `intercept({kind}, {pattern}, {code})` — register AOP advice on user-function
-/// calls; returns the new intercept's numeric ID (or -1 on a bad {kind}). The
-/// expression-context form of the `:Intercept before|after|around` sub-command.
-/// vimlrs/zshrs-original extension — no Vim counterpart.
-pub fn f_intercept(argvars: &[typval_T], rettv: &mut typval_T) {
-    use crate::intercepts::{register, AdviceKind};
-    let kind = match tv_get_string(&argvars[0]).as_str() {
-        "before" => AdviceKind::Before,
-        "after" => AdviceKind::After,
-        "around" => AdviceKind::Around,
-        other => {
-            crate::ported::message::semsg(&format!(
-                "E475: intercept(): kind must be before|after|around, got '{other}'"
-            ));
-            rettv.vval = v_number(-1);
-            return;
-        }
-    };
-    let id = register(kind, tv_get_string(&argvars[1]), tv_get_string(&argvars[2]));
-    rettv.vval = v_number(id as varnumber_T);
-}
-
-/// `intercept_proceed()` — from an around advice, run the original intercepted
-/// function and return its value. vimlrs/zshrs-original extension.
-pub fn f_intercept_proceed(_argvars: &[typval_T], rettv: &mut typval_T) {
-    *rettv = crate::fusevm_bridge::intercept_proceed();
-}
-
 // ── batch 8: time + soundfold + byteidxcomp (funcs.c / strings.c) ──
 
 /// Port of `f_localtime()` from `Src/eval/funcs.c` (c:4043) — `time(NULL)`, the
@@ -8052,69 +8024,6 @@ pub fn do_excmd(line: &str) -> ExCmdResult {
         // digit (`python3`, `py3`), so it is matched on `rest`, not the alpha `cmd`.
         _ if crate::viml_parser::is_script_lang_cmd(rest) => ExCmdResult::Handled,
         _ => ExCmdResult::NotEx,
-    }
-}
-
-/// `:Intercept …` handler — the user-facing entry point for the AOP
-/// command-intercept extension. Mirrors zshrs's `intercept` builtin sub-commands
-/// (`before|after|around <pattern> {code}`, `list`, `remove <id>`, `clear`) and
-/// adds `proceed` (the ex-command form of zshrs's `intercept_proceed`, for use
-/// inside an around advice). Returns a shell-style status (0 ok) that the Ex
-/// dispatcher discards.
-pub fn ex_intercept(args: &str) -> i32 {
-    use crate::intercepts::{self, AdviceKind};
-    use crate::ported::message::{emsg, semsg};
-    let args = args.trim();
-    if args.is_empty() {
-        println!("Usage: :Intercept <before|after|around> <pattern> {{ code }}");
-        println!("       :Intercept list | remove <id> | clear | proceed");
-        return 0;
-    }
-    let mut it = args.splitn(2, char::is_whitespace);
-    let sub = it.next().unwrap_or("");
-    let rest = it.next().unwrap_or("").trim();
-    match sub {
-        "list" => intercepts::list(),
-        "clear" => intercepts::clear(),
-        "proceed" => {
-            // Run the original intercepted function from around advice.
-            crate::fusevm_bridge::intercept_proceed();
-            0
-        }
-        "remove" => match rest.split_whitespace().next().and_then(|s| s.parse::<u32>().ok()) {
-            Some(id) => intercepts::remove(id),
-            None => {
-                emsg("E474: :Intercept remove requires a numeric ID");
-                1
-            }
-        },
-        "before" | "after" | "around" => {
-            let kind = match sub {
-                "before" => AdviceKind::Before,
-                "after" => AdviceKind::After,
-                _ => AdviceKind::Around,
-            };
-            let mut parts = rest.splitn(2, char::is_whitespace);
-            let pattern = parts.next().unwrap_or("").to_string();
-            let mut code = parts.next().unwrap_or("").trim().to_string();
-            if pattern.is_empty() || code.is_empty() {
-                semsg(&format!(
-                    "E474: :Intercept {sub} requires <pattern> {{ code }}"
-                ));
-                return 1;
-            }
-            // Strip the surrounding `{ … }` braces (mirrors zshrs builtin_intercept).
-            if code.starts_with('{') && code.ends_with('}') {
-                code = code[1..code.len() - 1].trim().to_string();
-            }
-            let id = intercepts::register(kind, pattern, code);
-            println!("intercept #{id} registered");
-            0
-        }
-        _ => {
-            semsg(&format!("E474: :Intercept: unknown sub-command '{sub}'"));
-            1
-        }
     }
 }
 

@@ -44,8 +44,7 @@ use crate::ported::eval::funcs::{
     f_getwinposy, f_getwinvar, f_has, f_has_key, f_hlID, f_hlexists, f_id, f_index, f_indexof,
     f_input, f_inputdialog, f_inputlist, f_inputrestore, f_inputsave, f_inputsecret, f_insert,
     f_interrupt, f_invert, f_isinf, f_islocked, f_isnan, f_items, f_jobpid, f_jobresize,
-    f_intercept, f_intercept_proceed, f_jobstart, f_jobstop, f_jobwait, f_json_decode,
-    f_json_encode, f_keys, f_keytrans,
+    f_jobstart, f_jobstop, f_jobwait, f_json_decode, f_json_encode, f_keys, f_keytrans,
     f_last_buffer_nr, f_len, f_libcall, f_libcallnr, f_line, f_line2byte, f_list2str, f_localtime,
     f_luaeval, f_match, f_matchbufline, f_matchend, f_matchlist, f_matchstr, f_matchstrlist,
     f_matchstrpos, f_max, f_menu_get, f_min, f_mode, f_msgpackdump, f_msgpackparse, f_nextnonblank,
@@ -3687,7 +3686,7 @@ fn b_usercmd(vm: &mut VM, _: u8) -> Value {
         // command word here as a user command; this built-in extension command
         // is handled before the E492 fallback so it needs no `:command` def.
         None if name == "Intercept" => {
-            crate::ported::eval::funcs::ex_intercept(args);
+            crate::intercepts::ex_intercept(args);
         }
         None => message::semsg(&format!("E492: Not an editor command: {name}")),
     }
@@ -4565,9 +4564,11 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FN_ISNAN, |vm, n| call_func(vm, n, f_isnan));
     vm.register_builtin(VIML_FN_GETPID, |vm, n| call_func(vm, n, f_getpid));
     vm.register_builtin(VIML_FN_LOCALTIME, |vm, n| call_func(vm, n, f_localtime));
-    vm.register_builtin(VIML_FN_INTERCEPT, |vm, n| call_func(vm, n, f_intercept));
+    vm.register_builtin(VIML_FN_INTERCEPT, |vm, n| {
+        call_func(vm, n, crate::intercepts::f_intercept)
+    });
     vm.register_builtin(VIML_FN_INTERCEPT_PROCEED, |vm, n| {
-        call_func(vm, n, f_intercept_proceed)
+        call_func(vm, n, crate::intercepts::f_intercept_proceed)
     });
     vm.register_builtin(VIML_FN_SOUNDFOLD, |vm, n| call_func(vm, n, f_soundfold));
     vm.register_builtin(VIML_FN_BYTEIDXCOMP, |vm, n| call_func(vm, n, f_byteidxcomp));
