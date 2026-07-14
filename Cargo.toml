@@ -1,7 +1,7 @@
 [package]
 name = "vimlrs"
 description = "Faithful Rust port of the Vimscript (VimL) interpreter, from the Neovim C eval engine"
-version = "0.2.2"
+version = "0.2.3"
 keywords = ["vim", "vimscript", "viml", "interpreter", "fusevm"]
 categories = ["command-line-utilities", "compilers"]
 authors = ["MenkeTechnologies <linux.dev25@gmail.com>"]
