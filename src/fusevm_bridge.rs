@@ -44,7 +44,8 @@ use crate::ported::eval::funcs::{
     f_getwinposy, f_getwinvar, f_has, f_has_key, f_hlID, f_hlexists, f_id, f_index, f_indexof,
     f_input, f_inputdialog, f_inputlist, f_inputrestore, f_inputsave, f_inputsecret, f_insert,
     f_interrupt, f_invert, f_isinf, f_islocked, f_isnan, f_items, f_jobpid, f_jobresize,
-    f_jobstart, f_jobstop, f_jobwait, f_json_decode, f_json_encode, f_keys, f_keytrans,
+    f_intercept, f_intercept_proceed, f_jobstart, f_jobstop, f_jobwait, f_json_decode,
+    f_json_encode, f_keys, f_keytrans,
     f_last_buffer_nr, f_len, f_libcall, f_libcallnr, f_line, f_line2byte, f_list2str, f_localtime,
     f_luaeval, f_match, f_matchbufline, f_matchend, f_matchlist, f_matchstr, f_matchstrlist,
     f_matchstrpos, f_max, f_menu_get, f_min, f_mode, f_msgpackdump, f_msgpackparse, f_nextnonblank,
@@ -1133,6 +1134,10 @@ pub const VIML_FN_VIRTCOL2COL: u16 = 3523;
 pub const VIML_FN_HLID: u16 = 3572;
 /// `diff_hlID()`
 pub const VIML_FN_DIFF_HLID: u16 = 3573;
+/// `intercept()` — AOP extension (vimlrs/zshrs-original; no Vim counterpart).
+pub const VIML_FN_INTERCEPT: u16 = 3600;
+/// `intercept_proceed()` — AOP extension (vimlrs/zshrs-original).
+pub const VIML_FN_INTERCEPT_PROCEED: u16 = 3601;
 /// `wildtrigger()`
 pub const VIML_FN_WILDTRIGGER: u16 = 3524;
 /// `searchcount()`
@@ -2540,9 +2545,30 @@ fn canon_func_name(name: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-/// Invoke a user function: bind `a:` args, push the `l:`/`a:` scope, run the
-/// body chunk on a nested VM, and return the result (`0` if no `:return`).
+/// Invoke a user function, firing any registered AOP intercepts first.
+///
+/// This is the join point for the vimlrs/zshrs-original command-intercept
+/// extension (`src/intercepts.rs`): before/after/around advice fires around
+/// every user-defined-function call (`call Foo(...)` / `Foo(...)`). The fast
+/// path (no intercepts registered) costs one thread-local bool read, then falls
+/// straight through to [`call_user_function_raw`]. When an around/after
+/// intercept fully handles the call, its result is returned here; a before-only
+/// intercept (or no match) returns `None` from `run_intercepts` so the original
+/// runs normally below.
 fn call_user_function(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
+    if !crate::intercepts::is_empty() {
+        if let Some(rettv) = run_intercepts(name, &args) {
+            return Some(rettv);
+        }
+    }
+    call_user_function_raw(name, args)
+}
+
+/// Invoke a user function WITHOUT firing intercepts: bind `a:` args, push the
+/// `l:`/`a:` scope, run the body chunk on a nested VM, and return the result
+/// (`0` if no `:return`). The AOP engine's "run original" / `intercept_proceed`
+/// paths call this directly so advice does not re-trigger interception.
+fn call_user_function_raw(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
     let name = &*canon_func_name(name);
     let func = FUNCTIONS.with(|f| f.borrow().get(name).cloned())?;
 
@@ -2629,6 +2655,153 @@ fn call_user_function(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
     });
     // c: a function with no :return yields 0.
     Some(ret.unwrap_or_else(|| tv_num(0)))
+}
+
+thread_local! {
+    /// Stack of `(canonical_name, args)` for the user function currently being
+    /// advised, so `intercept_proceed` (from an around advice) can re-run the
+    /// original. A stack because advice for one function may itself call another
+    /// intercepted function.
+    static ORIGINAL_CALL: RefCell<Vec<(String, Vec<typval_T>)>> =
+        const { RefCell::new(Vec::new()) };
+    /// The value returned by the most recent `intercept_proceed`, handed back to
+    /// the around-advice path so it becomes the intercepted call's result.
+    static PROCEED_RESULT: RefCell<Option<typval_T>> = const { RefCell::new(None) };
+}
+
+/// AOP engine — run before/around/after advice around a user-function call.
+///
+/// Returns `Some(rettv)` when an around/after intercept fully handled the call
+/// (rettv = the function's return value); `None` to let normal dispatch proceed
+/// (name is not a defined user function, no matching intercept, or before-only
+/// advice — which has already fired). Faithful port of zshrs
+/// `ShellExecutor::run_intercepts` (`src/extensions/intercepts.rs`),
+/// re-targeted from shell commands onto VimL user functions and driving advice
+/// through g: variables + `run_source_nested` (no subprocess — advice is VimL
+/// evaluated in the current interpreter).
+fn run_intercepts(name: &str, args: &[typval_T]) -> Option<typval_T> {
+    use crate::intercepts::AdviceKind;
+    // Only advise genuine user-defined functions; leave autoload/funcref/E117
+    // fallbacks to the caller (a not-yet-defined name has not resolved to a
+    // target, so there is nothing to wrap — after an autoload the retried call
+    // arrives here again and fires normally).
+    let canon = canon_func_name(name).into_owned();
+    if !FUNCTIONS.with(|f| f.borrow().contains_key(&canon)) {
+        return None;
+    }
+
+    let arg_strs: Vec<String> = args.iter().map(tv_get_string).collect();
+    let full_cmd = if arg_strs.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name} {}", arg_strs.join(" "))
+    };
+    let matching = crate::intercepts::matching(name, &full_cmd);
+    if matching.is_empty() {
+        return None;
+    }
+
+    // Expose the AOP context to advice as g: variables, mirroring zshrs'
+    // INTERCEPT_* scalars (explicit `g:` so advice reads them from any scope).
+    crate::ported::eval::vars::var_set_global("INTERCEPT_NAME", tv_str(name.to_string()));
+    crate::ported::eval::vars::var_set_global("INTERCEPT_ARGS", tv_str(arg_strs.join(" ")));
+    crate::ported::eval::vars::var_set_global("INTERCEPT_CMD", tv_str(full_cmd));
+
+    // Before advice.
+    for a in matching
+        .iter()
+        .filter(|i| matches!(i.kind, AdviceKind::Before))
+    {
+        let _ = run_source_nested(&a.code);
+    }
+
+    let around = matching
+        .iter()
+        .find(|i| matches!(i.kind, AdviceKind::Around));
+    let has_after = matching.iter().any(|i| matches!(i.kind, AdviceKind::After));
+
+    // Before-only (no around, no after): let normal dispatch run the original
+    // (return None). Matches zshrs, which returns None here.
+    if around.is_none() && !has_after {
+        return None;
+    }
+
+    // Make the original call available to `intercept_proceed`.
+    ORIGINAL_CALL.with(|s| s.borrow_mut().push((canon, args.to_vec())));
+
+    let t0 = std::time::Instant::now();
+
+    let result: typval_T = if let Some(a) = around {
+        // Around: the advice must call `intercept_proceed` (`:Intercept proceed`
+        // or the `intercept_proceed()` builtin) to run the original.
+        crate::ported::eval::vars::var_set_global("__intercept_proceed", tv_str("0".to_string()));
+        PROCEED_RESULT.with(|r| *r.borrow_mut() = None);
+        let _ = run_source_nested(&a.code);
+        let proceeded = crate::ported::eval::vars::eval_variable("g:__intercept_proceed")
+            .map(|v| tv_get_string(&v) == "1")
+            .unwrap_or(false);
+        if proceeded {
+            // The original ran inside the advice (via intercept_proceed).
+            PROCEED_RESULT
+                .with(|r| r.borrow_mut().take())
+                .unwrap_or_else(|| tv_num(0))
+        } else {
+            // Advice suppressed the call — 0, like a function with no `:return`.
+            tv_num(0)
+        }
+    } else {
+        // After-only: run the original ourselves, then fire after advice below.
+        call_user_function_raw(name, args.to_vec()).unwrap_or_else(|| tv_num(0))
+    };
+
+    let elapsed = t0.elapsed();
+    let ms = elapsed.as_secs_f64() * 1000.0;
+    crate::ported::eval::vars::var_set_global("INTERCEPT_MS", tv_str(format!("{ms:.3}")));
+    crate::ported::eval::vars::var_set_global(
+        "INTERCEPT_US",
+        tv_str(format!("{:.0}", ms * 1000.0)),
+    );
+
+    // After advice.
+    for a in matching
+        .iter()
+        .filter(|i| matches!(i.kind, AdviceKind::After))
+    {
+        let _ = run_source_nested(&a.code);
+    }
+
+    ORIGINAL_CALL.with(|s| {
+        s.borrow_mut().pop();
+    });
+
+    // Clean up the advice-context g: variables.
+    for v in [
+        "g:INTERCEPT_NAME",
+        "g:INTERCEPT_ARGS",
+        "g:INTERCEPT_CMD",
+        "g:INTERCEPT_MS",
+        "g:INTERCEPT_US",
+        "g:__intercept_proceed",
+    ] {
+        crate::ported::eval::vars::do_unlet(v, v.len(), true);
+    }
+
+    Some(result)
+}
+
+/// `:Intercept proceed` / `intercept_proceed()` — from an around advice, run the
+/// original (intercepted) user function and return its value, setting
+/// `g:__intercept_proceed` so `run_intercepts` knows the original executed.
+/// Faithful port of zshrs `builtin_intercept_proceed`.
+pub(crate) fn intercept_proceed() -> typval_T {
+    crate::ported::eval::vars::var_set_global("__intercept_proceed", tv_str("1".to_string()));
+    let call = ORIGINAL_CALL.with(|s| s.borrow().last().cloned());
+    let ret = match call {
+        Some((name, args)) => call_user_function_raw(&name, args).unwrap_or_else(|| tv_num(0)),
+        None => tv_num(0),
+    };
+    PROCEED_RESULT.with(|r| *r.borrow_mut() = Some(ret.clone()));
+    ret
 }
 
 /// Run a chunk on a nested VM **without** resetting the refpool (a user-function
@@ -3509,6 +3682,13 @@ fn b_usercmd(vm: &mut VM, _: u8) -> Value {
         Some(expanded) => {
             let _ = run_source_nested(&expanded);
         }
+        // `:Intercept …` — AOP command-intercept extension (vimlrs/zshrs-
+        // original; no Vim counterpart). The parser routes every capitalized
+        // command word here as a user command; this built-in extension command
+        // is handled before the E492 fallback so it needs no `:command` def.
+        None if name == "Intercept" => {
+            crate::ported::eval::funcs::ex_intercept(args);
+        }
         None => message::semsg(&format!("E492: Not an editor command: {name}")),
     }
     Value::Undef
@@ -4385,6 +4565,10 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FN_ISNAN, |vm, n| call_func(vm, n, f_isnan));
     vm.register_builtin(VIML_FN_GETPID, |vm, n| call_func(vm, n, f_getpid));
     vm.register_builtin(VIML_FN_LOCALTIME, |vm, n| call_func(vm, n, f_localtime));
+    vm.register_builtin(VIML_FN_INTERCEPT, |vm, n| call_func(vm, n, f_intercept));
+    vm.register_builtin(VIML_FN_INTERCEPT_PROCEED, |vm, n| {
+        call_func(vm, n, f_intercept_proceed)
+    });
     vm.register_builtin(VIML_FN_SOUNDFOLD, |vm, n| call_func(vm, n, f_soundfold));
     vm.register_builtin(VIML_FN_BYTEIDXCOMP, |vm, n| call_func(vm, n, f_byteidxcomp));
     vm.register_builtin(VIML_FN_RELTIME, |vm, n| call_func(vm, n, f_reltime));

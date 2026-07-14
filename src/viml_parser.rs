@@ -1175,6 +1175,11 @@ fn cmd_takes_bar_arg(cmd: &str) -> bool {
             | "vglob"
             | "vgloba"
             | "vglobal"
+            // `:Intercept before|after|around <pat> { code }` — AOP command-
+            // intercept extension (vimlrs/zshrs-original). The advice `{ code }`
+            // may contain `|`-separated statements, so the whole line is one
+            // command (like a user command defined without `-bar`).
+            | "Intercept"
     )
 }
 

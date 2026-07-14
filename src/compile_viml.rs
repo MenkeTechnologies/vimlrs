@@ -2391,6 +2391,9 @@ pub(crate) fn builtin_fn_id(name: &str) -> Option<u16> {
         "isnan" => h::VIML_FN_ISNAN,
         "getpid" => h::VIML_FN_GETPID,
         "localtime" => h::VIML_FN_LOCALTIME,
+        // AOP command-intercept extension (vimlrs/zshrs-original; no Vim fn).
+        "intercept" => h::VIML_FN_INTERCEPT,
+        "intercept_proceed" => h::VIML_FN_INTERCEPT_PROCEED,
         "soundfold" => h::VIML_FN_SOUNDFOLD,
         "byteidxcomp" => h::VIML_FN_BYTEIDXCOMP,
         "reltime" => h::VIML_FN_RELTIME,

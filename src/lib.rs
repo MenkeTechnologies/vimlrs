@@ -36,6 +36,9 @@ pub mod fusevm_disasm;
 /// Rust map API over the ported `hashtab_T` (see the module docs: the C has no
 /// `contains_key`/`iter_mut`, so the adapter lives in the synthesis zone).
 pub mod hashtab_map;
+/// AOP command-intercept (before/after/around advice on user-function calls) —
+/// a vimlrs/zshrs-original extension with no Vim counterpart.
+pub mod intercepts;
 pub mod lsp;
 pub mod repl;
 pub mod script_cache;

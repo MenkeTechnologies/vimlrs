@@ -234,6 +234,8 @@ pub const BUILTIN_ARGC: &[(&str, u8, u8)] = &[
     ("inputsave", 0, 0),
     ("inputsecret", 1, 2),
     ("insert", 2, 3),
+    ("intercept", 3, 3),
+    ("intercept_proceed", 0, 0),
     ("interrupt", 0, 0),
     ("invert", 1, 1),
     ("isabsolutepath", 1, 1),

@@ -207,6 +207,8 @@ pub const BUILTIN_DOCS: &[(&str, &str, &str)] = &[
     ("inputsave", "inputsave()", "Save and clear pending typeahead so input() can be used (stub in standalone)."),
     ("inputsecret", "inputsecret({prompt} [, {text}])", "Like input() but the typed text is hidden."),
     ("insert", "insert({object}, {item} [, {idx}])", "Insert {item} into List/Blob {object} before index {idx} (default 0)."),
+    ("intercept", "intercept({kind}, {pattern}, {code})", "Register AOP advice ({kind} = before|after|around) on user-function calls matching {pattern}; returns the intercept ID (vimlrs extension)."),
+    ("intercept_proceed", "intercept_proceed()", "From an around advice, run the original intercepted function and return its value (vimlrs extension)."),
     ("interrupt", "interrupt()", "Interrupt script execution as if CTRL-C were pressed (stub in standalone)."),
     ("invert", "invert({expr})", "Bitwise complement (NOT) of {expr}."),
     ("isabsolutepath", "isabsolutepath({path})", "1 if {path} is an absolute path, else 0."),
@@ -651,6 +653,8 @@ pub const BUILTIN_CATEGORY: &[(&str, &str)] = &[
     ("inputsave", "Functional & Misc"),
     ("inputsecret", "Functional & Misc"),
     ("insert", "List manipulation"),
+    ("intercept", "Functional & Misc"),
+    ("intercept_proceed", "Functional & Misc"),
     ("interrupt", "Functional & Misc"),
     ("invert", "Number & Float"),
     ("isabsolutepath", "Files, Buffers & Lines"),
@@ -935,6 +939,10 @@ pub const EX_COMMANDS: &[(&str, &str)] = &[
     (
         "eval",
         ":eval {expr} — evaluate {expr} for its side effects.",
+    ),
+    (
+        "Intercept",
+        ":Intercept before|after|around {pattern} { code } — register AOP advice on user-function calls; also :Intercept list | remove {id} | clear | proceed (vimlrs extension).",
     ),
 ];
 

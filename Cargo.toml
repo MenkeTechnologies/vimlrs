@@ -83,6 +83,11 @@ nu-ansi-term = "0.50"
 sysinfo = { version = "0.38", default-features = false, features = ["system"] }
 toml = "0.8"
 libc = "0.2"
+# Glob pattern matcher for the AOP function-call intercept engine
+# (src/intercepts.rs) — `*`/`?`/char-class matching of intercept patterns
+# against user-function names. Faithful port of zshrs's `glob::Pattern` usage;
+# `glob` is a foundational, vendorable rust-lang crate (durable to 2035+).
+glob = "0.3"
 
 [dev-dependencies]
 tempfile = "3"
