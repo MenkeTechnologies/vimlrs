@@ -247,6 +247,13 @@ pub enum Stmt {
     },
     /// `:call funcref(args)`.
     Call(Expr),
+    /// `:defer Func(args)` — call `Func` when the current function is done.
+    ///
+    /// The arguments are evaluated *now*, at the `:defer`, and the call happens on
+    /// frame exit; deferred calls run last-registered-first, and they run whether
+    /// the function returns normally or unwinds through a `:throw`. Verified
+    /// against vim 9.2 — see `defer_runs_lifo_on_frame_exit`.
+    Defer(Expr),
     /// A bare expression (REPL / `-e`).
     Expr(Expr),
 

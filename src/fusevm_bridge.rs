@@ -1243,6 +1243,11 @@ pub const VIML_ERR_MARK: u16 = 3575;
 pub const VIML_SET_RETURN: u16 = 3072;
 /// `:throw {expr}`: pop the value → raise it as the pending exception.
 pub const VIML_THROW: u16 = 3073;
+/// `:defer Func(args)`: pop `argc` already-evaluated arguments and the function
+/// name → stash the call on the current function frame's defer list, to be run
+/// when the frame exits. 3090 rather than the next id after the exception block:
+/// 3074-3076 are taken by the unwind machinery.
+pub const VIML_DEFER: u16 = 3090;
 /// Push `Bool(an exception is pending)` — the per-statement unwind check.
 pub const VIML_CHECK_EXC: u16 = 3074;
 /// `:catch /{pat}/`: pop the pattern → if it matches the pending exception,
@@ -1626,6 +1631,69 @@ fn b_throw(vm: &mut VM, _: u8) -> Value {
     // An explicit `:throw`, not an error — a one-line `:try` DOES catch this.
     EXC_FROM_ERR.with(|e| e.set(false));
     Value::Undef
+}
+
+/// One function frame's `:defer`red calls: the callee's name and the arguments
+/// as they were evaluated at the `:defer`, in registration order.
+type DeferFrame = Vec<(String, Vec<typval_T>)>;
+
+thread_local! {
+    /// `:defer`red calls, one list per live function frame — pushed alongside
+    /// `funccal_stack` and drained when the frame exits.
+    ///
+    /// Per-frame rather than one flat stack: a deferred call belongs to the
+    /// function that registered it, so a nested call's defers must run at *its*
+    /// exit and never be drained by the caller.
+    static DEFER_STACK: RefCell<Vec<DeferFrame>> = const { RefCell::new(Vec::new()) };
+}
+
+/// `:defer Func(args)` — stash the call for the current frame's exit.
+///
+/// The arguments arrive already evaluated (vim evaluates them at the `:defer`,
+/// not at the call), so they are stored as values. Outside a function there is no
+/// frame to attach to, which vim rejects rather than deferring to nothing.
+fn b_defer(vm: &mut VM, argc: u8) -> Value {
+    let mut args: Vec<typval_T> = (0..argc.saturating_sub(1)).map(|_| pop_tv(vm)).collect();
+    // Popped newest-first; restore the written order.
+    args.reverse();
+    let name = tv_get_string(&pop_tv(vm));
+    let in_function = crate::ported::eval::vars::funccal_stack.with(|s| !s.borrow().is_empty());
+    if !in_function {
+        message::emsg("E1298: :defer can only be used inside a function");
+        return Value::Undef;
+    }
+    DEFER_STACK.with(|d| {
+        if let Some(frame) = d.borrow_mut().last_mut() {
+            frame.push((name, args));
+        }
+    });
+    Value::Undef
+}
+
+/// Run and clear the current frame's deferred calls, last-registered-first.
+///
+/// Called on the way out of a function whether it returned or is unwinding: vim
+/// runs deferred calls before the exception reaches the caller's `:catch`, and
+/// because `:throw` here sets a pending-exception flag rather than unwinding the
+/// Rust stack, the one call site after the body covers both paths.
+///
+/// The pending exception is parked across the drain so a deferred call is not
+/// skipped by its own frame's unwind checks, then restored — a deferred call must
+/// not swallow the exception it is unwinding through.
+fn run_frame_defers() {
+    let deferred = DEFER_STACK
+        .with(|d| d.borrow_mut().pop())
+        .unwrap_or_default();
+    if deferred.is_empty() {
+        return;
+    }
+    let parked = PENDING_EXC.with(|p| p.borrow_mut().take());
+    for (name, args) in deferred.into_iter().rev() {
+        call_user_function(&name, args);
+    }
+    if let Some(exc) = parked {
+        PENDING_EXC.with(|p| *p.borrow_mut() = Some(exc));
+    }
 }
 
 fn b_check_exc(_vm: &mut VM, _: u8) -> Value {
@@ -2642,8 +2710,17 @@ fn call_user_function_raw(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
     bind_avar("000", new_list(extra));
 
     RETURN_STACK.with(|r| r.borrow_mut().push(None));
+    // This frame's `:defer` list. Pushed with the frame so a nested call's defers
+    // cannot land on ours.
+    DEFER_STACK.with(|d| d.borrow_mut().push(Vec::new()));
 
     run_chunk_nested(func.chunk.clone());
+
+    // vim runs deferred calls on the way out however the body ended — a `:return`,
+    // falling off the end, or unwinding through a `:throw`. `:throw` sets a
+    // pending-exception flag instead of unwinding the Rust stack, so the body
+    // always returns here and this one call site covers every path.
+    run_frame_defers();
 
     let ret = RETURN_STACK.with(|r| r.borrow_mut().pop().flatten());
     crate::ported::eval::vars::funccal_stack.with(|s| {
@@ -5112,6 +5189,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_ERR_MARK, b_err_mark);
     vm.register_builtin(VIML_SET_RETURN, b_set_return);
     vm.register_builtin(VIML_THROW, b_throw);
+    vm.register_builtin(VIML_DEFER, b_defer);
     vm.register_builtin(VIML_ERR_SINCE, b_err_since);
     vm.register_builtin(VIML_EXC_IS_HARD, b_exc_is_hard);
     vm.register_builtin(VIML_LINE_ABORT, b_line_abort);

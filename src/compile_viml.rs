@@ -558,7 +558,9 @@ fn slot_plan(stmts: &[Stmt], in_function: bool) -> SlotPlan {
                 }
                 Stmt::Let { .. } => *cx.bail = true, // non-bare target: be safe
                 Stmt::Echo(es) | Stmt::Echon(es) => es.iter().for_each(|e| walk_expr(e, cx)),
-                Stmt::Call(e) | Stmt::Expr(e) | Stmt::Throw(e) => walk_expr(e, cx),
+                // `:defer`'s arguments are evaluated where they are written, so
+                // they are walked like any other statement's expression.
+                Stmt::Call(e) | Stmt::Expr(e) | Stmt::Throw(e) | Stmt::Defer(e) => walk_expr(e, cx),
                 Stmt::Return(Some(e)) => walk_expr(e, cx),
                 Stmt::While { cond, body } => {
                     walk_expr(cond, cx);
@@ -731,7 +733,9 @@ fn slot_plan(stmts: &[Stmt], in_function: bool) -> SlotPlan {
                 Stmt::Echo(es) | Stmt::Echon(es) => {
                     es.iter().for_each(|e| scoped_e(e, in_function, out))
                 }
-                Stmt::Call(e) | Stmt::Expr(e) | Stmt::Throw(e) => scoped_e(e, in_function, out),
+                Stmt::Call(e) | Stmt::Expr(e) | Stmt::Throw(e) | Stmt::Defer(e) => {
+                    scoped_e(e, in_function, out)
+                }
                 Stmt::Return(Some(e)) => scoped_e(e, in_function, out),
                 Stmt::While { cond, body } => {
                     scoped_e(cond, in_function, out);
@@ -800,6 +804,7 @@ impl Compiler {
             Stmt::Echon(_) => "echon",
             Stmt::Let { .. } => "let",
             Stmt::Call(_) => "call",
+            Stmt::Defer(_) => "defer",
             Stmt::Return(_) => "return",
             Stmt::Throw(_) => "throw",
             Stmt::Execute(_) => "execute",
@@ -863,6 +868,27 @@ impl Compiler {
             Stmt::Let { target, expr } => self.let_stmt(target, expr),
             Stmt::Call(e) => {
                 self.expr(e)?;
+                self.emit(Op::Pop);
+                Ok(())
+            }
+            // `:defer Func(args)` — evaluate the arguments *here* and stash the
+            // call for the frame's exit, rather than emitting the call itself.
+            // vim evaluates a deferred call's arguments at the `:defer`, so the
+            // argument expressions compile inline exactly as `:call`'s would; only
+            // the invocation is postponed.
+            Stmt::Defer(e) => {
+                let Expr::Call { name, args } = e else {
+                    return Err(VimlError(
+                        "E1300: :defer requires a function call, e.g. `defer Func(arg)`"
+                            .to_string(),
+                    ));
+                };
+                self.load_str(name);
+                for a in args {
+                    self.expr(a)?;
+                }
+                // +1 for the name pushed under the arguments.
+                self.emit(Op::CallBuiltin(h::VIML_DEFER, args.len() as u8 + 1));
                 self.emit(Op::Pop);
                 Ok(())
             }

@@ -173,6 +173,11 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
         // enforced here — `:const` parses and assigns as `:let`.
         "const" | "cons" => parse_let(&strip_vim9_type(rest)),
         "call" => Ok(Stmt::Call(parse_expr(strip_legacy_trailing_comment(rest))?)),
+        // `:defer Func(args)` takes a call with no `:call` in front of it, so the
+        // expression is parsed exactly as `:call`'s is.
+        "defer" => Ok(Stmt::Defer(parse_expr(strip_legacy_trailing_comment(
+            rest,
+        ))?)),
         "eval" => Ok(Stmt::Expr(parse_expr(strip_legacy_trailing_comment(rest))?)),
         "break" => Ok(Stmt::Break),
         "continue" | "cont" => Ok(Stmt::Continue),
