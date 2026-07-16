@@ -47,7 +47,7 @@ thread_local! {
     pub static funccal_stack: RefCell<Vec<FuncScope>> = const { RefCell::new(Vec::new()) };
 
     /// `s:` script-local scope (`SCRIPT_SV(sid)->sv_dict`). RUST-PORT NOTE: one
-    /// script context in the standalone interpreter (zemacs maps multiple).
+    /// script context in the standalone interpreter (zmax maps multiple).
     pub static script_vars: RefCell<dict_T> = RefCell::new(dict_T::default());
     /// `b:` buffer-local (`buf_T.b_vars`). One buffer standalone.
     pub static buffer_vars: RefCell<dict_T> = RefCell::new(dict_T::default());

@@ -1,4 +1,4 @@
-//! `vimlrs` binary entry point. All logic lives in the library so zemacs can
+//! `vimlrs` binary entry point. All logic lives in the library so zmax can
 //! embed the same interpreter; this dispatches the AOT trailer (if any) then
 //! the CLI.
 

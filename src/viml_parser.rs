@@ -234,7 +234,7 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
             Ok(Stmt::Highlight(line[cmd.len()..].trim_start().to_string()))
         }
         // `:syntax`/`:syn` and `:filetype`/`:filet` — recognized so real vimrc
-        // files parse. Standalone they are no-ops (zemacs highlights and detects
+        // files parse. Standalone they are no-ops (zmax highlights and detects
         // filetypes itself); an embedding editor may hook them.
         "syntax" | "syn" | "synta" | "synt" if !line[cmd.len()..].starts_with('(') => {
             Ok(Stmt::Syntax(rest.trim().to_string()))

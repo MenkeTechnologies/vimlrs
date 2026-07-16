@@ -4081,7 +4081,7 @@ fn fire_excmd_host_hook(line: &str) -> bool {
 // selects a scheme; Vim then sources `colors/molokai.vim` from the runtime path,
 // which issues the `:highlight` commands that paint every group. vimlrs sources
 // that file itself (via [`b_colorscheme`], firing each `:highlight` through the
-// registry + the highlight host hook), so an embedding editor (zemacs) can
+// registry + the highlight host hook), so an embedding editor (zmax) can
 // translate the vim highlight groups into its own theme and apply it.
 
 thread_local! {
@@ -4237,7 +4237,7 @@ fn system_vim_runtime_dirs() -> Vec<std::path::PathBuf> {
 // builtins (getline/setline/append/getbufline, line()/col()/getpos()/setpos()/
 // cursor(), bufname()/bufnr()) operate on the reduced in-crate buffer/cursor
 // model in `src/ported/eval/funcs.rs` (CURBUF/CURPOS). When vimlrs is embedded
-// inside a host editor (e.g. zemacs), the host installs an [`EditorHost`] so the
+// inside a host editor (e.g. zmax), the host installs an [`EditorHost`] so the
 // SAME builtins read and mutate the host's live buffer and cursor instead. The
 // buffer choke-points in funcs.rs consult these readers first and fall back to
 // CURBUF/CURPOS when no host is installed.
