@@ -111,6 +111,12 @@ pub enum Tok {
     Comma,
     /// `=`
     Assign,
+    /// Un-lexable trailing text inside a re-split Float literal (the exponent
+    /// junk of `'a' .. 1.0e300` → `1 . 0` + `e300`): Vim's single-pass
+    /// evaluator only reports it (E15) AFTER the operands to its left are
+    /// evaluated — a List LHS raises E730 first — so the parser turns this into
+    /// an expression that errors at RUN time, not a parse error.
+    DeferredErr(String),
     /// End of input.
     Eof,
 }
@@ -167,6 +173,47 @@ pub enum CaseFlag {
 /// Lex a Vimscript expression string into a token stream (ending in [`Tok::Eof`]).
 pub fn lex(src: &str) -> Result<Vec<Token>, VimlError> {
     Lexer::new(src).run()
+}
+
+/// Lex as much of `src` as tokenizes, stopping (without error) at the first
+/// byte that does not start a token. Returns the tokens lexed so far (ending in
+/// [`Tok::Eof`] whose span is the stop offset) plus that stop offset.
+///
+/// `eval()` needs this: the C `f_eval` runs `eval1()` on the string, which
+/// consumes one leading expression and never looks at what follows — so
+/// `eval("a'quote")` is the variable `a` with trailing text, not a lex error.
+/// Lexing the whole string up front turned such trailing text into E115/E15
+/// before the leading expression was ever evaluated.
+pub fn lex_prefix(src: &str) -> (Vec<Token>, usize) {
+    let mut lx = Lexer::new(src);
+    let mut out = Vec::new();
+    loop {
+        lx.skip_ws();
+        let span = lx.pos;
+        if lx.pos >= lx.src.len() {
+            out.push(Token {
+                kind: Tok::Eof,
+                span,
+                end: span,
+            });
+            return (out, span);
+        }
+        match lx.next_token() {
+            Ok(kind) => out.push(Token {
+                kind,
+                span,
+                end: lx.pos,
+            }),
+            Err(_) => {
+                out.push(Token {
+                    kind: Tok::Eof,
+                    span,
+                    end: span,
+                });
+                return (out, span);
+            }
+        }
+    }
 }
 
 struct Lexer<'a> {
@@ -272,6 +319,10 @@ impl<'a> Lexer<'a> {
         while self.peek().is_ascii_digit() {
             self.pos += 1;
         }
+        // c: eval_number() — the whole `.{digits}` / exponent scan below can
+        // still be REJECTED (`get_float = false`), in which case the token is
+        // only the leading integer (`vim_str2nr` re-reads from the start).
+        let int_end = self.pos;
         let mut is_float = false;
         if self.peek() == b'.' && self.peek2().is_ascii_digit() {
             is_float = true;
@@ -279,23 +330,35 @@ impl<'a> Lexer<'a> {
             while self.peek().is_ascii_digit() {
                 self.pos += 1;
             }
-        }
-        // An exponent is only part of the literal after a `.{digits}` fraction:
-        // Vim/Neovim's float grammar is `[0-9]+\.[0-9]+([eE][+-]?[0-9]+)?`, so a
-        // dotless `1e100` is the Number `1` followed by the name `e100` (an error
-        // at parse time), never a float.
-        if is_float && matches!(self.peek(), b'e' | b'E') {
-            let save = self.pos;
-            self.pos += 1;
-            if matches!(self.peek(), b'+' | b'-') {
+            // An exponent is only part of the literal after a `.{digits}`
+            // fraction: Vim/Neovim's float grammar is
+            // `[0-9]+\.[0-9]+([eE][+-]?[0-9]+)?`, so a dotless `1e100` is the
+            // Number `1` followed by the name `e100` (an error at parse time),
+            // never a float.
+            if matches!(self.peek(), b'e' | b'E') {
                 self.pos += 1;
-            }
-            if self.peek().is_ascii_digit() {
-                while self.peek().is_ascii_digit() {
+                if matches!(self.peek(), b'+' | b'-') {
                     self.pos += 1;
                 }
-            } else {
-                self.pos = save;
+                if self.peek().is_ascii_digit() {
+                    while self.peek().is_ascii_digit() {
+                        self.pos += 1;
+                    }
+                } else {
+                    // c: `if (!ascii_isdigit(*p)) get_float = false;` — a bare
+                    // `1.5e`/`1.5e+` is NOT a float at all, just the Number 1.
+                    is_float = false;
+                }
+            }
+            // c: `if (ASCII_ISALPHA(*p) || *p == '.') get_float = false;` — a
+            // trailing name char or second dot rejects the float wholesale:
+            // `1.2.3` is `1 . 2 . 3` (three concatenated Numbers), `1.5x` the
+            // Number 1 followed by `.5x`.
+            if self.peek().is_ascii_alphabetic() || self.peek() == b'.' {
+                is_float = false;
+            }
+            if !is_float {
+                self.pos = int_end;
             }
         }
         let text = &self.s[start..self.pos];

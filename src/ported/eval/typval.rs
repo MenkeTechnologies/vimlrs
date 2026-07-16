@@ -2402,9 +2402,15 @@ fn item_compare(tv1: &typval_T, tv2: &typval_T, info: &sortinfo_T) -> i32 {
         encode_tv2string(tv2)
     };
     if !info.item_compare_numeric {
-        // c: lc → strcoll (locale; approximated by byte order); ic → STRICMP; else strcmp.
+        // c: lc → strcoll (collation under the environment's locale — under
+        // en_US.UTF-8 that is 'a' < 'A' < 'b', not byte order); ic → STRICMP;
+        // else strcmp.
         let ord = if info.item_compare_lc {
-            p1.cmp(&p2)
+            crate::ported::os::lang::init_locale();
+            let cs1 = std::ffi::CString::new(p1).unwrap_or_default();
+            let cs2 = std::ffi::CString::new(p2).unwrap_or_default();
+            let r = unsafe { nix::libc::strcoll(cs1.as_ptr(), cs2.as_ptr()) };
+            r.cmp(&0)
         } else if info.item_compare_ic {
             p1.to_lowercase().cmp(&p2.to_lowercase())
         } else {

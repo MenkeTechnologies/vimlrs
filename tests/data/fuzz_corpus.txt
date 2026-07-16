@@ -242,3 +242,53 @@ match('aaa','\\M\\%[ab]')	-1
 match('aaa','\\M\\%d97')	-1
 match('aaa','\\M\\%(\\*a\\)')	-1
 match('aaa','\\M\\(\\*\\)')	-1
+
+# --- round 16: the \@ lookaround family (zero-width assertions) ---
+split('3.5e2','a\@!')	['3', '.', '5', 'e', '2']
+substitute('*.[]^$\','a\@!','X','abc')	'X*.[]^$\'
+
+# --- round 17: multibyte string semantics — byte [i]/[a:b] slicing, composing
+# clusters (utfc_ptr2len) in escape/slice/strpart/trim, C truncating casts in
+# strcharpart/trim/strdisplaywidth, nr2char NUL, float-after-concat re-split ---
+strcharpart("a\\b",-9223372036854775808)	'\b'
+nr2char(0)	''
+nr2char(0,1)	''
+escape('écombining','écombining')	'é\c\o\m\b\i\n\i\n\g'
+toupper('écombining')[5:]	'MBINING'
+strtrans('écombining')[5]	'm'
+trim("é",'a,b,,c')[1:-1]	'�'
+trim("\<Esc>")	''
+trim("\<Esc>")[-5:]	''
+trim('\d\+','écombining',-9223372036854775808)	'\d\+'
+trim('-7','日本語',-9223372036854775808)	'-7'
+strdisplaywidth('ünïcø∂é',2147483647)	0
+escape('日本語',"\<Esc>")[-5:3]	''
+strtrans("nl\nhere")	'nl^@here'
+slice([1,2,3],-4,2)	[]
+slice(0z,256)[2]	!E979
+strpart('écombining',0,2,0)	'éc'
+'a' . -0.5	'a05'
+('a' .. -1.0e300)	!E15
+([[1,2],[3,4]] .. 1.0e-10)	!E730
+(1 ? 350.0 : (-2147483648 .. 1.0e308))	!E15
+trim("  x  ","")	'x'
+1.2.3	'123'
+call({x -> type(x)},[])	!E119
+call({x -> x},[1,2,3])	1
+matchbufline(-9223372036854775808,'a\>',10,-10)	!E475
+matchbufline(0,'\h',-1,9223372036854775807)	!E158
+funcref('écombining',['b','a','C','A'])	!E700
+eval('a''quote')	!E121
+eval('tab\there')	!E121
+eval('écombining')	!E121
+matchfuzzypos(['B','a','C'],'a')	[['a'], [[0]], [2147483647]]
+matchfuzzypos(['foo','bar','baz'],'a')	[['bar', 'baz'], [[1], [1]], [-10, -10]]
+matchfuzzypos(['foo','bar','baz'],'ba')	[['bar', 'baz'], [[0, 1], [0, 1]], [1895, 1895]]
+matchfuzzypos(['ab'],'a')	[['ab'], [[0]], [895]]
+matchfuzzypos(['hello world'],'hello')	[['hello world'], [[0, 1, 2, 3, 4]], [4870]]
+matchfuzzy(['hello','helloworld'],'hello')	['hello', 'helloworld']
+(isnan(0.1) . 1.0e-10)	!E15
+(isnan(1.0) ? (-2147483648 .. 1.0e308) : matchbufline(0x1f,'.\zea',-1,-10))	!E15
+printf('%1$s %1$s')[5]	!E1503
+split("\<C-A>")	[]
+sort(['b','a','c'],'l')	['a', 'b', 'c']

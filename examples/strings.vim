@@ -38,10 +38,11 @@ call assert_equal('+0007', printf('%+05d', 7))
 call assert_equal('+3.10', printf('%+.2f', 3.1))
 
 " ── printf positional args: %N$ selects the Nth argument (1-based) and may be
-"    reused or reordered; flags/width still apply, sequential args unaffected ──
+"    reused or reordered; flags/width still apply — but every supplied argument
+"    must be used by some %N$ slot (an unused one is E1501) ──
 call assert_equal('b a', printf('%2$s %1$s', 'a', 'b'))
 call assert_equal('x x', printf('%1$s %1$s', 'x'))
-call assert_equal('00042', printf('%2$05d', 7, 42))
+call assert_equal('00042 a', printf('%2$05d %1$s', 'a', 42))
 call assert_equal('1 x', printf('%d %s', 1, 'x'))
 
 " ── printf # (alternate form): 0x/0X/0b prefix on x/X/b, leading 0 on octal;

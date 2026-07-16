@@ -2496,7 +2496,8 @@ fn parse_expr_list(src: &str) -> Result<Vec<Expr>, VimlError> {
     let mut p = Parser::new(toks, src);
     let mut out = Vec::new();
     loop {
-        out.push(p.eval1()?);
+        let e = p.eval1()?;
+        out.push(p.guard_deferred(e));
         if matches!(p.peek(), Tok::Eof) {
             break;
         }
@@ -2514,12 +2515,18 @@ fn parse_expr_list(src: &str) -> Result<Vec<Expr>, VimlError> {
 /// reported a parse error (E15) for text Vim would have evaluated first —
 /// `eval("nl\nhere")` is E121 (undefined variable `nl`) in Vim, not E15.
 pub fn parse_expr_prefix(src: &str) -> Result<(Expr, usize), VimlError> {
-    let toks = lex(src)?;
+    // Lex only as far as the source tokenizes: text past the leading expression
+    // is `eval()`'s business (E488 trailing / never reached), not a lex error —
+    // `eval("a'quote")` is the variable `a` (E121 when undefined), and
+    // `eval("tab\\there")` is the variable `tab`, exactly as the C `eval1()`
+    // stops after one expression (verified against vim 9.2 / nvim 0.12).
+    let (toks, lex_stop) = crate::viml_lexer::lex_prefix(src);
     let mut p = Parser::new(toks, src);
     let e = p.eval1()?;
+    let e = p.guard_deferred(e);
     // The next token's start is where the expression ended; `Eof` means it ran to
-    // the end of the string.
-    let rest_at = p.peek_span().unwrap_or(src.len());
+    // the point where lexing stopped (the end of the string when it all lexed).
+    let rest_at = p.peek_span().unwrap_or(lex_stop);
     Ok((e, rest_at))
 }
 
@@ -2527,6 +2534,7 @@ pub fn parse_expr(src: &str) -> Result<Expr, VimlError> {
     let toks = lex(src)?;
     let mut p = Parser::new(toks, src);
     let e = p.eval1()?;
+    let e = p.guard_deferred(e);
     if !matches!(p.peek(), Tok::Eof) {
         return Err(VimlError::msg(
             "E15: Invalid expression: trailing tokens".to_string(),
@@ -2558,6 +2566,15 @@ struct Parser {
     /// `[idx]`) do NOT bump this — vim accepts those to great depth (500000
     /// nested `-` succeed), matching a loop/tail-recursive parse here.
     depth: u32,
+    /// Deferred E15s produced by [`Self::resplit_float_token`] during this
+    /// parse, in source order. Vim's `eval_number()` FAIL is a *parse* failure
+    /// that aborts `eval1` at the junk's position: everything textually after
+    /// it is dead, and the expression fails even when the junk sits in a
+    /// ternary/`&&`/`||` branch evaluation never reaches. The ternary and
+    /// short-circuit parse levels check for new entries after parsing an
+    /// operand (see `eval1`/`eval2`/`eval3`), and the expression roots wrap
+    /// the tree in [`Expr::ScriptErrorGuard`] as a last resort.
+    deferred_e15: Vec<String>,
 }
 
 impl Parser {
@@ -2571,6 +2588,23 @@ impl Parser {
             i: 0,
             src: src.to_string(),
             depth: 0,
+            deferred_e15: Vec::new(),
+        }
+    }
+
+    /// Wrap a completely parsed expression in [`Expr::ScriptErrorGuard`] when a
+    /// re-split float left a deferred E15 anywhere in it (see the field doc).
+    /// Redundant when a ternary/`&&`/`||` level already handled the junk (the
+    /// raise yields to any earlier error), but guarantees the expression can
+    /// never silently succeed, as Vim's parse failure never does.
+    fn guard_deferred(&mut self, e: Expr) -> Expr {
+        if self.deferred_e15.is_empty() {
+            return e;
+        }
+        let msg = std::mem::take(&mut self.deferred_e15).swap_remove(0);
+        Expr::ScriptErrorGuard {
+            inner: Box::new(e),
+            msg,
         }
     }
 
@@ -2605,6 +2639,79 @@ impl Parser {
         t
     }
 
+    /// Port of the `want_string` arm of `eval_number()` (`Src/eval.c:3434`):
+    /// after a `.`/`..` concat, "Don't look for a float after the '.' operator"
+    /// — the "." belongs to concatenation. The lexer tokenized context-free, so
+    /// the Float token at the cursor is split back into its leading integer
+    /// (with `vim_str2nr`'s octal rule) and the re-lexed remainder: `1.5` →
+    /// `1` `.` `5`, and `1.0e300` → `1` `.` `0` `e300` (an E15 downstream,
+    /// exactly as Vim reports for `'a' .. -1.0e300`).
+    fn resplit_float_token(&mut self) {
+        let (span, end) = (self.toks[self.i].span, self.toks[self.i].end);
+        let Some(text) = self.src.get(span..end) else {
+            return;
+        };
+        let digits = text.bytes().take_while(|b| b.is_ascii_digit()).count();
+        if digits == 0 || digits >= text.len() {
+            return;
+        }
+        let int_text = &text[..digits];
+        // Same integer rules as the lexer: octal for an all-octal 0-leading
+        // literal, saturating at VARNUMBER_MAX.
+        let n = if int_text.len() > 1
+            && int_text.starts_with('0')
+            && int_text.bytes().all(|b| (b'0'..=b'7').contains(&b))
+        {
+            i64::from_str_radix(int_text, 8).unwrap_or(i64::MAX)
+        } else {
+            int_text.parse::<i64>().unwrap_or(i64::MAX)
+        };
+        let rem_start = span + digits;
+        let mut spliced: Vec<Token> = Vec::new();
+        if let Some(rem_src) = self.src.get(rem_start..end) {
+            if let Ok(rem) = lex(rem_src) {
+                for mut t in rem {
+                    if t.kind == Tok::Eof {
+                        break;
+                    }
+                    t.span += rem_start;
+                    t.end += rem_start;
+                    spliced.push(t);
+                }
+            }
+        }
+        // A remainder with an exponent (`.0e300`) does not re-lex into a plain
+        // `.` + fraction — Vim stops scanning at the `e` and reports E15, but
+        // only at RUN time and only after the operands to its left evaluated
+        // (a List LHS is E730 first). Replace everything past the `.` with a
+        // deferred-error operand carrying Vim's message.
+        if spliced.len() > 2 {
+            let frac_start = rem_start + 1; // just past the '.'
+            let tail = self.src.get(frac_start..).unwrap_or("").to_string();
+            let msg = format!("E15: Invalid expression: {tail}");
+            // Record the parse-level failure for the enclosing ternary/`&&`/
+            // `||` levels and the expression root: Vim's eval_number() FAIL
+            // fails the whole eval1 even in a branch that is never evaluated
+            // (`(1 ? 350.0 : (-2147483648 .. 1.0e308))` is E15 in both
+            // oracles, not 350.0).
+            self.deferred_e15.push(msg.clone());
+            spliced.truncate(1); // keep the '.'
+            spliced.push(Token {
+                kind: Tok::DeferredErr(msg),
+                span: frac_start,
+                end,
+            });
+        }
+        self.toks[self.i] = Token {
+            kind: Tok::Number(n),
+            span,
+            end: rem_start,
+        };
+        for (k, t) in spliced.into_iter().enumerate() {
+            self.toks.insert(self.i + 1 + k, t);
+        }
+    }
+
     fn eat(&mut self, want: &Tok) -> Result<(), VimlError> {
         if self.peek() == want {
             self.advance();
@@ -2622,9 +2729,34 @@ impl Parser {
         match self.peek() {
             Tok::Question => {
                 self.advance();
+                let junk_before_then = self.deferred_e15.len();
                 let then = self.eval1()?;
+                let then_junk = self.deferred_e15.len() > junk_before_then;
                 self.eat(&Tok::Colon)?;
+                let junk_before_else = self.deferred_e15.len();
                 let otherwise = self.eval1()?;
+                let else_junk = self.deferred_e15.len() > junk_before_else;
+                // c: eval1 parses BOTH branches left to right, and a re-split
+                // float's junk is a parse FAILURE at its position: junk in the
+                // then-branch kills the else-branch as dead text (`(0 ? junk :
+                // matchbufline(0x1f,…))` is E15 in both oracles — matchbufline
+                // never runs); junk in the else-branch reports only after the
+                // then-branch evaluated.
+                let (then, otherwise) = if then_junk {
+                    let msg = self.deferred_e15[junk_before_then].clone();
+                    (then, Expr::ScriptError(msg))
+                } else if else_junk {
+                    let msg = self.deferred_e15[junk_before_else].clone();
+                    (
+                        Expr::ScriptErrorGuard {
+                            inner: Box::new(then),
+                            msg,
+                        },
+                        otherwise,
+                    )
+                } else {
+                    (then, otherwise)
+                };
                 Ok(Expr::Ternary {
                     cond: Box::new(cond),
                     then: Box::new(then),
@@ -2633,10 +2765,29 @@ impl Parser {
             }
             Tok::QuestionQuestion => {
                 self.advance();
+                let junk_before = self.deferred_e15.len();
                 let rhs = self.eval1()?;
-                Ok(Expr::Coalesce(Box::new(cond), Box::new(rhs)))
+                let node = Expr::Coalesce(Box::new(cond), Box::new(rhs));
+                Ok(self.guard_skipped_junk(node, junk_before))
             }
             _ => Ok(cond),
+        }
+    }
+
+    /// A short-circuit node whose right operand grew junk while parsing: in
+    /// Vim the junk is a parse failure at its position, so it reports right
+    /// after this node even when short-circuiting skipped the operand
+    /// (`((0 && junk) + f())` is E15 before `f()` ever runs). When the operand
+    /// DID evaluate, its inline [`Expr::ScriptError`] already raised and this
+    /// wrapper's raise yields to it.
+    fn guard_skipped_junk(&mut self, node: Expr, junk_before: usize) -> Expr {
+        if self.deferred_e15.len() <= junk_before {
+            return node;
+        }
+        let msg = self.deferred_e15[junk_before].clone();
+        Expr::ScriptErrorGuard {
+            inner: Box::new(node),
+            msg,
         }
     }
 
@@ -2644,8 +2795,10 @@ impl Parser {
         let mut lhs = self.eval3()?;
         while matches!(self.peek(), Tok::OrOr) {
             self.advance();
+            let junk_before = self.deferred_e15.len();
             let rhs = self.eval3()?;
-            lhs = Expr::Or(Box::new(lhs), Box::new(rhs));
+            let node = Expr::Or(Box::new(lhs), Box::new(rhs));
+            lhs = self.guard_skipped_junk(node, junk_before);
         }
         Ok(lhs)
     }
@@ -2654,8 +2807,10 @@ impl Parser {
         let mut lhs = self.eval4()?;
         while matches!(self.peek(), Tok::AndAnd) {
             self.advance();
+            let junk_before = self.deferred_e15.len();
             let rhs = self.eval4()?;
-            lhs = Expr::And(Box::new(lhs), Box::new(rhs));
+            let node = Expr::And(Box::new(lhs), Box::new(rhs));
+            lhs = self.guard_skipped_junk(node, junk_before);
         }
         Ok(lhs)
     }
@@ -2679,7 +2834,9 @@ impl Parser {
     }
 
     fn eval5(&mut self) -> Result<Expr, VimlError> {
-        let mut lhs = self.eval6()?;
+        // c: `eval6(arg, rettv, evalarg, false)` — only the operand AFTER a
+        // `.`/`..` concat is parsed with want_string.
+        let mut lhs = self.eval6(false)?;
         loop {
             let op = match self.peek() {
                 Tok::Plus => ArithOp::Add,
@@ -2688,7 +2845,10 @@ impl Parser {
                 _ => break,
             };
             self.advance();
-            let rhs = self.eval6()?;
+            // c: `eval6(arg, &var2, evalarg, op == '.')` — after a concat, a
+            // "." is string concatenation, never a float decimal point
+            // (`'a' . 1.5` is `'a' . 1 . 5` → `'a15'`).
+            let rhs = self.eval6(op == ArithOp::Concat)?;
             lhs = Expr::Arith {
                 op,
                 lhs: Box::new(lhs),
@@ -2698,8 +2858,8 @@ impl Parser {
         Ok(lhs)
     }
 
-    fn eval6(&mut self) -> Result<Expr, VimlError> {
-        let mut lhs = self.eval7()?;
+    fn eval6(&mut self, want_string: bool) -> Result<Expr, VimlError> {
+        let mut lhs = self.eval7(want_string)?;
         loop {
             let op = match self.peek() {
                 Tok::Star => ArithOp::Mul,
@@ -2708,7 +2868,8 @@ impl Parser {
                 _ => break,
             };
             self.advance();
-            let rhs = self.eval7()?;
+            // c: only the FIRST operand of eval6 inherits want_string.
+            let rhs = self.eval7(false)?;
             lhs = Expr::Arith {
                 op,
                 lhs: Box::new(lhs),
@@ -2718,7 +2879,7 @@ impl Parser {
         Ok(lhs)
     }
 
-    fn eval7(&mut self) -> Result<Expr, VimlError> {
+    fn eval7(&mut self, want_string: bool) -> Result<Expr, VimlError> {
         let mut leaders = Vec::new();
         loop {
             match self.peek() {
@@ -2737,6 +2898,15 @@ impl Parser {
                 _ => break,
             }
         }
+        // c: eval_number(arg, rettv, evaluate, want_string) — after a concat
+        // operator a "." is never a float decimal point. The lexer tokenized
+        // context-free, so re-split a Float token here: `1.5` becomes the
+        // Number 1 with `.5` re-lexed (a concat of 5), exactly the C's scan.
+        if want_string {
+            if let Tok::Float(_) = self.peek() {
+                self.resplit_float_token();
+            }
+        }
         let mut e = self.primary()?;
         e = self.postfix(e)?;
         for op in leaders.into_iter().rev() {
@@ -2752,6 +2922,9 @@ impl Parser {
         match self.advance() {
             Tok::Number(n) => Ok(Expr::Number(n)),
             Tok::Float(f) => Ok(Expr::Float(f)),
+            // Junk inside a re-split float (see `resplit_float_token`) — an
+            // error Vim raises when the expression RUNS, not when it parses.
+            Tok::DeferredErr(msg) => Ok(Expr::ScriptError(msg)),
             // Blob literal `0z…` desugars to `list2blob([byte, …])`, reusing the
             // ported list2blob builtin to build the Blob value.
             Tok::Blob(bytes) => Ok(Expr::Call {

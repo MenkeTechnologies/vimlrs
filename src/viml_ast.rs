@@ -46,6 +46,23 @@ pub enum Expr {
     Env(String),
     /// Register `@x`.
     Register(char),
+    /// A parse-position error deferred to RUN time, matching Vim's single-pass
+    /// evaluator: junk after a re-split float (`'a' .. 1.0e300`) is only
+    /// reported (E15) after the operands to its left are evaluated, so a List
+    /// LHS raises E730 first. Evaluating this raises the carried message.
+    ScriptError(String),
+    /// Whole-expression poison for a [`Expr::ScriptError`] somewhere in the
+    /// tree: in Vim the junk is a *parse* failure, so the expression fails even
+    /// when the bad literal sits in a never-evaluated ternary/`&&`/`||` branch
+    /// (`(1 ? 350.0 : (-2147483648 .. 1.0e308))` is E15 in vim 9.2 and nvim
+    /// 0.12, not 350.0). Evaluates `inner` (whose own errors come first), then
+    /// raises `msg` if nothing has errored yet.
+    ScriptErrorGuard {
+        /// The parsed expression containing the deferred error.
+        inner: Box<Expr>,
+        /// The E15 message to raise when evaluation completed without error.
+        msg: String,
+    },
 
     /// Unary leader: `!`, `-`, `+` (`eval7_leader`).
     Unary {

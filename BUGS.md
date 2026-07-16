@@ -102,9 +102,14 @@ early-return dropped it. ✅ FIXED: `string(-0.0)` → `-0.0`.
 
 ## String indexing
 
-### 8. String index/slice is char-based; Vim is byte-based
+### 8. String index/slice is char-based; Vim is byte-based — ✅ FIXED (round 17)
 - `'héllo'[1]` → Vim `<c3>` (first byte of the 2-byte `é`), vimlrs `é` (whole char)
 - Vim indexes strings by byte. ASCII matches (`'hello'[1]` → both `e`); only multibyte diverges.
+- Fixed in round 17: `[i]` is one byte, `[a:b]` is an inclusive byte range
+  (`eval_index_inner`, eval.c) in both the bridge and the ported eval; a byte
+  slice that splits a character carries U+FFFD where Vim carries the raw byte
+  (both render identically). `slice()` stays character-indexed with composing
+  clusters, per its own C path (`string_slice`).
 
 ---
 
@@ -957,17 +962,256 @@ non-capturing form.
 
 Regex fuzz after round 15: **326 → 12 gaps** (5 distinct), 0 panics.
 
+### R12-10. The `\@` lookaround family was not implemented at all — ✅ FIXED
+`split('3.5e2','a\@!')` → Vim `['3', '.', '5', 'e', '2']`, vimlrs `['3.5e2']`;
+`substitute('*.[]^$\','a\@!','X','abc')` → Vim `X*.[]^$\`, vimlrs unchanged.
+The parser had no `\@` handling, so `a\@!` fell through to literal `a`, `@`, `!` —
+a pattern that matches nothing in those subjects — instead of a zero-width
+negative lookahead that matches at every position where `a` does not follow.
+
+Ported the whole family from `nfa_regpiece` `case Magic('@')` (25 probe cases
+verified identical in vim 9.2 and nvim before fixing):
+- `\@=` / `\@!` — (negative) lookahead, zero-width; groups captured inside a
+  successful positive lookahead are kept (`matchlist('foobar','foo\(bar\)\@=')`
+  includes `'bar'`).
+- `\@<=` / `\@<!` — (negative) lookbehind: the atom must match **ending exactly
+  at** the assertion position; it may match empty, and the *farthest* start wins
+  the captures (`matchlist('aaab','\(a*\)\@<=b')[1]` is `'aaa'`). The `\@123<=`
+  form bounds how far back the attempt may start (C counts bytes; this engine's
+  unit is chars).
+- `\@>` — match the atom like a standalone pattern and consume it, with no
+  backtracking into it (`match('aaa','\(a*\)\@>a')` is -1).
+- Very magic: a bare `@` is the operator (`\v(foo)@<=bar`), and its digits and
+  `<`/`=`/`!`/`>` suffix chars are copied raw by the `\v` translation so they are
+  not re-translated into `\<`/`\=`/`\>`.
+- Errors, matching the NFA engine: `\@` with no atom before it → E866, a multi on
+  either side (`a*\@=`, `a\@!*`, `\(a\)\@=\{2}`) → E871, an unknown operator
+  (`a\@x`, `a\@<x`, trailing `a\@`) → E869.
+
 ## Still open
 
 - The remaining regex gaps (5 distinct) are deeply-nested backtracking corners —
   non-greedy `\{-}` inside a repeated group, and the *order* in which two errors in one
   pattern are reported (vimlrs reports the first it parses, Vim the first its NFA
   rejects).
-- `nr2char(2147483647)` → Vim emits the raw replacement bytes, vimlrs `''`. Same
+- `nr2char(2147483647)` now emits the encoded bytes (round 17), so the direct
+  value matches after lossy decode — but a *byte slice* of it
+  (`nr2char(2147483647)[2:]`) still diverges: Vim slices the raw 6-byte
+  sequence, vimlrs slices the U+FFFD-substituted string. Same
   string-representation root cause as R5-D1 (Vim strings are byte arrays), which
   remains the one structural divergence.
-- `matchbufline(-9223372036854775808, …)` → Vim E475, vimlrs E158. The C truncates
-  the buffer number to `int`, and what that yields for INT64_MIN is undefined
-  behavior; not worth reproducing.
 - `execute()` of a command that errors captures the error text in Vim but not in
   Neovim. vimlrs follows Neovim, its port target — no single spec.
+
+---
+
+# Round 17 — multibyte string semantics (the string-builtins fuzz cluster)
+
+Differential-fuzz cluster over `strcharpart` / `nr2char` / `escape` / `toupper` /
+`strtrans` / `trim` / `strdisplaywidth` / `strcharlen` / `strpart` / `slice`
+(seeds 424242, 20260716, 987654 — both oracles agreed on every case below).
+The recurring theme: Vim walks strings by **byte** (subscripts) or by
+**base-plus-composing cluster** (`utfc_ptr2len` — escape/slice/strpart/trim),
+and its C truncates 64-bit arguments to `int` instead of erroring.
+
+### R17-1. `strcharpart()` PANICKED on an INT64-min start — ✅ FIXED
+`strcharpart("a\\b",-9223372036854775808)` → overflow panic in
+`units.len() - start`. The C computes `nbyte = (int)nchar` — a *truncating*
+cast (the literal saturates to INT64_MAX, negated = `0x8000…0001`, truncated
+= `1`), so Vim returns `'\b'`. `f_strcharpart` is now the C's byte walk with
+the same `(int)` casts, including `{len}` counting one byte per position
+before the string start.
+
+### R17-2. `nr2char(0)` returned a NUL byte; huge codepoints returned `''` — ✅ FIXED
+The C writes `utf_char2bytes()` into a buffer and `xmemdupz()`s it — a C
+string, so `nr2char(0)` is `''` (terminates at the NUL). Out-of-Unicode values
+(surrogates, > 0x10FFFF) now emit the same 3–6 byte sequences the C does
+(U+FFFD-substituted in a Rust String). Also E5070/E5071 for negative/too-big.
+
+### R17-3. `escape()` walked by codepoint, escaping composing marks — ✅ FIXED
+`escape('écombining','écombining')` (decomposed é) escaped the combining
+accent. `vim_strsave_escaped_ext` walks `utfc_ptr2len` units: any multibyte
+unit — including base + composing — is copied verbatim and never matched
+against `{chars}`; only single-byte (ASCII) characters are escaped. Oracle:
+`'é\c\o\m\b\i\n\i\n\g'`.
+
+### R17-4. String `[i]`/`[a:b]` subscripts were char-based — ✅ FIXED (bug #8)
+`toupper('écombining')[5:]` → `'BINING'` (vim `'MBINING'`),
+`strtrans('écombining')[5]` → `'b'` (vim `'m'`), `trim("é",'a,b,,c')[1:-1]` →
+`''` (vim: the é's lone continuation byte), `escape('日本語',"\<Esc>")[-5:3]` →
+`'日本語'` (vim `''` — bytes 4..3 is empty). `eval_index_inner`'s legacy path
+is byte-indexed: `[i]` is `xmemdupz(s+n1, 1)` — one byte — and `[a:b]` wraps
+and clamps against `strlen`. Fixed in the bridge (`index_value`/`slice_value`)
+and the ported `eval_index_inner`; `slice()`/`char_from_string`/`string_slice`
+(the `exclusive` path) stay character-based but now fold composing clusters
+(`utfc_ptr2len`), fixing `slice('écombining',1)` → `'combining'`.
+
+### R17-5. `trim()` — default/empty mask, E1174, and `(int)` dir — ✅ FIXED
+Three gaps in one builtin: (a) the default mask trimmed only ASCII whitespace —
+the C trims any `c1 <= ' '` plus 0xa0, so `trim("\<Esc>")` is `''`; (b) an
+*empty* `{mask}` string is folded to NULL → the default set (`trim("  x  ","")`
+is `'x'`), and a non-String `{mask}` is E1174; (c) `{dir}` is
+`(int)tv_get_number_chk(...)` — INT64-min truncates to 0 (trim both ends),
+NOT E475 (E475 only for a truncated value outside 0..2). Mask matching
+compares the *base codepoint* of each cluster and advances by whole clusters
+(`MB_PTR_ADV`).
+
+### R17-6. `strdisplaywidth()` with a huge column returned the width — ✅ FIXED
+`strdisplaywidth('ünïcø∂é',2147483647)` → 7 (vim 0). `linetabsize_col`
+accumulates an int64 `vcol` but clamps the returned int at MAXCOL
+(0x7fffffff, pos_defs.h) — a start column at INT_MAX saturates immediately, so
+`result - col` is 0. The column is also `(int)`-truncated, not clamped at 0.
+
+### R17-7. `strpart({chars})` and `strcharpart({skipcc})` cluster walks — ✅ FIXED
+`strpart('écombining',0,2,0)` → `'é'` (vim `'éc'`): the C's `{chars}` walk is
+`utfc_ptr2len` — composing marks ride along with their base — and it applies
+whenever the 4th argument is *present*, regardless of its value.
+
+### R17-8. `strtrans("\n")` showed `^J` instead of `^@` — ✅ FIXED
+`transchar_nonprint()`: `if (c == NL) c = NUL;` — "we use newline in place of
+a NUL", so a newline in a String displays as `^@`.
+
+### R17-9. `slice()` on a List clamped an out-of-range start — ✅ FIXED
+`slice([1,2,3],-4,2)` → `[1,2]` (vim `[]`). `tv_list_slice_or_index` sets
+`n1 = len` when the wrapped start is still out of range — an empty slice, not
+a clamp to 0. `f_slice` now routes Lists/Blobs through the ported value layer
+(and a NULL-blob result indexes as length 0 → E979, not v:null).
+
+### R17-10. A float literal after `.`/`..` concat parsed as a float — ✅ FIXED
+`'a' . -0.5` → `'a-0.5'` (vim `'a05'`): `eval_number(..., want_string)` never
+reads a float after the concat operator, so `-0.5` is `-0 . 5` — two more
+concats. Likewise the trailing-junk rules: `1.2.3` is `'123'` (a second `.`
+rejects the float wholesale) and `1.5e`/`1.5ex` is the Number 1. The lexer now
+applies the C's trailing-character rejections, and the parser re-splits a
+Float token in concat-RHS position. Exponent junk (`'a' .. -1.0e300`) is
+Vim's *deferred* E15: raised when the expression runs, AFTER operands to its
+left — `([1] .. 1.0e300)` is E730, not E15 — and even when the junk sits in a
+branch evaluation never reaches (`Expr::ScriptError` operand +
+`Expr::ScriptErrorGuard` whole-expression wrapper; `VIML_RAISE` yields to any
+earlier error in the statement).
+
+String-cluster fuzz after round 17 (seeds 424242 / 20260716 / 987654, 2000
+exprs each): **0 gaps, 0 panics** on two seeds; the single remaining distinct
+gap is `nr2char(2147483647)[2:]` — byte-slicing a string of raw out-of-Unicode
+bytes — the R5-D1 structural divergence (Vim strings are byte arrays).
+
+---
+
+# Round 18 — error-code / check-order semantics (the call/eval/matchbufline/matchfuzzy fuzz cluster)
+
+Differential-fuzz cluster over `call` / `funcref` / `eval` / `matchbufline` /
+`matchfuzzy` / `matchfuzzypos` and their binop/ternary compositions (seeds
+987654, 20260716, 424242 — both oracles agreed on every case below; all three
+seeds now replay with **0 gaps, 0 panics**).
+
+### R18-1. `call()` of a lambda with too few arguments ran the body — ✅ FIXED
+`call({x -> type(x)},[])` → `7` (vim E119). `call_user_func_check`
+(userfunc.c) validates arity BEFORE binding: too few (below
+`uf_args - uf_def_args`) is E119, too many without varargs is E118. vimlrs
+bound the missing parameter to a placeholder and ran the body. The bridge's
+`call_user_function_raw` now ports the check. A lambda is created with
+`uf_varargs = true` (`get_lambda_tv`, userfunc.c:396), so
+`call({x -> x},[1,2,3])` stays `1` — never E118.
+
+### R18-2. `matchbufline()` buffer/lnum validation order — ✅ FIXED
+`matchbufline(-9223372036854775808,'a\>',10,-10)` → E158 (vim E475
+end_lnum), and `matchbufline(0,'\h',-1,…)` → E475 lnum (vim E158). Two `(int)`
+casts in the C: `tv_get_buf` does `buflist_findnr((int)v_number)` — the
+saturated literal -9223372036854775807 (0x8000000000000001) truncates to
+buffer **1**, which exists, so validation proceeds to the lnum checks — and
+buffer `0` goes through `buflist_findnr`'s `nr = curwin->w_alt_fnum` (no
+alternate buffer → E158, never "current buffer"). `linenr_T` is 32-bit, so
+lnum arguments truncate the same way (`end_lnum` of INT64_MAX is -1 → E475).
+
+### R18-3. `funcref()` with a combining char in the name was E475 — ✅ FIXED
+`funcref('écombining',…)` (decomposed e + U+0301) → E475 (vim E700 with the
+full name). `find_name_end()` (eval.c) advances with
+`MB_PTR_ADV`/`utfc_ptr2len`, so a composing char rides along with its accepted
+base char even though `eval_isnamec()` is ASCII-only; the whole
+"e\u{301}combining" is one (unknown) function name. The Rust port advanced
+byte-wise and cut the name at the combining char, leaving trailing text →
+`s = NULL` → E475. Note the split behavior is real: the *expression* name
+path (`get_id_len`, byte-wise) still stops at the combining char, which is
+why `eval('écombining')` is E121 "Undefined variable: e" — both verified
+against vim 9.2 + nvim 0.12.
+
+### R18-4. `eval()` lexed the whole string instead of one expression — ✅ FIXED
+`eval('a''quote')` → E115, `eval('tab\there')` → E15 (vim: E121 "Undefined
+variable: a"/"tab"), `keys({…}) % eval('écombining')` → E15 (fuzz-prelude
+oracle: E488). The C `f_eval` runs `eval1()`, which consumes ONE leading
+expression and never looks past it: evaluation errors (E121) surface first,
+and only a *successfully* evaluated expression with leftover text is E488
+(`e_trailing_arg`); the E15 fallback fires only when `eval1` itself fails
+(and not when aborting inside `:try`). `parse_expr_prefix` now lexes with
+`lex_prefix` (stops at the first untokenizable byte instead of failing), and
+`b_eval` reports E488 only on success and E15 only on failure.
+
+### R18-5. `matchfuzzy()`/`matchfuzzypos()` used the pre-fzy scoring — ✅ FIXED
+`matchfuzzypos(['B','a','C'],'a')` → `[…, [115]]` (vim `[…, [2147483647]]`).
+Both vim 9.2 and nvim 0.12 score with the **fzy** algorithm (nvim fuzzy.c,
+adapted from jhawthorn/fzy): a whole-string case-insensitive match is
+`SCORE_MAX` → the INT_MAX sentinel, and every partial score is the DP result
+scaled by 1000 (`'a'`→`'ab'` = 895, `'ba'`→`'bar'` = 1895, `'a'`→`'bar'` =
+-10). vimlrs had the old recursive bonus/penalty scorer (base 100 +
+first-letter/sequential bonuses), wrong on every score. Ported `has_match` /
+`compute_bonus_codepoint` / `match_row` / `match_positions` / `fuzzy_match` /
+`fuzzy_match_in_list` / `do_fuzzymatch` from fuzzy.c, including: `limit`
+capping the *scan* (first N matches, not top-N scores), `matchseq` as a
+key-presence check, the exact-match tiebreak in `fuzzy_match_item_compare`,
+and the E686/E475/E1206 argument validation.
+
+### R18-6. Junk float in a skipped branch let dead code run — ✅ FIXED
+`(isnan(1.0) ? (-2147483648 .. 1.0e308) : matchbufline(0x1f,…))` → E158 (vim
+E15). Follow-up to R17-10: the re-split float's exponent junk is a *parse*
+failure in Vim, aborting `eval1` at the junk's position — everything
+textually after it is dead, even the other ternary branch (`matchbufline`
+never runs), and a short-circuited `&&`/`||` right operand still reports E15
+right after its node. The parser now tracks re-split junk per operand: junk
+in a ternary then-branch replaces the (dead) else-branch with the raise; junk
+in an else-branch / short-circuit RHS wraps the node in
+`Expr::ScriptErrorGuard` (raises after the node evaluates, yielding to any
+earlier error).
+
+# Round 19 — positional printf, locale collation, and split's default pattern
+
+### R19-1. `$`-style printf formats skipped Vim's validation pre-pass — ✅ FIXED
+`printf('%1$s %1$s')[5]` → E766 (vim E1503). Vim validates positional
+(`%N$`) formats in a pre-pass over the whole format string *before* anything
+renders — `parse_fmt_types()`/`adjust_types()` (strings.c:1101/1013) — with
+its own error family: E1500 mixed positional/non-positional (`%1$s %s`,
+also raised for an unknown specifier carrying a position), E1501 a slot the
+format never uses (`%2$s` with `'a'`), E1502 a `*N$` field-width slot reused
+as a non-int, E1503 a slot past the supplied arguments, E1504 a slot reused
+as a different type (`%1$d %1$s` → "string/int"), E1505 a malformed spec
+(`%01$d`, `%5$` after width digits), and E1510 for a huge digit run — where
+`%$d` is E1510 with an *empty* digit run because `get_unsigned_int()` computes
+`(unsigned)('$' - '0')` and trips the overflow check. vimlrs formatted
+positionals leniently and only reported E766/E767 afterwards. Ported all six
+(`format_typeof`/`format_typename`/`adjust_types`/`format_overflow_error`/
+`get_unsigned_int`/`parse_fmt_types`) as a pre-pass in `f_printf`, plus the
+`%N$*M$d` positional field width/precision the formatter didn't consume.
+All error/value probes verified against nvim 0.12 + vim 9.2.
+
+### R19-2. `sort()`'s `'l'` flag compared by byte order, not `strcoll()` — ✅ FIXED
+`sort(['b','a','C','A'],'l')[0]` → `'A'` (vim `'a'` under en_US.UTF-8). The C
+`item_compare()` (eval/typval.c:1245) calls `strcoll()`, which collates by the
+locale adopted at startup — `init_locale()` (os/lang.c) does
+`setlocale(LC_ALL, "")` then forces `LC_NUMERIC` back to `"C"`. vimlrs
+approximated `'l'` with byte comparison, so uppercase sorted before lowercase
+regardless of locale. Ported `init_locale()` (`Once`-guarded, invoked lazily
+before the first `strcoll`) and routed the `'l'` branch through
+`libc::strcoll`. The ordering is inherently locale-dependent (`LC_ALL=C`
+yields `['A','C','a','b']` in real Vim too), so the corpus records the
+locale-invariant `sort(['b','a','c'],'l')`; the locale-sensitive case is
+covered by the fuzzer, whose oracles run under the same environment.
+
+### R19-3. `split()`'s default pattern was `\s\+`; Vim's is `[\x01- ]\+` — ✅ FIXED
+`split("\<C-A>")` → `['']` (vim `[]`). With `{pat}` missing *or empty*,
+`f_split()` (eval/funcs.c:7089) uses `"[\\x01- ]\\+"` — a run of ANY byte from
+0x01 through space, not just whitespace — so a control-char-only subject
+splits to nothing, exactly like `split(' ')`. vimlrs used a whitespace split
+that also ignored `{keepempty}` for the default pattern
+(`split('  a  b ', '', 1)` dropped the empty edges vim keeps). Now the default
+routes through the same regex path as an explicit pattern, with the
+collection's `\x01` written as the literal codepoint (the pattern engine
+does not yet decode `\x`-escapes inside `[…]` — the C's `coll_get_char()`).

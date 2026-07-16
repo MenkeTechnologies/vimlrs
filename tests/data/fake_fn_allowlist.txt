@@ -43,6 +43,17 @@ f_strdisplaywidth
 f_charclass
 utf_iscomposing
 utf_char2cells
+# $-style (positional) printf validation — strings.c:864/978/1013/1066/1084/1101.
+format_typeof
+format_typename
+adjust_types
+format_overflow_error
+get_unsigned_int
+parse_fmt_types
+
+# ── os/lang.c (not vendored) ──
+# Locale adoption behind sort()'s 'l' flag (strcoll) — os/lang.c:121.
+init_locale
 
 # ── option.c (not vendored) ──
 do_set
@@ -118,15 +129,22 @@ utf_char2utf16len
 # (Neovim has no named helper for it); faithful port of that formatting.
 vim_float_g
 
-# ── search.c (not vendored) — matchfuzzy()/matchfuzzypos() ──
-# Real Neovim fuzzy matcher. Home file search.c is outside the vendored eval/
-# tree; faithful ports cited to search.c.
+# ── fuzzy.c (not vendored) — matchfuzzy()/matchfuzzypos() ──
+# Real Neovim fuzzy matcher (the fzy algorithm both vim 9.2 and nvim 0.12
+# score with). Home file fuzzy.c is outside the vendored eval/ tree; faithful
+# ports cited to fuzzy.c. (Was previously ported from the pre-fzy search.c
+# scorer — BUGS.md R18-5.)
 f_matchfuzzy
 f_matchfuzzypos
 do_fuzzymatch
 fuzzy_match
-fuzzy_match_recursive
-fuzzy_match_compute_score
+fuzzy_match_in_list
+fuzzy_match_item_compare
+has_match
+setup_match_struct
+compute_bonus_codepoint
+match_row
+match_positions
 
 # ── cmdhist.c (not vendored) — command-line history ──
 # Real Neovim history rings behind histadd()/histget()/histnr()/histdel();

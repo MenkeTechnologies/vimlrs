@@ -167,14 +167,16 @@ fn collect_free_vars(
             collect_free_vars(base, bound, out);
             args.iter().for_each(|a| collect_free_vars(a, bound, out));
         }
-        // Literals and sigil-scoped refs capture nothing.
+        Expr::ScriptErrorGuard { inner, .. } => collect_free_vars(inner, bound, out),
+        // Literals, sigil-scoped refs and deferred errors capture nothing.
         Expr::Number(_)
         | Expr::Float(_)
         | Expr::Str(_)
         | Expr::NullFunc
         | Expr::Option(_)
         | Expr::Env(_)
-        | Expr::Register(_) => {}
+        | Expr::Register(_)
+        | Expr::ScriptError(_) => {}
     }
 }
 
@@ -893,6 +895,12 @@ impl Compiler {
                 Ok(())
             }
             Stmt::Expr(e) => {
+                // Mark the error count first (as `:echo` does) so a deferred
+                // `VIML_RAISE` inside the expression can tell whether an
+                // earlier operand already errored — Vim's single-pass eval
+                // aborts on the first error, so only the first is reported.
+                self.emit(Op::CallBuiltin(h::VIML_ERR_MARK, 0));
+                self.emit(Op::Pop);
                 self.expr(e)?;
                 self.emit(Op::CallBuiltin(h::VIML_SET_RESULT, 1));
                 self.emit(Op::Pop);
@@ -1827,6 +1835,23 @@ impl Compiler {
                 self.emit(Op::LoadFloat(*f));
             }
             Expr::Str(s) => self.load_str(s),
+            // A parse-position error Vim reports only when the expression runs
+            // (same rationale as the wrong-argc call → `VIML_RAISE` lowering).
+            Expr::ScriptError(msg) => {
+                self.load_str(msg);
+                self.emit(Op::CallBuiltin(h::VIML_RAISE, 1));
+            }
+            // c: a parse failure inside eval1 fails the WHOLE expression even
+            // when it sits in a branch evaluation never reaches — so evaluate
+            // the tree (its own errors report first; `VIML_RAISE` yields to
+            // any earlier error), drop the value, and raise the deferred E15.
+            // The result is the C's `rettv->vval.v_number = 0`.
+            Expr::ScriptErrorGuard { inner, msg } => {
+                self.expr(inner)?;
+                self.emit(Op::Pop);
+                self.load_str(msg);
+                self.emit(Op::CallBuiltin(h::VIML_RAISE, 1));
+            }
             // A Funcref is carried as a tagged string in the VM (see
             // `tv_to_value`); the null one is that tag with an empty name.
             Expr::NullFunc => self.load_str("\u{1}func\u{1}"),

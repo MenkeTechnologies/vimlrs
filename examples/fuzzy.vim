@@ -1,6 +1,8 @@
 " fuzzy.vim — matchfuzzy()/matchfuzzypos(), the faithful port of Neovim's
-" search.c fuzzy matcher (sequential/camel/separator/first-letter bonuses).
+" fuzzy.c matcher (the fzy scoring algorithm, which vim 9.2 also ships).
 " Self-test: asserts into v:errors, throws at the end if anything failed.
+" Every expected value below is oracle-recorded: vim 9.2 and nvim 0.12 agree
+" on each one.
 
 " --- matchfuzzy() keeps only items the pattern fuzzy-matches, best score first
 call assert_equal(['help', 'hello', 'shell'], matchfuzzy(['hello', 'world', 'help', 'shell'], 'hl'))
@@ -12,8 +14,10 @@ call assert_equal([], matchfuzzy(['world'], 'xz'))
 call assert_equal(['clip', 'cardiologist'], matchfuzzy(['cardiologist', 'clip'], 'cli'))
 
 " --- matchfuzzypos() returns [items, positions, scores]; positions are the
-"     0-based char indices that matched, scores are search.c's integer scores
-call assert_equal([['help', 'hello'], [[0, 2], [0, 2]], [113, 112]], matchfuzzypos(['hello', 'help'], 'hl'))
+"     0-based char indices that matched, scores are fuzzy.c's fzy scores
+"     (scaled by 1000; a whole-string match is the INT_MAX sentinel).
+"     Oracle-recorded: vim 9.2 and nvim 0.12 both return [885, 880] here.
+call assert_equal([['help', 'hello'], [[0, 2], [0, 2]], [885, 880]], matchfuzzypos(['hello', 'help'], 'hl'))
 
 " --- separator bonuses (matches after a space) outweigh a plain contiguous run
 let res = matchfuzzypos(['xhelloy', 'h e l l o'], 'hello')

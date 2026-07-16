@@ -1173,55 +1173,72 @@ pub const NAMESPACE_CHAR: &[u8] = b"abglstvw";
 
 /// Port of `char_idx2byte()` from `Src/eval.c:5863`.
 ///
-/// Byte offset of character index `idx` in `str`. A negative `idx` counts from
-/// the end (`-1` is the last character). Returns `Some(str.len())` when `idx`
-/// runs past the end, and `None` when a negative `idx` runs past the start
-/// (the C `-1` "before the start" sentinel).
-///
-/// RUST-PORT NOTE: the C walks `utfc_ptr2len`, which groups composing marks
-/// into one index; consistent with the rest of the crate, a Rust `char`
-/// (one Unicode scalar) is the unit instead.
+/// Byte offset of character index `idx` in `str`; composing characters are
+/// included (the C walks `utfc_ptr2len` forward and `utf_head_off` backward,
+/// so one index unit is a base character plus its trailing composing marks).
+/// A negative `idx` counts from the end (`-1` is the last character). Returns
+/// `Some(str.len())` when `idx` runs past the end, and `None` when a negative
+/// `idx` runs past the start (the C `-1` "before the start" sentinel).
 pub fn char_idx2byte(str: &str, idx: varnumber_T) -> Option<usize> {
-    if idx >= 0 {
-        // Forward: skip `idx` characters, clamping at the end.
-        match str.char_indices().nth(idx as usize) {
-            Some((b, _)) => Some(b),
-            None => Some(str.len()),
+    let bytes = str.as_bytes();
+    let mut nchar = idx;
+    let mut nbyte = 0usize;
+    if nchar >= 0 {
+        // c: while (nchar > 0 && nbyte < str_len) { nbyte += utfc_ptr2len(...); nchar--; }
+        while nchar > 0 && nbyte < bytes.len() {
+            nbyte += crate::ported::mbyte::utfc_ptr2len(&bytes[nbyte..]).max(1) as usize;
+            nchar -= 1;
         }
     } else {
-        // Backward: -1 is the last char. `nchar` chars from the end.
-        let nchar = (-idx) as usize;
-        let total = str.chars().count();
-        if nchar > total {
-            None
-        } else {
-            Some(
-                str.char_indices()
-                    .nth(total - nchar)
-                    .map_or(str.len(), |(b, _)| b),
-            )
+        // c: nbyte = str_len; while (nchar < 0 && nbyte > 0) { nbyte--;
+        //    nbyte -= utf_head_off(str, str + nbyte); nchar++; }
+        nbyte = bytes.len();
+        while nchar < 0 && nbyte > 0 {
+            nbyte -= 1;
+            nbyte -= crate::ported::mbyte::utf_head_off(bytes, nbyte);
+            nchar += 1;
+        }
+        if nchar < 0 {
+            return None;
         }
     }
+    Some(nbyte)
 }
 
 /// Port of `char_from_string()` from `Src/eval.c:5825`.
 ///
-/// The single character at character index `index` in `str` (a negative index
-/// counts from the end, like a List). Returns `None` (the C `NULL`, i.e. the
-/// empty string at the call site) when the index is out of range.
+/// The single character at character index `index` in `str` — the whole
+/// base-plus-composing cluster, as the C's `utfc_ptr2len` copy does. A negative
+/// index counts from the end, like a List. Returns `None` (the C `NULL`, i.e.
+/// the empty string at the call site) when the index is out of range.
 pub fn char_from_string(str: &str, index: varnumber_T) -> Option<String> {
-    let chars: Vec<char> = str.chars().collect();
-    let nchar = if index < 0 {
-        let n = chars.len() as varnumber_T + index;
-        if n < 0 {
+    let bytes = str.as_bytes();
+    let step = |off: usize| crate::ported::mbyte::utfc_ptr2len(&bytes[off..]).max(1) as usize;
+    let mut nchar = index;
+    if index < 0 {
+        // c: count the clusters, then a negative index counts from the end.
+        let mut clen: varnumber_T = 0;
+        let mut nbyte = 0usize;
+        while nbyte < bytes.len() {
+            nbyte += step(nbyte);
+            clen += 1;
+        }
+        nchar = clen + index;
+        if nchar < 0 {
             // c: unlike a List, an out-of-range index is the empty string.
             return None;
         }
-        n
-    } else {
-        index
-    };
-    chars.get(nchar as usize).map(|c| c.to_string())
+    }
+    // c: for (; nchar > 0 && nbyte < slen; nchar--) nbyte += utfc_ptr2len(...);
+    let mut nbyte = 0usize;
+    while nchar > 0 && nbyte < bytes.len() {
+        nbyte += step(nbyte);
+        nchar -= 1;
+    }
+    if nbyte >= bytes.len() {
+        return None;
+    }
+    Some(str[nbyte..nbyte + step(nbyte)].to_string())
 }
 
 /// Port of `string_slice()` from `Src/eval.c:5893`.
@@ -1243,9 +1260,10 @@ pub fn string_slice(
         slen
     } else {
         match char_idx2byte(str, last) {
-            // c: inclusive subscript end → step past that character.
+            // c: inclusive subscript end → step past that character (the whole
+            // base-plus-composing cluster: `end_byte += utfc_ptr2len(...)`).
             Some(b) if !exclusive && b < slen => {
-                b + str[b..].chars().next().map_or(0, char::len_utf8)
+                b + crate::ported::mbyte::utfc_ptr2len(&str.as_bytes()[b..]).max(1) as usize
             }
             Some(b) => b,
             None => return None,
@@ -1623,7 +1641,13 @@ pub fn find_name_end(arg: &str, flags: u32) -> (usize, Option<usize>, Option<usi
                 }
             }
         }
-        p += 1;
+        // c: `MB_PTR_ADV(p)` — advance by `utfc_ptr2len()`, i.e. over the char
+        // PLUS any following composing characters. This is what makes a name
+        // like "e\u{301}combining" one name in Vim: the combining acute rides
+        // along with the accepted 'e' even though `eval_isnamec()` itself is
+        // ASCII-only (`funcref('e\u{301}…')` is E700 with the full name in both
+        // oracles, not E475 on a truncated one).
+        p += (crate::ported::mbyte::utfc_ptr2len(&b[p..]).max(1)) as usize;
     }
     (p, expr_start, expr_end)
 }
@@ -2033,10 +2057,10 @@ pub fn eval_index(rettv: &mut typval_T, subscript: &str, verbose: bool) -> i32 {
 /// Port of `eval_index_inner()` from `Src/eval.c:3237`.
 ///
 /// Apply a subscript (`var1`) or slice (`var1:var2`, `exclusive` for `slice()`)
-/// — or a Dict key — to `rettv`, in place. RUST-PORT NOTE: unlike the C's
-/// byte-indexed String path, the String case is character-indexed (via the
-/// ported `string_slice`/`char_from_string`), matching the interpreter's
-/// char-based string subscripting. Returns [`OK`]/[`FAIL`].
+/// — or a Dict key — to `rettv`, in place. The String path is BYTE-indexed for
+/// the plain `[i]`/`[a:b]` subscript (like the C, it may split a multibyte
+/// character) and character-indexed only for `slice()` (`exclusive`, via the
+/// ported `string_slice`/`char_from_string`). Returns [`OK`]/[`FAIL`].
 #[allow(clippy::too_many_arguments)]
 pub fn eval_index_inner(
     rettv: &mut typval_T,
@@ -2067,10 +2091,49 @@ pub fn eval_index_inner(
         VAR_BOOL | VAR_SPECIAL | VAR_FUNC | VAR_FLOAT | VAR_PARTIAL | VAR_UNKNOWN => OK,
         VAR_NUMBER | VAR_STRING => {
             let s = tv_get_string(rettv);
-            let v = if is_range {
-                string_slice(&s, n1, n2, exclusive)
+            // c:3272 — only `slice()` (`exclusive`) is character-indexed (via
+            // `string_slice`/`char_from_string`); the plain `[i]`/`[a:b]`
+            // subscript is BYTE-indexed and may split a multibyte character.
+            let v = if exclusive {
+                if is_range {
+                    string_slice(&s, n1, n2, exclusive)
+                } else {
+                    char_from_string(&s, n1)
+                }
             } else {
-                char_from_string(&s, n1)
+                let bytes = s.as_bytes();
+                let len = bytes.len() as varnumber_T;
+                if is_range {
+                    // c: n1 < 0 → n1 = len + n1, floored at 0; n2 < 0 →
+                    // n2 = len + n2, else capped at len (the trailing NUL —
+                    // same effective end as len - 1); empty when out of range.
+                    let mut n1 = n1;
+                    let mut n2 = n2;
+                    if n1 < 0 {
+                        n1 = (len + n1).max(0);
+                    }
+                    if n2 < 0 {
+                        n2 = len + n2;
+                    } else if n2 >= len {
+                        n2 = len - 1;
+                    }
+                    if n1 >= len || n2 < 0 || n1 > n2 {
+                        None
+                    } else {
+                        Some(
+                            String::from_utf8_lossy(&bytes[n1 as usize..=n2 as usize]).into_owned(),
+                        )
+                    }
+                } else {
+                    // c: `v = xmemdupz(s + n1, 1)` — a single BYTE; too big or
+                    // negative is empty (a subscript does not wrap).
+                    if n1 >= len || n1 < 0 {
+                        None
+                    } else {
+                        let b = n1 as usize;
+                        Some(String::from_utf8_lossy(&bytes[b..b + 1]).into_owned())
+                    }
+                }
             };
             *rettv = typval_T::from(v.unwrap_or_default());
             OK
@@ -5791,10 +5854,13 @@ mod tests {
         }
         let saved = EVAL_STRING_HOOK.with(|h| *h.borrow());
         EVAL_STRING_HOOK.with(|h| *h.borrow_mut() = Some(hook));
-        // string[1] (char-based)
+        // string[1] — BYTE-based (c: `v = xmemdupz(s + n1, 1)`; vim 9.2/nvim
+        // 0.12: `'héllo'[1]` is the lone lead byte <c3>, U+FFFD after lossy
+        // decode). Was asserted char-based ("é") while BUGS.md #8 documented
+        // that as a bug; updated when the byte semantics were ported.
         let mut s = typval_T::from("héllo".to_string());
         assert_eq!(eval_index(&mut s, "[1]", false), OK);
-        assert!(matches!(&s.vval, v_string(t) if t == "é"));
+        assert!(matches!(&s.vval, v_string(t) if t == "\u{FFFD}"));
         // string[1:3] inclusive
         let mut s2 = typval_T::from("abcdef".to_string());
         eval_index(&mut s2, "[1:3]", false);
@@ -5815,7 +5881,10 @@ mod tests {
         };
         use crate::ported::eval_h::{FAIL, OK};
         use std::{cell::RefCell, rc::Rc};
-        // string subscript [1] is char-based
+        // string subscript [1] is BYTE-based (c: `v = xmemdupz(s + n1, 1)`;
+        // vim 9.2/nvim 0.12: `'héllo'[1]` is the lone lead byte <c3>, U+FFFD
+        // after lossy decode). Was asserted char-based ("é") while BUGS.md #8
+        // documented that as a bug; updated when the byte semantics were ported.
         let mut s = typval_T::from("héllo".to_string());
         assert_eq!(
             eval_index_inner(
@@ -5829,7 +5898,7 @@ mod tests {
             ),
             OK
         );
-        assert!(matches!(&s.vval, v_string(t) if t == "é"));
+        assert!(matches!(&s.vval, v_string(t) if t == "\u{FFFD}"));
         // string slice [1:3] inclusive
         let mut s2 = typval_T::from("abcdef".to_string());
         eval_index_inner(

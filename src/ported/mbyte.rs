@@ -158,6 +158,83 @@ pub fn utf_ptr2len(p: &[u8]) -> i32 {
     len
 }
 
+/// Port of `utfc_ptr2len()` from `Src/mbyte.c:970` — byte length of the UTF-8
+/// character at `p` *including* any following composing characters (the
+/// character-plus-composing "cluster" that Vim treats as one unit in
+/// `escape()`, `strcharpart()` skipcc, `slice()`, …).
+///
+/// RUST-PORT NOTE: the C's `utf_composinglike` uses the full grapheme tables;
+/// consistent with the rest of the crate, the composing check is the
+/// `utf_iscomposing` range approximation.
+pub fn utfc_ptr2len(p: &[u8]) -> i32 {
+    let b0 = p.first().copied().unwrap_or(0);
+    // c: if (b0 == NUL) return 0;
+    if b0 == 0 {
+        return 0;
+    }
+    // c: if (b0 < 0x80 && p[1] < 0x80) return 1;  // be quick for ASCII
+    if b0 < 0x80 && p.get(1).copied().unwrap_or(0) < 0x80 {
+        return 1;
+    }
+    // c: len = utf_ptr2len(p); if (len == 1 && b0 >= 0x80) return 1;
+    let mut len = utf_ptr2len(p);
+    if len == 1 && b0 >= 0x80 {
+        return 1;
+    }
+    // c: while (utf_composinglike(...)) len += utf_ptr2len(p + len);
+    loop {
+        let rest = &p[len as usize..];
+        if rest.first().copied().unwrap_or(0) < 0x80 {
+            return len;
+        }
+        let c = utf_ptr2char(rest);
+        match char::from_u32(c as u32) {
+            Some(ch) if crate::ported::strings::utf_iscomposing(ch) => {
+                len += utf_ptr2len(rest);
+            }
+            _ => return len,
+        }
+    }
+}
+
+/// Port of `utf_head_off()` from `Src/mbyte.c:1763` — how many bytes the byte
+/// at offset `i` sits PAST the start of its character cluster (base character
+/// plus trailing composing characters). 0 when `i` is itself a cluster start.
+///
+/// RUST-PORT NOTE: the C consults utf8proc grapheme boundclasses; consistent
+/// with the rest of the crate, the composing check is the `utf_iscomposing`
+/// range approximation, and `p` is a byte offset into a valid UTF-8 buffer.
+pub fn utf_head_off(base: &[u8], i: usize) -> usize {
+    // c: if (*p < 0x80) return 0;  // be quick for ASCII
+    if base.get(i).copied().unwrap_or(0) < 0x80 {
+        return 0;
+    }
+    // c: move start to the first byte of this codepoint.
+    let mut start = i;
+    while start > 0 && (base[start] & 0xc0) == 0x80 && i - start < 6 {
+        start -= 1;
+    }
+    // c: backtrack while the codepoint at `start` is a composing char, gluing
+    // it to the preceding base character (the cluster the C's boundclass walk
+    // finds).
+    loop {
+        let composing = utf_ptr2char(&base[start..])
+            .try_into()
+            .ok()
+            .and_then(char::from_u32)
+            .is_some_and(crate::ported::strings::utf_iscomposing);
+        if !composing || start == 0 {
+            break;
+        }
+        let mut prev = start - 1;
+        while prev > 0 && (base[prev] & 0xc0) == 0x80 && start - prev < 6 {
+            prev -= 1;
+        }
+        start = prev;
+    }
+    i - start
+}
+
 /// Port of `utf_char2len()` from `Src/mbyte.c:1053` — number of bytes needed to
 /// encode Unicode character `c`.
 pub fn utf_char2len(c: i32) -> i32 {
@@ -221,6 +298,37 @@ pub fn utf_char2bytes(c: i32, buf: &mut [u8]) -> i32 {
         buf[5] = (0x80 + (u & 0x3f)) as u8;
         6
     }
+}
+
+/// Port of `mb_tolower()` from `Src/mbyte.c` — single-codepoint lowercase
+/// (`utf_tolower`).
+///
+/// RUST-PORT NOTE: the C consults Vim's own case-folding tables; the
+/// first-codepoint of Rust's Unicode `to_lowercase` is the standalone
+/// approximation, identical over the simple (1:1) mappings Vim's tables hold.
+pub fn mb_tolower(c: char) -> char {
+    c.to_lowercase().next().unwrap_or(c)
+}
+
+/// Port of `mb_toupper()` from `Src/mbyte.c` — single-codepoint uppercase
+/// (`utf_toupper`). Same approximation note as [`mb_tolower`].
+pub fn mb_toupper(c: char) -> char {
+    c.to_uppercase().next().unwrap_or(c)
+}
+
+/// Port of `mb_charlen()` from `Src/mbyte.c:2236` — the number of characters
+/// in `str`, counting a base char plus its composing chars as one
+/// (`utfc_ptr2len` steps).
+pub fn mb_charlen(s: &str) -> i32 {
+    let b = s.as_bytes();
+    let mut count = 0i32;
+    let mut i = 0usize;
+    // c: for (count = 0; *p != NUL; count++) { p += utfc_ptr2len(p); }
+    while i < b.len() {
+        i += utfc_ptr2len(&b[i..]).max(1) as usize;
+        count += 1;
+    }
+    count
 }
 
 #[cfg(test)]

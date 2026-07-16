@@ -199,11 +199,26 @@ pub fn f_char2nr(argvars: &[typval_T], rettv: &mut typval_T) {
 /// Port of `f_nr2char()` from `Src/eval/funcs.c` — char for a code point.
 pub fn f_nr2char(argvars: &[typval_T], rettv: &mut typval_T) {
     let n = tv_get_number_chk(&argvars[0], None);
-    let s = char::from_u32(n as u32)
-        .map(String::from)
-        .unwrap_or_default();
+    // c: `if (num < 0) { emsg(E5070); return; } if (num > INT_MAX) { semsg(E5071); return; }`
+    if n < 0 {
+        emsg("E5070: Character number must not be less than zero");
+        return;
+    }
+    if n > i32::MAX as varnumber_T {
+        emsg(&format!(
+            "E5071: Character number must not be greater than INT_MAX ({})",
+            i32::MAX
+        ));
+        return;
+    }
+    // c: utf_char2bytes() into a buffer, then xmemdupz() — the result is a
+    // C string, so it TERMINATES at the first NUL: nr2char(0) is ''.
+    let mut buf = [0u8; 6];
+    let len = crate::ported::mbyte::utf_char2bytes(n as i32, &mut buf) as usize;
+    let bytes = &buf[..len];
+    let bytes = &bytes[..bytes.iter().position(|&b| b == 0).unwrap_or(len)];
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(s);
+    rettv.vval = v_string(String::from_utf8_lossy(bytes).into_owned());
 }
 
 /// Port of `repeat_list()` — `vendor/eval/funcs.c:5310`. Repeat list `l` `n` times
@@ -317,23 +332,25 @@ pub fn f_repeat(argvars: &[typval_T], rettv: &mut typval_T) {
 
 /// Port of `f_split()` from `Src/eval/funcs.c`.
 ///
-/// "split({str} [, {pat} [, {keepempty}]])" — split on the Vim regex `{pat}`
-/// (default whitespace `\s\+`), dropping empty pieces unless `{keepempty}`.
+/// "split({str} [, {pat} [, {keepempty}]])" — split on the Vim regex `{pat}`,
+/// dropping empty pieces unless `{keepempty}`. c (funcs.c): a missing or empty
+/// `{pat}` defaults to `"[\\x01- ]\\+"` — a run of ANY byte from 0x01 through
+/// space, not just `\s` whitespace — so `split("\x01")` is `[]`, exactly like
+/// `split(" ")`. RUST-PORT NOTE: the collection's `\x01` escape is written as
+/// the literal codepoint here because the pattern engine decodes collection
+/// escapes at a different layer than the C's `coll_get_char()`.
 pub fn f_split(argvars: &[typval_T], rettv: &mut typval_T) {
     let s = tv_get_string(&argvars[0]);
     let keepempty = argvars
         .get(2)
         .is_some_and(|t| tv_get_number_chk(t, None) != 0);
     let pat = argvars.get(1).map(tv_get_string).filter(|p| !p.is_empty());
-    let parts: Vec<String> = match pat {
-        Some(p) => crate::viml_regex::regex_split(
-            &s,
-            &p,
-            tv_get_bool(&get_option_value("ignorecase")) != 0,
-            keepempty,
-        ),
-        None => s.split_whitespace().map(String::from).collect(),
-    };
+    let parts: Vec<String> = crate::viml_regex::regex_split(
+        &s,
+        pat.as_deref().unwrap_or("[\u{01}- ]\\+"),
+        tv_get_bool(&get_option_value("ignorecase")) != 0,
+        keepempty,
+    );
     let l = tv_list_alloc_ret(rettv, parts.len() as isize);
     let mut lb = l.borrow_mut();
     for p in &parts {
@@ -1236,6 +1253,18 @@ pub fn f_exists(argvars: &[typval_T], rettv: &mut typval_T) {
 pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.v_type = VAR_STRING;
     let fmt = tv_get_string(&argvars[0]);
+    // c (`vim_vsnprintf_typval` → `parse_fmt_types`, Src/strings.c:1101):
+    // `$`-style (positional) conversions are validated in a pre-pass over the
+    // whole format before anything renders — E1500 (mixed), E1501 (unused
+    // slot), E1502/E1504 (slot type conflicts), E1503 (slot past the supplied
+    // arguments), E1505 (malformed `$` spec), E1510 (huge digit run) — and on
+    // failure printf() yields the empty string.
+    if crate::ported::strings::parse_fmt_types(&fmt, argvars.len() - 1)
+        == crate::ported::eval_h::FAIL
+    {
+        rettv.vval = v_string(String::new());
+        return;
+    }
     let bytes: Vec<char> = fmt.chars().collect();
     let mut out = String::new();
     let mut i = 0usize;
@@ -1290,14 +1319,34 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
             }
             i += 1;
         }
-        // Width. `*` takes the width from the next (sequential) argument; a
+        // Width. `*` takes the width from the next (sequential) argument —
+        // or, c (`skip_to_arg`): `*N$` takes it from positional argument N. A
         // negative value means left-justify, as in C.
         let mut width = 0usize;
         if i < bytes.len() && bytes[i] == '*' {
             i += 1;
-            let w = match argvars.get(arg) {
+            let mut wsrc = arg;
+            let mut positional_w = false;
+            {
+                let save = i;
+                let mut n = 0usize;
+                let mut got = false;
+                while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    n = n * 10 + (bytes[i] as usize - '0' as usize);
+                    got = true;
+                    i += 1;
+                }
+                if got && i < bytes.len() && bytes[i] == '$' {
+                    i += 1;
+                    wsrc = n;
+                    positional_w = true;
+                } else {
+                    i = save;
+                }
+            }
+            let w = match argvars.get(wsrc) {
                 Some(t) => {
-                    used_max = used_max.max(arg);
+                    used_max = used_max.max(wsrc);
                     tv_get_number_chk(t, None)
                 }
                 None => {
@@ -1305,7 +1354,10 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
                     0
                 }
             };
-            arg += 1;
+            // A positional width does not advance the sequential counter.
+            if !positional_w {
+                arg += 1;
+            }
             if w < 0 {
                 left = true;
                 width = (-w) as usize;
@@ -1318,15 +1370,35 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
                 i += 1;
             }
         }
-        // Precision. `.*` takes the precision from the next argument.
+        // Precision. `.*` takes the precision from the next argument — or,
+        // c (`skip_to_arg`): `.*N$` from positional argument N.
         let mut prec: Option<usize> = None;
         if i < bytes.len() && bytes[i] == '.' {
             i += 1;
             if i < bytes.len() && bytes[i] == '*' {
                 i += 1;
-                let p = match argvars.get(arg) {
+                let mut psrc = arg;
+                let mut positional_p = false;
+                {
+                    let save = i;
+                    let mut n = 0usize;
+                    let mut got = false;
+                    while i < bytes.len() && bytes[i].is_ascii_digit() {
+                        n = n * 10 + (bytes[i] as usize - '0' as usize);
+                        got = true;
+                        i += 1;
+                    }
+                    if got && i < bytes.len() && bytes[i] == '$' {
+                        i += 1;
+                        psrc = n;
+                        positional_p = true;
+                    } else {
+                        i = save;
+                    }
+                }
+                let p = match argvars.get(psrc) {
                     Some(t) => {
-                        used_max = used_max.max(arg);
+                        used_max = used_max.max(psrc);
                         tv_get_number_chk(t, None)
                     }
                     None => {
@@ -1334,7 +1406,10 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
                         0
                     }
                 };
-                arg += 1;
+                // A positional precision does not advance the sequential counter.
+                if !positional_p {
+                    arg += 1;
+                }
                 prec = Some(p.max(0) as usize);
             } else {
                 let mut p = 0usize;
@@ -1806,15 +1881,34 @@ pub fn f_matchend(argvars: &[typval_T], rettv: &mut typval_T) {
 
 /// Port of `f_escape()` from `Src/eval/funcs.c` — prefix each character of
 /// `{string}` that occurs in `{chars}` with a backslash.
+///
+/// The body is `vim_strsave_escaped_ext()` (`Src/strings.c:96`): the walk is by
+/// `utfc_ptr2len` units, so a MULTIBYTE unit — including a base character plus
+/// its composing marks — is copied verbatim and never escaped (only single-byte
+/// characters are looked up in `{chars}`, byte-wise as `vim_strchr` does).
 pub fn f_escape(argvars: &[typval_T], rettv: &mut typval_T) {
     let s = tv_get_string(&argvars[0]);
-    let chars: Vec<char> = tv_get_string(&argvars[1]).chars().collect();
+    let esc = tv_get_string(&argvars[1]);
+    let (bytes, esc_bytes) = (s.as_bytes(), esc.as_bytes());
     let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        if chars.contains(&c) {
+    let mut i = 0usize;
+    while i < bytes.len() {
+        // c: `const size_t l = utfc_ptr2len(p); if (l > 1) { memcpy; continue; }`
+        let l = crate::ported::mbyte::utfc_ptr2len(&bytes[i..]).max(1) as usize;
+        if l > 1 {
+            out.push_str(&s[i..i + l]);
+            i += l;
+            continue;
+        }
+        // c: `if (vim_strchr(esc_chars, *p) != NULL) *p2++ = '\\';` — a
+        // single-byte char here is ASCII, which never matches inside a
+        // multibyte {chars} character's bytes.
+        let b = bytes[i];
+        if esc_bytes.contains(&b) {
             out.push('\\');
         }
-        out.push(c);
+        out.push(b as char);
+        i += 1;
     }
     rettv.v_type = VAR_STRING;
     rettv.vval = v_string(out);
@@ -4561,11 +4655,20 @@ pub fn f_matchbufline(argvars: &[typval_T], rettv: &mut typval_T) {
     //
     // Standalone, the line store is the single current buffer that `getbufinfo()`
     // reports as `bufnr: 1`, and it is not on the `buf_T` list `tv_get_buf` walks
-    // (that list is populated by an editor host). So the current buffer — `0`,
-    // `1`, `''` or `'%'` — resolves here even with no host attached; every other
+    // (that list is populated by an editor host). So the current buffer — `1`,
+    // `''` or `'%'` — resolves here even with no host attached; every other
     // designator is E158, as in Vim.
+    //
+    // c: `tv_get_buf` does `buflist_findnr((int)tv->vval.v_number)` — the C
+    // `(int)` cast truncates the 64-bit number to its low 32 bits, so e.g.
+    // -9223372036854775807 (0x8000000000000001) designates buffer 1 (verified
+    // against vim 9.2 and nvim 0.12: it passes the buffer check and fails later
+    // on end_lnum). And 0 goes through `buflist_findnr`'s
+    // `if (nr == 0) nr = curwin->w_alt_fnum;` — no alternate buffer standalone,
+    // so 0 is E158 (`matchbufline(0, …)` is "E158: Invalid buffer name: 0" in
+    // both oracles), NOT the current buffer.
     let designates_curbuf = match (&argvars[0].v_type, &argvars[0].vval) {
-        (VAR_NUMBER, v_number(n)) => *n == 0 || *n == 1,
+        (VAR_NUMBER, v_number(n)) => (*n as i32) == 1,
         (VAR_STRING, v_string(s)) => s.is_empty() || s == "%",
         _ => false,
     };
@@ -4578,7 +4681,11 @@ pub fn f_matchbufline(argvars: &[typval_T], rettv: &mut typval_T) {
         return;
     }
     let pat = tv_get_string(&argvars[1]);
-    let lnum = tv_get_lnum(&argvars[2]);
+    // c: `linenr_T slnum = tv_get_lnum_buf(&argvars[2], buf);` — linenr_T is a
+    // 32-bit int, so the C assignment truncates a 64-bit lnum to its low 32 bits
+    // (`matchbufline(1, 'a', 1, 9223372036854775807)` sees end_lnum == -1 in the
+    // real binaries). Mirror the cast.
+    let lnum = tv_get_lnum(&argvars[2]) as i32 as varnumber_T;
     // c: `if (slnum < 1) { semsg(_(e_invargval), "lnum"); return; }` and
     // `if (elnum < 1 || elnum < slnum) { semsg(_(e_invargval), "end_lnum"); return; }`
     // — line numbers are 1-based, so 0 or negative is an error, not an empty list.
@@ -4587,7 +4694,7 @@ pub fn f_matchbufline(argvars: &[typval_T], rettv: &mut typval_T) {
         tv_list_alloc_ret(rettv, 0);
         return;
     }
-    let end = tv_get_lnum(&argvars[3]);
+    let end = tv_get_lnum(&argvars[3]) as i32 as varnumber_T;
     if end < 1 || end < lnum {
         crate::ported::message::semsg("E475: Invalid value for argument end_lnum");
         tv_list_alloc_ret(rettv, 0);
@@ -5987,209 +6094,421 @@ pub fn buf_win_common(_argvars: &[typval_T], rettv: &mut typval_T, _get_nr: bool
 
 use crate::ported::eval::typval_defs_h::VarLockStatus;
 
-// ── matchfuzzy()/matchfuzzypos() — Neovim search.c (fuzzy_match*). ──
+// ── matchfuzzy()/matchfuzzypos() — Neovim fuzzy.c (fuzzy_match*, and the fzy
+//    scoring engine it adapted from https://github.com/jhawthorn/fzy). Vim 9.2
+//    ships the same algorithm: both oracles agree on every probed score
+//    (895 for 'a'→'ab', 1895 for 'ba'→'bar', INT_MAX for a whole-string
+//    match, -10 for 'a'→'bar'). ──
 
-const FUZZY_SEQUENTIAL_BONUS: i32 = 15;
-const FUZZY_SEPARATOR_BONUS: i32 = 30;
-const FUZZY_CAMEL_BONUS: i32 = 30;
-const FUZZY_FIRST_LETTER_BONUS: i32 = 15;
-const FUZZY_LEADING_LETTER_PENALTY: i32 = -5;
-const FUZZY_MAX_LEADING_LETTER_PENALTY: i32 = -15;
-const FUZZY_UNMATCHED_LETTER_PENALTY: i32 = -1;
-const FUZZY_RECURSION_LIMIT: i32 = 10;
-const FUZZY_MAX_MATCHES: usize = 256;
+/// `FUZZY_MATCH_MAX_LEN` (fuzzy.h) — max characters that can be matched.
+const FUZZY_MATCH_MAX_LEN: usize = 1024;
+/// `FUZZY_SCORE_NONE = INT_MIN` (fuzzy.h) — invalid fuzzy score.
+const FUZZY_SCORE_NONE: i32 = i32::MIN;
 
-/// Port of `fuzzy_match_compute_score()` (Neovim search.c) — score a completed
-/// set of match positions: base 100, a clamped leading-letter penalty, an
-/// unmatched-letter penalty, plus sequential/camel/separator/first-letter
-/// bonuses per matched char.
-fn fuzzy_match_compute_score(str: &[char], matches: &[usize], camelcase: bool) -> i32 {
-    let mut score = 100;
-    // c: leading-letter penalty, clamped to MAX_LEADING_LETTER_PENALTY.
-    let mut penalty = FUZZY_LEADING_LETTER_PENALTY * matches[0] as i32;
-    if penalty < FUZZY_MAX_LEADING_LETTER_PENALTY {
-        penalty = FUZZY_MAX_LEADING_LETTER_PENALTY;
+// c: fuzzy.c fzy scoring constants (score_t is double).
+const FZY_SCORE_MAX: f64 = f64::INFINITY; // c: SCORE_MAX
+const FZY_SCORE_MIN: f64 = f64::NEG_INFINITY; // c: SCORE_MIN
+const FZY_SCORE_SCALE: f64 = 1000.0; // c: SCORE_SCALE
+const SCORE_GAP_LEADING: f64 = -0.005;
+const SCORE_GAP_TRAILING: f64 = -0.005;
+const SCORE_GAP_INNER: f64 = -0.01;
+const SCORE_MATCH_CONSECUTIVE: f64 = 1.0;
+const SCORE_MATCH_SLASH: f64 = 0.9;
+const SCORE_MATCH_WORD: f64 = 0.8;
+const SCORE_MATCH_CAPITAL: f64 = 0.7;
+const SCORE_MATCH_DOT: f64 = 0.6;
+
+/// Port of `has_match()` (fuzzy.c) — do all needle chars occur in order in the
+/// haystack? Both strings advance by `MB_PTR_ADV`/`utfc_ptr2len` cluster steps
+/// (`utf_ptr2char` reads the base codepoint); the case rule is the C's exactly:
+/// a needle char matches itself or its uppercase form (`mb_toupper`).
+fn has_match(needle: &str, haystack: &str) -> bool {
+    use crate::ported::mbyte::{mb_toupper, utfc_ptr2len};
+    if needle.is_empty() {
+        return false; // c: !*needle → FAIL
     }
-    score += penalty;
-    // c: unmatched-letter penalty.
-    let unmatched = str.len() as i32 - matches.len() as i32;
-    score += FUZZY_UNMATCHED_LETTER_PENALTY * unmatched;
-    // c: ordering bonuses.
-    for i in 0..matches.len() {
-        let curr_idx = matches[i];
-        if i > 0 && curr_idx == matches[i - 1] + 1 {
-            score += FUZZY_SEQUENTIAL_BONUS;
-        }
-        if curr_idx > 0 {
-            let neighbor = str[curr_idx - 1];
-            let curr = str[curr_idx];
-            if camelcase && neighbor.is_lowercase() && curr.is_uppercase() {
-                score += FUZZY_CAMEL_BONUS;
+    let hb = haystack.as_bytes();
+    let mut h = 0usize;
+    let nb = needle.as_bytes();
+    let mut n = 0usize;
+    while n < nb.len() {
+        let n_char = needle[n..].chars().next().unwrap_or('\0');
+        let n_upper = mb_toupper(n_char);
+        let mut found = false;
+        while h < hb.len() {
+            let h_char = haystack[h..].chars().next().unwrap_or('\0');
+            h += utfc_ptr2len(&hb[h..]).max(1) as usize;
+            if n_char == h_char || n_upper == h_char {
+                found = true;
+                break;
             }
-            if neighbor == '/' || neighbor == '\\' || neighbor == ' ' || neighbor == '_' {
-                score += FUZZY_SEPARATOR_BONUS;
-            }
-        } else {
-            score += FUZZY_FIRST_LETTER_BONUS;
         }
+        if !found {
+            return false;
+        }
+        n += utfc_ptr2len(&nb[n..]).max(1) as usize;
     }
-    score
+    true
 }
 
-/// Port of `fuzzy_match_recursive()` (Neovim search.c) — recursively match the
-/// remaining `fuzpat` against `str_rem` (whose first char is at absolute
-/// `str_idx` in `str_full`), accumulating matched positions into `matches`.
-/// Returns the best score when the whole pattern matches.
+/// Port of `compute_bonus_codepoint()` (fuzzy.c) — the positional bonus for a
+/// match at a char preceded by `last_c`.
+///
+/// RUST-PORT NOTE: the C's `vim_iswordc(c)` follows 'iskeyword'
+/// (`@,48-57,_,192-255` by default); `char::is_alphanumeric() || '_'` is the
+/// standalone approximation, identical over ASCII.
+fn compute_bonus_codepoint(last_c: char, c: char) -> f64 {
+    if c.is_alphanumeric() || c == '_' {
+        if last_c == '/' {
+            return SCORE_MATCH_SLASH;
+        }
+        if last_c == '-' || last_c == '_' || last_c == ' ' {
+            return SCORE_MATCH_WORD;
+        }
+        if last_c == '.' {
+            return SCORE_MATCH_DOT;
+        }
+        if c.is_uppercase() && last_c.is_lowercase() {
+            return SCORE_MATCH_CAPITAL;
+        }
+    }
+    0.0
+}
+
+/// Port of `match_row()` (fuzzy.c) — fill one DP row of the fzy score
+/// matrices. `D[j]`: best score ending with a match at column `j`; `M[j]`:
+/// best score at column `j`.
 #[allow(clippy::too_many_arguments)]
-fn fuzzy_match_recursive(
-    fuzpat: &[char],
-    str_rem: &[char],
-    str_idx: usize,
-    str_full: &[char],
-    camelcase: bool,
-    matches: &mut Vec<usize>,
-    recursion: &mut i32,
-) -> Option<i32> {
-    *recursion += 1;
-    if *recursion >= FUZZY_RECURSION_LIMIT {
-        return None;
-    }
-    if fuzpat.is_empty() || str_rem.is_empty() {
-        return None;
-    }
-    let mut recursive_best: Option<(i32, Vec<usize>)> = None;
-    let mut fp = 0usize;
-    let mut sp = 0usize;
-    while fp < fuzpat.len() && sp < str_rem.len() {
-        let c1 = fuzpat[fp];
-        let c2 = str_rem[sp];
-        // c: case-insensitive compare (mb_tolower).
-        if c1.to_lowercase().eq(c2.to_lowercase()) {
-            if matches.len() >= FUZZY_MAX_MATCHES {
-                return None;
-            }
-            // c: recursive call that "skips" this match (copy-on-write matches).
-            let mut rec_matches = matches.clone();
-            if let Some(rscore) = fuzzy_match_recursive(
-                &fuzpat[fp..],
-                &str_rem[sp + 1..],
-                str_idx + sp + 1,
-                str_full,
-                camelcase,
-                &mut rec_matches,
-                recursion,
-            ) {
-                #[allow(clippy::unnecessary_map_or)]
-                if recursive_best.as_ref().map_or(true, |(bs, _)| rscore > *bs) {
-                    recursive_best = Some((rscore, rec_matches));
-                }
-            }
-            matches.push(str_idx + sp);
-            fp += 1;
-        }
-        sp += 1;
-    }
-    let matched = fp >= fuzpat.len();
-    let this_score = if matched {
-        fuzzy_match_compute_score(str_full, matches, camelcase)
+fn match_row(
+    lower_needle: &[char],
+    lower_haystack: &[char],
+    match_bonus: &[f64],
+    row: usize,
+    curr_d: &mut [f64],
+    curr_m: &mut [f64],
+    last_d: &[f64],
+    last_m: &[f64],
+) {
+    let n = lower_needle.len();
+    let m = lower_haystack.len();
+    let i = row;
+
+    let mut prev_score = FZY_SCORE_MIN;
+    let gap_score = if i == n - 1 {
+        SCORE_GAP_TRAILING
     } else {
-        0
+        SCORE_GAP_INNER
     };
-    if let Some((rscore, rmatches)) = recursive_best {
-        if !matched || rscore > this_score {
-            *matches = rmatches;
-            return Some(rscore);
+    let mut prev_m = FZY_SCORE_MIN;
+    let mut prev_d = FZY_SCORE_MIN;
+
+    for j in 0..m {
+        if lower_needle[i] == lower_haystack[j] {
+            let mut score = FZY_SCORE_MIN;
+            if i == 0 {
+                score = (j as f64) * SCORE_GAP_LEADING + match_bonus[j];
+            } else if j > 0 {
+                // c: consecutive match, doesn't stack with match_bonus.
+                score = (prev_m + match_bonus[j]).max(prev_d + SCORE_MATCH_CONSECUTIVE);
+            }
+            prev_d = last_d[j];
+            prev_m = last_m[j];
+            curr_d[j] = score;
+            prev_score = score.max(prev_score + gap_score);
+            curr_m[j] = prev_score;
+        } else {
+            prev_d = last_d[j];
+            prev_m = last_m[j];
+            curr_d[j] = FZY_SCORE_MIN;
+            prev_score += gap_score;
+            curr_m[j] = prev_score;
         }
     }
-    if matched {
-        return Some(this_score);
-    }
-    None
 }
 
-/// Port of `fuzzy_match()` (Neovim search.c) — match `pat` against `str`. With
-/// `matchseq` the pattern matches as a single sequence; otherwise it is split
-/// on spaces into words, each matched independently and the scores summed.
-/// Returns the total score and all matched char positions.
+/// Port of `setup_match_struct()` (fuzzy.c) — the lowercased needle/haystack
+/// codepoints (one per `MB_PTR_ADV` cluster, capped at `MATCH_MAX_LEN`) and
+/// the per-position haystack bonus (the previous char seeds as '/').
+fn setup_match_struct(needle: &str, haystack: &str) -> (Vec<char>, Vec<char>, Vec<f64>) {
+    use crate::ported::mbyte::{mb_tolower, utfc_ptr2len};
+    let mut lower_needle: Vec<char> = Vec::new();
+    let nb = needle.as_bytes();
+    let mut i = 0usize;
+    while i < nb.len() && lower_needle.len() < FUZZY_MATCH_MAX_LEN {
+        lower_needle.push(mb_tolower(needle[i..].chars().next().unwrap_or('\0')));
+        i += utfc_ptr2len(&nb[i..]).max(1) as usize;
+    }
+
+    let mut lower_haystack: Vec<char> = Vec::new();
+    let mut match_bonus: Vec<f64> = Vec::new();
+    let hb = haystack.as_bytes();
+    let mut prev_c = '/';
+    i = 0;
+    while i < hb.len() && lower_haystack.len() < FUZZY_MATCH_MAX_LEN {
+        let c = haystack[i..].chars().next().unwrap_or('\0');
+        lower_haystack.push(mb_tolower(c));
+        match_bonus.push(compute_bonus_codepoint(prev_c, c));
+        prev_c = c;
+        i += utfc_ptr2len(&hb[i..]).max(1) as usize;
+    }
+    (lower_needle, lower_haystack, match_bonus)
+}
+
+/// Port of `match_positions()` (fuzzy.c) — the fzy DP over needle × haystack:
+/// returns the match score (`SCORE_MAX` for a whole-string case-insensitive
+/// match — the INT_MAX sentinel upstream) and writes the matched char
+/// positions into `positions`.
+fn match_positions(needle: &str, haystack: &str, positions: &mut [u32]) -> f64 {
+    if needle.is_empty() {
+        return FZY_SCORE_MIN;
+    }
+
+    let (lower_needle, lower_haystack, match_bonus) = setup_match_struct(needle, haystack);
+
+    let n = lower_needle.len();
+    let m = lower_haystack.len();
+
+    if m > FUZZY_MATCH_MAX_LEN || n > m {
+        // c: unreasonably large candidate — no score.
+        return FZY_SCORE_MIN;
+    }
+    if n == m {
+        // c: equal lengths + has_match precondition ⇒ the strings are equal
+        // ignoring case — the SCORE_MAX shortcut (INT_MAX upstream). Checked
+        // char-by-char because truncation can also make n == m.
+        if lower_needle == lower_haystack {
+            for (i, p) in positions.iter_mut().enumerate().take(n) {
+                *p = i as u32;
+            }
+            return FZY_SCORE_MAX;
+        }
+    }
+
+    // c: D[][] best score ending with a match here; M[][] best score here.
+    let mut d = vec![FZY_SCORE_MIN; n * m];
+    let mut mm = vec![FZY_SCORE_MIN; n * m];
+    {
+        let (d0, _) = d.split_at_mut(m);
+        let (m0, _) = mm.split_at_mut(m);
+        // c: match_row(&match, 0, D[0], M[0], D[0], M[0]) — row 0 never reads
+        // last_D/last_M (i == 0 branch), so seed rows are fine.
+        let seed = vec![FZY_SCORE_MIN; m];
+        match_row(
+            &lower_needle,
+            &lower_haystack,
+            &match_bonus,
+            0,
+            d0,
+            m0,
+            &seed,
+            &seed,
+        );
+    }
+    for i in 1..n {
+        let (dprev, dcur) = d.split_at_mut(i * m);
+        let (mprev, mcur) = mm.split_at_mut(i * m);
+        match_row(
+            &lower_needle,
+            &lower_haystack,
+            &match_bonus,
+            i,
+            &mut dcur[..m],
+            &mut mcur[..m],
+            &dprev[(i - 1) * m..],
+            &mprev[(i - 1) * m..],
+        );
+    }
+
+    // c: backtrace to find the positions of optimal matching.
+    let mut match_required = false;
+    let mut j = m as isize - 1;
+    for i in (0..n).rev() {
+        while j >= 0 {
+            let ju = j as usize;
+            if d[i * m + ju] != FZY_SCORE_MIN && (match_required || d[i * m + ju] == mm[i * m + ju])
+            {
+                // c: if this score was determined via SCORE_MATCH_CONSECUTIVE,
+                // the previous character MUST be a match.
+                match_required = i > 0
+                    && ju > 0
+                    && mm[i * m + ju] == d[(i - 1) * m + (ju - 1)] + SCORE_MATCH_CONSECUTIVE;
+                if i < positions.len() {
+                    positions[i] = ju as u32;
+                }
+                j -= 1;
+                break;
+            }
+            j -= 1;
+        }
+    }
+
+    mm[(n - 1) * m + (m - 1)]
+}
+
+/// Port of `fuzzy_match()` (fuzzy.c) — match `pat_arg` against `str`: each
+/// space-separated word independently (all words at once with `matchseq`),
+/// scores summed with INT_MAX/INT_MIN+1 saturation, matched char positions
+/// appended to `matches`. Returns true when anything matched.
 fn fuzzy_match(
-    str: &[char],
+    str_: &str,
+    pat_arg: &str,
+    matchseq: bool,
+    out_score: &mut i32,
+    matches: &mut [u32],
+    max_matches: usize,
+) -> bool {
+    let mut complete = false;
+    let mut num_matches = 0usize;
+
+    *out_score = 0;
+
+    let mut rest: &str = pat_arg;
+
+    // c: try matching each word in "pat_arg" in "str".
+    loop {
+        let pat: &str;
+        if matchseq {
+            complete = true;
+            pat = rest;
+        } else {
+            // c: extract one word from the pattern (separated by white space).
+            rest = crate::ported::eval::skipwhite(rest);
+            if rest.is_empty() {
+                break;
+            }
+            let mut end = rest.len();
+            let b = rest.as_bytes();
+            let mut i = 0usize;
+            while i < b.len() {
+                let c = rest[i..].chars().next().unwrap_or('\0');
+                if c == ' ' || c == '\t' {
+                    end = i;
+                    break;
+                }
+                i += crate::ported::mbyte::utfc_ptr2len(&b[i..]).max(1) as usize;
+            }
+            pat = &rest[..end];
+            if end == rest.len() {
+                complete = true; // c: processed all the words
+            }
+            rest = &rest[end..];
+        }
+
+        // c: match_positions() always writes pat_chars entries — bail if they
+        // won't fit. `pat_chars = mb_charlen(pat)`.
+        let mut pat_chars = crate::ported::mbyte::mb_charlen(pat) as usize;
+        if pat_chars > max_matches {
+            pat_chars = max_matches;
+        }
+        if num_matches > max_matches - pat_chars {
+            num_matches = 0;
+            *out_score = FUZZY_SCORE_NONE;
+            break;
+        }
+
+        let mut score = FUZZY_SCORE_NONE;
+        if has_match(pat, str_) {
+            let fzy_score = match_positions(pat, str_, &mut matches[num_matches..]);
+            if fzy_score != FZY_SCORE_MIN {
+                score = if fzy_score == FZY_SCORE_MAX {
+                    i32::MAX
+                } else if fzy_score < 0.0 {
+                    (fzy_score * FZY_SCORE_SCALE - 0.5).ceil() as i32
+                } else {
+                    (fzy_score * FZY_SCORE_SCALE + 0.5).floor() as i32
+                };
+            }
+        }
+
+        if score == FUZZY_SCORE_NONE {
+            num_matches = 0;
+            *out_score = FUZZY_SCORE_NONE;
+            break;
+        }
+
+        // c: saturating accumulation across words.
+        if score > 0 && *out_score > i32::MAX - score {
+            *out_score = i32::MAX;
+        } else if score < 0 && *out_score < i32::MIN + 1 - score {
+            *out_score = i32::MIN + 1;
+        } else {
+            *out_score += score;
+        }
+
+        num_matches += pat_chars;
+
+        if complete || num_matches >= max_matches {
+            break;
+        }
+    }
+
+    num_matches != 0
+}
+
+/// One scored entry of `fuzzy_match_in_list` (c: `fuzzyItem_T`).
+struct FuzzyItem {
+    /// c: `idx` — match order, the stable-sort key.
+    idx: usize,
+    /// Index of the item in the input list.
+    item: usize,
+    /// c: `score`.
+    score: i32,
+    /// c: `startpos` — `matches[0]`, used by the exact-match tiebreak.
+    startpos: u32,
+    /// c: `itemstr` — the matched text (for the exact-match tiebreak).
+    itemstr: String,
+    /// c: `lmatchpos` — the per-pattern-char matched positions.
+    lmatchpos: Vec<u32>,
+}
+
+/// Port of `fuzzy_match_item_compare()` (fuzzy.c) — descending score; equal
+/// scores put an exact substring match (the pattern verbatim at `startpos`)
+/// first, then keep input order. The C indexes `itemstr + startpos` with a
+/// *char* position — a byte/char conflation kept verbatim here.
+fn fuzzy_match_item_compare(s1: &FuzzyItem, s2: &FuzzyItem, pat: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    if s1.score != s2.score {
+        return s2.score.cmp(&s1.score);
+    }
+    let exact = |s: &FuzzyItem| {
+        s.itemstr
+            .as_bytes()
+            .get(s.startpos as usize..)
+            .is_some_and(|rest| rest.starts_with(pat.as_bytes()))
+    };
+    let (e1, e2) = (exact(s1), exact(s2));
+    if e1 == e2 {
+        s1.idx.cmp(&s2.idx)
+    } else if e2 {
+        Ordering::Greater
+    } else {
+        Ordering::Less
+    }
+}
+
+/// Port of `fuzzy_match_in_list()` (fuzzy.c) — score every String (or
+/// Dict-`key`) item, honoring `max_matches` as a cap on the SCAN (the first N
+/// matches in input order, sorted afterwards — not the top N by score), sort
+/// with [`fuzzy_match_item_compare`], and fill `rettv`'s pre-shaped result.
+#[allow(clippy::too_many_arguments)]
+fn fuzzy_match_in_list(
+    items: &[typval_T],
     pat: &str,
     matchseq: bool,
-    camelcase: bool,
-) -> Option<(i32, Vec<usize>)> {
-    let words: Vec<Vec<char>> = if matchseq {
-        vec![pat.chars().collect()]
-    } else {
-        pat.split(' ')
-            .filter(|w| !w.is_empty())
-            .map(|w| w.chars().collect())
-            .collect()
-    };
-    if words.is_empty() {
-        return None;
-    }
-    let mut total = 0i32;
-    let mut all: Vec<usize> = Vec::new();
-    for w in &words {
-        let mut matches: Vec<usize> = Vec::new();
-        let mut recursion = 0i32;
-        match fuzzy_match_recursive(w, str, 0, str, camelcase, &mut matches, &mut recursion) {
-            Some(score) => {
-                total += score;
-                all.extend_from_slice(&matches);
-            }
-            None => return None,
-        }
-    }
-    Some((total, all))
-}
+    key: Option<&str>,
+    retmatchpos: bool,
+    rettv: &mut typval_T,
+    max_matches: i64,
+) {
+    let mut found: Vec<FuzzyItem> = Vec::new();
+    let mut matches = vec![0u32; FUZZY_MATCH_MAX_LEN];
 
-/// Port of `do_fuzzymatch()` (Neovim search.c) — the shared body of
-/// `matchfuzzy()`/`matchfuzzypos()`. Scores every list item (a String, or a
-/// Dict field named by the `key` option), sorts by descending score (stable on
-/// input order for ties), applies the `limit`/`matchseq`/`camelcase` options,
-/// and returns either the filtered items or `[items, positions, scores]`.
-fn do_fuzzymatch(argvars: &[typval_T], rettv: &mut typval_T, return_pos: bool) {
-    let l = match (argvars[0].v_type, &argvars[0].vval) {
-        (VAR_LIST, v_list(Some(l))) => l.clone(),
-        _ => {
-            emsg("E714: List required");
-            return;
+    for (item_idx, item) in items.iter().enumerate() {
+        if max_matches > 0 && found.len() as i64 >= max_matches {
+            break;
         }
-    };
-    let pat = tv_get_string(&argvars[1]);
-    // c: third argument is an optional options Dict.
-    let mut key: Option<String> = None;
-    let mut matchseq = false;
-    let mut camelcase = true;
-    let mut limit: i64 = 0;
-    if argvars.len() >= 3 {
-        if let (VAR_DICT, v_dict(Some(d))) = (argvars[2].v_type, &argvars[2].vval) {
-            let d = d.borrow();
-            if let Some(k) = tv_dict_find(&d, "key") {
-                key = Some(tv_get_string(k));
-            }
-            if let Some(v) = tv_dict_find(&d, "matchseq") {
-                matchseq = tv_get_number(v) != 0;
-            }
-            if let Some(v) = tv_dict_find(&d, "camelcase") {
-                camelcase = tv_get_bool(v) != 0;
-            }
-            if let Some(v) = tv_dict_find(&d, "limit") {
-                limit = tv_get_number(v);
-            }
-        }
-    }
-    let items: Vec<typval_T> = l
-        .borrow()
-        .lv_items
-        .iter()
-        .map(|it| it.li_tv.clone())
-        .collect();
-    let mut scored: Vec<(usize, i32, Vec<usize>)> = Vec::new();
-    for (idx, item) in items.iter().enumerate() {
-        // c: extract the text to match — the item itself (String) or item[key].
-        let text = match &key {
+        // c: the item itself (String) or the `key` field of a Dict item.
+        let itemstr = match key {
             Some(k) => match (item.v_type, &item.vval) {
                 (VAR_DICT, v_dict(Some(d))) => match tv_dict_find(&d.borrow(), k) {
                     Some(v) => tv_get_string(v),
@@ -6205,64 +6524,197 @@ fn do_fuzzymatch(argvars: &[typval_T], rettv: &mut typval_T, return_pos: bool) {
                 }
             }
         };
-        let chars: Vec<char> = text.chars().collect();
-        if let Some((score, positions)) = fuzzy_match(&chars, &pat, matchseq, camelcase) {
-            scored.push((idx, score, positions));
+
+        let mut score = 0i32;
+        if fuzzy_match(
+            &itemstr,
+            pat,
+            matchseq,
+            &mut score,
+            &mut matches,
+            FUZZY_MATCH_MAX_LEN,
+        ) {
+            // c: copy the matching positions — one per non-whitespace pattern
+            // char (every char with matchseq), walking the pattern by
+            // `MB_PTR_ADV` cluster steps.
+            let mut lmatchpos = Vec::new();
+            if retmatchpos {
+                let mut j = 0usize;
+                let pb = pat.as_bytes();
+                let mut i = 0usize;
+                while i < pb.len() && j < FUZZY_MATCH_MAX_LEN {
+                    let c = pat[i..].chars().next().unwrap_or('\0');
+                    if !(c == ' ' || c == '\t') || matchseq {
+                        lmatchpos.push(matches[j]);
+                        j += 1;
+                    }
+                    i += crate::ported::mbyte::utfc_ptr2len(&pb[i..]).max(1) as usize;
+                }
+            }
+            found.push(FuzzyItem {
+                idx: found.len(),
+                item: item_idx,
+                score,
+                startpos: matches[0],
+                itemstr,
+                lmatchpos,
+            });
         }
     }
-    // c: sort by descending score; stable so equal scores keep input order.
-    scored.sort_by_key(|x| std::cmp::Reverse(x.1));
-    if limit > 0 && scored.len() > limit as usize {
-        scored.truncate(limit as usize);
-    }
-    if !return_pos {
-        let out = tv_list_alloc_ret(rettv, scored.len() as isize);
-        let mut ob = out.borrow_mut();
-        for (idx, _, _) in &scored {
-            tv_list_append_tv(&mut ob, items[*idx].clone());
-        }
+
+    if found.is_empty() {
         return;
     }
-    // c: matchfuzzypos() returns [matched_items, positions, scores].
-    let outer = tv_list_alloc_ret(rettv, 3);
-    let matched = tv_list_alloc(0);
-    let posl = tv_list_alloc(0);
-    let scorel = tv_list_alloc(0);
-    for (idx, score, positions) in &scored {
-        tv_list_append_tv(&mut matched.borrow_mut(), items[*idx].clone());
-        let p = tv_list_alloc(0);
-        for pos in positions {
-            tv_list_append_number(&mut p.borrow_mut(), *pos as varnumber_T);
-        }
-        tv_list_append_tv(
-            &mut posl.borrow_mut(),
-            typval_T {
-                v_type: VAR_LIST,
-                v_lock: VarLockStatus::VAR_UNLOCKED,
-                vval: v_list(Some(p)),
-            },
-        );
-        tv_list_append_number(&mut scorel.borrow_mut(), *score as varnumber_T);
-    }
+    // c: qsort(fuzzy_match_item_compare) — descending score with the
+    // exact-match tiebreak.
+    found.sort_by(|a, b| fuzzy_match_item_compare(a, b, pat));
+
     let mk = |l| typval_T {
         v_type: VAR_LIST,
         v_lock: VarLockStatus::VAR_UNLOCKED,
         vval: v_list(Some(l)),
     };
-    let mut ob = outer.borrow_mut();
-    tv_list_append_tv(&mut ob, mk(matched));
-    tv_list_append_tv(&mut ob, mk(posl));
-    tv_list_append_tv(&mut ob, mk(scorel));
+    if !retmatchpos {
+        if let v_list(Some(out)) = &rettv.vval {
+            let mut ob = out.borrow_mut();
+            for f in &found {
+                tv_list_append_tv(&mut ob, items[f.item].clone());
+            }
+        }
+        return;
+    }
+    // c: matchfuzzypos() fills the three pre-created sub-lists.
+    let matched = tv_list_alloc(0);
+    let posl = tv_list_alloc(0);
+    let scorel = tv_list_alloc(0);
+    for f in &found {
+        tv_list_append_tv(&mut matched.borrow_mut(), items[f.item].clone());
+        let p = tv_list_alloc(0);
+        for pos in &f.lmatchpos {
+            tv_list_append_number(&mut p.borrow_mut(), *pos as varnumber_T);
+        }
+        tv_list_append_tv(&mut posl.borrow_mut(), mk(p));
+        tv_list_append_number(&mut scorel.borrow_mut(), f.score as varnumber_T);
+    }
+    if let v_list(Some(outer)) = &rettv.vval {
+        let mut ob = outer.borrow_mut();
+        ob.lv_items.clear();
+        tv_list_append_tv(&mut ob, mk(matched));
+        tv_list_append_tv(&mut ob, mk(posl));
+        tv_list_append_tv(&mut ob, mk(scorel));
+    }
 }
 
-/// Port of `f_matchfuzzy()` (Neovim search.c) — fuzzy-filter a List by a
-/// pattern, best matches first.
+/// Port of `do_fuzzymatch()` (fuzzy.c) — the shared body of `matchfuzzy()`/
+/// `matchfuzzypos()`: validate the arguments and options Dict, then delegate
+/// to [`fuzzy_match_in_list`].
+///
+/// RUST-PORT NOTE: the `text_cb` Funcref option needs the Callback
+/// infrastructure (`tv_dict_get_callback`) and is accepted but not consulted;
+/// the `key` option covers the Dict-item form.
+fn do_fuzzymatch(argvars: &[typval_T], rettv: &mut typval_T, retmatchpos: bool) {
+    // c: validate and get the arguments.
+    let items: Vec<typval_T> = match (argvars[0].v_type, &argvars[0].vval) {
+        (VAR_LIST, v_list(Some(l))) => l
+            .borrow()
+            .lv_items
+            .iter()
+            .map(|it| it.li_tv.clone())
+            .collect(),
+        _ => {
+            crate::ported::message::semsg(&format!(
+                "E686: Argument of {} must be a List",
+                if retmatchpos {
+                    "matchfuzzypos()"
+                } else {
+                    "matchfuzzy()"
+                }
+            ));
+            return;
+        }
+    };
+    if argvars[1].v_type != VAR_STRING {
+        crate::ported::message::semsg(&format!(
+            "E475: Invalid argument: {}",
+            tv_get_string(&argvars[1])
+        ));
+        return;
+    }
+    let pat = tv_get_string(&argvars[1]);
+
+    let mut key: Option<String> = None;
+    let mut matchseq = false;
+    let mut max_matches: i64 = 0;
+    if argvars.len() >= 3 && argvars[2].v_type != VAR_UNKNOWN {
+        // c: tv_check_for_nonnull_dict_arg(argvars, 2).
+        let d = match (argvars[2].v_type, &argvars[2].vval) {
+            (VAR_DICT, v_dict(Some(d))) => d.clone(),
+            _ => {
+                crate::ported::message::semsg("E1206: Dictionary required for argument 3");
+                return;
+            }
+        };
+        let d = d.borrow();
+        if let Some(di) = tv_dict_find(&d, "key") {
+            // c: a `key` must be a non-empty String.
+            let bad = di.v_type != VAR_STRING || tv_get_string(di).is_empty();
+            if bad {
+                crate::ported::message::semsg(&format!(
+                    "E475: Invalid value for argument key: {}",
+                    tv_get_string(di)
+                ));
+                return;
+            }
+            key = Some(tv_get_string(di));
+        }
+        if let Some(di) = tv_dict_find(&d, "limit") {
+            // c: `limit` must be a Number.
+            if di.v_type != VAR_NUMBER {
+                crate::ported::message::semsg("E475: Invalid value for argument limit");
+                return;
+            }
+            max_matches = tv_get_number(di);
+        }
+        // c: `if (tv_dict_has_key(d, "matchseq")) matchseq = true;` — presence,
+        // not value.
+        matchseq = tv_dict_find(&d, "matchseq").is_some();
+    }
+
+    // c: tv_list_alloc_ret + (for matchfuzzypos) the three pre-created lists.
+    let out = tv_list_alloc_ret(rettv, if retmatchpos { 3 } else { 0 });
+    if retmatchpos {
+        let mut ob = out.borrow_mut();
+        for _ in 0..3 {
+            tv_list_append_tv(
+                &mut ob,
+                typval_T {
+                    v_type: VAR_LIST,
+                    v_lock: VarLockStatus::VAR_UNLOCKED,
+                    vval: v_list(Some(tv_list_alloc(0))),
+                },
+            );
+        }
+    }
+
+    fuzzy_match_in_list(
+        &items,
+        &pat,
+        matchseq,
+        key.as_deref(),
+        retmatchpos,
+        rettv,
+        max_matches,
+    );
+}
+
+/// Port of `f_matchfuzzy()` (fuzzy.c) — fuzzy-filter a List by a pattern, best
+/// matches first.
 pub fn f_matchfuzzy(argvars: &[typval_T], rettv: &mut typval_T) {
     do_fuzzymatch(argvars, rettv, false);
 }
 
-/// Port of `f_matchfuzzypos()` (Neovim search.c) — like `matchfuzzy()` but
-/// returns `[items, match-positions, scores]`.
+/// Port of `f_matchfuzzypos()` (fuzzy.c) — like `matchfuzzy()` but returns
+/// `[items, match-positions, scores]`.
 pub fn f_matchfuzzypos(argvars: &[typval_T], rettv: &mut typval_T) {
     do_fuzzymatch(argvars, rettv, true);
 }

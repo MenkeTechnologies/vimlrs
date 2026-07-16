@@ -14,8 +14,9 @@
 //! per `:help /\P`, and are NOT set-complements),
 //! quantifiers `* \+ \? \= \{n,m}` and the non-greedy `\{-n,m}`, groups
 //! `\(...\)` (capturing) and `\%(...\)` (non-capturing) with `\|` alternation,
-//! word boundaries `\< \>`, and case control `\c`/`\C` plus the caller's
-//! ignore-case flag. Backreferences (`\1`) are not yet handled.
+//! backreferences `\1`..`\9`, word boundaries `\< \>`, the `\@` family
+//! (`\@=` `\@!` `\@<=` `\@<!` `\@>`, incl. the `\@123<=` limit), and case
+//! control `\c`/`\C` plus the caller's ignore-case flag.
 //! ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 use std::cell::RefCell;
@@ -226,6 +227,28 @@ enum Node {
     Class(Class),
     /// Alternation of branches; `Some(idx)` = capturing group index.
     Group(Vec<Branch>, Option<usize>),
+    /// `\@` family — the preceding atom wrapped in a lookaround assertion or an
+    /// atomic group (c: `nfa_regpiece` `case Magic('@')`).
+    Look(Box<Atom>, LookOp),
+    /// Internal (match-time only): zero-width, succeeds only at this char index.
+    /// Appended after a lookbehind's atom to force it to end exactly at the
+    /// assertion position.
+    CheckPos(usize),
+}
+
+/// Which `\@` operator wraps the atom.
+#[derive(Debug, Clone)]
+enum LookOp {
+    /// `\@=` (`true`) / `\@!` (`false`) — zero-width (negative) lookahead
+    /// (c: `NFA_PREV_ATOM_NO_WIDTH` / `NFA_PREV_ATOM_NO_WIDTH_NEG`).
+    Ahead(bool),
+    /// `\@<=` (`true`) / `\@<!` (`false`) — zero-width (negative) lookbehind,
+    /// with the optional `\@123<=` distance limit
+    /// (c: `NFA_PREV_ATOM_JUST_BEFORE` / `NFA_PREV_ATOM_JUST_BEFORE_NEG`).
+    Behind(bool, Option<u32>),
+    /// `\@>` — match the atom like a standalone pattern, consuming it, with no
+    /// backtracking into it (c: `NFA_PREV_ATOM_LIKE_PATTERN`).
+    Atomic,
 }
 
 /// A quantified atom.
@@ -294,7 +317,7 @@ fn preprocess_magic(pat: &str) -> (String, Option<String>) {
     // Whether an atom has been emitted in the current branch — a multi needs one.
     let mut atom_before = false;
     let mut err: Option<String> = None;
-    const OPS: &str = "(){}+?=|<>";
+    const OPS: &str = "(){}+?=|<>@";
     while i < chars.len() {
         let c = chars[i];
         // A mode switch can appear anywhere in the pattern and applies from there on.
@@ -446,6 +469,29 @@ fn preprocess_magic(pat: &str) -> (String, Option<String>) {
                         out.push_str("\\%("); // non-capturing group
                         i += 2;
                     }
+                    // `\v(foo)@<=bar` — a bare `@` is the lookaround operator in
+                    // very magic. Its optional decimal limit and operator chars
+                    // (`=` `!` `>` `<=` `<!`) belong to the `\@` escape, so copy
+                    // them raw — the generic OPS rule below would re-translate
+                    // `<`/`=`/`>` into `\<`/`\=`/`\>` and break the parse.
+                    '@' => {
+                        out.push_str("\\@");
+                        i += 1;
+                        while chars.get(i).is_some_and(|ch| ch.is_ascii_digit()) {
+                            out.push(chars[i]);
+                            i += 1;
+                        }
+                        if chars.get(i) == Some(&'<') {
+                            out.push('<');
+                            i += 1;
+                        }
+                        if let Some(&opc) = chars.get(i) {
+                            if matches!(opc, '=' | '!' | '>') {
+                                out.push(opc);
+                                i += 1;
+                            }
+                        }
+                    }
                     _ if OPS.contains(c) => {
                         out.push('\\'); // operator → magic backslash form
                         out.push(c);
@@ -540,7 +586,7 @@ impl Parser {
             // apart.)
             if atoms.is_empty() && self.peek() == Some('\\') {
                 if let Some(m) = self.peek2() {
-                    if matches!(m, '+' | '=' | '?' | '{') {
+                    if matches!(m, '+' | '=' | '?' | '{' | '@') {
                         self.fail(&format!("E866: (NFA regexp) Misplaced {m}"));
                         break;
                     }
@@ -557,6 +603,22 @@ impl Parser {
     /// An atom plus an optional quantifier. `at_start` enables `^` as anchor.
     fn quantified(&mut self, at_start: bool) -> Option<Atom> {
         let node = self.atom(at_start)?;
+        // `\@` is a multi too (c: `nfa_regpiece` `case Magic('@')`): it wraps the
+        // atom just parsed in a lookaround/atomic node instead of repeating it.
+        if self.peek() == Some('\\') && self.peek2() == Some('@') {
+            self.i += 2;
+            let node = self.look(node);
+            // c: "E871: (NFA regexp) Can't have a multi follow a multi" — `a\@!*`.
+            if self.multi_follows() {
+                self.fail("E871: (NFA regexp) Can't have a multi follow a multi");
+            }
+            return Some(Atom {
+                node,
+                min: 1,
+                max: 1,
+                greedy: true,
+            });
+        }
         let before = self.i;
         let (min, max, greedy) = self.quantifier();
         let quantified = self.i != before;
@@ -573,10 +635,9 @@ impl Parser {
                     _ => {}
                 }
             }
-            // c: "E871: (NFA regexp) Can't have a multi follow a multi" — `a*\+`.
-            let after = self.i;
-            let (_, _, _) = self.quantifier();
-            if self.i != after {
+            // c: "E871: (NFA regexp) Can't have a multi follow a multi" — `a*\+`,
+            // and `a*\@=` (the `\@` family is a multi as well).
+            if self.multi_follows() {
                 self.fail("E871: (NFA regexp) Can't have a multi follow a multi");
             }
         }
@@ -586,6 +647,51 @@ impl Parser {
             max,
             greedy,
         })
+    }
+
+    /// Whether the cursor sits on another multi — `*`, `\+`, `\?`, `\=`, `\{`,
+    /// or `\@` (c: `re_multi_type(peekchr()) != NOT_MULTI` after a piece).
+    fn multi_follows(&self) -> bool {
+        self.peek() == Some('*')
+            || (self.peek() == Some('\\')
+                && matches!(self.peek2(), Some('+' | '?' | '=' | '{' | '@')))
+    }
+
+    /// The operator suffix of a `\@` multi (the `\@` itself is consumed). Wraps
+    /// `inner` per c: `nfa_regpiece` `case Magic('@')` — an optional decimal
+    /// limit (`getdecchrs()`, meaningful only for `\@123<=`/`\@123<!`), then
+    /// `=` / `!` / `>` / `<=` / `<!`. An unknown operator is E869.
+    fn look(&mut self, inner: Node) -> Node {
+        let nr = self.read_int();
+        let op = match self.bump() {
+            Some('=') => LookOp::Ahead(true),
+            Some('!') => LookOp::Ahead(false),
+            Some('>') => LookOp::Atomic,
+            Some('<') => match self.bump() {
+                Some('=') => LookOp::Behind(true, nr),
+                Some('!') => LookOp::Behind(false, nr),
+                other => return self.bad_look(inner, other),
+            },
+            other => return self.bad_look(inner, other),
+        };
+        Node::Look(
+            Box::new(Atom {
+                node: inner,
+                min: 1,
+                max: 1,
+                greedy: true,
+            }),
+            op,
+        )
+    }
+
+    /// c: "E869: (NFA) Unknown operator '\@x'" — the char after `\@` (or after
+    /// `\@<`) is not one Vim knows. The regex is dead after this, so the
+    /// returned node is never matched.
+    fn bad_look(&mut self, inner: Node, got: Option<char>) -> Node {
+        let bad = got.map(|c| c.to_string()).unwrap_or_default();
+        self.fail(&format!("E869: (NFA) Unknown operator '\\@{bad}'"));
+        inner
     }
 
     fn quantifier(&mut self) -> (u32, u32, bool) {
@@ -1263,6 +1369,61 @@ impl Regex {
                 }
                 Some(end)
             }
+            Node::Look(atom, op) => {
+                let one = std::slice::from_ref(atom.as_ref());
+                match op {
+                    // c: NFA_PREV_ATOM_NO_WIDTH(_NEG) — zero-width probe of the
+                    // atom at `pos`, consuming nothing. Groups captured inside a
+                    // *successful* positive lookahead are kept:
+                    // matchlist('foobar','foo\(bar\)\@=') == ['foo','bar',…].
+                    LookOp::Ahead(want) => {
+                        let mut probe = groups.clone();
+                        let hit = self.match_atoms(one, text, pos, &mut probe, ic).is_some();
+                        if hit != *want {
+                            return None;
+                        }
+                        if hit {
+                            *groups = probe;
+                        }
+                        Some(pos)
+                    }
+                    // c: NFA_PREV_ATOM_JUST_BEFORE(_NEG) — the atom must match
+                    // ending exactly at `pos`; `\@123<=` bounds how far back the
+                    // attempt may start (C counts bytes, this engine's unit is
+                    // chars). The FARTHEST start that matches wins the captures:
+                    // matchlist('aaab','\(a*\)\@<=b')[1] == 'aaa' in both oracles.
+                    LookOp::Behind(want, limit) => {
+                        let min_start = limit.map_or(0, |l| pos.saturating_sub(l as usize));
+                        let branch = [
+                            (**atom).clone(),
+                            Atom {
+                                node: Node::CheckPos(pos),
+                                min: 1,
+                                max: 1,
+                                greedy: true,
+                            },
+                        ];
+                        let mut hit = false;
+                        for s in min_start..=pos {
+                            let mut probe = groups.clone();
+                            if self.match_atoms(&branch, text, s, &mut probe, ic).is_some() {
+                                if *want {
+                                    *groups = probe;
+                                }
+                                hit = true;
+                                break;
+                            }
+                        }
+                        (hit == *want).then_some(pos)
+                    }
+                    // c: NFA_PREV_ATOM_LIKE_PATTERN (`\@>`) — match the atom like
+                    // a standalone pattern and CONSUME it, never backtracking into
+                    // it. `match_one` commits to the first way its operand matches,
+                    // so a plain match is exactly that.
+                    LookOp::Atomic => self.match_atoms(one, text, pos, groups, ic),
+                }
+            }
+            Node::CheckPos(target) => (pos == *target).then_some(pos),
         }
     }
 }
@@ -1697,5 +1858,82 @@ mod tests {
             regex_split("a1b2c", "\\d", false, false),
             vec!["a", "b", "c"]
         );
+    }
+
+    // Every expectation below was verified against BOTH vim 9.2 and nvim (they
+    // agree on all of them) — see BUGS.md R12-10.
+    #[test]
+    fn lookahead() {
+        // `a\@!` matches zero-width wherever `a` does not follow.
+        assert_eq!(
+            regex_split("3.5e2", "a\\@!", false, false),
+            vec!["3", ".", "5", "e", "2"]
+        );
+        assert_eq!(
+            regex_substitute("*.[]^$\\", "a\\@!", "X", "abc"),
+            "X*.[]^$\\"
+        );
+        assert_eq!(regex_match_index("b\\@!", "abc", false), 0);
+        assert_eq!(regex_match_index("b\\@!", "bbc", false), 2);
+        assert_eq!(regex_matchstr("foo\\(bar\\)\\@=", "foobar", false), "foo");
+        assert_eq!(regex_match_index("foo\\(bar\\)\\@!", "foobaz", false), 0);
+        assert_eq!(regex_match_index("foo\\(bar\\)\\@!", "foobar", false), -1);
+        // Groups captured inside a successful positive lookahead are kept.
+        assert_eq!(
+            regex_matchlist("foo\\(bar\\)\\@=", "foobar", false)[..2],
+            ["foo".to_string(), "bar".to_string()]
+        );
+        assert_eq!(regex_substitute("abc", "x\\@!", "-", "g"), "-a-b-c-");
+        assert_eq!(regex_substitute("abc", "x\\@=", "-", "g"), "abc");
+        assert_eq!(regex_split("ab", "b\\@=", false, false), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn lookbehind() {
+        assert_eq!(regex_matchstr("\\(foo\\)\\@<=bar", "foobar", false), "bar");
+        assert_eq!(regex_match_index("\\(foo\\)\\@<=bar", "zzzbar", false), -1);
+        assert_eq!(regex_match_index("\\(foo\\)\\@<!bar", "foobar", false), -1);
+        assert_eq!(regex_match_index("\\(foo\\)\\@<!bar", "zzzbar", false), 3);
+        // The lookbehind may match empty, and the FARTHEST start wins captures.
+        assert_eq!(regex_match_index("\\(a*\\)\\@<=b", "b", false), 0);
+        assert_eq!(
+            regex_matchlist("\\(a*\\)\\@<=b", "aaab", false)[..2],
+            ["b".to_string(), "aaa".to_string()]
+        );
+        // `\@123<=` bounds how far back the attempt may start.
+        assert_eq!(regex_matchstr("\\(foo\\)\\@2<=bar", "foobar", false), "");
+        assert_eq!(regex_matchstr("\\(foo\\)\\@3<=bar", "foobar", false), "bar");
+        assert_eq!(regex_substitute("aXbXc", "X\\@<!.", "-", "g"), "--b-c");
+        assert_eq!(regex_substitute("aaa", "\\(a\\)\\@<=a", "X", "g"), "aXX");
+    }
+
+    #[test]
+    fn atomic_group() {
+        // `\@>` consumes like a standalone pattern with no backtracking into it.
+        assert_eq!(regex_matchstr("\\(a*\\)\\@>b", "aaab", false), "aaab");
+        assert_eq!(regex_match_index("\\(a*\\)\\@>a", "aaa", false), -1);
+    }
+
+    #[test]
+    fn look_very_magic() {
+        assert_eq!(regex_matchstr("\\v(foo)@<=bar", "foobar", false), "bar");
+        assert_eq!(regex_match_index("\\vfoo(bar)@!", "foobaz", false), 0);
+        assert_eq!(regex_matchstr("\\v(foo)@3<=bar", "foobar", false), "bar");
+        assert_eq!(
+            regex_split("3.5e2", "\\va@!", false, false),
+            vec!["3", ".", "5", "e", "2"]
+        );
+    }
+
+    #[test]
+    fn look_errors() {
+        // A dead (rejected) pattern matches nothing: `\@` with nothing before it
+        // is E866, a multi on either side of `\@` is E871, `\@x` is E869.
+        assert_eq!(regex_match_index("\\@!", "x", false), -1);
+        assert_eq!(regex_match_index("a\\@!*", "x", false), -1);
+        assert_eq!(regex_match_index("a*\\@=", "x", false), -1);
+        assert_eq!(regex_match_index("a\\@x", "x", false), -1);
+        assert_eq!(regex_match_index("a\\@<x", "x", false), -1);
+        assert_eq!(regex_match_index("\\(a\\)\\@=\\{2}", "x", false), -1);
     }
 }

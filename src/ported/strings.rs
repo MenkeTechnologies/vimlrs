@@ -16,7 +16,7 @@ use crate::ported::eval::typval::{
     tv_list_append_tv,
 };
 use crate::ported::eval::typval_defs_h::{typval_T, typval_vval_union::*, varnumber_T, VarType::*};
-use crate::ported::eval_h::OK;
+use crate::ported::eval_h::{FAIL, OK};
 use crate::ported::message::{emsg, semsg};
 use crate::ported::option::get_option_value;
 
@@ -137,11 +137,13 @@ pub fn f_strpart(argvars: &[typval_T], rettv: &mut typval_T) {
     }
     // c: with {chars} ({4}) set, reinterpret the byte-clamped {len} as a
     // character count and walk that many characters forward from `nbyte`
-    // (the {start} offset itself stays byte-based, matching the C).
+    // (the {start} offset itself stays byte-based, matching the C). The walk
+    // is `utfc_ptr2len` — a base char plus its composing marks is ONE char
+    // (`strpart('écombining', 0, 2, 0)` with decomposed é is `'éc'`).
     if argvars.len() >= 3 && argvars.get(3).is_some_and(|t| t.v_type != VAR_UNKNOWN) {
         let mut off = nbyte;
         while off < slen && len > 0 {
-            off += crate::ported::mbyte::utf_ptr2len(&bytes[off as usize..]) as varnumber_T;
+            off += crate::ported::mbyte::utfc_ptr2len(&bytes[off as usize..]).max(1) as varnumber_T;
             len -= 1;
         }
         len = off - nbyte;
@@ -179,39 +181,94 @@ pub fn f_stridx(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.vval = v_number(idx.unwrap_or(-1));
 }
 
-/// Port of `f_trim()` from `Src/strings.c` (subset) — trim whitespace (or the
-/// characters in `{mask}`) from both ends.
+/// Port of `f_trim()` from `Src/strings.c` — trim characters from the ends of
+/// `{text}`.
+///
+/// With no `{mask}` (or an *empty* `{mask}`, which the C folds to NULL) any
+/// character `<= ' '` or the non-breaking space 0xa0 is trimmed. With a mask, a
+/// character is trimmed when its base codepoint (`utf_ptr2char`) equals the
+/// base codepoint of any mask cluster, and the walk advances by whole
+/// base-plus-composing clusters (`MB_PTR_ADV`). `{dir}` is truncated to `int`
+/// exactly like the C's `(int)tv_get_number_chk(...)` — so an INT64-huge value
+/// wraps rather than erroring — then anything outside 0..2 is E475.
 pub fn f_trim(argvars: &[typval_T], rettv: &mut typval_T) {
     let s = tv_get_string(&argvars[0]);
     rettv.v_type = VAR_STRING;
-    // c: {mask} (default = isspace() set); an explicit empty mask trims nothing.
+    rettv.vval = v_string(String::new());
+    // c: `if (tv_check_for_opt_string_arg(argvars, 1) == FAIL) return;` — a
+    // present, non-String {mask} is E1174.
     let has_mask = argvars.len() >= 2 && argvars[1].v_type != VAR_UNKNOWN;
-    let mask: Vec<char> = if has_mask {
-        tv_get_string(&argvars[1]).chars().collect()
-    } else {
-        vec![' ', '\t', '\r', '\n', '\u{0b}', '\u{0c}']
-    };
-    let pred = |c: char| mask.contains(&c);
-    // c: {dir} — 0 = both ends (default), 1 = leading only, 2 = trailing only.
-    let dir = argvars
-        .get(2)
-        .filter(|t| t.v_type != VAR_UNKNOWN)
-        .map_or(0, |t| tv_get_number_chk(t, None));
-    // c: `if (dir < 0 || dir > 2) { semsg(_(e_invarg2), tv_get_string(&argvars[2])); return; }`
-    // — anything outside 0..2 is E475, quoting the offending value.
-    if !(0..=2).contains(&dir) {
-        semsg(&format!(
-            "E475: Invalid argument: {}",
-            tv_get_string(&argvars[2])
-        ));
+    if has_mask && argvars[1].v_type != VAR_STRING {
+        semsg("E1174: String required for argument 2");
         return;
     }
-    let trimmed = match dir {
-        1 => s.trim_start_matches(pred),
-        2 => s.trim_end_matches(pred),
-        _ => s.trim_matches(pred),
+    // c: `mask = tv_get_string_buf_chk(...); if (*mask == NUL) mask = NULL;` —
+    // an EMPTY mask falls back to the default whitespace set.
+    let mask_str = if has_mask {
+        Some(tv_get_string(&argvars[1])).filter(|m| !m.is_empty())
+    } else {
+        None
     };
-    rettv.vval = v_string(trimmed.to_string());
+    // Base codepoint of each mask cluster (c: `utf_ptr2char(p)` per
+    // `MB_PTR_ADV` step).
+    let mask_bases: Option<Vec<i32>> = mask_str.as_deref().map(|m| {
+        let mb = m.as_bytes();
+        let mut bases = Vec::new();
+        let mut i = 0usize;
+        while i < mb.len() {
+            bases.push(crate::ported::mbyte::utf_ptr2char(&mb[i..]));
+            i += crate::ported::mbyte::utfc_ptr2len(&mb[i..]).max(1) as usize;
+        }
+        bases
+    });
+    // c: {dir} is parsed only when {mask} is a String (matching the C's
+    // `if (argvars[1].v_type == VAR_STRING)` nesting), `(int)`-truncated, then
+    // range-checked: 0 = both ends, 1 = leading, 2 = trailing.
+    let mut dir: i32 = 0;
+    if has_mask && argvars.len() >= 3 && argvars[2].v_type != VAR_UNKNOWN {
+        dir = tv_get_number_chk(&argvars[2], None) as i32;
+        if !(0..=2).contains(&dir) {
+            semsg(&format!(
+                "E475: Invalid argument: {}",
+                tv_get_string(&argvars[2])
+            ));
+            return;
+        }
+    }
+    // c: `c1 > ' ' && c1 != 0xa0` is the KEEP condition for the default mask.
+    let trims = |c1: i32| -> bool {
+        match &mask_bases {
+            None => c1 <= b' ' as i32 || c1 == 0xa0,
+            Some(bases) => bases.contains(&c1),
+        }
+    };
+    let bytes = s.as_bytes();
+    // c: trim leading characters (dir 0 or 1) — `c1 = utf_ptr2char(head)` then
+    // `MB_PTR_ADV(head)`: compare the cluster's base codepoint, advance by the
+    // whole base-plus-composing cluster.
+    let mut head = 0usize;
+    if dir == 0 || dir == 1 {
+        while head < bytes.len() {
+            if !trims(crate::ported::mbyte::utf_ptr2char(&bytes[head..])) {
+                break;
+            }
+            head += crate::ported::mbyte::utfc_ptr2len(&bytes[head..]).max(1) as usize;
+        }
+    }
+    // c: trim trailing characters (dir 0 or 2) — `MB_PTR_BACK(head, prev)`
+    // cluster by cluster from the end.
+    let mut tail = bytes.len();
+    if dir == 0 || dir == 2 {
+        while tail > head {
+            let mut prev = tail - 1;
+            prev -= crate::ported::mbyte::utf_head_off(bytes, prev);
+            if !trims(crate::ported::mbyte::utf_ptr2char(&bytes[prev..])) {
+                break;
+            }
+            tail = prev;
+        }
+    }
+    rettv.vval = v_string(s[head..tail].to_string());
 }
 
 /// Port of `f_strridx()` from `Src/strings.c` — byte index of the LAST
@@ -343,36 +400,72 @@ pub fn f_strgetchar(argvars: &[typval_T], rettv: &mut typval_T) {
 /// character (c: `utfc_ptr2len`); otherwise each codepoint is its own character
 /// (c: `utf_ptr2len`).
 pub fn f_strcharpart(argvars: &[typval_T], rettv: &mut typval_T) {
-    // c: skipcc = (argvars[2] != UNKNOWN && argvars[3] != UNKNOWN) ? tv_get_bool(&argvars[3]) : 0;
-    let skipcc = argvars
-        .get(3)
-        .is_some_and(|t| tv_get_number_chk(t, None) != 0);
-    // Build character units. With skipcc, composing marks fold into the
-    // preceding base character's unit; otherwise every codepoint is its own.
-    let mut units: Vec<String> = Vec::new();
-    for c in tv_get_string(&argvars[0]).chars() {
-        if skipcc && utf_iscomposing(c) && !units.is_empty() {
-            units.last_mut().unwrap().push(c);
+    let s = tv_get_string(&argvars[0]);
+    let bytes = s.as_bytes();
+    // c: `const size_t slen = strlen(p)` — everything below is the C's byte
+    // walk over `int nbyte`/`int len` offsets, including its `(int)` truncating
+    // casts (which is why an INT64-huge {start} wraps instead of erroring:
+    // `strcharpart("a\\b", -9223372036854775807)` is `(int)` 1 → `'\b'`).
+    let slen = bytes.len() as i64;
+    // c: skipcc is read only when BOTH {len} and {skipcc} are present.
+    let skipcc = argvars.get(2).is_some_and(|t| t.v_type != VAR_UNKNOWN)
+        && argvars
+            .get(3)
+            .is_some_and(|t| t.v_type != VAR_UNKNOWN && tv_get_number_chk(t, None) != 0);
+    // c: skipcc ? utfc_ptr2len (base + composing = one char) : utf_ptr2len.
+    let step = |off: usize| -> i64 {
+        let l = if skipcc {
+            crate::ported::mbyte::utfc_ptr2len(&bytes[off..])
         } else {
-            units.push(c.to_string());
-        }
-    }
-    let mut start = tv_get_number_chk(&argvars[1], None);
-    let has_len = argvars.len() >= 3;
-    let mut len = if has_len {
-        tv_get_number_chk(&argvars[2], None)
-    } else {
-        units.len() as varnumber_T - start
+            crate::ported::mbyte::utf_ptr2len(&bytes[off..])
+        };
+        l.max(1) as i64
     };
-    if start < 0 {
-        len += start; // chars before 0 are skipped but still consume {len}
-        start = 0;
+    let mut nbyte: i64 = 0;
+    let mut nchar = tv_get_number_chk(&argvars[1], None);
+    if nchar > 0 {
+        // c: while (nchar > 0 && nbyte < slen) nbyte += utf*_ptr2len(p + nbyte);
+        while nchar > 0 && nbyte < slen {
+            nbyte += step(nbyte as usize);
+            nchar -= 1;
+        }
+    } else {
+        // c: `nbyte = (int)nchar` — truncate, do not clamp.
+        nbyte = (nchar as i32) as i64;
     }
-    let start = (start as usize).min(units.len());
-    let len = len.max(0) as usize;
-    let end = (start + len).min(units.len());
+    let mut len: i64;
+    if argvars.get(2).is_some_and(|t| t.v_type != VAR_UNKNOWN) {
+        // c: `int charlen = (int)tv_get_number(&argvars[2])` — truncated too.
+        let mut charlen = (tv_get_number_chk(&argvars[2], None) as i32) as i64;
+        len = 0;
+        while charlen > 0 && nbyte + len < slen {
+            let off = nbyte + len;
+            if off < 0 {
+                // c: a char before the string counts as one byte of {len}.
+                len += 1;
+            } else {
+                len += step(off as usize);
+            }
+            charlen -= 1;
+        }
+    } else {
+        len = slen - nbyte; // c: default — all bytes that are available.
+    }
+    // c: only return the overlap between the specified part and the string.
+    if nbyte < 0 {
+        len += nbyte;
+        nbyte = 0;
+    } else if nbyte > slen {
+        nbyte = slen;
+    }
+    if len < 0 {
+        len = 0;
+    } else if nbyte + len > slen {
+        len = slen - nbyte;
+    }
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(units[start..end].concat());
+    let (a, b) = (nbyte as usize, (nbyte + len) as usize);
+    rettv.vval = v_string(String::from_utf8_lossy(&bytes[a..b]).into_owned());
 }
 
 /// Port of `f_byteidx()` from `Src/strings.c` — the byte index of the `{nr}`'th
@@ -522,8 +615,13 @@ pub fn f_strtrans(argvars: &[typval_T], rettv: &mut typval_T) {
     let s = tv_get_string(&argvars[0]);
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
-        let u = c as u32;
+        let mut u = c as u32;
         if u < 0x20 {
+            // c: `transchar_nonprint()` — `if (c == NL) { c = NUL; }` ("we use
+            // newline in place of a NUL"), so `strtrans("a\nb")` is `a^@b`.
+            if u == 0x0a {
+                u = 0;
+            }
             out.push('^');
             out.push((u as u8 + 0x40) as char);
         } else if u == 0x7F {
@@ -556,56 +654,64 @@ pub fn f_slice(argvars: &[typval_T], rettv: &mut typval_T) {
         *rettv = argvars[0].clone();
         return;
     }
-    // Length of the sliced value, by type.
-    let len: varnumber_T = match (argvars[0].v_type, &argvars[0].vval) {
-        (VAR_LIST, v_list(Some(l))) => l.borrow().lv_items.len() as varnumber_T,
-        (VAR_BLOB, v_blob(Some(b))) => b.borrow().bv_ga.len() as varnumber_T,
-        (VAR_LIST, _) | (VAR_BLOB, _) => 0,
-        _ => tv_get_string(&argvars[0]).chars().count() as varnumber_T,
-    };
-
-    let clamp = |mut i: varnumber_T| -> varnumber_T {
-        if i < 0 {
-            i += len;
-        }
-        i.clamp(0, len)
-    };
-    let s = clamp(tv_get_number_chk(&argvars[1], None));
-    let has_end = argvars.len() >= 3 && argvars[2].v_type != VAR_UNKNOWN;
-    let mut e = if has_end {
-        clamp(tv_get_number_chk(&argvars[2], None))
-    } else {
-        len
-    };
-    if e < s {
-        e = s;
+    // c: a String goes through `eval_index_inner(…, exclusive = true)` →
+    // `string_slice()` — CHARACTER indices with composing characters folded
+    // into their base (`utfc_ptr2len`), end exclusive, raw (unclamped) bounds.
+    if !matches!(argvars[0].v_type, VAR_LIST | VAR_BLOB) {
+        let s = tv_get_string(&argvars[0]);
+        let n1 = tv_get_number_chk(&argvars[1], None);
+        let n2 = if argvars.len() >= 3 && argvars[2].v_type != VAR_UNKNOWN {
+            tv_get_number_chk(&argvars[2], None)
+        } else {
+            crate::ported::eval::typval_defs_h::VARNUMBER_MAX
+        };
+        rettv.v_type = VAR_STRING;
+        rettv.vval =
+            v_string(crate::ported::eval::string_slice(&s, n1, n2, true).unwrap_or_default());
+        return;
     }
-    let (s, e) = (s as usize, e as usize);
 
+    // c: Lists and Blobs run through `eval_index_inner` → the ported
+    // `tv_list_slice_or_index`/`tv_blob_slice_or_index`, with the RAW bounds
+    // (an out-of-range start yields an EMPTY result — `slice([1,2,3],-4,2)` is
+    // `[]`, not a clamped `[1,2]`) and `n2` = VARNUMBER_MAX when omitted.
+    let n1 = tv_get_number_chk(&argvars[1], None);
+    let n2 = if argvars.len() >= 3 && argvars[2].v_type != VAR_UNKNOWN {
+        tv_get_number_chk(&argvars[2], None)
+    } else {
+        crate::ported::eval::typval_defs_h::VARNUMBER_MAX
+    };
     match (argvars[0].v_type, &argvars[0].vval) {
-        (VAR_LIST, v_list(l)) => {
-            let out = tv_list_alloc_ret(rettv, 0);
-            if let Some(l) = l {
-                let lb = l.borrow();
-                let mut ob = out.borrow_mut();
-                for it in &lb.lv_items[s..e] {
-                    tv_list_append_tv(&mut ob, it.li_tv.clone());
-                }
+        (VAR_LIST, v_list(l)) => match l.clone() {
+            Some(l) => {
+                *rettv = argvars[0].clone();
+                let _ = crate::ported::eval::typval::tv_list_slice_or_index(
+                    &l, true, n1, n2, true, rettv, false,
+                );
             }
-        }
-        (VAR_BLOB, v_blob(b)) => {
-            let out = tv_blob_alloc_ret(rettv);
-            if let Some(b) = b {
-                out.borrow_mut()
-                    .bv_ga
-                    .extend_from_slice(&b.borrow().bv_ga[s..e]);
+            None => {
+                tv_list_alloc_ret(rettv, 0);
             }
-        }
-        _ => {
-            let chars: Vec<char> = tv_get_string(&argvars[0]).chars().collect();
-            rettv.v_type = VAR_STRING;
-            rettv.vval = v_string(chars[s..e].iter().collect());
-        }
+        },
+        (VAR_BLOB, v_blob(b)) => match b.clone() {
+            Some(b) => {
+                *rettv = argvars[0].clone();
+                let _ = crate::ported::eval::typval::tv_blob_slice_or_index(
+                    &b.borrow(),
+                    true,
+                    n1,
+                    n2,
+                    true,
+                    rettv,
+                );
+            }
+            None => {
+                tv_blob_alloc_ret(rettv);
+            }
+        },
+        // Strings (and Numbers-as-strings) returned above through the ported
+        // `string_slice`; Dicts returned even earlier.
+        _ => {}
     }
 }
 
@@ -742,33 +848,48 @@ pub fn f_strwidth(argvars: &[typval_T], rettv: &mut typval_T) {
 /// starting screen column (so leading text affects Tab stops).
 pub fn f_strdisplaywidth(argvars: &[typval_T], rettv: &mut typval_T) {
     let s = tv_get_string(&argvars[0]);
-    let col0 = if argvars.len() >= 2 {
-        tv_get_number_chk(&argvars[1], None).max(0) as usize
+    // c: `col = (int)tv_get_number(&argvars[1])` — a truncating cast, and the
+    // value may legally be INT_MAX (or negative).
+    let col0: i32 = if argvars.len() >= 2 && argvars[1].v_type != VAR_UNKNOWN {
+        tv_get_number_chk(&argvars[1], None) as i32
     } else {
         0
     };
-    let ts = {
+    let ts: i64 = {
         let t = tv_get_number_chk(&get_option_value("tabstop"), None);
         if t > 0 {
-            t as usize
+            t
         } else {
             8
         }
     };
-    let mut col = col0;
+    // c: `linetabsize_col(col, s) - col`, where `linesize_fast` accumulates an
+    // int64 `vcol` and CLAMPS the returned int at MAXCOL (0x7fffffff): a huge
+    // starting {col} saturates immediately and the result is 0.
+    const MAXCOL: i64 = 0x7fffffff; // enum { MAXCOL } — Src/pos_defs.h:19
+    let mut vcol: i64 = col0 as i64;
+    let mut vcol_arg: i64 = vcol;
     for c in s.chars() {
-        if c == '\t' {
-            col += ts - (col % ts);
+        let width: i64 = if c == '\t' {
+            // c: tabstop_padding — `ts - (col % ts)`; Rust `%` truncates toward
+            // zero exactly like the C's, negative columns included.
+            ts - vcol_arg % ts
         } else if (c as u32) < 0x20 || c == '\x7f' {
             // c: a control character has no glyph — it *displays* as `^X` (`^J`,
             // `^?`), which is two cells. `strdisplaywidth` measures the display,
             // so it counts 2 where `strwidth` (which measures the text) counts 1.
-            col += 2;
+            2
         } else {
-            col += utf_char2cells(c);
+            utf_char2cells(c) as i64
+        };
+        vcol += width;
+        if vcol > MAXCOL {
+            vcol_arg = MAXCOL;
+            break;
         }
+        vcol_arg = vcol;
     }
-    rettv.vval = v_number((col - col0) as varnumber_T);
+    rettv.vval = v_number(vcol_arg - col0 as i64);
 }
 
 /// Port of `f_charclass()` from `Src/strings.c` — the character class of the
@@ -988,4 +1109,414 @@ pub fn f_utf16idx(argvars: &[typval_T], rettv: &mut typval_T) {
         }
     };
     rettv.vval = v_number(result);
+}
+
+// ── positional ($-style) printf format validation (Src/strings.c) ──
+
+/// The `TYPE_*` enum from `Src/strings.c` — what a conversion specifier
+/// consumes from the argument list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FormatType {
+    Unknown,
+    Int,
+    LongInt,
+    LongLongInt,
+    SignedSizeT,
+    UnsignedInt,
+    UnsignedLongInt,
+    UnsignedLongLongInt,
+    SizeT,
+    Pointer,
+    Percent,
+    Char,
+    String,
+    Float,
+}
+
+/// Port of `format_typeof()` from `Src/strings.c:864` — the [`FormatType`] of
+/// the conversion at the start of `type_` (a length modifier `h`/`l`/`ll`/`z`
+/// followed by the specifier char, with the `i`/`*`/`D`/`U`/`O` synonyms).
+fn format_typeof(type_: &[u8]) -> FormatType {
+    let mut i = 0usize;
+    // allowed values: \0, h, l, L
+    let mut length_modifier = 0u8;
+    if matches!(type_.first(), Some(b'h' | b'l' | b'z')) {
+        length_modifier = type_[0];
+        i = 1;
+        if length_modifier == b'l' && type_.get(1) == Some(&b'l') {
+            // double l = long long
+            length_modifier = b'L';
+            i = 2;
+        }
+    }
+    let mut fmt_spec = type_.get(i).copied().unwrap_or(0);
+    // common synonyms:
+    match fmt_spec {
+        b'i' => fmt_spec = b'd',
+        b'*' => {
+            fmt_spec = b'd';
+            length_modifier = b'h';
+        }
+        b'D' => {
+            fmt_spec = b'd';
+            length_modifier = b'l';
+        }
+        b'U' => {
+            fmt_spec = b'u';
+            length_modifier = b'l';
+        }
+        b'O' => {
+            fmt_spec = b'o';
+            length_modifier = b'l';
+        }
+        _ => {}
+    }
+    match fmt_spec {
+        b'%' => FormatType::Percent,
+        b'c' => FormatType::Char,
+        b's' | b'S' => FormatType::String,
+        b'p' => FormatType::Pointer,
+        b'b' | b'B' => FormatType::UnsignedLongLongInt,
+        b'd' => match length_modifier {
+            0 | b'h' => FormatType::Int,
+            b'l' => FormatType::LongInt,
+            b'L' => FormatType::LongLongInt,
+            b'z' => FormatType::SignedSizeT,
+            _ => FormatType::Unknown,
+        },
+        b'u' | b'o' | b'x' | b'X' => match length_modifier {
+            0 | b'h' => FormatType::UnsignedInt,
+            b'l' => FormatType::UnsignedLongInt,
+            b'L' => FormatType::UnsignedLongLongInt,
+            b'z' => FormatType::SizeT,
+            _ => FormatType::Unknown,
+        },
+        b'f' | b'F' | b'e' | b'E' | b'g' | b'G' => FormatType::Float,
+        _ => FormatType::Unknown,
+    }
+}
+
+/// Port of `format_typename()` from `Src/strings.c:978` — the human name of a
+/// conversion's type, used by the E1502/E1504 messages.
+fn format_typename(type_: &[u8]) -> &'static str {
+    match format_typeof(type_) {
+        FormatType::Int => "int",
+        FormatType::LongInt => "long int",
+        FormatType::LongLongInt => "long long int",
+        FormatType::SignedSizeT => "signed size_t",
+        FormatType::UnsignedInt => "unsigned int",
+        FormatType::UnsignedLongInt => "unsigned long int",
+        FormatType::UnsignedLongLongInt => "unsigned long long int",
+        FormatType::SizeT => "size_t",
+        FormatType::Pointer => "pointer",
+        FormatType::Percent => "percent",
+        FormatType::Char => "char",
+        FormatType::String => "string",
+        FormatType::Float => "float",
+        FormatType::Unknown => "unknown",
+    }
+}
+
+/// Port of `adjust_types()` from `Src/strings.c:1013` — record that positional
+/// argument `arg` (1-based) is consumed by the conversion at byte offset
+/// `type_off` of `fmt`, erroring when the same slot is reused with a different
+/// type (E1504), a `*` field-width slot is reused as a non-int (E1502), or the
+/// index is not positive (E1505). `ap_types` holds the offset of each slot's
+/// first use (the C's `const char **ap_types`).
+fn adjust_types(ap_types: &mut Vec<Option<usize>>, arg: i32, fmt: &str, type_off: usize) -> i32 {
+    if arg <= 0 {
+        semsg(&format!(
+            "E1505: Invalid format specifier: {}",
+            &fmt[type_off..]
+        ));
+        return FAIL;
+    }
+    let idx = arg as usize - 1;
+    if ap_types.len() <= idx {
+        ap_types.resize(idx + 1, None);
+    }
+    if let Some(old_off) = ap_types[idx] {
+        let old = &fmt.as_bytes()[old_off..];
+        let new = &fmt.as_bytes()[type_off..];
+        if old[0] == b'*' || new[0] == b'*' {
+            let pt = if new[0] == b'*' { old } else { new };
+            if pt[0] != b'*' && !matches!(pt[0], b'd' | b'i') {
+                semsg(&format!(
+                    "E1502: Positional argument {arg} used as field width reused as \
+                     different type: {}/{}",
+                    format_typename(old),
+                    format_typename(new)
+                ));
+                return FAIL;
+            }
+        } else if format_typeof(new) != format_typeof(old) {
+            semsg(&format!(
+                "E1504: Positional argument {arg} type used inconsistently: {}/{}",
+                format_typename(new),
+                format_typename(old)
+            ));
+            return FAIL;
+        }
+    }
+    ap_types[idx] = Some(type_off);
+    OK
+}
+
+/// Port of `format_overflow_error()` from `Src/strings.c:1066` — E1510 naming
+/// the digit run that exceeded [`MAX_ALLOWED_STRING_WIDTH`].
+fn format_overflow_error(fmt: &str, pstart: usize) {
+    let b = fmt.as_bytes();
+    let mut p = pstart;
+    while p < b.len() && b[p].is_ascii_digit() {
+        p += 1;
+    }
+    semsg(&format!("E1510: Value too large: {}", &fmt[pstart..p]));
+}
+
+/// `MAX_ALLOWED_STRING_WIDTH` from `Src/strings.c` — 1 MiB.
+const MAX_ALLOWED_STRING_WIDTH: u32 = 1048576;
+
+/// Port of `get_unsigned_int()` from `Src/strings.c:1084` — parse the digit
+/// run at `*p` into `uj`, capping at [`MAX_ALLOWED_STRING_WIDTH`] (E1510 when
+/// `overflow_err`, i.e. the typval `printf()` path). NOTE (c): the first byte
+/// is consumed unconditionally — `%$d` reads `'$' - '0'` and overflows, which
+/// is why its error is E1510 with an empty digit run.
+fn get_unsigned_int(
+    fmt: &str,
+    pstart: usize,
+    p: &mut usize,
+    uj: &mut u32,
+    overflow_err: bool,
+) -> i32 {
+    let b = fmt.as_bytes();
+    // c: `*uj = (unsigned)(**p - '0')` — int subtraction cast to unsigned, so a
+    // non-digit first byte ('$' in `%$d`) wraps huge and trips the overflow check.
+    *uj = (b[*p] as i32 - b'0' as i32) as u32;
+    *p += 1;
+    while *p < b.len() && b[*p].is_ascii_digit() && *uj < MAX_ALLOWED_STRING_WIDTH {
+        *uj = 10 * *uj + (b[*p] - b'0') as u32;
+        *p += 1;
+    }
+    if *uj > MAX_ALLOWED_STRING_WIDTH {
+        if overflow_err {
+            format_overflow_error(fmt, pstart);
+            return FAIL;
+        }
+        *uj = MAX_ALLOWED_STRING_WIDTH;
+    }
+    OK
+}
+
+/// Port of `parse_fmt_types()` from `Src/strings.c:1101` — the pre-pass over a
+/// `printf()` format that validates `$`-style (positional) conversions before
+/// anything is formatted. `argc` is the number of arguments supplied after the
+/// format (the C's `tvs` array length). Errors, in the C's order:
+///
+/// - E1505 — `0` flag on a positional index (`%01$d`), a `$` after a width or
+///   precision digit run, or a `%*N` width not followed by `$`.
+/// - E1510 — a width/precision/index digit run over 1 MiB.
+/// - E1500 — positional and non-positional conversions mixed (also raised for
+///   an *unknown* specifier carrying a positional index).
+/// - E1502/E1504 — a slot reused with an incompatible type (`adjust_types`).
+/// - E1501 — a slot the format never uses (`%2$d` with no `%1$…`).
+/// - E1503 — a slot past the supplied arguments.
+///
+/// Returns FAIL after emitting the message; the caller renders nothing (the
+/// C's `vim_vsnprintf_typval` returns 0 → `printf()` yields an empty string).
+pub fn parse_fmt_types(fmt: &str, argc: usize) -> i32 {
+    let b = fmt.as_bytes();
+    let mut ap_types: Vec<Option<usize>> = Vec::new();
+    let mut any_pos = false;
+    let mut any_arg = false;
+    let mut p = 0usize;
+
+    // c: CHECK_POS_ARG — mixing is detected the moment both kinds have been seen.
+    macro_rules! check_pos_arg {
+        () => {
+            if any_pos && any_arg {
+                semsg(&format!(
+                    "E1500: Cannot mix positional and non-positional arguments: {fmt}"
+                ));
+                return FAIL;
+            }
+        };
+    }
+
+    while p < b.len() {
+        if b[p] != b'%' {
+            p += 1;
+            continue;
+        }
+        let pstart = p + 1;
+        p += 1;
+        // variable for positional arg
+        let mut pos_arg: i32 = -1;
+
+        // First check to see if we find a positional argument specifier
+        let mut ptype = p;
+        while ptype < b.len() && b[ptype].is_ascii_digit() {
+            ptype += 1;
+        }
+        if b.get(ptype) == Some(&b'$') {
+            if b[p] == b'0' {
+                // 0 flag at the wrong place
+                semsg(&format!("E1505: Invalid format specifier: {fmt}"));
+                return FAIL;
+            }
+            // Positional argument
+            let mut uj = 0u32;
+            if get_unsigned_int(fmt, pstart, &mut p, &mut uj, true) == FAIL {
+                return FAIL;
+            }
+            pos_arg = uj as i32;
+            any_pos = true;
+            check_pos_arg!();
+            p += 1; // past '$'
+        }
+
+        // parse flags
+        while matches!(b.get(p), Some(b'0' | b'-' | b'+' | b' ' | b'#' | b'\'')) {
+            p += 1;
+        }
+
+        // parse field width
+        let mut arg_off = p;
+        if b.get(p) == Some(&b'*') {
+            p += 1;
+            if b.get(p).is_some_and(u8::is_ascii_digit) {
+                // Positional argument field width
+                let mut uj = 0u32;
+                if get_unsigned_int(fmt, arg_off + 1, &mut p, &mut uj, true) == FAIL {
+                    return FAIL;
+                }
+                if b.get(p) != Some(&b'$') {
+                    semsg(&format!("E1505: Invalid format specifier: {fmt}"));
+                    return FAIL;
+                }
+                p += 1;
+                any_pos = true;
+                check_pos_arg!();
+                if adjust_types(&mut ap_types, uj as i32, fmt, arg_off) == FAIL {
+                    return FAIL;
+                }
+            } else {
+                any_arg = true;
+                check_pos_arg!();
+            }
+        } else if b.get(p).is_some_and(u8::is_ascii_digit) {
+            let digstart = p;
+            let mut uj = 0u32;
+            if get_unsigned_int(fmt, digstart, &mut p, &mut uj, true) == FAIL {
+                return FAIL;
+            }
+            if b.get(p) == Some(&b'$') {
+                semsg(&format!("E1505: Invalid format specifier: {fmt}"));
+                return FAIL;
+            }
+        }
+
+        // parse precision
+        if b.get(p) == Some(&b'.') {
+            p += 1;
+            arg_off = p;
+            if b.get(p) == Some(&b'*') {
+                p += 1;
+                if b.get(p).is_some_and(u8::is_ascii_digit) {
+                    let mut uj = 0u32;
+                    if get_unsigned_int(fmt, arg_off + 1, &mut p, &mut uj, true) == FAIL {
+                        return FAIL;
+                    }
+                    if b.get(p) != Some(&b'$') {
+                        semsg(&format!("E1505: Invalid format specifier: {fmt}"));
+                        return FAIL;
+                    }
+                    any_pos = true;
+                    check_pos_arg!();
+                    p += 1;
+                    if adjust_types(&mut ap_types, uj as i32, fmt, arg_off) == FAIL {
+                        return FAIL;
+                    }
+                } else {
+                    any_arg = true;
+                    check_pos_arg!();
+                }
+            } else if b.get(p).is_some_and(u8::is_ascii_digit) {
+                let digstart = p;
+                let mut uj = 0u32;
+                if get_unsigned_int(fmt, digstart, &mut p, &mut uj, true) == FAIL {
+                    return FAIL;
+                }
+                if b.get(p) == Some(&b'$') {
+                    semsg(&format!("E1505: Invalid format specifier: {fmt}"));
+                    return FAIL;
+                }
+            }
+        }
+
+        if pos_arg != -1 {
+            any_pos = true;
+            check_pos_arg!();
+            ptype = p;
+        }
+
+        // parse 'h', 'l', 'll' and 'z' length modifiers
+        if matches!(b.get(p), Some(b'h' | b'l' | b'z')) {
+            let length_modifier = b[p];
+            p += 1;
+            if length_modifier == b'l' && b.get(p) == Some(&b'l') {
+                // double l = long long
+                p += 1;
+            }
+        }
+
+        match b.get(p) {
+            // Check for known format specifiers. % is special!
+            Some(
+                b'i' | b'*' | b'd' | b'u' | b'o' | b'D' | b'U' | b'O' | b'x' | b'X' | b'b' | b'B'
+                | b'c' | b's' | b'S' | b'p' | b'f' | b'F' | b'e' | b'E' | b'g' | b'G',
+            ) => {
+                if pos_arg != -1 {
+                    if adjust_types(&mut ap_types, pos_arg, fmt, ptype) == FAIL {
+                        return FAIL;
+                    }
+                } else {
+                    any_arg = true;
+                    check_pos_arg!();
+                }
+            }
+            _ => {
+                if pos_arg != -1 {
+                    semsg(&format!(
+                        "E1500: Cannot mix positional and non-positional arguments: {fmt}"
+                    ));
+                    return FAIL;
+                }
+            }
+        }
+
+        if p < b.len() {
+            p += 1; // step over the just processed conversion specifier
+        }
+    }
+
+    // c: an unused slot is E1501; a used slot past the supplied arguments
+    // (tvs[idx].v_type == VAR_UNKNOWN) is E1503 — checked per index, ascending.
+    for idx in 0..ap_types.len() {
+        if ap_types[idx].is_none() {
+            semsg(&format!(
+                "E1501: format argument {} unused in $-style format: {fmt}",
+                idx + 1
+            ));
+            return FAIL;
+        }
+        if idx >= argc {
+            semsg(&format!(
+                "E1503: Positional argument {} out of bounds: {fmt}",
+                idx + 1
+            ));
+            return FAIL;
+        }
+    }
+
+    OK
 }

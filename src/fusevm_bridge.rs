@@ -1504,7 +1504,13 @@ fn b_exc_is_hard(_vm: &mut VM, _: u8) -> Value {
 
 fn b_raise(vm: &mut VM, _: u8) -> Value {
     let msg = tv_get_string(&pop_tv(vm));
-    message::emsg(&msg);
+    // c: expression evaluation ABORTS on the first error (`eval5` returns FAIL
+    // as soon as an operand errors), so a deferred error to the right of an
+    // operand that already errored is never reported — `([1] .. 1.0e300)` is
+    // E730 only, never also the parse-junk E15.
+    if message::err_count.with(|d| d.get()) <= ERR_MARK.with(|m| m.get()) {
+        message::emsg(&msg);
+    }
     Value::Int(0)
 }
 
@@ -2662,6 +2668,27 @@ fn call_user_function_raw(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
         .iter()
         .position(|p| p == "...")
         .unwrap_or(func.params.len());
+    let varargs = nfixed < func.params.len();
+
+    // c: check_user_func_argcount (userfunc.c) validates arity before binding:
+    //   `if (argcount < regular_args - fp->uf_def_args.ga_len)
+    //        return FCERR_TOOFEW;
+    //    else if (!fp->uf_varargs && argcount > regular_args)
+    //        return FCERR_TOOMANY;`
+    // → E119 / E118 (user_func_error). Without this, `call({x -> type(x)}, [])`
+    // bound the missing arg to a placeholder and ran the body, where Vim raises
+    // E119 up front. A lambda is created with `fp->uf_varargs = true`
+    // (get_lambda_tv, userfunc.c:396), so it can never be "too many" — only
+    // "too few".
+    if args.len() < nfixed.saturating_sub(func.defaults.len()) {
+        message::emsg(&format!("E119: Not enough arguments for function: {name}"));
+        return Some(tv_num(0));
+    }
+    let is_lambda = name.starts_with("<lambda>");
+    if !varargs && !is_lambda && args.len() > nfixed {
+        message::emsg(&format!("E118: Too many arguments for function: {name}"));
+        return Some(tv_num(0));
+    }
 
     // Push the (empty) a:/l: frame first, then bind params into it one at a time.
     // Binding incrementally lets an omitted parameter's default expression read
@@ -3001,13 +3028,27 @@ fn b_eval(vm: &mut VM, _: u8) -> Value {
             return Value::Undef;
         }
     };
-    let out = run_chunk_capture(chunk).map_or(Value::Int(0), tv_to_value);
-    // c: `else if (*s != NUL) semsg(_(e_trailing_arg), s);` — after evaluating.
-    let rest = src[rest_at..].trim();
-    if !rest.is_empty() {
-        message::semsg(&format!("E488: Trailing characters: {rest}"));
+    // c: the FAIL branch (`eval1() == FAIL`) reports E15 with the whole
+    // expression — unless aborting(), which is why inside `:try` the error
+    // `eval1` itself raised (E121 for an undefined variable, …) is what
+    // surfaces. The trailing-characters check only runs when evaluation
+    // SUCCEEDED: `else if (*s != NUL) semsg(_(e_trailing_arg), s);`.
+    match run_chunk_capture(chunk) {
+        Some(tv) => {
+            let rest = src[rest_at..].trim();
+            if !rest.is_empty() {
+                message::semsg(&format!("E488: Trailing characters: {rest}"));
+            }
+            tv_to_value(tv)
+        }
+        None => {
+            if !crate::ported::ex_eval::aborting() {
+                message::semsg(&format!("E15: Invalid expression: \"{src}\""));
+            }
+            // c: `rettv->v_type = VAR_NUMBER; rettv->vval.v_number = 0;`
+            Value::Int(0)
+        }
     }
-    out
 }
 
 /// The `\=` substitute-expression evaluator (installed into the regex engine's
@@ -3901,30 +3942,45 @@ fn index_value(base: &typval_T, index: &typval_T) -> typval_T {
         // indexed as that string, so `strlen('ab')[0]` is `'2'`, not an error.
         (VAR_STRING, _) | (VAR_NUMBER, _) => {
             let s = tv_get_string(base);
-            let chars: Vec<char> = s.chars().collect();
-            let len = chars.len() as varnumber_T;
+            let bytes = s.as_bytes();
+            let len = bytes.len() as varnumber_T;
             let i = tv_get_number_chk(index, None);
             // c:3298 — "If the index is too big or negative the result is
             // empty." A single index does NOT wrap around from the end (only a
-            // *slice* bound does).
+            // *slice* bound does). c: `v = xmemdupz(s + n1, 1)` — Vim strings
+            // are byte arrays, so a subscript is ONE BYTE, splitting a
+            // multibyte character ('日本語'[0] is the lone lead byte 0xe6).
             if i < 0 || i >= len {
                 tv_str(String::new())
             } else {
-                tv_str(chars[i as usize].to_string())
+                let b = i as usize;
+                tv_str(String::from_utf8_lossy(&bytes[b..b + 1]).into_owned())
             }
         }
-        (VAR_BLOB, v_blob(Some(b))) => {
-            // Blob subscript → a single byte (Number), via the ported value layer.
+        (VAR_BLOB, v_blob(b)) => {
+            // Blob subscript → a single byte (Number), via the ported value
+            // layer. A NULL blob (the empty result of a slice) has length 0,
+            // so any index is E979 — it must not fall to the un-indexable arm.
             let i = tv_get_number_chk(index, None);
             let mut rettv = base.clone();
-            let _ = crate::ported::eval::typval::tv_blob_slice_or_index(
-                &b.borrow(),
-                false,
-                i,
-                0,
-                false,
-                &mut rettv,
-            );
+            let _ = match b {
+                Some(b) => crate::ported::eval::typval::tv_blob_slice_or_index(
+                    &b.borrow(),
+                    false,
+                    i,
+                    0,
+                    false,
+                    &mut rettv,
+                ),
+                None => crate::ported::eval::typval::tv_blob_slice_or_index(
+                    &Default::default(),
+                    false,
+                    i,
+                    0,
+                    false,
+                    &mut rettv,
+                ),
+            };
             rettv
         }
         // Everything else is un-indexable, and *which* error says so is part of
@@ -3989,23 +4045,35 @@ fn slice_value(base: &typval_T, from: &typval_T, to: &typval_T) -> typval_T {
         // VAR_STRING branch (c:3263), so `or(256,7)[2:]` slices `'263'`.
         (VAR_STRING, _) | (VAR_NUMBER, _) => {
             let s = tv_get_string(base);
-            let chars: Vec<char> = s.chars().collect();
-            let len = chars.len() as varnumber_T;
+            let bytes = s.as_bytes();
+            // c: `int len = (int)strlen(s)` — the `[a:b]` subscript is
+            // BYTE-indexed (only `slice()` is character-indexed), so bounds
+            // wrap/clamp against the byte length and the slice may split a
+            // multibyte character ('日本語'[1:] starts at a continuation byte).
+            let len = bytes.len() as varnumber_T;
             let (lo, hi) = (lower(len, from), upper(len, to));
             // c:3283 — "If the indexes are out of range the result is empty."
-            // Note `hi < 0` is its own reject (a `-9` upper bound on a 3-char
+            // Note `hi < 0` is its own reject (a `-9` upper bound on a 3-byte
             // string stays negative after the wrap and yields '', it does not
             // clamp up to 0).
             if lo >= len || hi < 0 || lo > hi {
                 tv_str(String::new())
             } else {
-                tv_str(chars[lo as usize..=(hi as usize)].iter().collect())
+                let (lo, hi) = (lo as usize, hi as usize);
+                tv_str(String::from_utf8_lossy(&bytes[lo..=hi]).into_owned())
             }
         }
-        (VAR_BLOB, v_blob(Some(b))) => {
+        (VAR_BLOB, v_blob(b)) => {
             // Blob slice → a sub-blob, via the ported value layer (inclusive
-            // bounds; an omitted bound is the whole-end default).
-            let len = crate::ported::eval::typval::tv_blob_len(&b.borrow()) as varnumber_T;
+            // bounds; an omitted bound is the whole-end default). A NULL blob
+            // (the empty result of a prior slice) slices as length 0.
+            let empty = Default::default();
+            let borrowed = b.as_ref().map(|b| b.borrow());
+            let blob: &crate::ported::eval::typval_defs_h::blob_T = match &borrowed {
+                Some(bb) => bb,
+                None => &empty,
+            };
+            let len = crate::ported::eval::typval::tv_blob_len(blob) as varnumber_T;
             let n1 = if from.v_type == VAR_SPECIAL {
                 0
             } else {
@@ -4018,12 +4086,7 @@ fn slice_value(base: &typval_T, from: &typval_T, to: &typval_T) -> typval_T {
             };
             let mut rettv = base.clone();
             let _ = crate::ported::eval::typval::tv_blob_slice_or_index(
-                &b.borrow(),
-                true,
-                n1,
-                n2,
-                false,
-                &mut rettv,
+                blob, true, n1, n2, false, &mut rettv,
             );
             rettv
         }
