@@ -68,10 +68,6 @@ pub fn emsg(s: &str) {
     // The observer lives in the synthesis zone (it has no C counterpart) and, unlike
     // a capture, changes nothing about what happens next.
     crate::fusevm_bridge::observe_error(s);
-    // Observed second, before any of the paths that suppress or divert the message.
-    // The observer lives in the synthesis zone (it has no C counterpart) and, unlike
-    // a capture, changes nothing about what happens next.
-    crate::fusevm_bridge::observe_error(s);
     let captured = ERROR_CAPTURE.with(|c| {
         if let Some(list) = c.borrow_mut().as_mut() {
             list.push(s.to_string());

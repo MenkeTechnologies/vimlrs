@@ -5434,6 +5434,45 @@ pub fn source_tolerant(src: &str) -> (usize, usize) {
     (ran, skipped)
 }
 
+// ── the embedding editor's command line ──
+//
+// Synthesis zone: `ccline` is a C static that only ex_getln.c writes, because in
+// Vim the command line and the interpreter are the same process. An editor that
+// embeds vimlrs owns its own command line, so it needs a way to say "this is the
+// line, this is where the cursor is, this is what kind it is" before evaluating
+// an expression from it (`c_CTRL-\ e`), and to read the position back afterwards
+// (the expression may have called `setcmdpos()`). The state itself is the model
+// `getcmdline()`/`getcmdpos()`/`getcmdtype()` already read.
+
+/// Publish the host's command line: `pos` is 1-based (as `getcmdpos()` reports
+/// it) and `cmdtype` is the line's first typed character (`ccline.cmdfirstc`:
+/// `:`, `/`, `?`, `=`, `-`, or `@` for an `input()` prompt).
+pub fn cmdline_host_publish(line: &str, pos: i64, cmdtype: &str) {
+    crate::ported::eval::funcs::CMDLINE.with(|c| {
+        let mut c = c.borrow_mut();
+        c.0 = line.to_string();
+        c.1 = pos;
+        c.2 = cmdtype.to_string();
+    });
+}
+
+/// The 1-based cursor position of the published command line — read back after
+/// an expression that may have moved it with `setcmdpos()`.
+pub fn cmdline_host_pos() -> i64 {
+    crate::ported::eval::funcs::CMDLINE.with(|c| c.borrow().1)
+}
+
+/// Unpublish: no command line is active, so `getcmdline()` is "", `getcmdpos()`
+/// is 0 and `getcmdtype()` is "" again — what Vim reports outside cmdline mode.
+pub fn cmdline_host_clear() {
+    crate::ported::eval::funcs::CMDLINE.with(|c| {
+        let mut c = c.borrow_mut();
+        c.0.clear();
+        c.1 = 0;
+        c.2.clear();
+    });
+}
+
 /// Parse + compile + run a single expression, returning its value.
 pub fn eval_expr(src: &str) -> Result<typval_T, VimlError> {
     let e = parse_expr(src)?;

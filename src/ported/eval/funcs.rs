@@ -9015,7 +9015,11 @@ pub fn do_normal(keys: &str) {
 thread_local! {
     /// The command-line buffer state (`ccline` in ex_getln.c): `(line, pos,
     /// type)`. `pos` is the 1-based byte position of the cursor.
-    static CMDLINE: std::cell::RefCell<(String, varnumber_T, String)> =
+    ///
+    /// Public so an embedding editor can publish its *real* command line here
+    /// (see `fusevm_bridge::cmdline_host_publish`) — standalone, the builtins
+    /// below are the only things that ever write it.
+    pub static CMDLINE: std::cell::RefCell<(String, varnumber_T, String)> =
         const { std::cell::RefCell::new((String::new(), 0, String::new())) };
 }
 
