@@ -2557,8 +2557,33 @@ fn b_call_user(vm: &mut VM, argc: u8) -> Value {
     }
     args.reverse();
     let name = tv_get_string(&pop_tv(vm));
+    // Inline Rust FFI: the `rust { ... }` desugar emits
+    // `call __rust_compile(b64, line)`; compile + register the block's exported
+    // functions. `dlopen`/`rustc` errors surface as a Vim error message.
+    if name == "__rust_compile" {
+        let b64 = args.first().map(tv_get_string).unwrap_or_default();
+        if let Err(e) = fusevm::ffi::compile_and_register(&b64) {
+            message::emsg(&e);
+        }
+        return Value::Undef;
+    }
     if let Some(rettv) = call_user_function(&name, args.clone()) {
         return tv_to_value(rettv);
+    }
+    // A `rust { ... }` block's exported functions are callable by bareword. User
+    // `:function`s (resolved just above) still win; the membership check keeps
+    // this off the hot path. Args marshal to native fusevm `Value`s and the
+    // result marshals back through the same typval bridge.
+    if fusevm::ffi::is_registered(&name) {
+        let vals: Vec<Value> = args.iter().cloned().map(tv_to_value).collect();
+        match fusevm::ffi::try_call(&name, &vals) {
+            Some(Ok(v)) => return v,
+            Some(Err(e)) => {
+                message::emsg(&e);
+                return Value::Undef;
+            }
+            None => {}
+        }
     }
     // Autoload: an undefined `pkg#func` sources `autoload/pkg.vim` (which should
     // define it), then the call is retried once.

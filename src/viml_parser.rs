@@ -687,6 +687,10 @@ pub fn parse_program(src: &str) -> Result<Vec<Stmt>, VimlError> {
 /// Like [`parse_program`] but pairs each TOP-LEVEL statement with its 1-based
 /// source line (for the debugger's statement markers).
 pub fn parse_program_lines(src: &str) -> Result<Vec<(u32, Stmt)>, VimlError> {
+    // Inline `rust { ... }` FFI blocks are rewritten to `call __rust_compile(...)`
+    // (and their exported names recorded for builtin override) before lexing.
+    let desugared = crate::rust_ffi::desugar(src);
+    let src = desugared.as_str();
     let _vim9 = Vim9Guard::enter(script_is_vim9(src));
     let mut cur = Lines::new(src);
     let mut out = Vec::new();
@@ -743,6 +747,10 @@ pub type TolerantParse = (Vec<(u32, Stmt)>, Vec<(u32, String)>);
 /// for each skipped one. Mirrors Vim reporting an error while sourcing a script
 /// and continuing; used for best-effort config sourcing (e.g. a real `.vimrc`).
 pub fn parse_program_lines_tolerant(src: &str) -> TolerantParse {
+    // Desugar inline `rust { ... }` FFI blocks before lexing (see
+    // `parse_program_lines`).
+    let desugared = crate::rust_ffi::desugar(src);
+    let src = desugared.as_str();
     let _vim9 = Vim9Guard::enter(script_is_vim9(src));
     let mut cur = Lines::new(src);
     let mut out = Vec::new();

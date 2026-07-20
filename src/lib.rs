@@ -41,6 +41,9 @@ pub mod hashtab_map;
 pub mod intercepts;
 pub mod lsp;
 pub mod repl;
+/// VimL wiring for inline Rust FFI (`rust { ... }` blocks): the RustSugar config,
+/// the pre-lex desugar, and the exported-name set for builtin override.
+pub mod rust_ffi;
 pub mod script_cache;
 pub mod viml_ast;
 pub mod viml_lexer;

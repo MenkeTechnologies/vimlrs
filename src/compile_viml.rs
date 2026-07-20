@@ -2191,7 +2191,14 @@ impl Compiler {
                         return Ok(());
                     }
                 }
-                match builtin_fn_id(name) {
+                // A `rust { ... }` block's exported functions are callable by
+                // bareword and SHADOW a Vim builtin of the same name (e.g. an
+                // exported `add` overrides the list `add()` builtin), mirroring
+                // how a PHP `rust` export shadows the standard library. Route
+                // such names through the runtime call path so the FFI fallback
+                // in `b_call_user` resolves them; a user `:function` still wins
+                // (it is looked up before the FFI registry there).
+                match builtin_fn_id(name).filter(|_| !crate::rust_ffi::is_ffi_export(name)) {
                     Some(id) => {
                         // A wrong argument count is an error Vim raises when it parses
                         // the expression — i.e. when the command runs. Rejecting it at
@@ -2234,7 +2241,9 @@ impl Compiler {
                 ));
                 self.emit_call_unwind_check();
             }
-            Expr::Method { base, name, args } => match builtin_fn_id(name) {
+            Expr::Method { base, name, args } => match builtin_fn_id(name)
+                .filter(|_| !crate::rust_ffi::is_ffi_export(name))
+            {
                 Some(id) => {
                     // See the note on the plain-call path: a mis-arity call raises at
                     // runtime, not at compile time.
