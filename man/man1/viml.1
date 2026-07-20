@@ -79,6 +79,18 @@ Run the Debug Adapter Protocol server on stdio (for editors).
 .B \-\-disasm
 Print the fusevm bytecode listing before running.
 .TP
+.B \-\-dump\-tokens
+Lex \fIFILE\fR and print the lexer token stream (one token per line), then exit
+without running.
+.TP
+.B \-\-dump\-ast
+Parse \fIFILE\fR and print the resulting VimL statement AST, then exit without
+running.
+.TP
+.B \-\-dump\-bytecode
+Compile \fIFILE\fR and print the fusevm bytecode (the raw \fBOp\fR list) for the
+top-level chunk and every user function, then exit without running.
+.TP
 .B \-\-repl
 Force the interactive REPL: a \fBreedline\fR line editor with a live ASCII
 stats banner, Tab completion drawn from the builtin/ex-command/\fBv:\fR-var

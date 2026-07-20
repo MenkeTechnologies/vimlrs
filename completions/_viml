@@ -14,6 +14,9 @@ _viml() {
     {-b,--build}'[AOT build: bake the script files into a standalone executable]:output file:_files' \
     {-n,--native}'[with --build: compile to native machine code (Cranelift object)]' \
     '--disasm[print the fusevm bytecode listing before running]' \
+    '--dump-tokens[print the lexer token stream for the script and exit]' \
+    '--dump-ast[print the parsed AST for the script and exit]' \
+    '--dump-bytecode[print the compiled fusevm bytecode for the script and exit]' \
     '*:VimL script file:_files -g "*.vim"'
 }
 

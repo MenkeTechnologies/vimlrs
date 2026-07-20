@@ -7,7 +7,7 @@
 //! - `viml` (no args) — read-eval-print loop on stdin.
 
 use std::io::{self, BufRead, IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{CommandFactory, FromArgMatches, Parser};
@@ -123,6 +123,27 @@ pub struct Cli {
     )]
     disasm: bool,
 
+    /// Print the lexer token stream for the script and exit.
+    #[arg(
+        long = "dump-tokens",
+        help = "\x1b[32m//\x1b[0m Print the lexer token stream for the script and exit"
+    )]
+    dump_tokens: bool,
+
+    /// Print the parsed AST for the script and exit.
+    #[arg(
+        long = "dump-ast",
+        help = "\x1b[32m//\x1b[0m Print the parsed AST for the script and exit"
+    )]
+    dump_ast: bool,
+
+    /// Print the compiled fusevm bytecode (Op list) for the script and exit.
+    #[arg(
+        long = "dump-bytecode",
+        help = "\x1b[32m//\x1b[0m Print the compiled fusevm bytecode (Op list) for the script and exit"
+    )]
+    dump_bytecode: bool,
+
     /// Force the interactive reedline REPL (banner, live stats, Tab completion,
     /// history). Implied when stdin is a terminal and no other mode is given.
     #[arg(
@@ -187,6 +208,30 @@ pub fn run() -> ExitCode {
     }
 
     crate::fusevm_disasm::set_enabled(cli.disasm);
+
+    // Introspection dumps: lex/parse/compile the script(s) and print the
+    // intermediate representation, then exit without running. All three require
+    // a FILE argument (mirrors the `--disasm`/file compile path).
+    if cli.dump_tokens || cli.dump_ast || cli.dump_bytecode {
+        if cli.files.is_empty() {
+            eprintln!("viml: --dump-tokens/--dump-ast/--dump-bytecode require a FILE argument");
+            return ExitCode::FAILURE;
+        }
+        for path in &cli.files {
+            let r = if cli.dump_tokens {
+                dump_tokens(path)
+            } else if cli.dump_ast {
+                dump_ast(path)
+            } else {
+                dump_bytecode(path)
+            };
+            if let Err(e) = r {
+                eprintln!("viml: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+        return ExitCode::SUCCESS;
+    }
 
     if cli.clear_cache {
         if let Some(cache) = script_cache::CACHE.as_ref() {
@@ -272,6 +317,52 @@ pub fn run() -> ExitCode {
 fn fail(e: VimlError) -> ExitCode {
     eprintln!("{e}");
     ExitCode::FAILURE
+}
+
+/// `--dump-tokens`: print the lexer token stream, one `span<TAB>Tok` per line.
+fn dump_tokens(file: &Path) -> Result<(), String> {
+    let src = std::fs::read_to_string(file)
+        .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
+    for t in crate::viml_lexer::lex(&src).map_err(|e| e.to_string())? {
+        println!("{}\t{:?}", t.span, t.kind);
+    }
+    Ok(())
+}
+
+/// `--dump-ast`: print the parsed VimL statement AST.
+fn dump_ast(file: &Path) -> Result<(), String> {
+    let src = std::fs::read_to_string(file)
+        .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
+    let stmts = crate::viml_parser::parse_program(&src).map_err(|e| e.to_string())?;
+    println!("{stmts:#?}");
+    Ok(())
+}
+
+/// `--dump-bytecode`: print the compiled fusevm bytecode (the raw `Op` list) for
+/// the top-level `main` chunk and every compiled user function.
+fn dump_bytecode(file: &Path) -> Result<(), String> {
+    let src = std::fs::read_to_string(file)
+        .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
+    let stmts = crate::viml_parser::parse_program(&src).map_err(|e| e.to_string())?;
+    let prog = crate::compile_viml::compile_program(&stmts).map_err(|e| e.to_string())?;
+    println!("== main ==\n{:#?}", prog.main.ops);
+    for f in &prog.funcs {
+        println!(
+            "== function {}({}) ==\n{:#?}",
+            f.name,
+            f.params.join(", "),
+            f.chunk.ops
+        );
+    }
+    for f in &prog.deferred_funcs {
+        println!(
+            "== function {}({}) [deferred] ==\n{:#?}",
+            f.name,
+            f.params.join(", "),
+            f.chunk.ops
+        );
+    }
+    Ok(())
 }
 
 /// Read-eval-print loop: each input line is one statement; a bare expression
