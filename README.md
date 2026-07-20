@@ -158,6 +158,7 @@ which needs no editor installed. See [`docs/FUZZING.md`](docs/FUZZING.md), and
 ## Links
 
 - **Docs** — https://menketechnologies.github.io/vimlrs/
+- **Reference** — https://menketechnologies.github.io/vimlrs/reference.html
 - **Engineering report** — https://menketechnologies.github.io/vimlrs/report.html
 - **The shared VM** — [`fusevm`](https://github.com/MenkeTechnologies/fusevm)
 
