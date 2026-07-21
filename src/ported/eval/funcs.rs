@@ -1015,6 +1015,107 @@ pub fn f_get(argvars: &[typval_T], rettv: &mut typval_T) {
         }
         return;
     }
+    // c: else if (tv_is_func(argvars[0])) — get() on a Funcref/Partial reads
+    // "func"/"name"/"dict"/"args"/"arity". For a bare Funcref a temporary
+    // partial holds just the name (fref_pt). "dict" is special: it sets rettv to
+    // the bound dict but then, like a NULL result, still lets a present {def}
+    // overwrite it (`what_is_dict` path); every other {what} sets rettv and
+    // returns here without ever consulting {def}.
+    if matches!(argvars[0].v_type, VAR_FUNC | VAR_PARTIAL) {
+        // c: if (argvars[0].v_type == VAR_PARTIAL) pt = v_partial else fref_pt.
+        // A NULL partial (v_partial(None)) leaves pt == NULL → skip to {def}.
+        let (name, argv, ptdict): (
+            String,
+            Vec<typval_T>,
+            Option<std::rc::Rc<std::cell::RefCell<crate::ported::eval::typval_defs_h::dict_T>>>,
+        ) = match (argvars[0].v_type, &argvars[0].vval) {
+            (VAR_FUNC, v_string(s)) => (s.clone(), Vec::new(), None),
+            (VAR_PARTIAL, v_partial(Some(p))) => (
+                crate::ported::eval::partial_name(p).to_string(),
+                p.pt_argv.clone(),
+                p.pt_dict.clone(),
+            ),
+            // c: pt == NULL — fall through to the {def} handling.
+            _ => {
+                if let Some(d) = argvars.get(2) {
+                    *rettv = d.clone();
+                }
+                return;
+            }
+        };
+        let what = tv_get_string(&argvars[1]);
+        // c: what_is_dict marks the one branch that keeps falling through to {def}.
+        let mut what_is_dict = false;
+        match what.as_str() {
+            // c: strcmp(what,"func")==0 || strcmp(what,"name")==0 — the name, as a
+            // Funcref ("func") or plain string ("name"). func_ref() is a no-op in
+            // the Rc model; the pt_func/<SNR> rename is unmodeled (pt_func absent).
+            "func" => {
+                rettv.v_type = VAR_FUNC;
+                rettv.vval = v_string(name);
+            }
+            "name" => {
+                rettv.v_type = VAR_STRING;
+                rettv.vval = v_string(name);
+            }
+            // c: strcmp(what,"dict")==0 — the bound self dict, if any.
+            "dict" => {
+                what_is_dict = true;
+                if let Some(d) = ptdict {
+                    rettv.v_type = VAR_DICT;
+                    rettv.vval = v_dict(Some(d));
+                }
+            }
+            // c: strcmp(what,"args")==0 — the List of bound leading arguments.
+            "args" => {
+                let l = tv_list_alloc_ret(rettv, argv.len() as isize);
+                for a in argv {
+                    tv_list_append_tv(&mut l.borrow_mut(), a);
+                }
+            }
+            // c: strcmp(what,"arity")==0 — {required,optional,varargs}, adjusted by
+            // the count of already-bound partial arguments.
+            "arity" => {
+                let ufunc = crate::ported::eval::userfunc::find_func(&name);
+                let (mut required, mut optional, varargs) =
+                    crate::ported::eval::userfunc::get_func_arity(&name, ufunc.as_ref())
+                        .unwrap_or((0, 0, false));
+                let argc = argv.len() as i32;
+                if argc >= required + optional {
+                    required = 0;
+                    optional = 0;
+                } else if argc > required {
+                    optional -= argc - required;
+                    required = 0;
+                } else {
+                    required -= argc;
+                }
+                let d = tv_dict_alloc_ret(rettv);
+                let mut d = d.borrow_mut();
+                tv_dict_add_nr(&mut d, "required", required as varnumber_T);
+                tv_dict_add_nr(&mut d, "optional", optional as varnumber_T);
+                crate::ported::eval::typval::tv_dict_add_bool(
+                    &mut d,
+                    "varargs",
+                    if varargs { kBoolVarTrue } else { kBoolVarFalse },
+                );
+            }
+            // c: else semsg(_(e_invarg2), what) → E475.
+            _ => {
+                crate::ported::message::semsg(&format!("E475: Invalid argument: {what}"));
+                return;
+            }
+        }
+        // c: `if (!what_is_dict) return;` — only "dict" keeps falling through so a
+        // present {def} still overwrites the (possibly-set) dict.
+        if !what_is_dict {
+            return;
+        }
+        if let Some(d) = argvars.get(2) {
+            *rettv = d.clone();
+        }
+        return;
+    }
     let default = argvars.get(2).cloned();
     let found = match (argvars[0].v_type, &argvars[0].vval) {
         (VAR_LIST, v_list(Some(l))) => {
@@ -1030,9 +1131,6 @@ pub fn f_get(argvars: &[typval_T], rettv: &mut typval_T) {
             tv_dict_find(&d.borrow(), &tv_get_string(&argvars[1])).cloned()
         }
         (VAR_LIST, _) | (VAR_DICT, _) => None,
-        // c: get() on a Funcref/Partial reads "func"/"name"/"dict"/"args" —
-        // not yet ported; fall through to the default rather than error.
-        (VAR_FUNC, _) | (VAR_PARTIAL, _) => None,
         // c: else semsg(e_listdictblobarg, "get()").
         _ => {
             emsg("E1531: Argument of get() must be a List, Tuple, Dictionary or Blob");
