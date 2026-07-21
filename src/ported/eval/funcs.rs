@@ -5588,10 +5588,73 @@ pub fn f_ctxset(_argvars: &[typval_T], rettv: &mut typval_T) {
 pub fn f_ctxsize(_argvars: &[typval_T], rettv: &mut typval_T) {
     *rettv = typval_T::from(0 as varnumber_T);
 }
-/// Port of `f_islocked()` (funcs.c) — variable locks are not modeled → 0
-/// (not locked).
-pub fn f_islocked(_argvars: &[typval_T], rettv: &mut typval_T) {
-    *rettv = typval_T::from(0 as varnumber_T);
+/// Port of `f_islocked()` (`eval/funcs.c:3223`) — `1` if the variable named by
+/// `argvars[0]` is `:lockvar`-locked, `0` if unlocked, `-1` if it does not
+/// exist. Parses the name with [`get_lval`] (`GLV_NO_AUTOLOAD | GLV_READ_ONLY`)
+/// and reads the lock via [`tv_islocked`].
+///
+/// RUST-PORT NOTE: `di_flags` is not modeled, so the C
+/// `(di->di_flags & DI_FLAGS_LOCK)` half of the scalar check is elided — a
+/// scalar `:lockvar` stores its lock on the value's `v_lock` (see
+/// [`crate::ported::eval::typval::tv_item_lock`]), which `tv_islocked` reads.
+pub fn f_islocked(argvars: &[typval_T], rettv: &mut typval_T) {
+    use crate::ported::eval::typval::tv_islocked;
+    use crate::ported::eval::vars::find_var;
+    use crate::ported::eval::{get_lval, lval_T, FNE_CHECK_START, GLV_NO_AUTOLOAD, GLV_READ_ONLY};
+
+    // c:3227 rettv->vval.v_number = -1;
+    *rettv = typval_T::from(-1 as varnumber_T);
+
+    let name = tv_get_string(&argvars[0]);
+    let mut lv = lval_T::default();
+    // c:3228 end = get_lval(name, NULL, &lv, false, false, GLV_NO_AUTOLOAD|GLV_READ_ONLY, FNE_CHECK_START);
+    let end = get_lval(
+        &name,
+        None,
+        &mut lv,
+        false,
+        false,
+        GLV_NO_AUTOLOAD | GLV_READ_ONLY,
+        FNE_CHECK_START,
+    );
+
+    // c:3233 if (end != NULL && lv.ll_name != NULL)
+    if let (Some(end_off), Some(_)) = (end, lv.ll_name.as_ref()) {
+        if end_off < name.len() {
+            // c:3234 *end != NUL → invalid/trailing argument.
+            let rest = &name[end_off..];
+            if lv.ll_name_len == 0 {
+                crate::ported::message::semsg(&format!("E475: Invalid argument: {rest}"));
+            } else {
+                crate::ported::message::semsg(&format!("E488: Trailing characters: {rest}"));
+            }
+        } else if matches!(lv.ll_tv, crate::ported::eval::LlTv::Null) {
+            // c:3237 lv.ll_tv == NULL → a plain variable.
+            if let Some(di_tv) = find_var(lv.ll_name.as_ref().unwrap(), true) {
+                // c:3244 (di->di_flags & DI_FLAGS_LOCK) || tv_islocked(&di->di_tv);
+                //        the DI_FLAGS_LOCK half is elided (di_flags not modeled).
+                rettv.vval = v_number(tv_islocked(&di_tv) as varnumber_T);
+            }
+        } else if lv.ll_range {
+            // c:3247
+            emsg("E786: Range not allowed");
+        } else if let Some(newkey) = lv.ll_newkey.as_ref() {
+            // c:3249 semsg(e_dictkey, lv.ll_newkey);
+            crate::ported::message::semsg(&format!(
+                "E716: Key not present in Dictionary: {newkey}"
+            ));
+        } else if let (Some(l), Some(li)) = (lv.ll_list.as_ref(), lv.ll_li) {
+            // c:3251 List item — tv_islocked(TV_LIST_ITEM_TV(lv.ll_li)).
+            if let Some(item) = l.borrow().lv_items.get(li) {
+                rettv.vval = v_number(tv_islocked(&item.li_tv) as varnumber_T);
+            }
+        } else if let (Some(d), Some(key)) = (lv.ll_dict.as_ref(), lv.ll_di.as_ref()) {
+            // c:3254 Dictionary item — tv_islocked(&lv.ll_di->di_tv).
+            if let Some(item) = d.borrow().dv_hashtab.get(key) {
+                rettv.vval = v_number(tv_islocked(item) as varnumber_T);
+            }
+        }
+    }
 }
 /// Port of `f_last_buffer_nr()` (buffer.c) — no buffers → 0.
 pub fn f_last_buffer_nr(_argvars: &[typval_T], rettv: &mut typval_T) {
@@ -11919,5 +11982,67 @@ mod helper_tests {
         assert!(capture_errors_take()
             .iter()
             .any(|e| e.starts_with("E158: Invalid buffer name: 999")));
+    }
+}
+
+#[cfg(test)]
+mod islocked_reference_tests {
+    use super::*;
+    use crate::ported::eval::vars::{cmdidx_T, ex_let, ex_lockvar, exarg_T};
+
+    fn let_eap(arg: &str) -> exarg_T {
+        exarg_T {
+            arg: arg.to_string(),
+            cmdidx: cmdidx_T::CMD_let,
+            ..Default::default()
+        }
+    }
+    fn lock_eap(arg: &str, idx: cmdidx_T) -> exarg_T {
+        exarg_T {
+            arg: arg.to_string(),
+            cmdidx: idx,
+            ..Default::default()
+        }
+    }
+    fn islocked(name: &str) -> varnumber_T {
+        let args = vec![typval_T::from(name.to_string())];
+        let mut rettv = typval_T::default();
+        f_islocked(&args, &mut rettv);
+        match rettv.vval {
+            v_number(n) => n,
+            _ => panic!("islocked() did not return a Number"),
+        }
+    }
+
+    // Faithful `f_islocked` (eval/funcs.c:3223): 1 locked, 0 unlocked, -1 absent.
+    #[test]
+    fn islocked_locked_unlocked_missing() {
+        // let g:il_x = 1 | lockvar g:il_x  → 1
+        ex_let(&mut let_eap("g:il_x = 1"));
+        ex_lockvar(&mut lock_eap("g:il_x", cmdidx_T::CMD_lockvar));
+        assert_eq!(islocked("g:il_x"), 1);
+
+        // let g:il_y = 1 (never locked) → 0
+        ex_let(&mut let_eap("g:il_y = 1"));
+        assert_eq!(islocked("g:il_y"), 0);
+
+        // a name that does not exist → -1 (no error emitted)
+        assert_eq!(islocked("g:il_nope"), -1);
+
+        // unlockvar clears the lock → 0
+        ex_lockvar(&mut lock_eap("g:il_x", cmdidx_T::CMD_unlockvar));
+        assert_eq!(islocked("g:il_x"), 0);
+    }
+
+    // A locked container value is reported locked (tv_islocked descends into a
+    // locked List/Dict), matching the C `di->di_tv` lock check.
+    #[test]
+    fn islocked_locked_container() {
+        ex_let(&mut let_eap("g:il_l = [1, 2]"));
+        ex_lockvar(&mut lock_eap("g:il_l", cmdidx_T::CMD_lockvar));
+        assert_eq!(islocked("g:il_l"), 1);
+
+        ex_let(&mut let_eap("g:il_l2 = [3, 4]"));
+        assert_eq!(islocked("g:il_l2"), 0);
     }
 }

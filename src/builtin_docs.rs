@@ -214,7 +214,7 @@ pub const BUILTIN_DOCS: &[(&str, &str, &str)] = &[
     ("isabsolutepath", "isabsolutepath({path})", "1 if {path} is an absolute path, else 0."),
     ("isdirectory", "isdirectory({directory})", "1 if {directory} exists and is a directory, else 0."),
     ("isinf", "isinf({expr})", "1 if {expr} is +inf, -1 if -inf, else 0."),
-    ("islocked", "islocked({expr})", "1 if the variable named by {expr} is locked, else 0 (stub in standalone)."),
+    ("islocked", "islocked({expr})", "1 if the variable named by {expr} is locked, 0 if unlocked, -1 if it does not exist."),
     ("isnan", "isnan({expr})", "1 if {expr} is a NaN Float, else 0."),
     ("items", "items({dict})", "List of [key, value] pairs in {dict}."),
     ("jobpid", "jobpid({id})", "Process ID of job {id} (stub in standalone)."),

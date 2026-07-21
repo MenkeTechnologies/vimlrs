@@ -13,7 +13,13 @@ call assert_equal(0, ctxpush(['regs']))
 call assert_equal(0, ctxpop())
 
 " ── misc query/no-ops ──
-call assert_equal(0, islocked('g:nope'))
+" islocked(): -1 when the variable does not exist, 1 locked, 0 unlocked.
+call assert_equal(-1, islocked('g:nope'))
+let g:il_demo = 1
+call assert_equal(0, islocked('g:il_demo'))
+lockvar g:il_demo
+call assert_equal(1, islocked('g:il_demo'))
+unlockvar g:il_demo
 call assert_equal(0, last_buffer_nr())
 call assert_equal('', libcall('libc.so', 'getenv', 'HOME'))
 call assert_equal(0, libcallnr('libc.so', 'getpid', 0))

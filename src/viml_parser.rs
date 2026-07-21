@@ -3443,6 +3443,12 @@ impl Parser {
         // vim9.txt "the {} form uses literal keys"). Legacy scripts keep the
         // expression-keyed form.
         let vim9 = vim9_active();
+        // c: eval.c:4500 — `tv_dict_find` before adding each item raises E721 on a
+        // repeated key. Keys that are constants (a string or number literal)
+        // resolve to their final string form at parse time, so the duplicate can
+        // be caught here; a computed key (variable/expression) is left for run
+        // time, matching Vim's evaluate-then-check order for those.
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         loop {
             let key = if vim9 {
                 self.vim9_dict_key()?
@@ -3451,6 +3457,14 @@ impl Parser {
                 self.eat(&Tok::Colon)?;
                 k
             };
+            // c: eval.c:4502 semsg(e_duplicate_key_in_dictionary_str, key).
+            if let Some(k) = const_dict_key(&key) {
+                if !seen.insert(k.clone()) {
+                    return Err(VimlError::msg(format!(
+                        "E721: Duplicate key in Dictionary: \"{k}\""
+                    )));
+                }
+            }
             let val = self.nested_eval1()?;
             pairs.push((key, val));
             match self.advance() {
@@ -3553,6 +3567,20 @@ impl Parser {
             }
         }
         Ok(args)
+    }
+}
+
+/// The final Dict-key string for a *constant* key expression, or `None` for a
+/// computed key. Mirrors `tv_get_string_buf_chk` on the evaluated key: a string
+/// literal is its own value; a Number is its decimal form (`{1: v}` keys on
+/// "1"). A Float key is a Vim error (E806), not a duplicate concern, so it is
+/// left out. Non-constant keys can only be compared after evaluation, so they
+/// are deferred to run time (`None`).
+fn const_dict_key(key: &Expr) -> Option<String> {
+    match key {
+        Expr::Str(s) => Some(s.clone()),
+        Expr::Number(n) => Some(n.to_string()),
+        _ => None,
     }
 }
 
@@ -3748,6 +3776,19 @@ mod tests {
             Expr::Dict(_)
         ));
         assert!(matches!(parse_expr("{}").unwrap(), Expr::Dict(_)));
+    }
+
+    #[test]
+    fn dict_duplicate_key_e721() {
+        // c: eval.c:4502 — a repeated constant key raises E721 naming the key.
+        let e = parse_expr("{'a': 1, 'a': 2}").unwrap_err();
+        assert_eq!(e.to_string(), "E721: Duplicate key in Dictionary: \"a\"");
+        // A Number key keys on its decimal string, so `1` and `'1'` collide.
+        assert!(parse_expr("{1: 2, '1': 3}").is_err());
+        // Distinct keys are fine, including a repeated *value*.
+        assert!(parse_expr("{'a': 1, 'b': 1}").is_ok());
+        // A non-constant (computed) key is deferred to run time — not flagged here.
+        assert!(parse_expr("{k: 1, 'k': 2}").is_ok());
     }
 
     #[test]

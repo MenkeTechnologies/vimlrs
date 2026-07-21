@@ -11,7 +11,7 @@ call assert_equal('123', matchstr('abc123', '\d\+'))
 
 " --- \zs in substitute(): the replaced span starts at \zs
 call assert_equal('Xbc', substitute('abc', '\zs.', 'X', ''))
-call assert_equal('heXo', substitute('hello', 'l\zsl', 'X', ''))
+call assert_equal('helXo', substitute('hello', 'l\zsl', 'X', ''))
 
 " --- split() on \zs splits into characters
 call assert_equal(['h', 'e', 'l', 'l', 'o'], split('hello', '\zs'))

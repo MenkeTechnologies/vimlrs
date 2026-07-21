@@ -561,12 +561,48 @@ impl Parser {
 
     /// `branch \| branch \| …`.
     fn alternation(&mut self) -> Vec<Branch> {
-        let mut branches = vec![self.concat()];
+        let mut branches = vec![self.and_branch()];
         while self.peek() == Some('\\') && self.peek2() == Some('|') {
             self.i += 2;
-            branches.push(self.concat());
+            branches.push(self.and_branch());
         }
         branches
+    }
+
+    /// `concat \& concat \& …` (c: `nfa_regbranch`). All `\&`-joined concats must
+    /// match at the same position; the result is the LAST concat's match. Each
+    /// leading concat is compiled to a zero-width positive lookahead
+    /// (`\(concat\)\@=`) and the last concat is inlined as the consuming match, so
+    /// `foo\&...` == `\(foo\)\@=...` (matchstr → 'foo').
+    fn and_branch(&mut self) -> Branch {
+        let first = self.concat();
+        if !(self.peek() == Some('\\') && self.peek2() == Some('&')) {
+            return first;
+        }
+        let mut concats = vec![first];
+        while self.peek() == Some('\\') && self.peek2() == Some('&') {
+            self.i += 2;
+            concats.push(self.concat());
+        }
+        // The last concat consumes; the earlier ones are zero-width AND assertions.
+        let last = concats.pop().unwrap_or_default();
+        let mut out: Branch = Vec::new();
+        for c in concats {
+            let group = Atom {
+                node: Node::Group(vec![c], None),
+                min: 1,
+                max: 1,
+                greedy: true,
+            };
+            out.push(Atom {
+                node: Node::Look(Box::new(group), LookOp::Ahead(true)),
+                min: 1,
+                max: 1,
+                greedy: true,
+            });
+        }
+        out.extend(last);
+        out
     }
 
     /// A sequence of quantified atoms, stopping at `\|`, `\)`, or end.
@@ -575,7 +611,9 @@ impl Parser {
         loop {
             match (self.peek(), self.peek2()) {
                 (None, _) => break,
-                (Some('\\'), Some('|')) | (Some('\\'), Some(')')) => break,
+                (Some('\\'), Some('|')) | (Some('\\'), Some(')')) | (Some('\\'), Some('&')) => {
+                    break
+                }
                 _ => {}
             }
             // c: "E866: (NFA regexp) Misplaced +" — a multi at the start of a branch has
@@ -1602,7 +1640,12 @@ pub fn regex_substitute(subject: &str, pat: &str, sub: &str, flags: &str) -> Str
         // Find the next match at or after `tail`.
         let mut found = None;
         for start in tail..=chars.len() {
-            let mut groups = vec![None; re.ngroups + 1];
+            // Two extra trailing slots hold the `\zs`/`\ze` positions (see
+            // `find_from`): `\zs` moves the replaced region's start, `\ze` its end.
+            // Without them the `MatchStart`/`MatchEnd` writes land out of bounds and
+            // the region is mis-narrowed (`substitute('foobar','foo\zsbar','X','')`
+            // wrongly replaced 'foobar' instead of just 'bar').
+            let mut groups = vec![None; re.ngroups + 3];
             if let Some(end) = re.match_alt(
                 &re.branches,
                 &chars,
@@ -1610,8 +1653,19 @@ pub fn regex_substitute(subject: &str, pat: &str, sub: &str, flags: &str) -> Str
                 &mut groups,
                 re.effective_ic(ic),
             ) {
-                groups[0] = Some((start, end));
-                found = Some((start, end, groups));
+                let s = match groups[re.ngroups + 1] {
+                    Some((zp, _)) => zp,
+                    None => start,
+                };
+                let e = match groups[re.ngroups + 2] {
+                    Some((ep, _)) => ep,
+                    None => end,
+                };
+                groups[0] = Some((s, e));
+                // Drop the working `\zs`/`\ze` slots so `expand_sub`/`submatch()`
+                // see only the real capture groups.
+                groups.truncate(re.ngroups + 1);
+                found = Some((s, e, groups));
                 break;
             }
         }
@@ -1849,6 +1903,48 @@ mod tests {
         assert_eq!(
             regex_substitute("2024-06", "\\(\\d\\+\\)-\\(\\d\\+\\)", "\\2/\\1", ""),
             "06/2024"
+        );
+    }
+
+    // `\zs` moves the start of the replaced region: only text after `\zs` is
+    // substituted. Verified against vim 9.2 / nvim.
+    #[test]
+    fn substitute_zs_region() {
+        // `\zs` narrows the replaced region to the text after it.
+        assert_eq!(regex_substitute("foobar", "foo\\zsbar", "X", ""), "fooX");
+        assert_eq!(regex_substitute("abc", "a\\zsb", "X", ""), "aXc");
+        // Leftmost real match wins; the reported start is the `\zs` position.
+        assert_eq!(regex_substitute("foobar", "o\\zsbar", "X", ""), "fooX");
+        // Trailing `\zs` — a zero-width match after the anchor text inserts.
+        assert_eq!(regex_substitute("abc", "abc\\zs", "X", ""), "abcX");
+        // `&` in the replacement is the narrowed region, not the whole match.
+        assert_eq!(
+            regex_substitute("foobar", "foo\\zsbar", "[&]", ""),
+            "foo[bar]"
+        );
+        // Global `\zs` narrowing.
+        assert_eq!(regex_substitute("axbxc", "\\zsx", "-", "g"), "a-b-c");
+    }
+
+    // `\&` — concat/AND: all `\&`-joined branches must match at the position and
+    // the LAST branch is the result (`foo\&...` == `\(foo\)\@=...`). Verified
+    // against vim 9.2.
+    #[test]
+    fn regex_and_branch() {
+        // All branches match at pos 0; the last (`...`) is what is returned.
+        assert_eq!(regex_matchstr("foo\\&...", "foobar", false), "foo");
+        // Order of branches does not change the "last wins" rule.
+        assert_eq!(regex_matchstr("...\\&foo", "foobar", false), "foo");
+        // A failing leading branch fails the whole match.
+        assert_eq!(regex_matchstr("x\\&foo", "foobar", false), "");
+        // The last branch may consume more than a leading one.
+        assert_eq!(regex_matchstr("fo\\&..o", "foobar", false), "foo");
+        // substitute() replaces the last branch's span.
+        assert_eq!(regex_substitute("foobar", "foo\\&...", "X", ""), "Xbar");
+        // Exact equivalence to the positive-lookahead form.
+        assert_eq!(
+            regex_matchstr("foo\\&...", "foobar", false),
+            regex_matchstr("\\(foo\\)\\@=...", "foobar", false)
         );
     }
 
