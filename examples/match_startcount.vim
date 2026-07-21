@@ -13,6 +13,18 @@ call assert_equal(4, match('abcabc', 'b', 0, 2))
 call assert_equal('Y', matchstr('aXbYc', '[A-Z]', 0, 2))
 call assert_equal(-1, match('abcabc', 'b', 0, 3))
 
+" --- {count} with a multi-char match: the next search starts ONE CHARACTER
+" past the START of the previous match, not past its end (funcs.c:4190 —
+" `startcol = startp[0] + utfc_ptr2len(startp[0]) - str`). So the 2nd `\w\+`
+" in 'hello world' is 'ello' (from col 1), NOT 'world'. Verified vim==nvim.
+call assert_equal('ello', matchstr('hello world', '\w\+', 0, 2))
+call assert_equal('llo', matchstr('hello world', '\w\+', 0, 3))
+call assert_equal('ne', matchstr('one two three', '\w\+', 0, 2))
+call assert_equal(1, match('hello world', '\w\+', 0, 2))
+call assert_equal(5, matchend('hello world', '\w\+', 0, 2))
+call assert_equal(['ello', 1, 5], matchstrpos('hello world', '\w\+', 0, 2))
+call assert_equal('a', matchstr('aabbbcc', '\(.\)\1*', 0, 2))
+
 " --- matchstr()/matchlist() honour {start}
 call assert_equal('2', matchstr('a1b2', '\d', 2))
 call assert_equal('2', matchlist('a1b2', '\d', 2)[0])

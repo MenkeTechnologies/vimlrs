@@ -1556,9 +1556,13 @@ pub fn regex_search_nth(
             groups.resize(10, String::new());
             return Some((s as i64, e as i64, groups));
         }
-        // Advance past this match to find the next; step one char on a
-        // zero-width match so the search makes progress.
-        pos = if e > s { e } else { s + 1 };
+        // c (funcs.c:4190): the next {count} search starts ONE CHARACTER past the
+        // START of this match, not past its end —
+        //   `startcol = startp[0] + utfc_ptr2len(startp[0]) - str`
+        // so e.g. `matchstr('hello world', '\w\+', 0, 2)` == 'ello', not 'world'.
+        // `utfc_ptr2len` is one char, i.e. `s + 1` in char-index space; this also
+        // covers the zero-width case (still advances by one to make progress).
+        pos = s + 1;
         if pos > chars.len() {
             return None;
         }

@@ -1439,6 +1439,26 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
                 return;
             }
         }
+        // c (`format_typeof`, Src/strings.c:864): a C length modifier — `h`,
+        // `l`, `ll`, or `z` — may precede the conversion char. Vim stores every
+        // integer as int64, so the modifier never changes the rendered value; it
+        // only gates whether the specifier is recognized. `ll` collapses to one
+        // unit (`L`). NOTE: the `z` (size_t) modifier is a Neovim extension —
+        // `%zd` formats in nvim but is "unknown" in Vim — and this engine is
+        // ported from Neovim, so it follows nvim here.
+        let length_modifier = match bytes.get(i).copied() {
+            Some('h' | 'l' | 'z') => {
+                let m = bytes[i] as u8;
+                i += 1;
+                if m == b'l' && bytes.get(i) == Some(&'l') {
+                    i += 1;
+                    b'L'
+                } else {
+                    m
+                }
+            }
+            _ => 0u8,
+        };
         let Some(conv) = bytes.get(i).copied() else {
             out.push('%');
             break;
@@ -1448,6 +1468,35 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
             out.push('%');
             continue;
         }
+        // c (`vim_vsnprintf_typval` default case, via `format_typeof`): a
+        // specifier the engine does not recognize — an unknown conversion char
+        // (`%a`, `%q`), or a valid modifier with an invalid char (`%hhd`) — is
+        // printed as just its conversion character (the `%`, flags, width,
+        // precision and modifier are all dropped) and consumes NO argument. Any
+        // argument the format thus never reads surfaces as E767 below, so
+        // `printf('%a')` yields "a" while `printf('%a', 1)` errors.
+        let mut type_bytes: Vec<u8> = Vec::new();
+        match length_modifier {
+            0 => {}
+            b'L' => type_bytes.extend_from_slice(b"ll"),
+            m => type_bytes.push(m),
+        }
+        type_bytes.push(conv as u8);
+        if crate::ported::strings::format_typeof(&type_bytes)
+            == crate::ported::strings::FormatType::Unknown
+        {
+            out.push(conv);
+            continue;
+        }
+        // c (`format_typeof` synonyms): `%D`/`%U`/`%O` are the old long-int
+        // decimal/unsigned/octal aliases; fold them onto the base conversion the
+        // switch below understands (`i` is already handled as `d`).
+        let conv = match conv {
+            'D' => 'd',
+            'U' => 'u',
+            'O' => 'o',
+            c => c,
+        };
         let want = explicit_idx.unwrap_or(arg);
         let cur = argvars.get(want);
         // c (`tvs_get_float`): a float conversion reports ONE error for any

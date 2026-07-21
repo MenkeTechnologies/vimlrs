@@ -34,6 +34,28 @@ call assert_equal('A', printf('%c', 65))
 call assert_equal('%', printf('%%'))
 call assert_equal('b a', printf('%2$s %1$s', 'a', 'b'))
 
+" --- C length modifiers (h/l/ll) are parsed and ignored: every Vim integer is
+" int64, so `%ld`/`%lld`/`%hd` render exactly as `%d` (strings.c format_typeof).
+call assert_equal('42', printf('%ld', 42))
+call assert_equal('42', printf('%lld', 42))
+call assert_equal('42', printf('%hd', 42))
+call assert_equal('ff', printf('%lx', 255))
+call assert_equal('ff', printf('%llx', 255))
+
+" --- the old long-int synonyms %D/%U/%O fold onto %d/%u/%o
+call assert_equal('42', printf('%D', 42))
+call assert_equal('42', printf('%U', 42))
+call assert_equal('10', printf('%O', 8))
+
+" --- an unknown conversion prints just its char (dropping the %, flags, width,
+" precision) and consumes NO argument, so a lone %a with no argument is fine
+" (vim_vsnprintf_typval default case). A trailing modifier with no valid spec
+" (`%h` before ']') is likewise dropped.
+call assert_equal('[a]', printf('[%a]'))
+call assert_equal('XqY', printf('X%qY'))
+call assert_equal('[a]', printf('[%5a]'))
+call assert_equal('[]', printf('[%h]'))
+
 if len(v:errors) > 0
   for err in v:errors
     echo err

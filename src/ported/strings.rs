@@ -1116,7 +1116,7 @@ pub fn f_utf16idx(argvars: &[typval_T], rettv: &mut typval_T) {
 /// The `TYPE_*` enum from `Src/strings.c` — what a conversion specifier
 /// consumes from the argument list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FormatType {
+pub(crate) enum FormatType {
     Unknown,
     Int,
     LongInt,
@@ -1136,7 +1136,7 @@ enum FormatType {
 /// Port of `format_typeof()` from `Src/strings.c:864` — the [`FormatType`] of
 /// the conversion at the start of `type_` (a length modifier `h`/`l`/`ll`/`z`
 /// followed by the specifier char, with the `i`/`*`/`D`/`U`/`O` synonyms).
-fn format_typeof(type_: &[u8]) -> FormatType {
+pub(crate) fn format_typeof(type_: &[u8]) -> FormatType {
     let mut i = 0usize;
     // allowed values: \0, h, l, L
     let mut length_modifier = 0u8;
