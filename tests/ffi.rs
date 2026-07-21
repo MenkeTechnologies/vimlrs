@@ -43,10 +43,15 @@ fn rust_block_export_returns_42() {
     }
     // The headline case: an exported `add` shadows Vim's list `add()` builtin
     // and `add(21, 21)` returns 42.
-    let src = "rust { pub extern \"C\" fn add(a: i64, b: i64) -> i64 { a + b } }\necho add(21, 21)\n";
+    let src =
+        "rust { pub extern \"C\" fn add(a: i64, b: i64) -> i64 { a + b } }\necho add(21, 21)\n";
     let (stdout, stderr, ok) = run_viml(src);
     assert!(ok, "viml failed; stderr: {stderr}");
-    assert_eq!(stdout.trim(), "42", "stdout was {stdout:?}; stderr {stderr:?}");
+    assert_eq!(
+        stdout.trim(),
+        "42",
+        "stdout was {stdout:?}; stderr {stderr:?}"
+    );
 }
 
 #[test]
@@ -71,7 +76,11 @@ echo ffi_slen("hello world")
     let (stdout, stderr, ok) = run_viml(src);
     assert!(ok, "viml failed; stderr: {stderr}");
     let lines: Vec<&str> = stdout.lines().map(str::trim).collect();
-    assert_eq!(lines, ["42", "9.0", "11"], "stdout {stdout:?}; stderr {stderr:?}");
+    assert_eq!(
+        lines,
+        ["42", "9.0", "11"],
+        "stdout {stdout:?}; stderr {stderr:?}"
+    );
 }
 
 #[test]

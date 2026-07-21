@@ -104,8 +104,8 @@ fn collect_export_names(src: &str) -> Vec<String> {
         let kw = search_from + rel;
         // `rust` must be a whole word: preceded by a boundary and not part of a
         // longer identifier (`trust`, `rusty`).
-        let before_ok = kw == 0
-            || !matches!(bytes[kw - 1], b'_' | b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z');
+        let before_ok =
+            kw == 0 || !matches!(bytes[kw - 1], b'_' | b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z');
         let after = kw + 4;
         let after_ok = after >= bytes.len()
             || !matches!(bytes[after], b'_' | b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z');
@@ -167,7 +167,8 @@ fn scan_extern_c_fns(body: &str, out: &mut Vec<String>) {
         skip_ws(&mut p);
         // Read the identifier.
         let start = p;
-        while p < bytes.len() && matches!(bytes[p], b'_' | b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z') {
+        while p < bytes.len() && matches!(bytes[p], b'_' | b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z')
+        {
             p += 1;
         }
         if p > start {
@@ -183,9 +184,13 @@ mod tests {
 
     #[test]
     fn desugars_block_becomes_call() {
-        let src = "rust { pub extern \"C\" fn add(a: i64, b: i64) -> i64 { a + b } }\necho add(2, 3)\n";
+        let src =
+            "rust { pub extern \"C\" fn add(a: i64, b: i64) -> i64 { a + b } }\necho add(2, 3)\n";
         let out = desugar(src);
-        assert!(out.contains("call __rust_compile("), "no builtin call: {out}");
+        assert!(
+            out.contains("call __rust_compile("),
+            "no builtin call: {out}"
+        );
         assert!(!out.contains("pub extern"), "Rust body leaked: {out}");
         assert!(out.contains("echo add(2, 3)"));
     }
@@ -214,8 +219,14 @@ mod tests {
         // comment ends at the newline and the block below desugars correctly.
         let src = "\" a note about the ffi\nrust { pub extern \"C\" fn f() -> i64 { 1 } }\n";
         let out = desugar(src);
-        assert!(out.contains("call __rust_compile("), "block not desugared: {out}");
-        assert!(out.starts_with("\" a note about the ffi\n"), "comment mangled: {out}");
+        assert!(
+            out.contains("call __rust_compile("),
+            "block not desugared: {out}"
+        );
+        assert!(
+            out.starts_with("\" a note about the ffi\n"),
+            "comment mangled: {out}"
+        );
         assert!(!out.contains("pub extern"), "Rust body leaked: {out}");
     }
 
@@ -233,10 +244,17 @@ mod tests {
 
     #[test]
     fn vim9_hash_comment_before_block_desugars() {
-        let src = "# a vim9 comment mentioning rust {\nrust { pub extern \"C\" fn g() -> i64 { 2 } }\n";
+        let src =
+            "# a vim9 comment mentioning rust {\nrust { pub extern \"C\" fn g() -> i64 { 2 } }\n";
         let out = desugar(src);
-        assert!(out.contains("call __rust_compile("), "block not desugared: {out}");
-        assert!(out.starts_with("# a vim9 comment"), "comment mangled: {out}");
+        assert!(
+            out.contains("call __rust_compile("),
+            "block not desugared: {out}"
+        );
+        assert!(
+            out.starts_with("# a vim9 comment"),
+            "comment mangled: {out}"
+        );
     }
 
     #[test]

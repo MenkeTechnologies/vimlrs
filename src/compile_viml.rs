@@ -2241,36 +2241,36 @@ impl Compiler {
                 ));
                 self.emit_call_unwind_check();
             }
-            Expr::Method { base, name, args } => match builtin_fn_id(name)
-                .filter(|_| !crate::rust_ffi::is_ffi_export(name))
-            {
-                Some(id) => {
-                    // See the note on the plain-call path: a mis-arity call raises at
-                    // runtime, not at compile time.
-                    if let Some(msg) = builtin_argc_error(name, args.len() + 1) {
-                        self.load_str(&msg);
-                        self.emit(Op::CallBuiltin(h::VIML_RAISE, 1));
-                        return Ok(());
+            Expr::Method { base, name, args } => {
+                match builtin_fn_id(name).filter(|_| !crate::rust_ffi::is_ffi_export(name)) {
+                    Some(id) => {
+                        // See the note on the plain-call path: a mis-arity call raises at
+                        // runtime, not at compile time.
+                        if let Some(msg) = builtin_argc_error(name, args.len() + 1) {
+                            self.load_str(&msg);
+                            self.emit(Op::CallBuiltin(h::VIML_RAISE, 1));
+                            return Ok(());
+                        }
+                        self.expr(base)?;
+                        for a in args {
+                            self.expr(a)?;
+                        }
+                        self.emit(Op::CallBuiltin(id, Self::argc(args.len() + 1)?));
                     }
-                    self.expr(base)?;
-                    for a in args {
-                        self.expr(a)?;
+                    None => {
+                        self.load_str(name);
+                        self.expr(base)?;
+                        for a in args {
+                            self.expr(a)?;
+                        }
+                        self.emit(Op::CallBuiltin(
+                            h::VIML_CALL_USER,
+                            Self::argc(args.len() + 1)?,
+                        ));
+                        self.emit_call_unwind_check();
                     }
-                    self.emit(Op::CallBuiltin(id, Self::argc(args.len() + 1)?));
                 }
-                None => {
-                    self.load_str(name);
-                    self.expr(base)?;
-                    for a in args {
-                        self.expr(a)?;
-                    }
-                    self.emit(Op::CallBuiltin(
-                        h::VIML_CALL_USER,
-                        Self::argc(args.len() + 1)?,
-                    ));
-                    self.emit_call_unwind_check();
-                }
-            },
+            }
         }
         Ok(())
     }
