@@ -49,7 +49,7 @@ path = "src/bin/fuzz_parity.rs"
 # Language-agnostic bytecode VM + 3-tier Cranelift JIT. VimL has no local
 # vm.rs / jit.rs: lex/parse → AST → lower to fusevm bytecode → fusevm runs it,
 # the same way zshrs hosts zsh. jit-disk-cache persists native code across runs.
-fusevm = { version = "0.14.12", features = ["jit", "jit-disk-cache", "aot", "ffi"] }
+fusevm = { version = "0.14.17", features = ["jit", "jit-disk-cache", "aot", "ffi"] }
 clap = { version = "4.5", features = ["derive", "cargo"] }
 thiserror = "2.0"
 rustc-hash = "2.1"
