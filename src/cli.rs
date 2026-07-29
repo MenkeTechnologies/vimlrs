@@ -144,6 +144,14 @@ pub struct Cli {
     )]
     dump_bytecode: bool,
 
+    /// Run the script, then report which fusevm execution tier took each of its
+    /// chunks.
+    #[arg(
+        long = "tiers",
+        help = "\x1b[32m//\x1b[0m Run it, then report which fusevm tiers took it"
+    )]
+    tiers: bool,
+
     /// Force the interactive reedline REPL (banner, live stats, Tab completion,
     /// history). Implied when stdin is a terminal and no other mode is given.
     #[arg(
@@ -226,6 +234,22 @@ pub fn run() -> ExitCode {
                 dump_bytecode(path)
             };
             if let Err(e) = r {
+                eprintln!("viml: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+        return ExitCode::SUCCESS;
+    }
+
+    // `--tiers`: run the script, then report which fusevm execution tier took
+    // each of its chunks. Needs a FILE for the same reason the dumps do.
+    if cli.tiers {
+        if cli.files.is_empty() {
+            eprintln!("viml: --tiers requires a FILE argument");
+            return ExitCode::FAILURE;
+        }
+        for path in &cli.files {
+            if let Err(e) = tiers(path) {
                 eprintln!("viml: {e}");
                 return ExitCode::FAILURE;
             }
@@ -362,6 +386,17 @@ fn dump_bytecode(file: &Path) -> Result<(), String> {
             f.chunk.ops
         );
     }
+    Ok(())
+}
+
+/// `--tiers`: run the script, then report which fusevm execution tier took each
+/// of its chunks — asked of fusevm's own eligibility and cache predicates, so
+/// the answer comes from the compiler that would have done the work. The
+/// script's own output precedes the report.
+fn tiers(file: &Path) -> Result<(), String> {
+    let src = std::fs::read_to_string(file)
+        .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
+    println!("{}", crate::tiers::report(&src)?);
     Ok(())
 }
 

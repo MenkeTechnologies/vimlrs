@@ -64,6 +64,7 @@ In active development.
 | rkyv bytecode script cache (`~/.cache/vimlrs/scripts.rkyv`, mmap zero-copy) | Working |
 | AOT build (`--build` bakes scripts into a self-contained executable) | Working |
 | Bytecode disassembler (`--disasm`) | Working |
+| Execution-tier report (`--tiers`) | Working |
 | LSP server (`--lsp`) — diagnostics, completion, hover, document symbols | Working |
 | DAP debugger (`--dap`) — breakpoints, stepping, variables, evaluate | Working |
 | Control flow — `:if`/`:elseif`/`:else`, `:while`, `:for`, `:break`/`:continue` | Working |

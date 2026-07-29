@@ -45,6 +45,7 @@ pub mod repl;
 /// the pre-lex desugar, and the exported-name set for builtin override.
 pub mod rust_ffi;
 pub mod script_cache;
+pub mod tiers;
 pub mod viml_ast;
 pub mod viml_lexer;
 pub mod viml_parser;
