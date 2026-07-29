@@ -640,10 +640,10 @@ fn fread(fd: &mut std::fs::File, buf: &mut [u8]) -> i32 {
 ///
 /// Port of `read_blob()` from `vendor/eval/fs.c:1232`.
 ///
-/// @param[in]  fd  File to read from.
-/// @param[in,out]  rettv  Blob to write to.
-/// @param[in]  offset  Read the file from the specified offset.
-/// @param[in]  size  Read the specified size, or -1 if no limit.
+/// @param\[in\]  fd  File to read from.
+/// @param\[in,out\]  rettv  Blob to write to.
+/// @param\[in\]  offset  Read the file from the specified offset.
+/// @param\[in\]  size  Read the specified size, or -1 if no limit.
 ///
 /// @return  OK on success, or FAIL on failure.
 fn read_blob(fd: &mut std::fs::File, rettv: &mut typval_T, offset: i64, size_arg: i64) -> i32 {
@@ -936,8 +936,8 @@ pub fn f_readblob(argvars: &[typval_T], rettv: &mut typval_T) {
 /// Port of `write_list()` from `vendor/eval/fs.c:1698`.
 ///
 /// @param  fp  File to write to.
-/// @param[in]  list  List to write.
-/// @param[in]  binary  Whether to write in binary mode.
+/// @param\[in\]  list  List to write.
+/// @param\[in\]  binary  Whether to write in binary mode.
 ///
 /// @return true in case of success, false otherwise.
 fn write_list(fp: &mut FileDescriptor, list: &list_T, binary: bool) -> bool {

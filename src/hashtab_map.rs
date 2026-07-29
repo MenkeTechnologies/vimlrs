@@ -1,4 +1,4 @@
-//! The Rust map facade over the ported [`hashtab_T`].
+//! The Rust map facade over the ported `hashtab_T`.
 //!
 //! EXTENSION — NO `vendor/` counterpart, and that is the point of putting it
 //! here rather than in `src/ported/`. `hashtab.c` has no `contains_key` or
@@ -8,8 +8,8 @@
 //! synthesis zone where invented names belong.
 //!
 //! Everything here is a thin shim over the real C algorithm next door
-//! ([`hash_hash`], `hash_lookup`, `hash_add_item`, `hash_remove`). The one thing
-//! it must never do is change iteration order: [`hashtab_T::iter`] walks the
+//! (`hash_hash`, `hash_lookup`, `hash_add_item`, `hash_remove`). The one thing
+//! it must never do is change iteration order: `hashtab_T::iter` walks the
 //! bucket array in index order, because that order is what VimL sees.
 
 use std::borrow::Borrow;

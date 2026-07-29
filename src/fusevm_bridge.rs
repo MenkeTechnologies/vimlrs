@@ -241,7 +241,7 @@ pub const VIML_MAKE_DICT: u16 = 3051;
 pub const VIML_INDEX: u16 = 3052;
 /// `base[from:to]`
 pub const VIML_SLICE: u16 = 3053;
-/// `let base[index] = value` — pop index, base, value; set base[index]=value.
+/// `let base`index` = value` — pop index, base, value; set base`index`=value.
 pub const VIML_SETINDEX: u16 = 3054;
 /// `let base[idx1:idx2] = list` — pop idx2, idx1, base, value; range-assign.
 pub const VIML_SETRANGE: u16 = 3055;
@@ -1257,7 +1257,7 @@ pub const VIML_CATCH_MATCH: u16 = 3075;
 pub const VIML_REPORT_UNCAUGHT: u16 = 3076;
 /// Register a deferred (block-level) `:function` when its line executes. Pops the
 /// staging key emitted by the compiler and moves the staged def into the live
-/// `FUNCTIONS` registry — see [`b_define_func`].
+/// `FUNCTIONS` registry — see `b_define_func`.
 pub const VIML_DEFINE_FUNC: u16 = 3580;
 
 /// Builtin id for comparison `(op, ignore_case)`.
@@ -4229,7 +4229,7 @@ thread_local! {
 }
 
 /// Install a host callback fired with an ex-command line vimlrs doesn't handle
-/// (see [`EXCMD_HOST_HOOK`]). Return `true` to claim the line, `false` to let
+/// (see `EXCMD_HOST_HOOK`). Return `true` to claim the line, `false` to let
 /// vimlrs fall back to statement evaluation.
 pub fn install_excmd_hook(f: Box<dyn Fn(&str) -> bool>) {
     EXCMD_HOST_HOOK.with(|h| *h.borrow_mut() = Some(f));

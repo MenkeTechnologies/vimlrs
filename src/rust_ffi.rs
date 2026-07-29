@@ -21,7 +21,7 @@
 //! is therefore broken.
 //!
 //! The fix is to tell the scanner that `"` *is* a line-comment introducer
-//! ([`SUGAR`] below): its line-comment branch copies the skipped run verbatim
+//! (`SUGAR` below): its line-comment branch copies the skipped run verbatim
 //! and stops at the newline, which is exactly legacy `"`-comment semantics. A
 //! `"`-string on a code line is likewise copied verbatim to end-of-line and
 //! never mis-scanned for `rust {`. `#` is included too so a Vim9 `#` comment

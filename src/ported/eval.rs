@@ -463,7 +463,7 @@ pub fn partial_free(_pt: &partial_T) {}
 
 /// Port of `partial_unref()` from `Src/eval.c:3842` — decrement a closure's
 /// reference count, freeing at zero. The `Rc` does this on clone/drop, so the
-/// explicit unref is a no-op (mirrors [`func_unref`]).
+/// explicit unref is a no-op (mirrors `func_unref`).
 pub fn partial_unref(_pt: Option<&Rc<partial_T>>) {}
 
 /// Port of `typval_tostring()` from `Src/eval.c:7001`.
@@ -812,7 +812,7 @@ pub fn ex_echo(arg: &str, skip: bool, echon: bool) -> String {
 /// - The assembled string (`garray_T ga`) is returned. For `CMD_echomsg` the C
 ///   `msg()` has no standalone message area (returned instead, as [`ex_echo`]);
 ///   for `CMD_echoerr` the C `emsg_multiline()` is routed through
-///   [`emsg`](crate::ported::message::emsg) (the real error path); for
+///   [`emsg`] (the real error path); for
 ///   `CMD_execute` the tail `do_cmdline()` (`Src/ex_docmd.c`) is DEFERRED — the
 ///   ex-command loop is not ported (see `deferred_deps`), so the assembled
 ///   command line is returned unrun.
@@ -1726,7 +1726,7 @@ pub fn save_tv_as_string(tv: &typval_T, endnl: bool, crlf: bool) -> Option<Strin
 /// path separator is checked directly, else searched on `$PATH`), or `None`.
 ///
 /// RUST-PORT NOTE: the same leaf is ported module-private in
-/// [`fs`](crate::ported::eval::fs) for `executable()`/`exepath()`; this copy
+/// [`fs`] for `executable()`/`exepath()`; this copy
 /// keeps identical logic so [`tv_to_argv`] can resolve its `argv[0]` (the two
 /// should be deduplicated once one is made `pub`).
 fn os_can_exe(name: &str) -> Option<String> {
@@ -1822,10 +1822,10 @@ fn os_system(argv: &[String], input: Option<&str>) -> (i32, Option<String>) {
 ///
 /// @param cmd_tv      Vimscript object
 /// @param cmd         Returns the command or executable name.
-/// @param executable  Set to `false` if argv[0] is not executable.
+/// @param executable  Set to `false` if `argv[0]` is not executable.
 ///
 /// @return  the shell argv when `cmd_tv` is a String; else the List's string
-///          values with argv[0] resolved to a full path, or `None` on error.
+///          values with `argv[0]` resolved to a full path, or `None` on error.
 pub fn tv_to_argv(
     cmd_tv: &typval_T,
     mut cmd: Option<&mut String>,
@@ -1904,7 +1904,7 @@ pub fn tv_to_argv(
 ///
 /// RUST-PORT NOTE: `check_secure()` (restricted mode), `:profile`, and the
 /// `'verbose' > 3` echo are editor state not modeled standalone and are dropped.
-/// The `USE_CRNL` <CR><NL> translation is Windows-only and omitted.
+/// The `USE_CRNL` `<CR><NL>` translation is Windows-only and omitted.
 pub fn get_system_output_as_rettv(argvars: &[typval_T], rettv: &mut typval_T, retlist: bool) {
     use crate::ported::eval::typval::{tv_get_number, tv_list_ref};
     use crate::ported::eval::vars::{set_vim_var_nr, vv::VV_SHELL_ERROR};
@@ -2454,7 +2454,7 @@ pub fn call_func_rettv(rettv: &mut typval_T, args: &str) -> i32 {
 ///
 /// Evaluate a function or method call: with a `basetv` it is a method call
 /// ([`eval_method`]), otherwise a plain call
-/// ([`get_func_tv`](crate::ported::eval::userfunc::get_func_tv)). Returns
+/// (`get_func_tv`). Returns
 /// [`OK`]/[`FAIL`]. RUST-PORT NOTE: the C resolves the name and parses the call
 /// off the expression; here the name and isolated argument text are passed in.
 pub fn eval_func(name: &str, args: &str, basetv: Option<&typval_T>, rettv: &mut typval_T) -> i32 {
@@ -2467,7 +2467,7 @@ pub fn eval_func(name: &str, args: &str, basetv: Option<&typval_T>, rettv: &mut 
 /// Port of `eval_method()` from `Src/eval.c:2955`.
 ///
 /// Dispatch a method call `base->method(args)`: a builtin via
-/// [`call_internal_method`](crate::ported::eval::funcs::call_internal_method)
+/// `call_internal_method`
 /// (which inserts the base at the builtin's method-base position), else a user
 /// function with the base prepended as the first argument. Returns [`OK`]/[`FAIL`].
 /// RUST-PORT NOTE: the C parses `->method(args)` off the expression; here the
@@ -2499,9 +2499,9 @@ pub fn eval_method(method: &str, args: &str, basetv: &typval_T, rettv: &mut typv
 ///
 /// RUST-PORT NOTE: the C `call_func_rettv(arg, evalarg, rettv, evaluate, NULL,
 /// &base, NULL)` threads the parse pointer through the callee; here the callee is
-/// the [`get_lambda_tv`](crate::ported::eval::userfunc::get_lambda_tv) result
+/// the `get_lambda_tv` result
 /// (always a `VAR_PARTIAL`), the parenthesised argument text is isolated and run
-/// through [`get_func_arguments`](crate::ported::eval::userfunc::get_func_arguments),
+/// through `get_func_arguments`,
 /// the base is prepended (method-base semantics), and the call is dispatched via
 /// [`eval_expr_partial`]. In skip mode (`!evaluate`) the arguments are only
 /// consumed, matching the C fast path.
@@ -4304,9 +4304,9 @@ pub fn eval6(
 ///
 /// RUST-PORT NOTE: several `eval7` branches call editor/userfunc subsystems that
 /// the standalone evaluator resolves through already-ported adapters or leaves
-/// deferred: the register case routes through [`get_reg_contents`]
+/// deferred: the register case routes through `get_reg_contents`
 /// (crate::ported::eval::…), variable lookup through
-/// [`eval_variable`](crate::ported::eval::vars::eval_variable), function calls
+/// `eval_variable`, function calls
 /// and method calls through the ported [`eval_func`]/[`handle_subscript`]
 /// (with the `(args)`/`[idx]`/`.key`/`->m()` chain scanned off the cursor here),
 /// the recursion counter is dropped, and lambda `{a -> expr}` (C `get_lambda_tv`,
@@ -5230,7 +5230,7 @@ pub fn eval_env_var(arg: &mut &str, rettv: &mut typval_T, evaluate: bool) -> i32
 /// RUST-PORT NOTE: `find_option_var_end()`/`OptIndex`/`is_tty_option()` (the
 /// option-table subsystem) are not modeled; the option name is scanned inline
 /// after any `&+`/`&<`/`&g:`/`&l:` prefix and looked up via
-/// [`get_option_value`](crate::ported::option::get_option_value), which returns
+/// `get_option_value`, which returns
 /// an empty value for an unknown name (the C `E113` check is deferred).
 pub fn eval_option(arg: &mut &str, rettv: &mut typval_T, evaluate: bool) -> i32 {
     let src = *arg;
@@ -5468,7 +5468,7 @@ pub fn eval_for_line(arg: &str, errp: &mut bool, evalarg: &mut evalarg_T) -> for
 ///
 /// RUST-PORT NOTE: `buf_T *buf` (nullable) becomes `Option<&Rc<RefCell<buf_T>>>`.
 /// C's `utfc_ptr2len` (which folds trailing composing characters into one
-/// grapheme) collapses to [`utf_ptr2len`] here — the composing-character /
+/// grapheme) collapses to `utf_ptr2len` here — the composing-character /
 /// grapheme machinery (`utf_composinglike`, `GraphemeState`) is not yet ported
 /// in `mbyte.rs`, so combining sequences count per code point.
 pub fn buf_byteidx_to_charidx(
@@ -5521,7 +5521,7 @@ pub fn buf_byteidx_to_charidx(
 /// (both zero-based). Works only for loaded buffers; returns -1 on failure.
 ///
 /// RUST-PORT NOTE: nullable `buf_T *` → `Option<&Rc<RefCell<buf_T>>>`, and
-/// `utfc_ptr2len` collapses to [`utf_ptr2len`] (see `buf_byteidx_to_charidx`).
+/// `utfc_ptr2len` collapses to `utf_ptr2len` (see `buf_byteidx_to_charidx`).
 pub fn buf_charidx_to_byteidx(
     buf: Option<&Rc<RefCell<buf_T>>>,
     mut lnum: linenr_T,

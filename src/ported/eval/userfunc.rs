@@ -156,7 +156,7 @@ pub fn add_defer() {}
 
 /// Port of `ex_defer_inner()` from `Src/eval/userfunc.c:3397` — parse and
 /// register a `:defer` call. No defer stack is tracked standalone (see
-/// [`add_defer`]/[`can_add_defer`]), so this accepts and discards it → [`OK`].
+/// [`add_defer`]/[`can_add_defer`]), so this accepts and discards it → `OK`.
 pub fn ex_defer_inner() -> i32 {
     crate::ported::eval_h::OK
 }
@@ -665,7 +665,7 @@ thread_local! {
 /// Register a Lua callback `ref` as an anonymous lambda: allocate a [`ufunc_T`]
 /// under a fresh `<lambda>N` name ([`get_lambda_name`]/[`alloc_ufunc`]), mark it
 /// refcounted + varargs + `FC_LUAREF`, record the Lua ref and the defining
-/// script context, add it to [`func_hashtab`], and return its name.
+/// script context, add it to `func_hashtab`, and return its name.
 ///
 /// RUST-PORT NOTE: `LuaRef` is Neovim's `typedef int LuaRef` (`types_defs.h:27`)
 /// → `i32`, and the C parameter name `ref` is a Rust keyword → `r#ref`. The
@@ -976,7 +976,7 @@ pub fn func_call(
 /// Add a read-only Number variable `name = nr` to dict `dp` (used to populate
 /// the `a:`/funccall info dicts). RUST-PORT NOTE: the C sets `DI_FLAGS_RO |
 /// DI_FLAGS_FIX` on the item; the `IndexMap`-backed dict has no per-item flags,
-/// so the value is added via the ported [`tv_dict_add_nr`].
+/// so the value is added via the ported `tv_dict_add_nr`.
 pub fn add_nr_var(
     dp: &mut crate::ported::eval::typval_defs_h::dict_T,
     name: &str,
@@ -1189,7 +1189,7 @@ pub struct DerefedFunc {
 /// If a variable `name` holds a Funcref or Partial, resolve it to the function
 /// name it refers to (and the bound partial); otherwise return `name` itself.
 /// RUST-PORT NOTE: the C reads a `dictitem_T` via `find_var`; the subset
-/// resolves through [`eval_variable`]. `no_autoload` is accepted for signature
+/// resolves through `eval_variable`. `no_autoload` is accepted for signature
 /// fidelity (no autoload standalone).
 pub fn deref_func_name(name: &str, _no_autoload: bool) -> DerefedFunc {
     use crate::ported::eval::typval_defs_h::{typval_vval_union::*, VarType::*};
@@ -1768,7 +1768,7 @@ pub fn save_function_name(
 /// is replaced by a bracket-balanced scan (the same approach as
 /// [`get_func_arguments`]); the generated `ufunc_T` body (`uf_lines = "return
 /// <expr>"`), its `hash_add` into `func_hashtab`, `register_closure`, profiling
-/// and `sctx` are bridge-owned, so the reduced [`partial_T`] only carries the
+/// and `sctx` are bridge-owned, so the reduced `partial_T` only carries the
 /// generated `<lambda>N` name. `eval_lavars_used`/`sandbox` state is not modeled.
 pub fn get_lambda_tv(
     arg: &mut &str,

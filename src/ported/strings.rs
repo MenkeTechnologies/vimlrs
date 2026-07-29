@@ -88,7 +88,7 @@ pub fn f_toupper(argvars: &[typval_T], rettv: &mut typval_T) {
 }
 
 /// Port of `f_strchars()` from `Src/strings.c` — character count. The optional
-/// `{skipcc}` (argvars[1]); when truthy, composing characters are not counted
+/// `{skipcc}` (`argvars[1]`); when truthy, composing characters are not counted
 /// (the same folding `strcharlen()` always applies).
 pub fn f_strchars(argvars: &[typval_T], rettv: &mut typval_T) {
     let s = tv_get_string(&argvars[0]);

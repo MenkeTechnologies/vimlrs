@@ -2,9 +2,9 @@
 //!
 //! Two directions, both reachable from VimL:
 //!
-//! - [`trans_special`] — `"\<Esc>"` in a double-quoted string becomes the ESC
+//! - `trans_special` — `"\<Esc>"` in a double-quoted string becomes the ESC
 //!   character (`eval_string`, `eval.c:3512`, case `'<'`).
-//! - [`get_special_key_name`] — `keytrans()` renders a character back as
+//! - `get_special_key_name` — `keytrans()` renders a character back as
 //!   `<Esc>` / `<C-A>` / `<Space>`.
 //!
 //! ## What this port covers, and why the rest cannot be
@@ -188,7 +188,7 @@ pub fn trans_special(src: &str) -> Option<(char, usize)> {
 /// Port of `get_special_key_name()` (`keycodes.c:263`) — the `<…>` notation for a
 /// character, as `keytrans()` prints it.
 ///
-/// Covers the inverse of [`trans_special`]: the table names, and the C0 controls
+/// Covers the inverse of `trans_special`: the table names, and the C0 controls
 /// that `get_special_key_name` renders under the CTRL modifier (c: "if (table_idx
 /// < 0 && !vim_isprintc(c) && c < ' ') { c += '@'; modifiers |= MOD_MASK_CTRL; }").
 /// A character with no `<…>` form is returned as itself.

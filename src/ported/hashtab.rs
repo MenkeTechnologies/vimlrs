@@ -29,7 +29,7 @@
 //! that a resize could invalidate, so there is nothing to protect.
 //!
 //! `HI_KEY_REMOVED` — the C's tombstone, a sentinel pointer distinct from `NULL`
-//! — is [`Slot::Removed`] here. It matters: a removed slot still blocks a probe
+//! — is `Slot::Removed` here. It matters: a removed slot still blocks a probe
 //! (so a later lookup keeps searching past it) but is available for reuse, and it
 //! counts toward `ht_filled` (which drives resizing) but not `ht_used`.
 

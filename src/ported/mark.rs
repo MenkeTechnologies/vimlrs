@@ -2,7 +2,7 @@
 //! calls in the vendored eval tree, so the drift gate recognizes them via the
 //! allowlist / `nvim_c_functions.txt`).
 //!
-//! Only [`setmark_pos`] — the mark-setter behind `setpos()`/`setcharpos()` — is
+//! Only `setmark_pos` — the mark-setter behind `setpos()`/`setcharpos()` — is
 //! ported, over a minimal in-process mark store.
 //!
 //! RUST-PORT NOTE: Neovim keeps marks in a rich set of per-buffer/global arrays
@@ -31,7 +31,7 @@ thread_local! {
 /// Port of `setmark_pos()` from `Src/mark.c:117`.
 ///
 /// Set named mark `c` to position `pos` in buffer `fnum`. Returns
-/// [`OK`](crate::ported::eval_h::OK)/[`FAIL`](crate::ported::eval_h::FAIL).
+/// [`OK`]/[`FAIL`].
 ///
 /// RUST-PORT NOTE (signature): the C `fmarkv_T *view_pt` view argument is dropped
 /// (no view metadata is stored). See the module note for the storage deviation.

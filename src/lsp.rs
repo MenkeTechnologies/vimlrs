@@ -232,7 +232,7 @@ fn compute_diagnostics(text: &str) -> Vec<Diagnostic> {
 /// Flat, sorted, deduped list of every completion word — the union of the four
 /// completion sources ([`BUILTIN_DOCS`] names, [`EX_COMMANDS`], [`V_VARS`], and
 /// the parser's [`PHASE3_BUILTINS`]). This is the single source of truth for
-/// bare names; the LSP's [`completions`] enriches the same union with
+/// bare names; the LSP's `completions` enriches the same union with
 /// signatures/docs/kinds, while the interactive REPL (`crate::repl`) feeds this
 /// flat list straight into its completion menu. Keeping both on this union
 /// means the editor and the REPL always offer the same surface.

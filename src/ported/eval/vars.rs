@@ -1027,7 +1027,7 @@ pub fn get_var_value(name: &str) -> Option<String> {
 /// is the index of the first item (`n1_arg` its list index), `has_n2`/`n2` give
 /// the optional inclusive end. RUST-PORT NOTE: the C threads `listitem_T`
 /// pointers; the `Vec`-backed `list_T` works in indices and delegates to the
-/// ported [`tv_list_remove_items`].
+/// ported `tv_list_remove_items`.
 pub fn tv_list_unlet_range(l: &mut list_T, first: usize, n1_arg: i32, has_n2: bool, n2: i32) {
     let len = crate::ported::eval::typval::tv_list_len(l) as usize;
     let mut last = first;
@@ -1301,7 +1301,7 @@ pub fn get_spellword(list: &list_T) -> Option<(String, i32)> {
 /// Port of `var_set_global()` from `Src/eval/vars.c`.
 ///
 /// Set variable `name` in the global scope even when called from inside a
-/// function: suspend the active funccal ([`save_funccal`]), [`set_var`] at
+/// function: suspend the active funccal (`save_funccal`), [`set_var`] at
 /// global level, then restore. RUST-PORT NOTE: with the active scope cleared a
 /// bare `name` resolves to `globvardict` (see [`set_var`]).
 pub fn var_set_global(name: &str, vartv: typval_T) {

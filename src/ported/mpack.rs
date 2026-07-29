@@ -2,11 +2,11 @@
 //! (`vendor/mpack/{mpack_core,object,conv}.{c,h}`).
 //!
 //! Only the *decode* half is ported — the token reader
-//! ([`mpack_read`]/[`mpack_rtoken`]/[`mpack_rvalue`]/[`mpack_rblob`]), the
-//! object walker ([`mpack_parse`]/[`mpack_parse_tok`]/[`mpack_parser_init`] and
-//! the [`mpack_parser_push`]/[`mpack_parser_pop`] node stack), and the
-//! number-unpacking conversions ([`mpack_unpack_boolean`]/[`mpack_unpack_uint`]/
-//! [`mpack_unpack_sint`]/[`mpack_unpack_float_fast`]). These are exactly what
+//! (`mpack_read`/`mpack_rtoken`/`mpack_rvalue`/`mpack_rblob`), the
+//! object walker (`mpack_parse`/`mpack_parse_tok`/`mpack_parser_init` and
+//! the `mpack_parser_push`/`mpack_parser_pop` node stack), and the
+//! number-unpacking conversions (`mpack_unpack_boolean`/`mpack_unpack_uint`/
+//! `mpack_unpack_sint`/`mpack_unpack_float_fast`). These are exactly what
 //! `vendor/eval/decode.c`'s `unpack_typval()` drives. The packing/writing half
 //! (`mpack_write`, `mpack_wtoken`, `mpack_pack_*`) is left unported: it is not
 //! referenced by the four decode stubs and `msgpackdump()` has its own encoder.
@@ -15,7 +15,7 @@
 //!
 //! * **The `void *p` user-data union is a type parameter.** libmpack's
 //!   `mpack_data_t` union carries arbitrary user state on nodes via `void *p`
-//!   (the C caller casts it to their own type). Here [`mpack_data_t`] is generic
+//!   (the C caller casts it to their own type). Here `mpack_data_t` is generic
 //!   over that payload `P`, so `vendor/eval/decode.c` instantiates the parser with
 //!   its own [`crate::ported::eval::decode`] payload enum instead of casting raw
 //!   pointers. The `u`/`i`/`d` union members are kept for fidelity though the

@@ -3004,10 +3004,10 @@ pub fn tv_dict_item_copy(tv: &typval_T) -> typval_T {
 /// @note that the type and value of the item (->di_tv) still needs to
 ///       be initialized.
 ///
-/// @param[in]  key  Key, is copied to the new item.
-/// @param[in]  key_len  Key length.
+/// @param\[in\]  key  Key, is copied to the new item.
+/// @param\[in\]  key_len  Key length.
 ///
-/// @return [allocated] new dictionary item.
+/// @return \[allocated\] new dictionary item.
 ///
 /// RUST-PORT NOTE: this model has no `dictitem_T` struct — dictitems are
 /// `(String, typval_T)` entries in `dict_T::dv_hashtab`. The allocator therefore
@@ -3032,9 +3032,9 @@ pub fn tv_dict_item_alloc_len(key: &str, key_len: usize) -> (String, typval_T) {
 /// @note that the type and value of the item (->di_tv) still needs to
 ///       be initialized.
 ///
-/// @param[in]  key  Key, is copied to the new item.
+/// @param\[in\]  key  Key, is copied to the new item.
 ///
-/// @return [allocated] new dictionary item.
+/// @return \[allocated\] new dictionary item.
 pub fn tv_dict_item_alloc(key: &str) -> (String, typval_T) {
     // c: return tv_dict_item_alloc_len(key, strlen(key));
     tv_dict_item_alloc_len(key, key.len())

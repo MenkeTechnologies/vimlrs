@@ -631,7 +631,7 @@ pub fn write_reg_contents(name: char, value: &str, mtype: MotionType, append: bo
 /// RUST-PORT NOTE: arg order/shape is adapted to the `funcs.c` bridge — the
 /// motion type (`mtype`, block width folded in) comes before `append`, and the
 /// lines are already split. The `'/'`/`'='`/`'#'` single-line special cases
-/// route to [`write_reg_contents_ex`] (all no-ops here); the black-hole `'_'` is
+/// route to `write_reg_contents_ex` (all no-ops here); the black-hole `'_'` is
 /// a no-op.
 pub fn write_reg_contents_lst(name: char, lines: Vec<String>, mtype: MotionType, append: bool) {
     let name = name as i32;

@@ -1,11 +1,11 @@
 //! Port of `src/nvim/eval/decode.c` (vendored at `vendor/eval/decode.c`).
 //!
 //! The JSON decoder: an explicit value/container stack machine
-//! ([`json_decode_string`], [`json_decoder_pop`], [`parse_json_string`],
-//! [`parse_json_number`]) that turns a UTF-8 JSON document into a [`typval_T`]
-//! tree, plus the special-dictionary helpers ([`create_special_dict`],
-//! [`decode_create_map_special_dict`], [`decode_string`],
-//! [`positive_integer_to_special_typval`]) shared with the msgpack path.
+//! (`json_decode_string`, `json_decoder_pop`, `parse_json_string`,
+//! `parse_json_number`) that turns a UTF-8 JSON document into a [`typval_T`]
+//! tree, plus the special-dictionary helpers (`create_special_dict`,
+//! `decode_create_map_special_dict`, `decode_string`,
+//! `positive_integer_to_special_typval`) shared with the msgpack path.
 //!
 //! RUST-PORT NOTE (control flow): C walks a `const char *p` over a
 //! NUL-terminated buffer and uses `goto` for the parse loop's restart / trailing
@@ -18,7 +18,7 @@
 //! `list_T *`/`dict_T *` stored on both the value stack and the container stack;
 //! here that is one `Rc<RefCell<…>>` cloned onto both stacks, and the C
 //! pointer-identity test (`(void *)obj.vval.v_list == (void *)container.vval
-//! .v_list`) becomes [`Rc::ptr_eq`].
+//! .v_list`) becomes `Rc::ptr_eq`.
 //!
 //! RUST-PORT NOTE (msgpack): the `typval_parse_enter`/`typval_parse_exit`/
 //! `mpack_parse_typval`/`unpack_typval` half of `decode.c` drives the libmpack
@@ -26,7 +26,7 @@
 //! `mpack_node_t`, `mpack_parse`, `mpack_unpack_*`, the `MPACK_TOKEN_*` enum),
 //! now ported at [`crate::ported::mpack`]. Those four functions are ported here;
 //! the libmpack node `data[0]`/`data[1]` `void *p` union members are represented
-//! by [`TypvalNodeData`] (see its note) since Rust cannot store raw pointers into
+//! by `TypvalNodeData` (see its note) since Rust cannot store raw pointers into
 //! the shared `Rc<RefCell<…>>` containers.
 #![allow(
     dead_code,
@@ -143,9 +143,9 @@ struct ValuesStackItem {
 ///
 /// Port of `create_special_dict()` from `vendor/eval/decode.c:62`.
 ///
-/// @param[out]  rettv  Location where created dictionary will be saved.
-/// @param[in]  type  Type of the dictionary.
-/// @param[in]  val  Value associated with the _VAL key.
+/// @param\[out\]  rettv  Location where created dictionary will be saved.
+/// @param\[in\]  type  Type of the dictionary.
+/// @param\[in\]  val  Value associated with the _VAL key.
 fn create_special_dict(rettv: &mut typval_T, r#type: MessagePackType, val: typval_T) {
     // c: dict_T *const dict = tv_dict_alloc();
     let dict = tv_dict_alloc();
@@ -338,7 +338,7 @@ fn json_decoder_pop(
 ///
 /// Port of `decode_create_map_special_dict()` from `vendor/eval/decode.c:230`.
 ///
-/// @return [allocated] list which should contain key-value pairs.
+/// @return \[allocated\] list which should contain key-value pairs.
 pub fn decode_create_map_special_dict(ret_tv: &mut typval_T, len: isize) -> Rc<RefCell<list_T>> {
     // c: list_T *const list = tv_list_alloc(len); tv_list_ref(list);
     let list = tv_list_alloc(len);
@@ -1465,7 +1465,7 @@ fn typval_parse_enter(parser: &mut mpack_parser_t<TypvalNodeData>, node: usize) 
 ///
 /// RUST-PORT NOTE: the C `XFREE_CLEAR(node->data[1].p)` frees the manually
 /// `xmallocz`'d byte / map-pair buffers of BIN/STR/EXT/MAP nodes. Here those are
-/// `Rc<RefCell<…>>` handles in [`TypvalNodeData`] that drop automatically when
+/// `Rc<RefCell<…>>` handles in `TypvalNodeData` that drop automatically when
 /// the parser is dropped, so there is nothing to free → no-op.
 pub fn typval_parser_error_free(_parser: &mpack_parser_t<TypvalNodeData>) {}
 

@@ -10,7 +10,7 @@
 //! safely, so the links become `Rc<RefCell<…>>` (forward, owning) and
 //! `Weak<RefCell<…>>` (`w_prev`, back-link), and the file-static roots become
 //! `thread_local!` cells. Pointer identity (`wp == curwin`, `tp == curtab`)
-//! becomes [`Rc::ptr_eq`]. The deep window-management operations of `window.c`
+//! becomes `Rc::ptr_eq`. The deep window-management operations of `window.c`
 //! (splits, frames, resize, layout) are not reachable from eval and are not
 //! modelled here.
 #![allow(non_camel_case_types)]

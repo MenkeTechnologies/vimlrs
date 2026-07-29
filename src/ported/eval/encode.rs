@@ -628,7 +628,7 @@ pub fn encode_vim_to_json(tv: &typval_T) -> String {
 /// global shared with the decoder (`vars.c` `evalvars_init()`); in the vimlrs
 /// port it lives in [`crate::ported::eval::decode`], so this reads the same
 /// per-run lists the decoder's `create_special_dict()` stamped into the `_TYPE`
-/// value — pointer identity via [`Rc::ptr_eq`].
+/// value — pointer identity via `Rc::ptr_eq`.
 pub fn encode_check_json_key(tv: &typval_T) -> bool {
     use crate::ported::eval::decode::{eval_msgpack_type_lists, MessagePackType};
     use crate::ported::eval::typval::tv_dict_find;

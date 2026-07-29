@@ -271,6 +271,7 @@ fn op_name(op: &Op) -> String {
 
 
 /// The counted loop this module's tests measure, in the frontend's own syntax.
+#[cfg(test)]
 const PROGRAM: &str = "function! F(n)\n  let l:t = 0\n  let l:i = 0\n  while l:i < a:n\n    let l:t = l:t + l:i\n    let l:i = l:i + 1\n  endwhile\n  return l:t\nendfunction\ncall F(2000)\n";
 
 #[cfg(test)]

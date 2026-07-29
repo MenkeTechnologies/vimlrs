@@ -4266,9 +4266,9 @@ pub fn f_getcharsearch(_argvars: &[typval_T], rettv: &mut typval_T) {
 
 /// Port of `get_user_input()` (the body behind `f_input`/`f_inputdialog` in
 /// `Src/eval/funcs.c`, defined outside the vendored tree) — write `{prompt}`
-/// (argvars[0]) to stdout and read one line from stdin. `{text}` (argvars[1])
+/// (`argvars[0]`) to stdout and read one line from stdin. `{text}` (`argvars[1]`)
 /// is the editable default returned on an empty line / EOF; for `inputdialog`
-/// argvars[2] is the value returned when the read is cancelled (EOF).
+/// `argvars[2]` is the value returned when the read is cancelled (EOF).
 fn get_user_input(argvars: &[typval_T], rettv: &mut typval_T, dialog: bool, _secret: bool) {
     use std::io::Write;
     let prompt = tv_get_string(&argvars[0]);
@@ -4318,7 +4318,7 @@ pub fn f_input(argvars: &[typval_T], rettv: &mut typval_T) {
 pub fn f_inputsecret(argvars: &[typval_T], rettv: &mut typval_T) {
     get_user_input(argvars, rettv, false, true);
 }
-/// Port of `f_inputdialog()` — `input()` with a cancel value (argvars[2]).
+/// Port of `f_inputdialog()` — `input()` with a cancel value (`argvars[2]`).
 pub fn f_inputdialog(argvars: &[typval_T], rettv: &mut typval_T) {
     get_user_input(argvars, rettv, true, false);
 }
@@ -4358,7 +4358,7 @@ pub fn f_inputlist(argvars: &[typval_T], rettv: &mut typval_T) {
 
 /// Port of `f_confirm()` — print `{msg}` and the `&`-accelerated `{choices}`
 /// (split on `\n`, default "&OK") numbered from 1, then read the chosen number
-/// from stdin. Empty input returns the `{default}` button (argvars[2], default
+/// from stdin. Empty input returns the `{default}` button (`argvars[2]`, default
 /// 1); EOF returns 0 (cancelled), as the editor's dialog does.
 pub fn f_confirm(argvars: &[typval_T], rettv: &mut typval_T) {
     use std::io::Write;
@@ -5170,7 +5170,7 @@ pub fn f_assert_exception(argvars: &[typval_T], rettv: &mut typval_T) {
 // capture its stdout, or read the process environment. `system()` sets
 // `v:shell_error` to the command's exit status, as in Vim.
 
-/// Run `{cmd}` (argvars[0]) through `sh -c`, writing `{input}` (argvars[1], if
+/// Run `{cmd}` (`argvars[0]`) through `sh -c`, writing `{input}` (`argvars[1]`, if
 /// any) to its stdin, and return the captured stdout bytes. Sets `v:shell_error`
 /// to the exit status (-1 if the shell could not be run). stderr is inherited
 /// (shown), as Vim does by default.
@@ -5737,8 +5737,8 @@ pub fn f_ctxsize(_argvars: &[typval_T], rettv: &mut typval_T) {
 }
 /// Port of `f_islocked()` (`eval/funcs.c:3223`) — `1` if the variable named by
 /// `argvars[0]` is `:lockvar`-locked, `0` if unlocked, `-1` if it does not
-/// exist. Parses the name with [`get_lval`] (`GLV_NO_AUTOLOAD | GLV_READ_ONLY`)
-/// and reads the lock via [`tv_islocked`].
+/// exist. Parses the name with `get_lval` (`GLV_NO_AUTOLOAD | GLV_READ_ONLY`)
+/// and reads the lock via `tv_islocked`.
 ///
 /// RUST-PORT NOTE: `di_flags` is not modeled, so the C
 /// `(di->di_flags & DI_FLAGS_LOCK)` half of the scalar check is elided — a
@@ -10375,7 +10375,7 @@ pub fn f_call(argvars: &[typval_T], rettv: &mut typval_T) {
 /// "eval(string)" — evaluate `string` as a Vimscript expression.
 ///
 /// RUST-PORT NOTE: `need_clr_eos`/`aborting()` editor state is not modelled; the
-/// ported [`eval1`](crate::ported::eval::eval1) reference drives evaluation, with
+/// ported `eval1` reference drives evaluation, with
 /// `EVAL_STRING_HOOK` backing sub-expression evaluation as elsewhere.
 pub fn f_eval(argvars: &[typval_T], rettv: &mut typval_T) {
     // c:1235 const char *s = tv_get_string_chk(&argvars[0]);
@@ -10971,7 +10971,7 @@ pub fn search_cmn(
 ///
 /// Shared by `searchpair()` and `searchpairpos()`: parse the start/middle/end
 /// patterns and flags then delegate to
-/// [`do_searchpair`](crate::ported::search::do_searchpair). Returns the match
+/// `do_searchpair`. Returns the match
 /// line (via `do_searchpair`) or `0`.
 pub fn searchpair_cmn(
     argvars: &[typval_T],
@@ -11061,9 +11061,9 @@ pub fn searchpair_cmn(
 /// Shared body of `libcall()` (`out_type == VAR_STRING`) and `libcallnr()`
 /// (`out_type == VAR_NUMBER`): load a native library and call a function taking a
 /// string/int and returning a string/int (via
-/// [`os_libcall`](crate::ported::os::dl::os_libcall)).
+/// `os_libcall`).
 ///
-/// RUST-PORT NOTE (signature): `out_type` is passed as the [`VarType`] enum.
+/// RUST-PORT NOTE (signature): `out_type` is passed as the `VarType` enum.
 /// `check_secure()` (the `'secure'`/sandbox gate) is not modelled and is elided.
 pub fn libcall_common(
     argvars: &[typval_T],
@@ -11237,9 +11237,9 @@ pub fn msgpackparse_unpack_blob(
 ///
 /// RUST-PORT NOTE: Neovim streams the joined list bytes through a persistent
 /// `mpack_parser_t` in `ARENA_BLOCK_SIZE` chunks. This reference reconstructs the
-/// full joined byte stream via [`encode_read_from_list`] (the same primitive the
+/// full joined byte stream via `encode_read_from_list` (the same primitive the
 /// C uses to read the list) and then decodes value-by-value with
-/// [`unpack_typval`], the same primitive the Blob path uses.
+/// `unpack_typval`, the same primitive the Blob path uses.
 pub fn msgpackparse_unpack_list(
     list: &crate::ported::eval::typval_defs_h::list_T,
     ret_list: &mut crate::ported::eval::typval_defs_h::list_T,
@@ -11383,7 +11383,7 @@ pub fn add_regionpos_range(
 /// Validate the `[lnum,col]` list arguments and `{type}` dict of
 /// `getregion()`/`getregionpos()`, computing the sorted region endpoints
 /// (`p1`/`p2`), `inclusive`, and the [`MotionType`] into `region_type`. Returns
-/// [`OK`](crate::ported::eval_h::OK)/[`FAIL`](crate::ported::eval_h::FAIL).
+/// [`OK`]/[`FAIL`].
 ///
 /// RUST-PORT NOTE: charwise / linewise are faithful; the blockwise
 /// `getvvcol`/`oparg`/`reset_lbr`/`virtual_op` machinery is simplified — the

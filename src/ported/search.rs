@@ -1,7 +1,7 @@
 //! Reference ports of the buffer-search core from `src/nvim/search.c` (not
 //! vendored under `vendor/`; names are recognized via the allowlist).
 //!
-//! [`searchit`] and [`do_searchpair`] back the strict reference ports of
+//! `searchit` and `do_searchpair` back the strict reference ports of
 //! `search_cmn`/`searchpair_cmn` in
 //! [`funcs`](crate::ported::eval::funcs). The runtime path (`f_search`,
 //! `f_searchpair`, …) uses the fusevm-bridge-folded helpers already present in
@@ -51,7 +51,7 @@ thread_local! {
 /// match at the start position) and `SEARCH_END` (leave the position at the end
 /// of the match). On success writes the 1-based line / 0-based byte column into
 /// `pos` and returns a sub-pattern number (`1` for the whole pattern); on no
-/// match returns [`FAIL`](crate::ported::eval_h::FAIL).
+/// match returns [`FAIL`].
 ///
 /// RUST-PORT NOTE (signature): the C `searchit(win_T*, buf_T*, pos_T*, pos_T*
 /// end_pos, dir, char *pat, size_t patlen, long count, options, pat_use,

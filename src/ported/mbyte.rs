@@ -2,8 +2,8 @@
 //! `vendor/mbyte.c`).
 //!
 //! Only the four routines the JSON decoder (`eval/decode.c`) needs are ported
-//! here: [`utf_ptr2char`], [`utf_ptr2len`], [`utf_char2len`] and
-//! [`utf_char2bytes`], plus the [`utf8len_tab`] lookup table they share. The
+//! here: `utf_ptr2char`, `utf_ptr2len`, `utf_char2len` and
+//! `utf_char2bytes`, plus the `utf8len_tab` lookup table they share. The
 //! rest of `mbyte.c` (composing-char logic, iconv, screen-cell width) is a
 //! separate concern and is not ported.
 //!

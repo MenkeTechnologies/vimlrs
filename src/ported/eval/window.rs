@@ -7,8 +7,8 @@
 //!
 //! RUST-PORT NOTE: the C `win_T *`/`tabpage_T *` pointers become
 //! `Option<Rc<RefCell<win_T>>>`/`Option<Rc<RefCell<tabpage_T>>>`, pointer
-//! identity becomes [`Rc::ptr_eq`], and the `tabpage_T **tpp` out-parameter of
-//! [`win_id2wp_tp`] becomes `Option<&mut Option<Rc<RefCell<tabpage_T>>>>`. The
+//! identity becomes `Rc::ptr_eq`, and the `tabpage_T **tpp` out-parameter of
+//! `win_id2wp_tp` becomes `Option<&mut Option<Rc<RefCell<tabpage_T>>>>`. The
 //! deep window-management ops (`switch_win`, `get_win_info`, `win_execute_*`,
 //! frame layout) are not reachable from a standalone eval and remain honest
 //! stubs below.
