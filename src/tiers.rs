@@ -166,7 +166,6 @@ fn program_chunks(prog: &crate::compile_viml::CompiledProgram) -> Vec<(String, C
     out
 }
 
-
 /// Report on one already-executed chunk, as a whole-program report. Used by
 /// tests that build a chunk by hand.
 pub fn inspect(chunk: &Chunk) -> Report {
@@ -269,7 +268,6 @@ fn op_name(op: &Op) -> String {
     }
 }
 
-
 /// The counted loop this module's tests measure, in the frontend's own syntax.
 #[cfg(test)]
 const PROGRAM: &str = "function! F(n)\n  let l:t = 0\n  let l:i = 0\n  while l:i < a:n\n    let l:t = l:t + l:i\n    let l:i = l:i + 1\n  endwhile\n  return l:t\nendfunction\ncall F(2000)\n";
@@ -321,7 +319,10 @@ mod tests {
     fn the_loop_lives_in_a_chunk_other_than_main() {
         let report = report(PROGRAM).expect("runs");
         assert!(report.chunks.len() > 1, "{report}");
-        assert!(report.chunks[0].loops.is_empty(), "main has no loop: {report}");
+        assert!(
+            report.chunks[0].loops.is_empty(),
+            "main has no loop: {report}"
+        );
         assert!(
             report.chunks[1..].iter().any(|c| !c.loops.is_empty()),
             "{report}"
