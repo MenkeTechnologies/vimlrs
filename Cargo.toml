@@ -13,9 +13,27 @@ repository = "https://github.com/MenkeTechnologies/vimlrs"
 license = "MIT"
 readme = "README.md"
 publish = true
-# `vendor/` is the vendored Neovim C spec for porting; `docs/` is the published
-# HUD site — neither is part of the crate build.
-exclude = ["/vendor/", "/docs/"]
+# Keep the published crate lean: ship `src/`, `man/`, `completions/`,
+# README/LICENSE — nothing else. `vendor/` is the vendored Neovim C spec for
+# porting, `docs/` the published HUD site, `editors/` the editor plugins; none
+# is part of the crate build. Everything below stays in git for local/CI use
+# but is omitted from `cargo package` / the crates.io tarball. Mirrors
+# strykelang's exclude set.
+exclude = [
+    "/.github/",
+    "/tests/",
+    "/examples/",
+    "/docs/",
+    "/editors/",
+    "/bench/",
+    "/benches/",
+    "/parity/",
+    "/scripts/",
+    "/vendor/",
+    "/tools/",
+    "/fuzz/",
+    "/BUGS.md",
+]
 
 # vimlrs is a standalone crate, not a workspace member. An explicit empty
 # `[workspace]` stops cargo walking up to the MenkeTechnologiesMeta parent.
