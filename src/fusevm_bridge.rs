@@ -5328,6 +5328,25 @@ pub fn dap_eval_var(name: &str) -> Option<String> {
     eval_variable(name).as_ref().map(encode_tv2echo)
 }
 
+/// Bind `g:name` to a string from Rust, for an embedder that has data to hand a
+/// script — a buffer's text, a selection, a filename.
+///
+/// Without this the only way in was to build a `:let` line and evaluate it,
+/// which puts the data into the *syntax* of the script: the value has to be
+/// escaped into a string literal, and any quote or backslash that escaping
+/// misses changes what the script means. Here the value never passes through the
+/// parser.
+///
+/// ```no_run
+/// vimlrs::fusevm_bridge::set_global_string("stdin", "a \"quoted\" line");
+/// // the script now reads it as an ordinary g: variable
+/// let _ = vimlrs::eval_source("echo strlen(g:stdin)");
+/// ```
+pub fn set_global_string(name: &str, value: &str) {
+    let full = format!("g:{name}");
+    crate::ported::eval::vars::set_var(&full, full.len(), tv_str(value.to_string()), false);
+}
+
 // ── public driver: parse → compile → run on fusevm ──
 
 /// Run an already-compiled `fusevm::Chunk` on a fresh VM with the VimL host
