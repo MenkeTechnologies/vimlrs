@@ -99,6 +99,10 @@ pub fn emsg(s: &str) {
     // message, in which case nothing is printed here — the exception carries it.
     // Outside a `:try` it declines and the error prints as before.
     if !crate::fusevm_bridge::errthrow(s) {
+        // c: `msg_start()` — an error message begins on a fresh line, so a
+        // half-written `:echon` line is terminated first rather than having the
+        // error run onto the end of it.
+        crate::fusevm_bridge::msg_flush_line();
         eprintln!("{s}");
     }
 }

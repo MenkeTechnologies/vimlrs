@@ -1215,3 +1215,138 @@ that also ignored `{keepempty}` for the default pattern
 routes through the same regex path as an explicit pattern, with the
 collection's `\x01` written as the literal codepoint (the pattern engine
 does not yet decode `\x`-escapes inside `[…]` — the C's `coll_get_char()`).
+
+---
+
+# Round 20 — whole-script parity (the new `scripts/parity.sh` harness)
+
+Rounds 1–19 fuzzed *expressions* and single statements. Round 20 added
+`scripts/parity.sh`, which sources a whole `.vim` file through vimlrs and through
+`vim -es -u NONE -i NONE -c 'verbose source FILE' -c 'qa!'` and byte-diffs the
+captured output plus the exit status. Everything below was found by that harness
+on the first pass over a hand-written corpus (`tests/parity_cases/`), and none of
+it is reachable one expression at a time: these are divergences *between*
+statements — message state, option state, and definitions that parse but leave
+nothing behind. Each case is committed with vim's recorded output and replayed in
+CI by `tests/parity_cases.rs`.
+
+### R20-1. `:echo` appended a newline; vim's newline is a LEADING separator — ✅ FIXED
+The single highest-impact one. Vim's message layer breaks the line only when the
+column is non-zero (`msg_start`), and `:echon` never breaks it, so:
+
+```vim
+echo 'A' | echo '' | echo 'B' | echon 'C' | echo '' | echo '' | echo 'D'
+```
+
+prints `A / BC / D` in vim and printed `A / <blank> / B / C / <blank> / D` in
+vimlrs — every empty `:echo` became a blank line instead of ending the current
+one, and every `:echo` after an `:echon` started on the wrong line. Modelled with
+`MSG_COL` in `fusevm_bridge.rs`: `:echo` emits the break first *if* the line has
+text, `:echon` never does, and the run's last line is closed once at exit by
+`msg_flush_line()` (a CLI convenience — vim itself leaves it open). Errors call
+the same flush before writing to stderr, matching `msg_start`. The `execute()`
+and embedding capture paths keep their existing conventions.
+Cases: `tests/parity_cases/echo_column.vim`, `echo_mixed.vim`.
+
+### R20-2. `'ignorecase'` did not reach `==` / `<` / `=~`, and `=~#` ignored case — ✅ FIXED
+`eval4` (c:2209) resolves an unsuffixed comparison's case rule from `p_ic` **when
+the comparison runs**; `#`/`?` fix it at parse time. vimlrs baked all three into
+the opcode id at compile time, mapping "no suffix" to match-case, so
+`set ignorecase | echo 'abc' == 'ABC'` printed 0 (vim: 1) — and the *same* bug
+inverted for regex, where `pattern_match` OR-ed the option in unconditionally, so
+`set ignorecase | echo 'abc' =~# 'ABC'` printed 1 (vim: 0). Added a third
+comparison-id family (`VIML_CMP_OPT_BASE`, 3080..=3089) whose handlers read
+`'ignorecase'` at run time, and removed the OR in `pattern_match`. Affects `==`,
+`!=`, `<`, `<=`, `>`, `>=`, `=~`, `!~` and the List/Dict element comparisons that
+recurse through `tv_equal`. Script-cache format version bumped (opcode ids
+changed meaning). Case: `tests/parity_cases/ignorecase.vim`.
+
+### R20-3. `:lockvar` / `:unlockvar` did not parse — ✅ FIXED
+Both commands were a parse error, which had a second-order effect far worse than
+the missing feature: a file containing one fell back to `source_tolerant`, and
+that path (R20-4) silently dropped earlier assignments. The full `ex_lockvar` /
+`ex_unletlock` / `do_lock_var` chain was already ported in `vars.rs` and simply
+unreachable — the parser now produces `Stmt::LockVar` and the bridge rebuilds the
+`exarg_T` those take. `islocked()` (already ported) consequently went from always
+`0` to vim's `1`/`0`/`-1`.
+
+### R20-4. A statement-at-a-time fallback lost top-level `:let` — ✅ FIXED
+When a file contains anything the parser rejects, `eval_file` falls back to
+running it statement by statement so the rest of a real `.vimrc` still takes
+effect. Each statement was compiled with `compile_program`, whose top-level slot
+planner sees `let A = 1` alone as a write nobody reads and absorbs it into a
+chunk-local slot — so `g:A` was never written and the *next* statement's
+`echo A` raised E121 where vim prints 1. Split out `compile_script_stmt`, which
+is `compile_program` with top-level slotting disabled.
+
+### R20-5. `:const` assigned but never locked — ✅ FIXED
+`const C = 5` behaved as `let`, so `let C = 9` afterwards silently succeeded
+where vim raises `E741: Value is locked: C`. `:const` now lowers to the
+assignment plus the `:lockvar!` it implies (c: `set_var_const` locks with
+`DICT_MAXNEST`), and the `:let` bridge path checks the lock before overwriting.
+
+### R20-6. `function d.key()` defined nothing, and `d.key()` could not call it — ✅ FIXED
+Three separate holes in the same feature:
+- `function d.get() dict … endfunction` registered a function literally named
+  `d.get` and never touched the Dict, so `d.get` was E716. Vim defines an
+  anonymous numbered function and stores a reference under the key; the compiler
+  now does the same (`func_nr`-style counter from 1) and lowers the definition
+  line to the assignment it implies.
+- `d.key(args)` parsed as `d . key(args)` — string concatenation — because the
+  earlier fix for `substitute(…).submatch(0)` (bug #2) made `.name(` *always*
+  concat. It is actually the same runtime question `Expr::Member` already
+  answers: added `Expr::MemberCall`, which tests the base's type at run time and
+  either calls `base[key]` or concatenates with `key(args)`. Both forms verified
+  (`substitute('abc','.','\=submatch(0).submatch(0)','g')` still gives `aabbcc`).
+- `self` was entirely unimplemented, so any `dict` function raised E121. The
+  `self` dict is now bound into the function-local scope for a `d.key()` call, a
+  `d['key']()` call, a Partial carrying `pt_dict`, and `call(F, args, dict)`.
+
+Known remaining divergence: `string(d.get)` is `function('1')` where vim prints
+`function('1', {…})` — vim stores a *partial* bound to the dict, this stores a
+plain Funcref. Calls behave identically (including the re-binding vim does when
+the same reference is stored in another dict), so only `string()` differs.
+
+### R20-7. `typename()` was missing — ✅ FIXED
+Ported as `f_typename` (c: `type_name(typval2type(…))`, vim9type.c). Scalars,
+`list<T>`/`dict<T>` member inference and the `<any>` fallbacks all match vim
+exactly. A Funcref reports `func(...): any`, which is what vim prints for every
+legacy `:function`; vim's precise signatures for *builtin* funcrefs and vim9
+lambdas need the vim9 argument-type table this port does not carry.
+Its arity is not in `funcs_argc.rs` (generated from Neovim's `eval.lua`, and
+Neovim has no `typename`), so `EXTRA_BUILTIN_ARGC` in `compile_viml.rs` supplies
+it — consulted only when the generated table has no entry, so it cannot
+contradict it.
+
+### R20-8. `\f` / `\F` regex atoms were unimplemented — ✅ FIXED
+`matchstr('foo/bar','\f\+')` → vim `foo/bar`, vimlrs `f` (the `\f` was taken as a
+literal). Implemented against `'isfname'`'s Unix default, enumerated char by char
+against vim 9.2 over `0x20..=0x7E`: `#$%+,-./0-9=A-Z_a-z~` plus multibyte
+alphabetics. (`\k`, `\p`, `\i` and the POSIX classes were already present — the
+remaining R3-12 item was `\f` alone.)
+
+### R20-9. `v:exception` was not restored by `:endtry` — ✅ FIXED
+`try | throw 'a' | catch | endtry` left `v:exception` set to `a` forever; vim
+restores the value the enclosing level had (empty at the top). c: `ex_try` saves
+it and `ex_endtry` puts it back, so a nested `:try` restores the *outer* catch
+clause's value rather than clearing it — both verified.
+
+### R20-10. The first lambda was `<lambda>0`, vim's is `<lambda>1` — ✅ FIXED
+c: `get_lambda_name()` (userfunc.c:269) is `"<lambda>%d", ++lambda_no` — a
+pre-increment. Observable through `string({x -> x})`.
+
+## Still open
+
+### R20-O1. `v:throwpoint` is always empty
+vim reports the whole sourcing chain plus the line the exception was raised on
+(`command line..script /path/to/x.vim[29]..function F, line 1`). This port only
+tracks source line numbers in a *debug* build (the `SET_LINENO` markers the DAP
+compiler emits); a faithful `v:throwpoint` needs them unconditionally plus a
+sourcing-context stack that records the entry line of each nested frame. Recorded
+as `tests/parity_cases/throwpoint.vim` with vim's real answer and listed in
+`KNOWN_OPEN` in `tests/parity_cases.rs`, which fails if the gap ever closes
+without the entry being removed.
+
+### R20-O2. `expr ?:` (no `then` branch) is accepted
+vim raises `E109: Missing ':' after '?'`; vimlrs treats it as a falsy-coalesce.
+Accepting more than vim, so no valid script observes it.

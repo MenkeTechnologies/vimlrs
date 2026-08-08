@@ -426,11 +426,10 @@ fn mb_strcmp_ic(ic: bool, s1: &str, s2: &str) -> i32 {
 /// other ports delegate to fusevm; that engine implements Vim's pattern dialect
 /// (it replaces the C engine's bytecode-program matcher).
 fn pattern_match(pat: &str, subject: &str, ic: bool) -> bool {
-    // `'ignorecase'` makes a plain `=~` match case-insensitively.
-    let ic = ic
-        || crate::ported::eval::typval::tv_get_bool(&crate::ported::option::get_option_value(
-            "ignorecase",
-        )) != 0;
+    // `ic` is already resolved by the caller (`eval4` c:2209 for the tree walker,
+    // `do_compare` for the bytecode path): a bare `=~` carries `'ignorecase'`, a
+    // `=~#` carries `false`. OR-ing the option in here instead made `=~#` ignore
+    // case whenever 'ignorecase' was set, which is exactly what `#` forbids.
     crate::viml_regex::regex_match(pat, subject, ic)
 }
 

@@ -20,7 +20,16 @@ use vimlrs::ported::message::did_emsg;
 /// now succeed; 1000 nested `(` raise E1169 like vim.
 const WORKER_STACK: usize = 1 << 30;
 
+/// Run, then close the message line. `:echo` under Vim's message-column model
+/// puts the newline *before* the text, so the last line of a run has none yet
+/// (see `fusevm_bridge::msg_flush_line`).
 fn run() -> ExitCode {
+    let code = run_inner();
+    vimlrs::fusevm_bridge::msg_flush_line();
+    code
+}
+
+fn run_inner() -> ExitCode {
     // AOT: if this binary has scripts baked in, run them in build order and
     // exit (the self-contained-executable path).
     if let Ok(exe) = std::env::current_exe() {

@@ -62,12 +62,12 @@ use crate::ported::eval::funcs::{
     f_strptime, f_submatch, f_substitute, f_swapfilelist, f_swapinfo, f_swapname, f_synID,
     f_synIDattr, f_synIDtrans, f_synconcealed, f_synstack, f_system, f_systemlist,
     f_tabpagebuflist, f_tabpagenr, f_tabpagewinnr, f_tagfiles, f_taglist, f_termopen, f_timer_info,
-    f_timer_pause, f_timer_start, f_timer_stop, f_timer_stopall, f_type, f_values, f_virtcol,
-    f_visualmode, f_wait, f_wildmenumode, f_win_execute, f_win_findbuf, f_win_getid, f_win_gettype,
-    f_win_gotoid, f_win_id2tabwin, f_win_id2win, f_win_move_separator, f_win_move_statusline,
-    f_win_screenpos, f_win_splitmove, f_winbufnr, f_wincol, f_windowsversion, f_winheight,
-    f_winlayout, f_winline, f_winnr, f_winrestcmd, f_winrestview, f_winsaveview, f_winwidth,
-    f_wordcount, f_xor, float_op_wrapper,
+    f_timer_pause, f_timer_start, f_timer_stop, f_timer_stopall, f_type, f_typename, f_values,
+    f_virtcol, f_visualmode, f_wait, f_wildmenumode, f_win_execute, f_win_findbuf, f_win_getid,
+    f_win_gettype, f_win_gotoid, f_win_id2tabwin, f_win_id2win, f_win_move_separator,
+    f_win_move_statusline, f_win_screenpos, f_win_splitmove, f_winbufnr, f_wincol,
+    f_windowsversion, f_winheight, f_winlayout, f_winline, f_winnr, f_winrestcmd, f_winrestview,
+    f_winsaveview, f_winwidth, f_wordcount, f_xor, float_op_wrapper,
 };
 use crate::ported::eval::funcs::{
     f_argc, f_argidx, f_arglistid, f_argv, f_assert_equalfile, f_cindent, f_clearmatches,
@@ -233,6 +233,11 @@ pub const VIML_CMP_BASE: u16 = 3020;
 // `0x200` (=3532+) overlapped VIML_FN_GETCHAR…, so `==?` dispatched to those
 // instead of comparing — leaving 3030..=3039 reserved for the ic family.
 const VIML_CMP_IC_OFFSET: u16 = 10;
+/// Comparison ids for an operator written with **no** `#`/`?` suffix, whose case
+/// rule is `'ignorecase'` read at run time rather than at compile time (see
+/// [`cmp_id`]). Occupies the free 3080..=3089 block — 3020..=3029 are the
+/// match-case ids and 3030..=3039 the ignore-case ones.
+const VIML_CMP_OPT_BASE: u16 = 3080;
 /// list constructor (argc = element count).
 pub const VIML_MAKE_LIST: u16 = 3050;
 /// dict constructor (argc = 2 × pairs).
@@ -471,6 +476,8 @@ pub const VIML_FILETYPE: u16 = 3579;
 /// `:source {file}`: pop the filename, read and run it in the current scope.
 pub const VIML_SOURCE: u16 = 3500;
 /// `:unlet {name}`: pop the name, delete the variable.
+/// `:lockvar` / `:unlockvar` — pops (lock, depth, name).
+pub const VIML_LOCKVAR: u16 = 3047;
 pub const VIML_UNLET: u16 = 3501;
 /// `:unlet base[index]` / `:unlet base.key`: pop index then container, remove
 /// the List item or Dict entry in place.
@@ -1133,6 +1140,8 @@ pub const VIML_FN_VIRTCOL2COL: u16 = 3523;
 pub const VIML_FN_HLID: u16 = 3572;
 /// `diff_hlID()`
 pub const VIML_FN_DIFF_HLID: u16 = 3573;
+/// `typename()` — the vim9 declared-type name of a value.
+pub const VIML_FN_TYPENAME: u16 = 3602;
 /// `intercept()` — AOP extension (vimlrs/zshrs-original; no Vim counterpart).
 pub const VIML_FN_INTERCEPT: u16 = 3600;
 /// `intercept_proceed()` — AOP extension (vimlrs/zshrs-original).
@@ -1236,6 +1245,9 @@ pub const VIML_SET_LINENO: u16 = 3070;
 pub const VIML_CALL_USER: u16 = 3071;
 /// Funcref-value call: pop `argc` args then a Funcref/Partial value → call it.
 pub const VIML_CALL_FUNCREF: u16 = 3574;
+/// `base.key(args)` where `base` is a Dict — calls the funcref at `base[key]`
+/// with `base` as `self`. Stack (bottom→top): base, key, args….
+pub const VIML_CALL_MEMBER: u16 = 3048;
 /// Snapshot `did_emsg` before a statement evaluates its expression, so the
 /// statement (e.g. `:echo`) can suppress its output if an error was raised.
 pub const VIML_ERR_MARK: u16 = 3575;
@@ -1260,8 +1272,15 @@ pub const VIML_REPORT_UNCAUGHT: u16 = 3076;
 /// `FUNCTIONS` registry — see `b_define_func`.
 pub const VIML_DEFINE_FUNC: u16 = 3580;
 
-/// Builtin id for comparison `(op, ignore_case)`.
-pub fn cmp_id(op: CmpOp, ic: bool) -> u16 {
+/// Builtin id for comparison `(op, case-suffix)`.
+///
+/// Three families, not two. `==#` and `==?` fix the case rule when the script is
+/// compiled, but a bare `==` does not: `eval.c`'s `eval4` (c:2209) reads `p_ic`
+/// *at the moment the comparison runs*, so a `:set ignorecase` executed later in
+/// the same script has to change the answer. Baking `Default` into the
+/// match-case id — what this did before — made `set ignorecase | echo 'a' == 'A'`
+/// print 0 where vim prints 1.
+pub fn cmp_id(op: CmpOp, case: CaseFlag) -> u16 {
     let off = match op {
         CmpOp::Equal => 0,
         CmpOp::NotEqual => 1,
@@ -1274,13 +1293,11 @@ pub fn cmp_id(op: CmpOp, ic: bool) -> u16 {
         CmpOp::Is => 8,
         CmpOp::IsNot => 9,
     };
-    VIML_CMP_BASE + off + if ic { VIML_CMP_IC_OFFSET } else { 0 }
-}
-
-/// Resolve the comparison ignore-case flag from a `==#`/`==?` suffix. Phase 3
-/// has no `'ignorecase'` option, so `Default` is match-case.
-pub fn ic_flag(case: CaseFlag) -> bool {
-    matches!(case, CaseFlag::IgnoreCase)
+    match case {
+        CaseFlag::MatchCase => VIML_CMP_BASE + off,
+        CaseFlag::IgnoreCase => VIML_CMP_BASE + VIML_CMP_IC_OFFSET + off,
+        CaseFlag::Default => VIML_CMP_OPT_BASE + off,
+    }
 }
 
 /// Map a lexer [`CmpOp`] to the ported [`exprtype_T`] `typval_compare` expects.
@@ -1310,6 +1327,21 @@ thread_local! {
     static LAST_RESULT: RefCell<Option<typval_T>> = const { RefCell::new(None) };
     /// `:echo` sink: `Some(buf)` captures (tests/embedding), `None` is stdout.
     static ECHO_SINK: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// c: `msg_col` (`globals.h`) — is there already text on the message line?
+    ///
+    /// Vim's newline is a **leading** separator, not a trailing one: `msg_start()`
+    /// breaks the line only when the column is non-zero, and `:echon` never breaks
+    /// it at all. That single fact is what makes
+    ///
+    ///   echo 'B' | echon 'C'        →  "B" and "C" on ONE line
+    ///   echo 'x' | echo ''          →  the empty `:echo` *ends* the line, it does
+    ///                                  not add a blank one
+    ///
+    /// come out the way real vim prints them. Modelling it as "`:echo` appends a
+    /// newline" gets all three wrong, which is what vimlrs did before. Only the
+    /// stdout path uses this; a capture (`execute()`, `:redir`, embedding) keeps
+    /// its own convention — see [`echo_impl`].
+    static MSG_COL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// `did_emsg` snapshot taken by `VIML_ERR_MARK` at a statement's start, so
     /// `:echo`/`:echon` can skip output when evaluating its args raised an error.
     static ERR_MARK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
@@ -1545,12 +1577,33 @@ fn b_silent_leave(vm: &mut VM, _: u8) -> Value {
 
 fn b_try_enter(_vm: &mut VM, _: u8) -> Value {
     crate::ported::ex_eval::trylevel.with(|t| t.set(t.get() + 1));
+    // c: `ex_try` saves `v:exception` (`v_exception(NULL)` in `vars.c:2308`) into
+    // the try-conditional so `ex_endtry` can put it back. `v:exception` is only
+    // meaningful *inside* the `:catch` that set it: after `:endtry` it reverts to
+    // whatever the enclosing level had — empty at the top level. Verified against
+    // vim 9.2: `try | throw 'a' | catch | endtry | echo v:exception` prints
+    // nothing, and a nested `:try` restores the outer clause's value, not "".
+    V_EXCEPTION_SAVE.with(|s| {
+        let cur = V_EXCEPTION.with(|e| e.borrow().clone());
+        s.borrow_mut().push(cur);
+    });
     Value::Undef
 }
 
 fn b_try_leave(_vm: &mut VM, _: u8) -> Value {
     crate::ported::ex_eval::trylevel.with(|t| t.set((t.get() - 1).max(0)));
+    if let Some(prev) = V_EXCEPTION_SAVE.with(|s| s.borrow_mut().pop()) {
+        set_vim_var_string(VV_EXCEPTION, &prev);
+        V_EXCEPTION.with(|e| *e.borrow_mut() = prev);
+    }
     Value::Undef
+}
+
+thread_local! {
+    /// `v:exception` as it was at each live `:try`, restored by that `:endtry`
+    /// (see [`b_try_enter`]). One entry per open try-conditional, so nesting
+    /// unwinds in order.
+    static V_EXCEPTION_SAVE: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
 thread_local! {
@@ -1807,6 +1860,22 @@ fn is_vim9_def_frame() -> bool {
 fn b_setvar(vm: &mut VM, _: u8) -> Value {
     let name = tv_get_string(&pop_tv(vm));
     let val = pop_tv(vm);
+    // c: `set_var_const` (vars.c:2860) calls `value_check_lock(di->di_tv.v_lock,
+    // name, TV_CSTRING)` before overwriting — reassigning a `:lockvar`-ed or
+    // `:const` variable is E741 and changes nothing. The check lives here rather
+    // than inside `set_var` because the ported `do_lock_var` writes the *newly
+    // locked* value back through `set_var`, and a check there would make
+    // `:unlockvar` impossible.
+    if let Some(old) = crate::ported::eval::vars::find_var(&name, true) {
+        if matches!(
+            old.v_lock,
+            crate::ported::eval::typval_defs_h::VarLockStatus::VAR_LOCKED
+                | crate::ported::eval::typval_defs_h::VarLockStatus::VAR_FIXED
+        ) {
+            message::semsg(&format!("E741: Value is locked: {name}"));
+            return Value::Undef;
+        }
+    }
     set_var(&name, name.len(), val, false);
     Value::Undef
 }
@@ -2018,9 +2087,19 @@ fn b_not(vm: &mut VM, _: u8) -> Value {
     tv_to_value(tv_num(n))
 }
 
-/// Shared comparison body: `typval_compare(&mut a, &b, type, ic)` writes the
-/// boolean result into `a`.
-fn do_compare(vm: &mut VM, op: CmpOp, ic: bool) -> Value {
+/// Shared comparison body: resolve the case rule, then let
+/// `typval_compare(&mut a, &b, type, ic)` write the boolean result into `a`.
+fn do_compare(vm: &mut VM, op: CmpOp, case: CaseFlag) -> Value {
+    let ic = match case {
+        CaseFlag::MatchCase => false,
+        CaseFlag::IgnoreCase => true,
+        // c: eval4 (c:2209) — no suffix means `ic = p_ic`, read now.
+        CaseFlag::Default => {
+            crate::ported::eval::typval::tv_get_bool(&crate::ported::option::get_option_value(
+                "ignorecase",
+            )) != 0
+        }
+    };
     let b = pop_tv(vm);
     let mut a = pop_tv(vm);
     crate::ported::eval::typval_compare(&mut a, &b, cmp_to_exprtype(op), ic);
@@ -2028,26 +2107,35 @@ fn do_compare(vm: &mut VM, op: CmpOp, ic: bool) -> Value {
 }
 
 // One thin handler per comparison id (fusevm `register_builtin` takes plain
-// `fn`s; the `(op, ic)` pair is compile-time known).
+// `fn`s; the `(op, case)` pair is compile-time known). Three per operator: `#`,
+// `?`, and the unsuffixed form that resolves `'ignorecase'` when it runs.
 macro_rules! cmp_handlers {
-    ($(($name:ident, $op:expr, $ic:literal)),+ $(,)?) => {
-        $(fn $name(vm: &mut VM, _: u8) -> Value { do_compare(vm, $op, $ic) })+
+    ($(($m:ident, $i:ident, $o:ident, $op:expr)),+ $(,)?) => {
+        $(
+            fn $m(vm: &mut VM, _: u8) -> Value { do_compare(vm, $op, CaseFlag::MatchCase) }
+            fn $i(vm: &mut VM, _: u8) -> Value { do_compare(vm, $op, CaseFlag::IgnoreCase) }
+            fn $o(vm: &mut VM, _: u8) -> Value { do_compare(vm, $op, CaseFlag::Default) }
+        )+
         fn register_cmp_handlers(vm: &mut VM) {
-            $(vm.register_builtin(cmp_id($op, $ic), $name);)+
+            $(
+                vm.register_builtin(cmp_id($op, CaseFlag::MatchCase), $m);
+                vm.register_builtin(cmp_id($op, CaseFlag::IgnoreCase), $i);
+                vm.register_builtin(cmp_id($op, CaseFlag::Default), $o);
+            )+
         }
     };
 }
 cmp_handlers! {
-    (cmp_eq,     CmpOp::Equal,        false), (cmp_eq_ic,     CmpOp::Equal,        true),
-    (cmp_ne,     CmpOp::NotEqual,     false), (cmp_ne_ic,     CmpOp::NotEqual,     true),
-    (cmp_match,  CmpOp::Match,        false), (cmp_match_ic,  CmpOp::Match,        true),
-    (cmp_nomatch,CmpOp::NoMatch,      false), (cmp_nomatch_ic,CmpOp::NoMatch,      true),
-    (cmp_gt,     CmpOp::Greater,      false), (cmp_gt_ic,     CmpOp::Greater,      true),
-    (cmp_ge,     CmpOp::GreaterEqual, false), (cmp_ge_ic,     CmpOp::GreaterEqual, true),
-    (cmp_lt,     CmpOp::Less,         false), (cmp_lt_ic,     CmpOp::Less,         true),
-    (cmp_le,     CmpOp::LessEqual,    false), (cmp_le_ic,     CmpOp::LessEqual,    true),
-    (cmp_is,     CmpOp::Is,           false), (cmp_is_ic,     CmpOp::Is,           true),
-    (cmp_isnot,  CmpOp::IsNot,        false), (cmp_isnot_ic,  CmpOp::IsNot,        true),
+    (cmp_eq,      cmp_eq_ic,      cmp_eq_opt,      CmpOp::Equal),
+    (cmp_ne,      cmp_ne_ic,      cmp_ne_opt,      CmpOp::NotEqual),
+    (cmp_match,   cmp_match_ic,   cmp_match_opt,   CmpOp::Match),
+    (cmp_nomatch, cmp_nomatch_ic, cmp_nomatch_opt, CmpOp::NoMatch),
+    (cmp_gt,      cmp_gt_ic,      cmp_gt_opt,      CmpOp::Greater),
+    (cmp_ge,      cmp_ge_ic,      cmp_ge_opt,      CmpOp::GreaterEqual),
+    (cmp_lt,      cmp_lt_ic,      cmp_lt_opt,      CmpOp::Less),
+    (cmp_le,      cmp_le_ic,      cmp_le_opt,      CmpOp::LessEqual),
+    (cmp_is,      cmp_is_ic,      cmp_is_opt,      CmpOp::Is),
+    (cmp_isnot,   cmp_isnot_ic,   cmp_isnot_opt,   CmpOp::IsNot),
 }
 
 fn b_make_list(vm: &mut VM, argc: u8) -> Value {
@@ -2235,14 +2323,58 @@ fn echo_impl(vm: &mut VM, argc: u8, newline: bool) {
     // execute(), Vim instead *prefixes* each `:echo` with a newline (so
     // string(execute("echo 5")) == "\n5"); `:echon` adds none.
     let exec_capture = EXECUTE_DEPTH.with(|d| d.get()) > 0;
-    let line = if !newline {
-        body
-    } else if exec_capture {
-        format!("\n{body}")
-    } else {
-        format!("{body}\n")
-    };
-    echo_write(&line);
+    if ECHO_SINK.with(|s| s.borrow().is_some()) {
+        // A capture is active. `execute()` has its own recorded convention (Vim
+        // returns "\n5" for `execute('echo 5')`), and the embedding/test capture
+        // keeps the line-per-message shape its callers already parse.
+        let line = if !newline {
+            body
+        } else if exec_capture {
+            format!("\n{body}")
+        } else {
+            format!("{body}\n")
+        };
+        echo_write(&line);
+        return;
+    }
+    msg_put(&body, newline);
+}
+
+/// Write one `:echo`/`:echon` message to stdout under Vim's message-column model
+/// (see [`MSG_COL`]): `:echo` breaks the line first *if* there is anything on it,
+/// `:echon` never does, and neither appends a trailing newline. The line the run
+/// ends on is closed by [`msg_flush_line`].
+fn msg_put(body: &str, newline: bool) {
+    // c: `msg_silent` — while `:silent` is in effect nothing is shown, so the
+    // message never reaches the column either.
+    if message::msg_silent.with(|m| m.get()) != 0 {
+        return;
+    }
+    if newline && MSG_COL.with(|c| c.get()) {
+        echo_write("\n");
+        MSG_COL.with(|c| c.set(false));
+    }
+    if body.is_empty() {
+        return;
+    }
+    echo_write(body);
+    // An embedded newline (`echo "a\nb"`) resets the column just like a break
+    // does, so what matters is only the text after the last one.
+    let tail = body.rsplit('\n').next().unwrap_or("");
+    MSG_COL.with(|c| c.set(!tail.is_empty()));
+}
+
+/// Close the message line if the run left text on it. Vim itself never writes
+/// that final newline — in `-es` mode its last line ends without one — but a
+/// command-line interpreter that leaves the shell prompt mid-line is not usable,
+/// so the newline is emitted once, at the very end, where it cannot affect the
+/// spacing *between* messages. Called from the binary's exit path and after each
+/// REPL turn.
+pub fn msg_flush_line() {
+    if MSG_COL.with(|c| c.get()) {
+        MSG_COL.with(|c| c.set(false));
+        echo_write("\n");
+    }
 }
 
 fn b_set_result(vm: &mut VM, _: u8) -> Value {
@@ -2435,6 +2567,29 @@ pub fn do_runtime(bang: bool, args: &str) {
     }
 }
 
+/// `:lockvar[!] [depth] {name}…` / `:unlockvar[!] …` — stack (top→bottom):
+/// which command, the `!`, the raw argument. Rebuilds the `exarg_T` and hands it
+/// to the ported `ex_lockvar`, which owns the depth/name parsing and the
+/// per-target (un)locking.
+fn b_lockvar(vm: &mut VM, _: u8) -> Value {
+    use crate::ported::eval::vars::{cmdidx_T, ex_lockvar, exarg_T};
+    let lock = tv_get_string(&pop_tv(vm)) == "lock";
+    let bang = tv_get_string(&pop_tv(vm)) == "!";
+    let arg = tv_get_string(&pop_tv(vm));
+    let mut eap = exarg_T {
+        arg,
+        cmdidx: if lock {
+            cmdidx_T::CMD_lockvar
+        } else {
+            cmdidx_T::CMD_unlockvar
+        },
+        forceit: bang,
+        ..Default::default()
+    };
+    ex_lockvar(&mut eap);
+    Value::Undef
+}
+
 /// `:unlet {name}` — delete a variable (forceit: missing is not an error here).
 fn b_unlet(vm: &mut VM, _: u8) -> Value {
     let name = tv_get_string(&pop_tv(vm));
@@ -2544,6 +2699,37 @@ fn b_call_funcref(vm: &mut VM, argc: u8) -> Value {
         return Value::Undef;
     }
     match call_funcref(&callee, args) {
+        Some(rettv) => tv_to_value(rettv),
+        None => Value::Undef,
+    }
+}
+
+/// `VIML_CALL_MEMBER` — the Dict branch of `base.key(args)`. Pops the arguments,
+/// the key and the base; looks the funcref up in the Dict and calls it with the
+/// Dict bound as `self`, which is what makes `function d.f() dict … endfunction`
+/// and `d.f()` see `self.x` (c: `handle_subscript` passes `selfdict` to
+/// `call_func`).
+fn b_call_member(vm: &mut VM, argc: u8) -> Value {
+    let mut args = Vec::with_capacity(argc as usize);
+    for _ in 0..argc {
+        args.push(pop_tv(vm));
+    }
+    args.reverse();
+    let key = pop_tv(vm);
+    let base = pop_tv(vm);
+    let member = index_value(&base, &key);
+    if !matches!(member.v_type, VAR_FUNC | VAR_PARTIAL) {
+        // E716 (missing key) has already been raised by `index_value`; only a
+        // present-but-not-callable member reaches this.
+        if !matches!(member.v_type, VAR_UNKNOWN) {
+            message::emsg("E15: not a function");
+        }
+        return Value::Undef;
+    }
+    // Only a Dict base becomes `self` — `funcs[0](x)` indexes a List and binds
+    // nothing, exactly as `handle_subscript` only sets `selfdict` for VAR_DICT.
+    let selfdict = matches!(base.v_type, VAR_DICT).then_some(base);
+    match call_funcref_self(&member, args, selfdict) {
         Some(rettv) => tv_to_value(rettv),
         None => Value::Undef,
     }
@@ -2725,6 +2911,15 @@ fn call_user_function_raw(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
             fc_name: name.to_string(),
         })
     });
+    // c: `fc_selfdict` becomes the function-local `self` for a `dict` function.
+    // Taken (not read) so a nested call inside the body does not inherit it.
+    if let Some(selftv) = PENDING_SELF.with(|s| s.borrow_mut().take()) {
+        crate::ported::eval::vars::funccal_stack.with(|s| {
+            if let Some(top) = s.borrow_mut().last_mut() {
+                tv_dict_add_tv(&mut top.fc_l_vars, "self", selftv);
+            }
+        });
+    }
     // Track vim9-def-ness parallel to the frame so `b_getvar` can fall back to
     // script scope for a bare name inside a vim9 def (but not a legacy function).
     VIM9_DEF_STACK.with(|s| s.borrow_mut().push(func.vim9));
@@ -3361,13 +3556,29 @@ fn filter_map_cmd(cmd: &str, key: &typval_T, val: &typval_T) -> bool {
 /// Call a Funcref/Partial typval with `extra` args. A Partial prepends its bound
 /// `pt_argv` (its `self` dict is not modeled).
 fn call_funcref(funcref: &typval_T, extra: Vec<typval_T>) -> Option<typval_T> {
+    call_funcref_self(funcref, extra, None)
+}
+
+/// [`call_funcref`] with an explicit `self` dict — what a `d.key(...)` member
+/// call and `call(F, args, dict)` supply. A Partial's own bound dict
+/// (`pt_dict`) wins over the caller's, as in `call_func`.
+fn call_funcref_self(
+    funcref: &typval_T,
+    extra: Vec<typval_T>,
+    selfdict: Option<typval_T>,
+) -> Option<typval_T> {
     match (funcref.v_type, &funcref.vval) {
         (VAR_PARTIAL, v_partial(Some(p))) => {
             let mut args = p.pt_argv.clone();
             args.extend(extra);
-            call_named(&p.pt_name, args)
+            let bound = p.pt_dict.clone().map(|d| typval_T {
+                v_type: VAR_DICT,
+                v_lock: crate::ported::eval::typval_defs_h::VarLockStatus::VAR_UNLOCKED,
+                vval: v_dict(Some(d)),
+            });
+            with_self(bound.or(selfdict), || call_named(&p.pt_name, args))
         }
-        _ => call_named(&tv_get_string(funcref), extra),
+        _ => with_self(selfdict, || call_named(&tv_get_string(funcref), extra)),
     }
 }
 
@@ -3399,6 +3610,28 @@ fn b_define_func(vm: &mut VM, _argc: u8) -> Value {
         });
     }
     Value::Int(0)
+}
+
+thread_local! {
+    /// The `self` dict for the *next* user-function call, consumed by
+    /// [`call_user_function_raw`] when it pushes the `l:` frame.
+    ///
+    /// c: `funccall_T.fc_selfdict` (`userfunc.c`) — set by `call_func` from the
+    /// `selfdict` argument, which `handle_subscript`/`ex_call` fills in for a
+    /// `dict.key(...)` call and `f_call` from its optional third argument. This
+    /// port has no `funcexe_T` to carry it through `call_named`, so it is parked
+    /// here for the one call that immediately follows and taken exactly once.
+    static PENDING_SELF: RefCell<Option<typval_T>> = const { RefCell::new(None) };
+}
+
+/// Run `f` with `selfdict` parked as the `self` of the call it makes. Always
+/// clears the slot afterwards, so a `self` meant for a builtin (which never
+/// takes one) cannot leak into an unrelated later call.
+fn with_self<R>(selfdict: Option<typval_T>, f: impl FnOnce() -> R) -> R {
+    PENDING_SELF.with(|s| *s.borrow_mut() = selfdict);
+    let r = f();
+    PENDING_SELF.with(|s| *s.borrow_mut() = None);
+    r
 }
 
 /// Resolve a function name to either a user `:function` or a ported builtin and
@@ -3462,7 +3695,13 @@ fn b_call(vm: &mut VM, argc: u8) -> Value {
             .collect(),
         _ => Vec::new(),
     };
-    match call_funcref(&args[0], call_args) {
+    // c: `f_call` passes its optional third argument as `selfdict`, so
+    // `call(F, args, d)` runs a `dict` function with `self` bound to `d`.
+    let selfdict = args
+        .get(2)
+        .filter(|d| matches!(d.v_type, VAR_DICT))
+        .cloned();
+    match call_funcref_self(&args[0], call_args, selfdict) {
         Some(rettv) => tv_to_value(rettv),
         None => {
             message::semsg(&format!(
@@ -4589,6 +4828,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_SETOPT, b_setopt);
     vm.register_builtin(VIML_FN_LEN, b_fn_len);
     vm.register_builtin(VIML_FN_TYPE, b_fn_type);
+    vm.register_builtin(VIML_FN_TYPENAME, |vm, n| call_func(vm, n, f_typename));
     vm.register_builtin(VIML_FN_STRING, b_fn_string);
     vm.register_builtin(VIML_FN_EMPTY, b_fn_empty);
     vm.register_builtin(VIML_FN_ABS, b_fn_abs);
@@ -4698,6 +4938,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FN_LOG10, |vm, n| call_float_op(vm, n, f64::log10));
     vm.register_builtin(VIML_EXEC_STMT, b_exec_stmt);
     vm.register_builtin(VIML_SOURCE, b_source);
+    vm.register_builtin(VIML_LOCKVAR, b_lockvar);
     vm.register_builtin(VIML_UNLET, b_unlet);
     vm.register_builtin(VIML_UNLET_INDEX, b_unlet_index);
     vm.register_builtin(VIML_SET, b_set);
@@ -5274,6 +5515,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_SET_LINENO, b_set_lineno);
     vm.register_builtin(VIML_CALL_USER, b_call_user);
     vm.register_builtin(VIML_CALL_FUNCREF, b_call_funcref);
+    vm.register_builtin(VIML_CALL_MEMBER, b_call_member);
     vm.register_builtin(VIML_ERR_MARK, b_err_mark);
     vm.register_builtin(VIML_SET_RETURN, b_set_return);
     vm.register_builtin(VIML_THROW, b_throw);
@@ -5467,7 +5709,10 @@ pub fn source_tolerant(src: &str) -> (usize, usize) {
     for (_lineno, stmt) in stmts {
         // Each statement compiles + runs independently; a compile error or an
         // uncaught run-time error ends only that statement's chunk.
-        match compile_program(std::slice::from_ref(&stmt)) {
+        // `compile_script_stmt`, not `compile_program`: each statement is a
+        // fragment of one script, so a top-level `let` has to reach `g:` rather
+        // than a slot only this fragment can see.
+        match crate::compile_viml::compile_script_stmt(std::slice::from_ref(&stmt)) {
             Ok(prog) => {
                 run_compiled(prog);
                 ran += 1;

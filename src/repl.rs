@@ -459,7 +459,12 @@ pub fn run() -> ExitCode {
                 // the result value when no runtime error was raised for THIS
                 // line (mirrors `cli::run`'s `--expr` path).
                 let before = emsg_count();
-                match crate::eval_source(trimmed) {
+                let r = crate::eval_source(trimmed);
+                // Close the message line this turn's `:echo`s left open before
+                // the value or the next prompt is written (see
+                // `fusevm_bridge::msg_flush_line`).
+                crate::fusevm_bridge::msg_flush_line();
+                match r {
                     Ok(opt) => {
                         let errored = emsg_count() > before;
                         if let Some(v) = opt {

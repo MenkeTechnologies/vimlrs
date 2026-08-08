@@ -103,6 +103,68 @@ pub fn f_type(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.vval = v_number(n);
 }
 
+/// Port of `f_typename()` (`Src/eval/funcs.c`) → `type_name(typval2type(…))`
+/// (`Src/vim9type.c`): the *declared type* of a value as vim9 spells it.
+///
+/// Scalars map one-to-one. A container's member type is inferred from its items:
+/// all-alike gives `list<T>`/`dict<T>`, anything else — including an empty
+/// container — gives `<any>`. Verified against vim 9.2:
+///
+///   typename([])          → list<any>      typename([1,2])    → list<number>
+///   typename([1,'a'])     → list<any>      typename([[1,2]])  → list<list<number>>
+///   typename([[]])        → list<list<any>>  typename({'a':1}) → dict<number>
+///   typename(v:null)      → special        typename(v:none)   → special
+///
+/// KNOWN GAP: a Funcref reports `func(...): any`, which is what vim prints for
+/// every *legacy* `:function` (verified: `function('UF')`, `funcref('UF')`, a
+/// partial over one, and a varargs function all give exactly that). vim prints a
+/// precise signature only for a builtin (`func([unknown], [unknown], [unknown]):
+/// string` for `tr`) or a vim9 lambda, both of which need the vim9 builtin
+/// argument-type table that this port does not carry.
+pub fn f_typename(argvars: &[typval_T], rettv: &mut typval_T) {
+    *rettv = typval_T::from(type_name_of(&argvars[0]));
+}
+
+/// The vim9 type name of one value — see [`f_typename`].
+fn type_name_of(tv: &typval_T) -> String {
+    // The member type of a container: the shared type of every item, else "any".
+    fn member_of<'a>(mut items: impl Iterator<Item = &'a typval_T>) -> String {
+        let Some(first) = items.next() else {
+            return "any".into();
+        };
+        let t = type_name_of(first);
+        if items.all(|i| type_name_of(i) == t) {
+            t
+        } else {
+            "any".into()
+        }
+    }
+    match (tv.v_type, &tv.vval) {
+        (VAR_NUMBER, _) => "number".into(),
+        (VAR_STRING, _) => "string".into(),
+        (VAR_FLOAT, _) => "float".into(),
+        (VAR_BOOL, _) => "bool".into(),
+        (VAR_SPECIAL, _) => "special".into(),
+        (VAR_BLOB, _) => "blob".into(),
+        (VAR_FUNC | VAR_PARTIAL, _) => "func(...): any".into(),
+        (VAR_LIST, v_list(l)) => {
+            let m = l.as_ref().map_or_else(
+                || "any".to_string(),
+                |l| member_of(l.borrow().lv_items.iter().map(|i| &i.li_tv)),
+            );
+            format!("list<{m}>")
+        }
+        (VAR_DICT, v_dict(d)) => {
+            let m = d.as_ref().map_or_else(
+                || "any".to_string(),
+                |d| member_of(d.borrow().dv_hashtab.values()),
+            );
+            format!("dict<{m}>")
+        }
+        _ => "any".into(),
+    }
+}
+
 /// Port of `f_empty()` from `Src/eval/funcs.c`.
 ///
 /// "empty(expr)" function — whether `expr` is empty.

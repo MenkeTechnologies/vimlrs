@@ -137,6 +137,19 @@ pub enum Expr {
         /// Argument expressions.
         args: Vec<Expr>,
     },
+    /// `base.name(args)` with no space around the dot — syntactically ambiguous
+    /// in legacy Vimscript exactly as [`Expr::Member`] is, and resolved the same
+    /// way: when `base` is a Dict at run time this calls the funcref stored at
+    /// `base['name']`; otherwise it is `base . name(args)`, string concatenation
+    /// with an ordinary function call.
+    MemberCall {
+        /// The value before the dot.
+        base: Box<Expr>,
+        /// The literal key / function name after it.
+        key: String,
+        /// Argument expressions.
+        args: Vec<Expr>,
+    },
     /// Direct call of a funcref-valued expression: `expr(args)` (e.g.
     /// `function('toupper')('hi')` or `(F)(x)`).
     CallExpr {
@@ -370,6 +383,11 @@ pub enum Stmt {
     /// entries. Each argument is either a bare name or a List/Dict element
     /// target (`l[i]` / `d.key`); see [`UnletArg`].
     Unlet(Vec<UnletArg>),
+    /// `:lockvar[!] [depth] {name}…` / `:unlockvar[!] …` — lock or unlock
+    /// variables. The argument text is kept raw and handed to the ported
+    /// `ex_lockvar` (vendor/eval/vars.c), which owns the `!`/depth/name parsing;
+    /// `lock` selects which of the two commands it is and `bang` is the `!`.
+    LockVar { arg: String, bang: bool, lock: bool },
     /// A `:map`-family command (`nmap`, `inoremap`, `vunmap`, `mapclear`, …):
     /// the whole raw command line, re-parsed by the mapping runtime.
     Map(String),

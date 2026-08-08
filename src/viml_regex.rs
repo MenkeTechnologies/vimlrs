@@ -83,6 +83,10 @@ enum ClassItem {
     Keyword,
     /// `\K` — `\k` but excluding digits.
     KeywordNoDigit,
+    /// `\f` — filename char (default `'isfname'`); multibyte-aware.
+    Fname,
+    /// `\F` — `\f` but excluding digits.
+    FnameNoDigit,
     /// `[:alnum:]` — ASCII letters/digits `[0-9A-Za-z]` (no `_`, unlike `\w`).
     Alnum,
     /// `[:blank:]` — space or tab only (`:help /[:blank:]`).
@@ -148,6 +152,8 @@ impl ClassItem {
             ClassItem::IdentNoDigit => is_ident_char(c) && !c.is_ascii_digit(),
             ClassItem::Keyword => is_keyword_char(c),
             ClassItem::KeywordNoDigit => is_keyword_char(c) && !c.is_ascii_digit(),
+            ClassItem::Fname => is_fname_char(c),
+            ClassItem::FnameNoDigit => is_fname_char(c) && !c.is_ascii_digit(),
             // POSIX bracket classes `[[:name:]]` (`:help /[:alpha:]`). ASCII-ness
             // matches Vim/nvim empirically: alnum/graph/punct are ASCII-only,
             // `[:print:]` reuses `is_printable` (multibyte-aware).
@@ -192,6 +198,15 @@ fn is_ident_char(c: char) -> bool {
 /// marks as keyword chars; `is_alphanumeric` does not.
 fn is_keyword_char(c: char) -> bool {
     is_ident_char(c) || ((c as u32) > 0xFF && c.is_alphanumeric())
+}
+
+/// `\f` filename test — default `'isfname'`, which on Unix is
+/// `@,48-57,/,.,-,_,+,,,#,$,%,~,=`: the `@` class (alphabetic, multibyte
+/// included), digits, `_`, and that punctuation set. Enumerated char by char
+/// against vim 9.2 over `0x20..=0x7E`, which yields exactly
+/// `#$%+,-./0123456789=A-Z_a-z~`; `é` and `中` also match, `' '` does not.
+fn is_fname_char(c: char) -> bool {
+    is_keyword_char(c) || matches!(c, '#' | '$' | '%' | '+' | ',' | '-' | '.' | '/' | '=' | '~')
 }
 
 impl Class {
@@ -983,6 +998,8 @@ impl Parser {
             'I' => class_atom(false, ClassItem::IdentNoDigit),
             'k' => class_atom(false, ClassItem::Keyword),
             'K' => class_atom(false, ClassItem::KeywordNoDigit),
+            'f' => class_atom(false, ClassItem::Fname),
+            'F' => class_atom(false, ClassItem::FnameNoDigit),
             'c' => {
                 self.forced_ic = Some(true);
                 return self.atom(false);

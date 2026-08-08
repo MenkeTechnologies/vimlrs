@@ -148,6 +148,12 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
                 .collect::<Result<Vec<_>, _>>()
                 .map(Stmt::Unlet)
         }
+        // `:lockvar[!] [depth] {name}…` / `:unlockvar[!] …` — `ex_lockvar`
+        // (vendor/eval/vars.c): `!` locks/unlocks all levels (`DICT_MAXNEST`), an
+        // optional leading number is the explicit depth, and the default is 2.
+        "lockvar" | "lockva" | "lockv" | "unlockvar" | "unlockva" | "unlockv" | "unlo" => {
+            parse_lockvar(rest, !cmd.starts_with("un"))
+        }
         "let" => parse_let(rest),
         // vim9 `:var {name}[: type] = {expr}` declare-and-assign like `:let`. The
         // `: type` annotation is parsed and discarded (checking/coercion deferred).
@@ -168,10 +174,29 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
         {
             Ok(Stmt::Expr(Expr::Number(0)))
         }
-        // `:const {name} = {expr}` assigns like `:let`. RUST-PORT NOTE: Vim also
-        // locks the variable (reassigning is E741); that immutability is not yet
-        // enforced here — `:const` parses and assigns as `:let`.
-        "const" | "cons" => parse_let(&strip_vim9_type(rest)),
+        // `:const {name} = {expr}` assigns like `:let` and then locks the result
+        // (`ex_let_const` passes `is_const`, and `set_var_const` locks with
+        // `DICT_MAXNEST` depth) — reassigning a `:const` is E741 in vim. Modelled
+        // as the assignment followed by the `:lockvar!` it implies.
+        "const" | "cons" => {
+            let assign = parse_let(&strip_vim9_type(rest))?;
+            match &assign {
+                Stmt::Let {
+                    target: LetTarget::Var(name),
+                    ..
+                } => {
+                    let lock = Stmt::LockVar {
+                        arg: name.clone(),
+                        bang: true,
+                        lock: true,
+                    };
+                    Ok(Stmt::LineGroup(vec![assign, lock]))
+                }
+                // A destructuring or element target: assign without the lock
+                // rather than guess which names it bound.
+                _ => Ok(assign),
+            }
+        }
         "call" => Ok(Stmt::Call(parse_expr(strip_legacy_trailing_comment(rest))?)),
         // `:defer Func(args)` takes a call with no `:call` in front of it, so the
         // expression is parsed exactly as `:call`'s is.
@@ -2219,6 +2244,20 @@ fn parse_let(rest: &str) -> Result<Stmt, VimlError> {
 /// Split a `:unlet` argument list on top-level whitespace, keeping `[…]`
 /// subscripts and quoted strings (e.g. `d['a b']`) intact. A plain
 /// `split_whitespace()` would wrongly break `unlet d['a b']` in two.
+/// `:lockvar`/`:unlockvar` argument text → [`Stmt::LockVar`].
+///
+/// Only the `!` is split off here; the depth digits and the name list are left
+/// for the ported `ex_lockvar`, which already implements both.
+fn parse_lockvar(rest: &str, lock: bool) -> Result<Stmt, VimlError> {
+    let t = rest.trim_start();
+    let bang = t.starts_with('!');
+    let arg = t.trim_start_matches('!').trim().to_string();
+    if arg.is_empty() {
+        return Err(VimlError::msg("E471: Argument required"));
+    }
+    Ok(Stmt::LockVar { arg, bang, lock })
+}
+
 fn split_unlet_args(s: &str) -> Vec<&str> {
     let bytes = s.as_bytes();
     let mut out = Vec::new();
@@ -3053,16 +3092,21 @@ impl Parser {
         }
         let prev = &self.toks[i - 1];
         let next = &self.toks[i + 1];
-        // `.name(` is concatenation with a function call (`a().b(x)` / `s.f(x)`),
-        // not a member call — legacy Vimscript has no direct `dict.key(args)`
-        // call syntax (that is vim9). So only treat `.name` as a member read when
-        // the name is NOT immediately followed by '('.
-        let followed_by_call =
-            matches!(self.toks.get(i + 2), Some(t) if t.kind == Tok::LParen && t.span == next.end);
         matches!(next.kind, Tok::Ident(_))
             && dot.span == prev.end // no space before the dot
             && next.span == dot.end // no space after the dot
-            && !followed_by_call
+    }
+
+    /// True when the member dot at the current position is followed by
+    /// `name(` — `d.get()`. Which of the two it means (call the funcref in the
+    /// Dict, or concatenate with the result of calling `name`) is a run-time
+    /// question, so this only reports the shape; see [`Expr::MemberCall`].
+    fn at_member_call(&self) -> bool {
+        let next_end = match self.toks.get(self.i + 1) {
+            Some(t) => t.end,
+            None => return false,
+        };
+        matches!(self.toks.get(self.i + 2), Some(t) if t.kind == Tok::LParen && t.span == next_end)
     }
 
     /// Postfix subscripts: `[index]`, `[from:to]`, `.name` dict member access,
@@ -3084,8 +3128,19 @@ impl Parser {
                     Expr::Number(_) | Expr::Float(_) | Expr::Str(_) | Expr::List(_)
                 )
             {
+                let is_call = self.at_member_call();
                 self.advance(); // consume the dot
                 if let Tok::Ident(key) = self.advance() {
+                    if is_call {
+                        self.advance(); // consume '('
+                        let args = self.arg_list(&Tok::RParen)?;
+                        base = Expr::MemberCall {
+                            base: Box::new(base),
+                            key,
+                            args,
+                        };
+                        continue;
+                    }
                     // Syntactically identical to string concat (`a.b`): whether
                     // this is a Dict subscript or `.`-concat is decided by the
                     // runtime type of `base` (see the `Expr::Member` lowering in

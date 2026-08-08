@@ -419,7 +419,11 @@ fn repl() -> ExitCode {
             prompt(&mut out);
             continue;
         }
-        match eval_source(&line) {
+        let r = eval_source(&line);
+        // A turn's `:echo` output leaves the message line open (Vim's newline is
+        // a leading separator); close it before the value or the next prompt.
+        crate::fusevm_bridge::msg_flush_line();
+        match r {
             Ok(Some(v)) => println!("{}", encode_tv2echo(&v)),
             Ok(None) => {}
             Err(e) => eprintln!("{e}"),

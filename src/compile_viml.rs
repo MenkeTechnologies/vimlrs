@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::fusevm_bridge as h;
 use crate::viml_ast::{ArithOp, Expr, ForVars, LetTarget, Stmt, UnaryOp, UnletArg};
-use crate::viml_lexer::{CmpOp, VimlError};
+use crate::viml_lexer::{CaseFlag, CmpOp, VimlError};
 
 /// A compiled user function: its name, parameter names, and body chunk.
 #[derive(Serialize, Deserialize, Clone)]
@@ -65,6 +65,8 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
     /// Counter for unique `<lambda>N` names within a compile.
     static LAMBDA_COUNTER: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Counter for the generated names of `:function d.key()` bodies (c: `func_nr`).
+    static DICT_FUNC_COUNTER: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Functions whose `:function` sits inside a script-level control-flow block
     /// (`:if`/`:while`/`:for`/`:try`). Accumulated as the block body compiles,
     /// then moved into [`CompiledProgram::deferred_funcs`]. They are registered
@@ -157,6 +159,10 @@ fn collect_free_vars(
             }
         }
         Expr::Member { base, .. } => collect_free_vars(base, bound, out),
+        Expr::MemberCall { base, args, .. } => {
+            collect_free_vars(base, bound, out);
+            args.iter().for_each(|a| collect_free_vars(a, bound, out));
+        }
         Expr::Interp(segs) => segs.iter().for_each(|s| collect_free_vars(s, bound, out)),
         Expr::Call { args, .. } => args.iter().for_each(|a| collect_free_vars(a, bound, out)),
         Expr::CallExpr { callee, args } => {
@@ -206,11 +212,61 @@ fn build_user_func_def(
     })
 }
 
+/// Split a `:function` name that targets a Dict key (`d.key`, `g:d.key`,
+/// `d.a.b`) into the container expression and the final key. Returns `None` for
+/// an ordinary function name — including an autoload name (`foo#bar`), which
+/// has no dot, and a name whose dots are all part of a scope prefix.
+fn dict_func_target(name: &str) -> Option<(Expr, String)> {
+    let (head, key) = name.rsplit_once('.')?;
+    if head.is_empty() || key.is_empty() {
+        return None;
+    }
+    // The container is everything before the last dot, itself possibly a chain.
+    let mut base = match head.split_once('.') {
+        None => Expr::Var(head.to_string()),
+        Some(_) => {
+            let mut parts = head.split('.');
+            let mut e = Expr::Var(parts.next()?.to_string());
+            for p in parts {
+                e = Expr::Member {
+                    base: Box::new(e),
+                    key: p.to_string(),
+                };
+            }
+            e
+        }
+    };
+    // A bare `d` inside a `:function d.key()` names the script/global variable
+    // `d`, which `Expr::Var` already resolves.
+    if let Expr::Var(v) = &base {
+        if v.is_empty() {
+            return None;
+        }
+        base = Expr::Var(v.clone());
+    }
+    Some((base, key.to_string()))
+}
+
+/// The next generated name for a `:function d.key()` body. c: `func_nr`
+/// (`userfunc.c`) — a decimal counter starting at 1, which is why vim prints
+/// `function('1')` for the first such definition in a session.
+fn next_dict_func_name() -> String {
+    DICT_FUNC_COUNTER.with(|c| {
+        let n = c.get() + 1;
+        c.set(n);
+        n.to_string()
+    })
+}
+
 /// A fresh unique anonymous-function name, `<lambda>N`.
+///
+/// c: `get_lambda_name()` (`userfunc.c:269`) is `"<lambda>%d", ++lambda_no` — the
+/// counter is *pre*-incremented, so the first lambda in a script is
+/// `<lambda>1`, which is what `string({x -> x})` prints in vim.
 fn next_lambda_name() -> String {
     LAMBDA_COUNTER.with(|c| {
-        let n = c.get();
-        c.set(n + 1);
+        let n = c.get() + 1;
+        c.set(n);
         format!("<lambda>{n}")
     })
 }
@@ -218,6 +274,23 @@ fn next_lambda_name() -> String {
 /// Compile a program: top-level statements into `main`, `:function` definitions
 /// into `funcs`.
 pub fn compile_program(stmts: &[Stmt]) -> Result<CompiledProgram, VimlError> {
+    compile_program_inner(stmts, true)
+}
+
+/// Compile a program that is only *part* of a script — one statement of a
+/// tolerant, statement-at-a-time source (`fusevm_bridge::source_tolerant`).
+///
+/// Identical to [`compile_program`] except that top-level locals are never
+/// slotted. Slotting is what lets a script-level numeric loop lower to native
+/// ops, and it is sound only when the whole script is in front of the compiler:
+/// a bare `let A = 1` compiled alone looks like a write nobody reads, so the
+/// slot absorbs it and `g:A` is never written — the next statement's `echo A`
+/// then raised E121 where vim prints 1.
+pub fn compile_script_stmt(stmts: &[Stmt]) -> Result<CompiledProgram, VimlError> {
+    compile_program_inner(stmts, false)
+}
+
+fn compile_program_inner(stmts: &[Stmt], slot_top: bool) -> Result<CompiledProgram, VimlError> {
     // Exceptions are global: if anything in the program throws or `:try`s, every
     // compilation unit emits unwind checks (so a throw can propagate through a
     // function call into a caller's `:try`).
@@ -237,9 +310,35 @@ pub fn compile_program(stmts: &[Stmt]) -> Result<CompiledProgram, VimlError> {
             vim9,
         } = s
         {
-            funcs.push(build_user_func_def(
-                name, args, defaults, body, *bang, *vim9, exc,
-            )?);
+            // `:function d.key()` defines an ANONYMOUS function and stores a
+            // reference to it in the Dict — `string(d.key)` in vim is
+            // `function('1', {…})`, never `function('d.key')`. So the body is
+            // registered under a generated numeric name (vim's `func_nr`
+            // counter, which also starts at 1) and the definition line becomes
+            // the assignment it implies.
+            match dict_func_target(name) {
+                Some((base, key)) => {
+                    let anon = next_dict_func_name();
+                    funcs.push(build_user_func_def(
+                        &anon, args, defaults, body, *bang, *vim9, exc,
+                    )?);
+                    top.push(Stmt::Let {
+                        target: LetTarget::Index {
+                            base: Box::new(base),
+                            index: Box::new(Expr::Str(key)),
+                        },
+                        // NOT `function('1')`: vim rejects a numeric name there
+                        // (E129/E475 — verified), even though its own numbered
+                        // functions are named exactly that. The Funcref value is
+                        // built directly, through the same `\x01func\x01`
+                        // sentinel `Expr::NullFunc` uses.
+                        expr: Expr::Str(format!("\u{1}func\u{1}{anon}")),
+                    });
+                }
+                None => funcs.push(build_user_func_def(
+                    name, args, defaults, body, *bang, *vim9, exc,
+                )?),
+            }
         } else {
             top.push(s.clone());
         }
@@ -249,7 +348,7 @@ pub fn compile_program(stmts: &[Stmt]) -> Result<CompiledProgram, VimlError> {
     // JIT-traces too. Sound: `slot_plan` bails on function calls/dynamic and
     // drops any bare name whose `g:`-alias is referenced (a bare script-level
     // name IS `g:name`). Disabled when exceptions add per-statement unwinds.
-    if !exc {
+    if !exc && slot_top {
         (c.slots, c.int_slots) = slot_plan(&top, false);
     }
     c.unwind.push(Vec::new());
@@ -559,6 +658,9 @@ fn slot_plan(stmts: &[Stmt], in_function: bool) -> SlotPlan {
                     }
                 }
                 Stmt::Let { .. } => *cx.bail = true, // non-bare target: be safe
+                // `:lockvar`/`:unlockvar` names a variable by string at run time,
+                // which a slot has no name for — keep everything in `g:`.
+                Stmt::LockVar { .. } => *cx.bail = true,
                 Stmt::Echo(es) | Stmt::Echon(es) => es.iter().for_each(|e| walk_expr(e, cx)),
                 // `:defer`'s arguments are evaluated where they are written, so
                 // they are walked like any other statement's expression.
@@ -811,6 +913,8 @@ impl Compiler {
             Stmt::Throw(_) => "throw",
             Stmt::Execute(_) => "execute",
             Stmt::Unlet(_) => "unlet",
+            Stmt::LockVar { lock: true, .. } => "lockvar",
+            Stmt::LockVar { lock: false, .. } => "unlockvar",
             _ => return None,
         })
     }
@@ -1025,6 +1129,16 @@ impl Compiler {
                     }
                     self.emit(Op::Pop);
                 }
+                Ok(())
+            }
+            // `:lockvar`/`:unlockvar` — the raw argument plus the two flags; the
+            // bridge rebuilds the `exarg_T` the ported `ex_lockvar` parses.
+            Stmt::LockVar { arg, bang, lock } => {
+                self.load_str(arg);
+                self.load_str(if *bang { "!" } else { "" });
+                self.load_str(if *lock { "lock" } else { "unlock" });
+                self.emit(Op::CallBuiltin(h::VIML_LOCKVAR, 3));
+                self.emit(Op::Pop);
                 Ok(())
             }
             Stmt::Break => {
@@ -1431,7 +1545,10 @@ impl Compiler {
         self.get_var(&idx_var);
         self.get_var(&list_var);
         self.emit(Op::CallBuiltin(h::VIML_FN_LEN, 1));
-        self.emit(Op::CallBuiltin(h::cmp_id(CmpOp::Less, false), 2));
+        self.emit(Op::CallBuiltin(
+            h::cmp_id(CmpOp::Less, CaseFlag::MatchCase),
+            2,
+        ));
         self.emit(Op::CallBuiltin(h::VIML_TRUTHY, 1));
         let jf = self.emit(Op::JumpIfFalse(0));
 
@@ -2131,7 +2248,7 @@ impl Compiler {
                 }
                 self.expr(lhs)?;
                 self.expr(rhs)?;
-                self.emit(Op::CallBuiltin(h::cmp_id(*op, h::ic_flag(*case)), 2));
+                self.emit(Op::CallBuiltin(h::cmp_id(*op, *case), 2));
             }
             Expr::And(a, b) => self.logical_and(a, b)?,
             Expr::Or(a, b) => self.logical_or(a, b)?,
@@ -2230,6 +2347,57 @@ impl Compiler {
             }
             // `expr(args)` — evaluate the callee to a Funcref/Partial, push the
             // args, then call the value. Stack: [funcref, arg0, …, argN].
+            // `base.name(args)` — the same runtime Dict test as `Expr::Member`,
+            // with the call applied inside each branch: a Dict base calls the
+            // funcref at `base['name']`, anything else concatenates `base` with
+            // the result of calling `name(args)` (`substitute(…).submatch(0)`).
+            Expr::MemberCall { base, key, args } => {
+                self.expr(base)?; // [base]
+                self.emit(Op::Dup); // [base, base]
+                self.emit(Op::CallBuiltin(h::VIML_IS_DICT, 1)); // [base, bool]
+                let jf = self.emit(Op::JumpIfFalse(0)); // pops bool → [base]
+                                                        // Dict branch: call the funcref stored under the
+                                                        // key, with the Dict bound as `self`.
+                self.load_str(key); // [base, "key"]
+                for a in args {
+                    self.expr(a)?;
+                }
+                self.emit(Op::CallBuiltin(
+                    h::VIML_CALL_MEMBER,
+                    Self::argc(args.len())?,
+                ));
+                self.emit_call_unwind_check();
+                let jend = self.emit(Op::Jump(0));
+                // Concat branch: `base . key(args)`.
+                let lconcat = self.b.current_pos();
+                self.b.patch_jump(jf, lconcat);
+                self.expr(&Expr::Call {
+                    name: key.clone(),
+                    args: args.clone(),
+                })?; // [base, value]
+                self.emit(Op::CallBuiltin(h::VIML_CONCAT, 2)); // [result]
+                let lend = self.b.current_pos();
+                self.b.patch_jump(jend, lend);
+            }
+            // `d['key'](args)` / `l[0](args)` — the subscript-then-call form.
+            // Routed through `VIML_CALL_MEMBER` so a Dict base binds `self`, the
+            // same way `d.key(args)` does (c: `handle_subscript` sets `selfdict`
+            // from the Dict it just indexed).
+            Expr::CallExpr { callee, args } if matches!(**callee, Expr::Index { .. }) => {
+                let Expr::Index { base, index } = &**callee else {
+                    unreachable!("guarded by the match arm")
+                };
+                self.expr(base)?;
+                self.expr(index)?;
+                for a in args {
+                    self.expr(a)?;
+                }
+                self.emit(Op::CallBuiltin(
+                    h::VIML_CALL_MEMBER,
+                    Self::argc(args.len())?,
+                ));
+                self.emit_call_unwind_check();
+            }
             Expr::CallExpr { callee, args } => {
                 self.expr(callee)?;
                 for a in args {
@@ -2371,12 +2539,28 @@ fn bitwise_native_op(name: &str, argc: usize) -> Option<Op> {
 /// mis-arity call compiles to a runtime raise (see `VIML_RAISE`) rather than being
 /// rejected at compile time, which would make an unreachable bad call abort the whole
 /// script. The check still guards the leaf `f_*` from indexing a short `argvars[]`.
+/// Accepted argument counts for builtins vimlrs implements that Neovim's
+/// `eval.lua` — the metadata `funcs_argc.rs` is GENERATED from — does not carry,
+/// because Neovim does not have the function. Consulted only when the generated
+/// table has no entry for the name, so it can never contradict it.
+const EXTRA_BUILTIN_ARGC: &[(&str, u8, u8)] = &[
+    // `typename({expr})` is Vim-only (vim9 type introspection). Vim raises E119
+    // for `typename()` and E118 for a second argument.
+    ("typename", 1, 1),
+];
+
 pub(crate) fn builtin_argc_range(name: &str) -> Option<(u8, u8)> {
     use crate::ported::eval::funcs_argc::BUILTIN_ARGC;
     BUILTIN_ARGC
         .binary_search_by(|(n, _, _)| (*n).cmp(name))
         .ok()
         .map(|i| (BUILTIN_ARGC[i].1, BUILTIN_ARGC[i].2))
+        .or_else(|| {
+            EXTRA_BUILTIN_ARGC
+                .iter()
+                .find(|(n, _, _)| *n == name)
+                .map(|&(_, lo, hi)| (lo, hi))
+        })
 }
 
 /// The Vim error a builtin call with `argc` arguments would raise, or `None`
@@ -2398,6 +2582,7 @@ pub(crate) fn builtin_fn_id(name: &str) -> Option<u16> {
     Some(match name {
         "len" => h::VIML_FN_LEN,
         "type" => h::VIML_FN_TYPE,
+        "typename" => h::VIML_FN_TYPENAME,
         "string" => h::VIML_FN_STRING,
         "empty" => h::VIML_FN_EMPTY,
         "abs" => h::VIML_FN_ABS,

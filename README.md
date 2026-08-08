@@ -136,10 +136,27 @@ excluded from the crate build.
 
 ## Parity testing
 
-Parity with real Vim is checked two ways.
+Parity with real Vim is checked three ways.
 
 Every `examples/*.vim` is a self-testing script whose assertions were written
 against Vim 9.2 / Neovim 0.12; `cargo test` runs all of them.
+
+`scripts/parity.sh` is the **script-level differential harness**: it sources a
+whole `.vim` file through vimlrs *and* through the real `vim` and byte-diffs the
+captured output and the exit status. That is the level at which the divergences
+between statements live — the message-column model (`:echo` vs `:echon` vs
+`echo ''`), a `:set ignorecase` leaking into later comparisons, a `:const` or
+`:function d.key()` that parses but leaves nothing behind.
+
+```sh
+bash scripts/parity.sh                     # the committed corpus
+bash scripts/parity.sh probe.vim           # one ad-hoc script
+bash scripts/parity.sh -r tests/parity_cases   # re-record from vim after a fix
+```
+
+Only vim ever writes an expectation, so a case cannot be made to pass by changing
+vimlrs. The corpus is replayed against the recorded output by
+`tests/parity_cases.rs`, which needs no editor installed and therefore runs in CI.
 
 On top of that, `fuzz-parity` is a **differential fuzzer**: it generates random
 VimL expressions, runs each through vimlrs *and* through `nvim` *and* `vim`, and
@@ -153,8 +170,8 @@ cargo run --bin fuzz-parity -- --count 1500 --seed 11
 It needs both editors on `PATH`, so it is a development tool and does not run in
 CI. Its findings are frozen into `tests/data/fuzz_corpus.txt` as
 oracle-recorded expectations and replayed in-process by `tests/fuzz_corpus.rs`,
-which needs no editor installed. See [`docs/FUZZING.md`](docs/FUZZING.md), and
-`BUGS.md` for the divergences it has found and what remains open.
+which needs no editor installed. `BUGS.md` records every divergence both harnesses
+have found and what remains open.
 
 ## Links
 
