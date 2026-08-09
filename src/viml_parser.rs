@@ -3125,6 +3125,22 @@ impl Parser {
             && self.toks[i].span == self.toks[i - 1].end
     }
 
+    /// True when the `Tok::LBracket` at the current position directly abuts the
+    /// previous token, i.e. it opens an index/slice subscript of the expression
+    /// just parsed rather than starting a separate List argument.
+    ///
+    /// `vendor/eval.c:5964` — `handle_subscript()` only consumes `[` when
+    /// `!ascii_iswhite(*(*arg - 1))`, so `echo l [0]` is two `:echo` arguments
+    /// (a List and a List) while `echo l[0]` is one element. The same guard
+    /// already exists for `(` ([`Self::lparen_abuts_prev`]) and for `.name`
+    /// ([`Self::at_member_dot`]); `->` is the one form the C exempts.
+    fn lbracket_abuts_prev(&self) -> bool {
+        let i = self.i;
+        i > 0
+            && self.toks.get(i).is_some_and(|t| t.kind == Tok::LBracket)
+            && self.toks[i].span == self.toks[i - 1].end
+    }
+
     /// True when the `Tok::Dot` at the current position is a dict member access
     /// `d.key` rather than the `..`-style concat operator: it must directly abut
     /// the base (no space before) and be immediately followed by a bare name (no
@@ -3216,7 +3232,8 @@ impl Parser {
                 continue;
             }
             match self.peek() {
-                Tok::LBracket => {
+                // Only when the `[` abuts the base — see [`Self::lbracket_abuts_prev`].
+                Tok::LBracket if self.lbracket_abuts_prev() => {
                     self.advance();
                     base = self.subscript(base)?;
                 }

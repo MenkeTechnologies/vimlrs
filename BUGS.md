@@ -1925,7 +1925,7 @@ Round 23 closed every *value*-level question about a byte string and left one
 thing between vimlrs and vim on one: `:echo` wrote the bytes instead of rendering
 them. Round 24 ports that transform from the C, which also closed R23-O2 and
 turned up three defects the transform had been masking. `tests/parity_cases` is
-**28/28** byte-identical to vim with an EMPTY `KNOWN_OPEN`.
+**29/29** byte-identical to vim with an EMPTY `KNOWN_OPEN`.
 
 The C for it was not vendored. `charset.c` and `message.c` are now, from Neovim
 master at `982d2f253168be9dbfecd0c1a41ec9cff8017a4e` — the commit whose
@@ -2086,6 +2086,40 @@ Both sides are now handled as bytes end to end; only the failure *report* is
 lossy. `scripts/parity.sh` was never affected — it has always compared with
 `cmp`. This makes the gate strictly stricter; it reports more, never less.
 
+## R24-4. A subscript attached across whitespace — ✅ FIXED
+
+`handle_subscript()` (`vendor/eval.c:5961`) loops while
+
+```c
+  ((**arg == '[' || (**arg == '.' && rettv->v_type == VAR_DICT)
+    || (**arg == '(' && (!evaluate || tv_is_func(*rettv))))
+   && !ascii_iswhite(*(*arg - 1)))
+  || (**arg == '-' && (*arg)[1] == '>')
+```
+
+so a `[`, a `.name` or a `(` only subscripts the expression it **abuts**; with a
+space in front it starts a new expression instead. `->` is the one form the C
+exempts. vimlrs had the guard for `(` (`lparen_abuts_prev`) and for `.name`
+(`at_member_dot`) but not for `[`, so every spaced `[` was read as an index.
+
+| script | vim 9.2 | vimlrs (before) |
+|---|---|---|
+| `echo 12345 [1,2]` | `12345 [1, 2]` | *(nothing — the whole `:echo` aborted)* |
+| `let l=[1,2] \| echo l [0]` | `[1, 2] [0]` | `1` |
+| `let d={'a':1}` + `echo d ['a']` | `{'a': 1} ['a']` | `1` |
+| `echo 'ab' [0]` | `ab [0]` | `a` |
+| `echo 1.5 [1,2]` | `1.5 [1, 2]` | *(nothing)* |
+
+The Number/Float rows printed *nothing at all*: `12345[1,2]` is not a valid
+index, the error aborted the command, and `:echo` prints nothing after an error
+in its own arguments — so the divergence was a silently missing line, not a
+wrong value.
+
+Fixed with `lbracket_abuts_prev()` (`src/viml_parser.rs`), the exact counterpart
+of the existing `lparen_abuts_prev()`. Covered by
+`tests/parity_cases/subscript_whitespace.vim`, which pins the abutting forms,
+the spaced forms and the `->` exemption.
+
 ## Still open
 
 ### R24-O1. vim shows a BELL, nvim consumes it
@@ -2140,6 +2174,55 @@ string`. The Blob form (`msgpackdump([…], 'B')`) is `0zC3C2C0` in both, so the
 DUMP side is right and the failure is on the parse side, in how a
 readfile()-style List of byte strings is turned back into a byte stream. vim has
 no `msgpackdump`, so nvim is the only oracle.
+
+### R24-O4. A leading composing char: vim draws a space first, nvim does not
+
+The other half of the `NEITHER` class R24-O1 opened, found the same way. vim's
+`msg_outtrans_len_attr()` opens with
+
+```c
+    if (enc_utf8 && utf_iscomposing(utf_ptr2char(msgstr)))
+	msg_puts_attr(" ", attr);
+```
+
+(vim `message.c:1763`) — a space for the mark to sit on. The vendored
+`msg_outtrans_len` (`vendor/message.c`) has no such line, so this port does not
+draw it either.
+
+```sh
+$ printf 'echo nr2char(0x180b)\n' > /tmp/c.vim
+$ vim  -es -u NONE -i NONE -c 'verbose source /tmp/c.vim' -c 'qa!' 2>&1 | xxd
+00000000: 203c 3138 3062 3e                         <180b>
+$ nvim --clean -es -c 'verbose source /tmp/c.vim' -c 'qa!' 2>&1 | xxd
+00000000: 3c31 3830 623e                           <180b>
+$ ./target/debug/viml /tmp/c.vim 2>&1 | xxd
+00000000: 3c31 3830 623e 0a                        <180b>.
+```
+
+Same call as R24-O1: matching vim as well would mean writing a rule the vendored
+C does not contain. Excluded from `tests/parity_cases/echo_transchar.vim`.
+
+### R24-O5. `scripts/parity.sh` cannot compare a message CR
+
+The harness strips CR from vim's stream because silent Ex mode writes CRLF (see
+its header). A `:echo` of a string *containing* a CR therefore can never compare
+equal even when the two engines agree, which they do:
+
+```sh
+$ printf 'echo "a" . nr2char(13) . "b"\n' > /tmp/r.vim
+$ vim  -es -u NONE -i NONE -c 'verbose source /tmp/r.vim' -c 'qa!' 2>&1 | xxd
+00000000: 610d 62                                  a.b
+$ nvim --clean -es -c 'verbose source /tmp/r.vim' -c 'qa!' 2>&1 | xxd
+00000000: 610d 62                                  a.b
+$ ./target/debug/viml /tmp/r.vim 2>&1 | xxd
+00000000: 610d 620a                                a.b.
+```
+
+This is a harness limit, not a language divergence: `msg_multiline` chunks on
+`\r` and writes it through, and vimlrs does the same. Recorded so a future case
+author does not read the normalisation as a bug. Telling a message CR from the
+line-terminator CR needs a different normalisation than the one-pass byte filter
+the harness uses, which is a harness change and belongs in its own review.
 
 ### R22-O3. Vim-only builtins — the C IS available now
 
