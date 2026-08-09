@@ -1005,7 +1005,9 @@ pub fn func_has_abort() -> bool {
 /// `...`. Uses the `string()`-style echo encoding.
 pub fn get_return_cmd(rettv: Option<&crate::ported::eval::typval_defs_h::typval_T>) -> String {
     const IOSIZE: usize = 1024 + 1;
-    let s = rettv.map_or(String::new(), crate::ported::eval::encode::encode_tv2echo);
+    let s = rettv.map_or(String::new(), |tv| {
+        crate::ported::eval::encode::encode_tv2echo(tv).to_string()
+    });
     let mut buf = format!(":return {s}");
     if buf.len() >= IOSIZE {
         let mut cut = IOSIZE - 4;

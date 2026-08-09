@@ -12,8 +12,8 @@ use crate::ported::charset::{
 };
 use crate::ported::eval::encode::encode_tv2string;
 use crate::ported::eval::typval::{
-    tv_blob_alloc_ret, tv_get_number_chk, tv_get_string, tv_list_alloc_ret, tv_list_append_number,
-    tv_list_append_tv,
+    tv_blob_alloc_ret, tv_get_number_chk, tv_get_string, tv_get_string_buf_chk, tv_list_alloc_ret,
+    tv_list_append_number, tv_list_append_tv,
 };
 use crate::ported::eval::typval_defs_h::{typval_T, typval_vval_union::*, varnumber_T, VarType::*};
 use crate::ported::eval_h::{FAIL, OK};
@@ -72,8 +72,14 @@ pub fn f_str2nr(argvars: &[typval_T], rettv: &mut typval_T) {
 }
 
 /// Port of `f_strlen()` from `Src/strings.c` — byte length of a string.
+///
+/// c: `STRLEN(tv_get_string(&argvars[0]))` — a count of the BYTES, so it reads
+/// through the byte-exact accessor. Through the `String` wrapper a byte that is
+/// not valid UTF-8 became a 3-byte `U+FFFD` and `strlen(list2str([-1,0,1]))`
+/// answered 4 where vim answers 2 (measured).
 pub fn f_strlen(argvars: &[typval_T], rettv: &mut typval_T) {
-    rettv.vval = v_number(tv_get_string(&argvars[0]).len() as varnumber_T);
+    let n = tv_get_string_buf_chk(&argvars[0]).unwrap_or_default().len();
+    rettv.vval = v_number(n as varnumber_T);
 }
 
 /// Port of `f_tolower()` from `Src/strings.c`.
@@ -376,11 +382,23 @@ pub fn f_tr(argvars: &[typval_T], rettv: &mut typval_T) {
 /// Port of `f_str2list()` from `Src/strings.c` — a List of the code points of
 /// `{string}`.
 pub fn f_str2list(argvars: &[typval_T], rettv: &mut typval_T) {
-    let s = tv_get_string(&argvars[0]);
-    let l = tv_list_alloc_ret(rettv, s.chars().count() as isize);
+    // c: `for (; *p != NUL; p += utf_ptr2len(p)) { tv_list_append_number(l,
+    //     utf_ptr2char(p)); }` — a walk over the BYTES with the port's own
+    // `utf_ptr2char`, which returns the lead byte unchanged for a sequence that
+    // is not valid UTF-8. That is what makes `str2list(list2str([-1,0,1]))`
+    // `[255, 1]` in vim; decoding to Rust `char`s gave `[65533, 1]` because the
+    // `0xff` had already been replaced with `U+FFFD`.
+    let s = tv_get_string_buf_chk(&argvars[0]).unwrap_or_default();
+    let b = s.as_bytes();
+    let l = tv_list_alloc_ret(rettv, 0);
     let mut lb = l.borrow_mut();
-    for c in s.chars() {
-        tv_list_append_number(&mut lb, c as varnumber_T);
+    let mut p = 0usize;
+    while p < b.len() {
+        tv_list_append_number(
+            &mut lb,
+            crate::ported::mbyte::utf_ptr2char(&b[p..]) as varnumber_T,
+        );
+        p += (crate::ported::mbyte::utf_ptr2len(&b[p..]) as usize).max(1);
     }
 }
 

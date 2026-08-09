@@ -136,22 +136,31 @@ pub fn tv_get_float(tv: &typval_T) -> f64 {
 ///
 /// Number → decimal; Float → `%g`; String → itself; Bool → `v:false`/`v:true`;
 /// Special → its own name (`v:null` / `v:none`). List/Dict/Blob/Func raise
-/// `emsg` and yield "". (We return an owned `String`, so the C
+/// `emsg` and yield "". (We return an owned value, so the C
 /// single-static-buffer caveat does not apply.)
-pub fn tv_get_string_buf_chk(tv: &typval_T) -> Option<String> {
+///
+/// This is the **byte-exact** string read: the C returns `char *`, and a VimL
+/// string's bytes need not be valid UTF-8 (`list2str([-1])` is `0xff` — see
+/// [`crate::vimstr`]). The three convenience wrappers over it in this file
+/// ([`tv_get_string`], [`tv_get_string_chk`], [`tv_get_string_buf`]) hand back a
+/// Rust `String` because that is what the several hundred text-shaped call sites
+/// want, and they replace a non-UTF-8 byte with `U+FFFD`. A call site that must
+/// not lose a byte — `writefile()`, the `:echo` sink, `str2list()` — reads this
+/// one, or destructures `v_string` directly as the C does.
+pub fn tv_get_string_buf_chk(tv: &typval_T) -> Option<crate::vimstr::VimStr> {
     match (tv.v_type, &tv.vval) {
         // c: snprintf(buf, NUMBUFLEN, "%" PRIdVARNUMBER, tv->vval.v_number);
-        (VAR_NUMBER, v_number(n)) => Some(n.to_string()),
+        (VAR_NUMBER, v_number(n)) => Some(n.to_string().into()),
         // c: vim_snprintf(buf, NUMBUFLEN, "%g", tv->vval.v_float);
         // Vim's `vim_snprintf` `%g` is not C's `%g`: it keeps a `.0` on a whole
         // float and writes the exponent form as `1.0e-10`, so `round(0.5) .. 'x'`
         // is `'1.0x'`, not `'1x'`. `vim_float_g` is that formatter (already used
         // by `string()` and `printf('%g')`); Rust's `Display` is NOT equivalent
         // and produced `1` / `0.0000000001` here.
-        (VAR_FLOAT, v_float(f)) => Some(crate::ported::eval::encode::vim_float_g(*f, None)),
+        (VAR_FLOAT, v_float(f)) => Some(crate::ported::eval::encode::vim_float_g(*f, None).into()),
         // c: return tv->vval.v_string == NULL ? "" : v_string;
-        (VAR_STRING, v_string(s)) => Some(s.to_string()),
-        (VAR_FUNC, v_string(s)) => Some(s.to_string()),
+        (VAR_STRING, v_string(s)) => Some(s.clone()),
+        (VAR_FUNC, v_string(s)) => Some(s.clone()),
         // c: STRCPY(buf, encode_bool_var_names[tv->vval.v_bool]);
         (VAR_BOOL, v_bool(b)) => Some(
             if *b == kBoolVarTrue {
@@ -159,7 +168,7 @@ pub fn tv_get_string_buf_chk(tv: &typval_T) -> Option<String> {
             } else {
                 "v:false"
             }
-            .to_string(),
+            .into(),
         ),
         // c: STRCPY(buf, encode_special_var_names[tv->vval.v_special]);
         //
@@ -171,9 +180,9 @@ pub fn tv_get_string_buf_chk(tv: &typval_T) -> Option<String> {
         // differ, and did so here only once this stopped printing one name for
         // both.
         (VAR_SPECIAL, v_special(v)) => {
-            Some(crate::ported::eval::encode::encode_special_var_names[*v as usize].to_string())
+            Some(crate::ported::eval::encode::encode_special_var_names[*v as usize].into())
         }
-        (VAR_SPECIAL, _) => Some("v:null".to_string()),
+        (VAR_SPECIAL, _) => Some("v:null".into()),
         // c: emsg(_(str_errors[tv->v_type])); return NULL;
         //
         // `str_errors[]` (c:4135) is a per-type table, and the type is part of
@@ -189,8 +198,11 @@ pub fn tv_get_string_buf_chk(tv: &typval_T) -> Option<String> {
 
 /// Port of `tv_get_string()` from `Src/eval/typval.c` — never-NULL convenience
 /// over `tv_get_string_buf_chk` (NULL → "").
+///
+/// Returns text: see [`tv_get_string_buf_chk`] for the byte-exact read and for
+/// when to prefer it.
 pub fn tv_get_string(tv: &typval_T) -> String {
-    tv_get_string_buf_chk(tv).unwrap_or_default()
+    tv_get_string_buf_chk(tv).unwrap_or_default().to_string()
 }
 
 /// Port of `tv_equal()` from `Src/eval/typval.c` (the `ic == false` path).
@@ -1822,7 +1834,7 @@ pub fn tv_dict_get_string_buf(d: &dict_T, key: &str) -> Option<String> {
 pub fn tv_dict_get_string_buf_chk(d: &dict_T, key: &str, def: Option<String>) -> Option<String> {
     match tv_dict_find(d, key) {
         None => def,
-        Some(di) => tv_get_string_buf_chk(di),
+        Some(di) => tv_get_string_buf_chk(di).map(|s| s.to_string()),
     }
 }
 
@@ -2025,13 +2037,13 @@ pub fn tv_get_bool_chk(tv: &typval_T, ret_error: Option<&mut bool>) -> varnumber
 /// value, or `None` on a type error. (Our owned `String` avoids the C single
 /// static buffer; `tv_get_string_buf_chk` is the same here.)
 pub fn tv_get_string_chk(tv: &typval_T) -> Option<String> {
-    tv_get_string_buf_chk(tv)
+    tv_get_string_buf_chk(tv).map(|s| s.to_string())
 }
 
 /// Port of `tv_get_string_buf()` from `Src/eval/typval.c` (c:4673) — like
 /// `tv_get_string_chk` but a type error yields "" instead of `None`.
 pub fn tv_get_string_buf(tv: &typval_T) -> String {
-    tv_get_string_buf_chk(tv).unwrap_or_default()
+    tv_get_string_buf_chk(tv).unwrap_or_default().to_string()
 }
 
 /// Port of `tv_list_remove()` from `Src/eval/typval.c:1127`.
@@ -2210,7 +2222,7 @@ fn list_join_inner(gap: &mut String, l: &list_T, sep: &str) -> i32 {
         } else {
             gap.push_str(sep);
         }
-        gap.push_str(&encode_tv2echo(&item.li_tv));
+        gap.push_str(&encode_tv2echo(&item.li_tv).to_string_lossy());
     }
     OK
 }
@@ -2403,7 +2415,7 @@ fn item_compare(tv1: &typval_T, tv2: &typval_T, info: &sortinfo_T) -> i32 {
             tv_get_string(tv1)
         }
     } else {
-        encode_tv2string(tv1)
+        encode_tv2string(tv1).to_string()
     };
     let p2 = if tv2.v_type == VAR_STRING {
         if tv1.v_type != VAR_STRING || info.item_compare_numeric {
@@ -2412,7 +2424,7 @@ fn item_compare(tv1: &typval_T, tv2: &typval_T, info: &sortinfo_T) -> i32 {
             tv_get_string(tv2)
         }
     } else {
-        encode_tv2string(tv2)
+        encode_tv2string(tv2).to_string()
     };
     if !info.item_compare_numeric {
         // c: lc → strcoll (collation under the environment's locale — under

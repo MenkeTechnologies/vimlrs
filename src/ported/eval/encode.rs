@@ -13,6 +13,7 @@
 use crate::ported::eval::typval_defs_h::{
     typval_T, typval_vval_union::*, BoolVarValue::*, VarType::*,
 };
+use crate::vimstr::VimStr;
 
 /// Render a float for `"%g"` the way neovim's `vim_vsnprintf_typval()`
 /// (`src/nvim/strings.c`) does — which is *not* libc `%g`. Unlike libc, neovim
@@ -167,7 +168,7 @@ pub fn conv_error(
                 let key = encode_tv2string(&key_tv);
                 // c:140-141 vim_snprintf(IObuff, IOSIZE, key_msg, key);
                 //   ga_concat(&msg_ga, IObuff);
-                msg_ga.push_str(&snprintf_s(key_msg, &key));
+                msg_ga.push_str(&snprintf_s(key_msg, &key.to_string_lossy()));
             }
             // c:145-146 case kMPConvPairs: case kMPConvList:
             kMPConvPairs | kMPConvList => {
@@ -225,7 +226,10 @@ pub fn conv_error(
                         // c:170 char *const key = encode_tv2echo(&key_tv, NULL);
                         let key = encode_tv2echo(&key_tv);
                         // c:171 vim_snprintf(IObuff, IOSIZE, key_pair_msg, key, idx);
-                        msg_ga.push_str(&snprintf_i(&snprintf_s(key_pair_msg, &key), idx));
+                        msg_ga.push_str(&snprintf_i(
+                            &snprintf_s(key_pair_msg, &key.to_string_lossy()),
+                            idx,
+                        ));
                     }
                 }
             }
@@ -410,7 +414,7 @@ pub fn encode_list_write(list: &mut crate::ported::eval::typval_defs_h::list_T, 
 ///
 /// String representation of a value with quotes around strings (parseable back
 /// by `eval()`). This is `string()`.
-pub fn encode_tv2string(tv: &typval_T) -> String {
+pub fn encode_tv2string(tv: &typval_T) -> VimStr {
     // c: encode_vim_to_string(&ga, tv, ...)
     encode_vim_to_string(tv)
 }
@@ -419,10 +423,10 @@ pub fn encode_tv2string(tv: &typval_T) -> String {
 ///
 /// String representation without quotes around the outermost string, as `:echo`
 /// displays values.
-pub fn encode_tv2echo(tv: &typval_T) -> String {
+pub fn encode_tv2echo(tv: &typval_T) -> VimStr {
     // c: if (tv->v_type == VAR_STRING || tv->v_type == VAR_FUNC) { ga_concat(v_string) }
     match (tv.v_type, &tv.vval) {
-        (VAR_STRING | VAR_FUNC, v_string(s)) => s.to_string(),
+        (VAR_STRING | VAR_FUNC, v_string(s)) => s.clone(),
         // c: else encode_vim_to_echo(&ga, tv, ...)
         _ => encode_vim_to_echo(tv),
     }
@@ -430,37 +434,74 @@ pub fn encode_tv2echo(tv: &typval_T) -> String {
 
 /// Port of the `encode_vim_to_string` instantiation of the `typval_encode.c.h`
 /// template — recursive render with every string quoted.
-pub fn encode_vim_to_string(tv: &typval_T) -> String {
+///
+/// The C builds into a `garray_T` of bytes and hands back `ga.ga_data`, a
+/// `char *`. It is a byte builder here for the same reason: a VimL string may
+/// hold bytes that are not valid UTF-8 (`string(list2str([-1]))` quotes the
+/// single byte `0xff`), and those bytes are spliced in as they are.
+pub fn encode_vim_to_string(tv: &typval_T) -> VimStr {
     match (tv.v_type, &tv.vval) {
         // TYPVAL_ENCODE_CONV_NUMBER
-        (VAR_NUMBER, v_number(n)) => n.to_string(),
+        (VAR_NUMBER, v_number(n)) => n.to_string().into(),
         // TYPVAL_ENCODE_CONV_FLOAT (encode.c:351) — FP_NAN → "str2float('nan')",
         // FP_INFINITE → "[-]str2float('inf')", else "%g" then append ".0" if no
         // '.'/'e' (so string(3.0) is "3.0", not "3").
         (VAR_FLOAT, v_float(f)) => {
             if f.is_nan() {
-                "str2float('nan')".to_string()
+                "str2float('nan')".into()
             } else if f.is_infinite() {
                 if *f < 0.0 {
                     "-str2float('inf')"
                 } else {
                     "str2float('inf')"
                 }
-                .to_string()
+                .into()
             } else {
                 let s = vim_float_g(*f, None);
                 if s.contains(['.', 'e', 'E']) {
-                    s
+                    s.into()
                 } else {
-                    format!("{s}.0")
+                    format!("{s}.0").into()
                 }
             }
         }
-        // TYPVAL_ENCODE_CONV_STRING — single-quoted, embedded quotes doubled.
-        (VAR_STRING, v_string(s)) => format!("'{}'", s.to_string_lossy().replace('\'', "''")),
-        // TYPVAL_ENCODE_CONV_FUNC_START — function('name').
+        // TYPVAL_ENCODE_CONV_STRING (encode.c:295) — single-quoted, embedded
+        // quotes doubled. The C is a macro with the loop written out at each
+        // use, so it is written out here too:
+        //
+        //   ga_append(gap, '\'');
+        //   for (size_t i_ = 0; i_ < len_; i_++) {
+        //     if (buf_[i_] == '\'') { ga_append(gap, '\''); }
+        //     ga_append(gap, (uint8_t)buf_[i_]);
+        //   }
+        //   ga_append(gap, '\'');
+        //
+        // It walks BYTES. `'` is ASCII and a UTF-8 trail byte is always >= 0x80,
+        // so the scan can never fire inside a multibyte sequence — no decode is
+        // needed, and a string whose bytes are not valid UTF-8 keeps every one.
+        (VAR_STRING, v_string(s)) => {
+            let mut out = VimStr::from("'");
+            for &b in s.as_bytes() {
+                if b == b'\'' {
+                    out.push_char('\'');
+                }
+                out.as_mut_vec().push(b);
+            }
+            out.push_char('\'');
+            out
+        }
+        // TYPVAL_ENCODE_CONV_FUNC_START — function('name'), the same macro over
+        // the function name.
         (VAR_FUNC, v_string(s)) => {
-            format!("function('{}')", s.to_string_lossy().replace('\'', "''"))
+            let mut out = VimStr::from("function('");
+            for &b in s.as_bytes() {
+                if b == b'\'' {
+                    out.push_char('\'');
+                }
+                out.as_mut_vec().push(b);
+            }
+            out.push_str("')");
+            out
         }
         // A Partial — function('name'[, [args]][, {self}]).
         //
@@ -472,14 +513,20 @@ pub fn encode_vim_to_string(tv: &typval_T) -> String {
         // print `function('P', [1], {'n': 7})`.
         (VAR_PARTIAL, v_partial(Some(p))) => {
             let name = p.pt_name.replace('\'', "''");
-            let mut out = format!("function('{name}'");
+            let mut out = VimStr::from(format!("function('{name}'"));
             if !p.pt_argv.is_empty() {
-                let args: Vec<String> = p.pt_argv.iter().map(encode_tv2string).collect();
-                out.push_str(&format!(", [{}]", args.join(", ")));
+                out.push_str(", [");
+                for (i, a) in p.pt_argv.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    out.push_bytes(&encode_tv2string(a));
+                }
+                out.push_char(']');
             }
             if let Some(d) = &p.pt_dict {
                 out.push_str(", ");
-                out.push_str(&encode_tv2string(&typval_T {
+                out.push_bytes(&encode_tv2string(&typval_T {
                     v_type: VAR_DICT,
                     v_lock: crate::ported::eval::typval_defs_h::VarLockStatus::VAR_UNLOCKED,
                     vval: crate::ported::eval::typval_defs_h::typval_vval_union::v_dict(Some(
@@ -487,7 +534,7 @@ pub fn encode_vim_to_string(tv: &typval_T) -> String {
                     )),
                 }));
             }
-            out.push(')');
+            out.push_char(')');
             out
         }
         (VAR_BOOL, v_bool(b)) => if *b == kBoolVarTrue {
@@ -495,65 +542,65 @@ pub fn encode_vim_to_string(tv: &typval_T) -> String {
         } else {
             "v:false"
         }
-        .to_string(),
-        (VAR_SPECIAL, v_special(v)) => encode_special_var_names[*v as usize].to_string(),
-        (VAR_SPECIAL, _) => "v:null".to_string(),
+        .into(),
+        (VAR_SPECIAL, v_special(v)) => encode_special_var_names[*v as usize].into(),
+        (VAR_SPECIAL, _) => "v:null".into(),
         // TYPVAL_ENCODE_CONV_LIST_START / _BETWEEN_ITEMS / _END
         (VAR_LIST, v_list(l)) => match l {
-            None => "[]".to_string(),
+            None => "[]".into(),
             Some(l) => {
                 let l = l.borrow();
-                let mut out = String::from("[");
+                let mut out = VimStr::from("[");
                 for (i, it) in l.lv_items.iter().enumerate() {
                     if i > 0 {
                         out.push_str(", ");
                     }
-                    out.push_str(&encode_vim_to_string(&it.li_tv));
+                    out.push_bytes(&encode_vim_to_string(&it.li_tv));
                 }
-                out.push(']');
+                out.push_char(']');
                 out
             }
         },
         // TYPVAL_ENCODE_CONV_DICT_START / _KEY / _AFTER_KEY / _BETWEEN_ITEMS / _END
         (VAR_DICT, v_dict(d)) => match d {
-            None => "{}".to_string(),
+            None => "{}".into(),
             Some(d) => {
                 let d = d.borrow();
-                let mut out = String::from("{");
+                let mut out = VimStr::from("{");
                 for (i, (k, v)) in d.dv_hashtab.iter().enumerate() {
                     if i > 0 {
                         out.push_str(", ");
                     }
                     out.push_str(&format!("'{}'", k.replace('\'', "''")));
                     out.push_str(": ");
-                    out.push_str(&encode_vim_to_string(v));
+                    out.push_bytes(&encode_vim_to_string(v));
                 }
-                out.push('}');
+                out.push_char('}');
                 out
             }
         },
         // TYPVAL_ENCODE_CONV_BLOB — 0z followed by hex, grouped in 4-byte runs.
         (VAR_BLOB, v_blob(b)) => match b {
-            None => "0z".to_string(),
+            None => "0z".into(),
             Some(b) => {
                 let b = b.borrow();
-                let mut out = String::from("0z");
+                let mut out = VimStr::from("0z");
                 for (i, byte) in b.bv_ga.iter().enumerate() {
                     if i > 0 && i % 4 == 0 {
-                        out.push('.');
+                        out.push_char('.');
                     }
                     out.push_str(&format!("{byte:02X}"));
                 }
                 out
             }
         },
-        _ => String::new(),
+        _ => VimStr::new(),
     }
 }
 
 /// Port of the `encode_vim_to_echo` instantiation. Equivalent to
 /// [`encode_vim_to_string`] for all nested values (see file-header note).
-pub fn encode_vim_to_echo(tv: &typval_T) -> String {
+pub fn encode_vim_to_echo(tv: &typval_T) -> VimStr {
     encode_vim_to_string(tv)
 }
 

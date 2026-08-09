@@ -351,7 +351,10 @@ pub fn f_nr2char(argvars: &[typval_T], rettv: &mut typval_T) {
     let bytes = &buf[..len];
     let bytes = &bytes[..bytes.iter().position(|&b| b == 0).unwrap_or(len)];
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(String::from_utf8_lossy(bytes).into_owned().into());
+    // The bytes go in as written: `utf_char2bytes` has no range check above
+    // `U+10FFFF`, so `nr2char(0x110000)` is `f4 90 80 80`, which is not a valid
+    // UTF-8 sequence and used to be replaced with U+FFFD by a lossy decode.
+    rettv.vval = v_string(bytes.into());
 }
 
 /// Port of `repeat_list()` — `vendor/eval/funcs.c:5310`. Repeat list `l` `n` times
@@ -934,7 +937,7 @@ fn find_some_match(argvars: &[typval_T]) -> Option<SomeMatch> {
         };
         let mut remaining = count.max(1);
         for idx in start..len {
-            let str = encode_tv2echo(&items[idx as usize]);
+            let str = encode_tv2echo(&items[idx as usize]).to_string();
             if let Some((s, e, groups)) = crate::viml_regex::regex_search_nth(&pat, &str, ic, 0, 1)
             {
                 remaining -= 1;
@@ -1795,7 +1798,7 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
             // E730 as `tv_get_string_buf_chk` would. `%S` differs from `%s` only in
             // that width/precision count screen cells; the value renders the same.
             's' | 'S' => {
-                let mut s = cur.map(encode_tv2echo).unwrap_or_default();
+                let mut s = cur.map(encode_tv2echo).unwrap_or_default().to_string();
                 if let Some(p) = prec {
                     // c: precision caps the byte count; keep it a char boundary so
                     // multi-byte container output never splits mid-codepoint.
@@ -2219,26 +2222,34 @@ pub fn f_escape(argvars: &[typval_T], rettv: &mut typval_T) {
 /// points.
 pub fn f_list2str(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.v_type = VAR_STRING;
-    let mut out = String::new();
+    // c: `garray_T ga; ga_init(&ga, 1, 80);` — a byte buffer, which is what the
+    // result is: `utf_char2bytes` writes bytes that need not be valid UTF-8.
+    let mut ga = VimStr::new();
     if let (VAR_LIST, v_list(Some(l))) = (argvars[0].v_type, &argvars[0].vval) {
+        // c: `char buf[MB_MAXBYTES + 1];`
+        let mut buf = [0u8; 7];
         for it in &l.borrow().lv_items {
             let n = tv_get_number_chk(&it.li_tv, None);
             // c: `buf[utf_char2bytes((int)n, buf)] = NUL; ga_concat(&ga, buf);`
-            // — each code point is encoded into `buf`, NUL-terminated, and
-            // appended with the STRLEN-based `ga_concat`. A 0 encodes to a
-            // single NUL byte, which `ga_concat` measures as length 0: the item
-            // contributes nothing and the walk CONTINUES to the next one.
-            // `list2str([65, 0, 66])` is `'AB'` in vim (verified), not `'A'` —
-            // this used to `break`, which dropped every element after a 0.
-            if n == 0 {
-                continue;
-            }
-            if let Some(c) = char::from_u32(n as u32) {
-                out.push(c);
-            }
+            // — the code point is encoded into `buf`, NUL-terminated, and
+            // appended with the STRLEN-based `ga_concat`, so the run stops at
+            // the first NUL *inside* the encoding. `utf_char2bytes` writes a
+            // NUL byte only for `c == 0`, so that item alone contributes
+            // nothing — and the walk CONTINUES to the next one.
+            // `list2str([65, 0, 66])` is `'AB'` in vim (verified), not `'A'`.
+            //
+            // The cast is the C's `(int)n`, and `utf_char2bytes` takes the
+            // `c < 0x80` arm for a NEGATIVE `c` too (`buf[0] = (char_u)c`), so
+            // `list2str([-1])` is the single byte `0xff`. It also has no range
+            // check above `U+10FFFF`, so `list2str([0x110000])` is the four
+            // bytes `f4 90 80 80`. Neither fits in a Rust `String`, which is
+            // why this now builds a `VimStr` — see `crate::vimstr`.
+            let buflen = crate::ported::mbyte::utf_char2bytes(n as i32, &mut buf) as usize;
+            let nul = buf[..buflen].iter().position(|&b| b == 0);
+            ga.push_bytes(&buf[..nul.unwrap_or(buflen)]);
         }
     }
-    rettv.vval = v_string(out.into());
+    rettv.vval = v_string(ga);
 }
 
 /// Port of `flatten_common()` from `Src/eval/funcs.c:1529`.
@@ -5145,7 +5156,7 @@ fn fill_assert_error(
     let mut s = String::new();
     if let Some(m) = opt_msg {
         if m.v_type != VAR_UNKNOWN {
-            s.push_str(&encode_tv2echo(m));
+            s.push_str(&encode_tv2echo(m).to_string_lossy());
             s.push_str(": ");
         }
     }
@@ -5156,21 +5167,21 @@ fn fill_assert_error(
     });
     match exp_str {
         Some(e) => s.push_str(e),
-        None => s.push_str(&encode_tv2string(exp_tv)),
+        None => s.push_str(&encode_tv2string(exp_tv).to_string_lossy()),
     }
     match atype {
         AssertType::NotEqual => {}
         AssertType::Match => {
             s.push_str(" does not match ");
-            s.push_str(&encode_tv2string(got_tv));
+            s.push_str(&encode_tv2string(got_tv).to_string_lossy());
         }
         AssertType::NotMatch => {
             s.push_str(" does match ");
-            s.push_str(&encode_tv2string(got_tv));
+            s.push_str(&encode_tv2string(got_tv).to_string_lossy());
         }
         _ => {
             s.push_str(" but got ");
-            s.push_str(&encode_tv2string(got_tv));
+            s.push_str(&encode_tv2string(got_tv).to_string_lossy());
         }
     }
     s
@@ -5286,7 +5297,7 @@ pub fn f_assert_inrange(argvars: &[typval_T], rettv: &mut typval_T) {
         let mut msg = String::new();
         if let Some(m) = argvars.get(3) {
             if m.v_type != VAR_UNKNOWN {
-                msg.push_str(&encode_tv2echo(m));
+                msg.push_str(&encode_tv2echo(m).to_string_lossy());
                 msg.push_str(": ");
             }
         }
@@ -11149,8 +11160,8 @@ pub fn searchpair_cmn(
 
     // c:6074 the three patterns.
     let spat = tv_get_string_chk(&argvars[0]);
-    let mpat = tv_get_string_buf_chk(&argvars[1]);
-    let epat = tv_get_string_buf_chk(&argvars[2]);
+    let mpat = tv_get_string_buf_chk(&argvars[1]).map(|s| s.to_string());
+    let epat = tv_get_string_buf_chk(&argvars[2]).map(|s| s.to_string());
     let (spat, mpat, epat) = match (spat, mpat, epat) {
         (Some(s), Some(m), Some(e)) => (s, m, e),
         _ => {

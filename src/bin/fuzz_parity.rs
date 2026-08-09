@@ -1125,7 +1125,7 @@ fn eval_one(expr: &str) -> Outcome {
         let errs = observe_errors_take();
         let unhandled = did_emsg.with(|d| d.get()) != 0;
         match out {
-            Ok(v) if !unhandled => Outcome::Val(encode_tv2string(&v)),
+            Ok(v) if !unhandled => Outcome::Val(encode_tv2string(&v).to_string()),
             // The FIRST unhandled message: Vim reports an error and abandons the
             // command, so the first one is what it shows. This VM keeps evaluating
             // and can raise more, and a `:catch` clears the ones it handled — so

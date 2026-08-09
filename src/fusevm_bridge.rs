@@ -95,11 +95,12 @@ use crate::ported::eval::typval::{
     tv_list_slice_or_index, CALL_FUNC_HOOK, FUNC_EXISTS_HOOK, SORT_FUNCREF_HOOK,
 };
 use crate::ported::eval::typval::{
-    tv_get_float, tv_get_number_chk, tv_get_string, tv_list_alloc, tv_list_append_tv,
+    tv_get_float, tv_get_number_chk, tv_get_string, tv_get_string_buf_chk, tv_list_alloc,
+    tv_list_append_tv,
 };
 use crate::ported::eval::typval_defs_h::{
-    blob_T, listitem_T, typval_T, typval_vval_union::*, varnumber_T, SpecialVarValue::*,
-    VarLockStatus::VAR_UNLOCKED, VarType::*,
+    blob_T, listitem_T, typval_T, typval_vval_union, typval_vval_union::*, varnumber_T,
+    SpecialVarValue::*, VarLockStatus::VAR_UNLOCKED, VarType, VarType::*,
 };
 use crate::ported::eval::vars::{eval_variable, set_var, set_vim_var_string, vv::VV_EXCEPTION};
 use crate::ported::eval_h::exprtype_T::{self, *};
@@ -130,7 +131,7 @@ fn tv_flt(f: f64) -> typval_T {
         vval: v_float(f),
     }
 }
-fn tv_str(s: String) -> typval_T {
+fn tv_str(s: impl Into<crate::vimstr::VimStr>) -> typval_T {
     typval_T {
         v_type: VAR_STRING,
         v_lock: VAR_UNLOCKED,
@@ -1326,7 +1327,7 @@ thread_local! {
     /// Value of the last bare-expression statement (REPL `-e` result).
     static LAST_RESULT: RefCell<Option<typval_T>> = const { RefCell::new(None) };
     /// `:echo` sink: `Some(buf)` captures (tests/embedding), `None` is stdout.
-    static ECHO_SINK: RefCell<Option<String>> = const { RefCell::new(None) };
+    static ECHO_SINK: RefCell<Option<Vec<u8>>> = const { RefCell::new(None) };
     /// c: `msg_col` (`globals.h`) — is there already text on the message line?
     ///
     /// Vim's newline is a **leading** separator, not a trailing one: `msg_start()`
@@ -1411,7 +1412,21 @@ fn tv_to_value(tv: typval_T) -> Value {
     match (tv.v_type, tv.vval) {
         (VAR_NUMBER, v_number(n)) => Value::Int(n),
         (VAR_FLOAT, v_float(f)) => Value::Float(f),
-        (VAR_STRING, v_string(s)) => Value::str(s),
+        // `Value::Str` is an `Arc<String>`, so it can only carry a string whose
+        // bytes are valid UTF-8. Vim's are not always (`list2str([-1])` is the
+        // single byte `0xff` — see `crate::vimstr`), so a string that would not
+        // survive the trip rides the REFPOOL handle instead, exactly like a
+        // List/Dict/Blob. Nothing else has to change for it: VimL lowers every
+        // string operation to a host builtin (`VIML_CONCAT`, the `cmp_id`
+        // comparisons, the `f_*` table), never to a native fusevm op — the one
+        // native path, `native_cmp` in `compile_viml`, is guarded by
+        // `expr_is_num` on both operands and so is unreachable for a string.
+        (VAR_STRING, v_string(s)) => match s.as_str() {
+            Some(u) => Value::str(u),
+            None => refpool_handle(VAR_STRING, v_string(s)),
+        },
+        // A Funcref's `v_string` is a function name — an identifier, always
+        // UTF-8 — so the `\u{1}func\u{1}` tagging needs no byte path.
         (VAR_FUNC, v_string(s)) => Value::str(format!("\u{1}func\u{1}{s}")),
         (VAR_BOOL, v_bool(b)) => {
             Value::Bool(b == crate::ported::eval::typval_defs_h::BoolVarValue::kBoolVarTrue)
@@ -1420,32 +1435,28 @@ fn tv_to_value(tv: typval_T) -> Value {
         // differently), so stash it in the REFPOOL like a compound value rather
         // than collapse it to the shared `Undef` null.
         (VAR_SPECIAL, v_special(kSpecialVarNone)) => {
-            let idx = REFPOOL.with(|p| {
-                let mut p = p.borrow_mut();
-                p.push(typval_T {
-                    v_type: VAR_SPECIAL,
-                    v_lock: VAR_UNLOCKED,
-                    vval: v_special(kSpecialVarNone),
-                });
-                p.len() - 1
-            });
-            Value::Ref(Box::new(Value::Int(idx as i64)))
+            refpool_handle(VAR_SPECIAL, v_special(kSpecialVarNone))
         }
         (VAR_SPECIAL, _) | (VAR_UNKNOWN, _) => Value::Undef,
         // Compound: stash the whole typval (keeps v_type) and tag with the index.
-        (vt, vv) => {
-            let idx = REFPOOL.with(|p| {
-                let mut p = p.borrow_mut();
-                p.push(typval_T {
-                    v_type: vt,
-                    v_lock: VAR_UNLOCKED,
-                    vval: vv,
-                });
-                p.len() - 1
-            });
-            Value::Ref(Box::new(Value::Int(idx as i64)))
-        }
+        (vt, vv) => refpool_handle(vt, vv),
     }
+}
+
+/// Stash a `typval_T` the fusevm `Value` set cannot represent and return the
+/// handle that stands in for it on the VM stack. Used by every compound type,
+/// by `v:none`, and by a String whose bytes are not valid UTF-8.
+fn refpool_handle(v_type: VarType, vval: typval_vval_union) -> Value {
+    let idx = REFPOOL.with(|p| {
+        let mut p = p.borrow_mut();
+        p.push(typval_T {
+            v_type,
+            v_lock: VAR_UNLOCKED,
+            vval,
+        });
+        p.len() - 1
+    });
+    Value::Ref(Box::new(Value::Int(idx as i64)))
 }
 
 fn value_to_tv(v: &Value) -> typval_T {
@@ -2201,8 +2212,11 @@ fn b_mod(vm: &mut VM, _: u8) -> Value {
 fn b_concat(vm: &mut VM, _: u8) -> Value {
     let b = pop_tv(vm);
     let a = pop_tv(vm);
-    // c: eval5 — `.`/`..` string concatenation.
-    tv_to_value(tv_str(tv_get_string(&a) + &tv_get_string(&b)))
+    // c: eval5 — `.`/`..` string concatenation. Concatenating BYTES: through
+    // the `String` accessor `list2str([-1]) . 'Z'` lost the `0xff` to `U+FFFD`.
+    let mut out = tv_get_string_buf_chk(&a).unwrap_or_default();
+    out.push_bytes(&tv_get_string_buf_chk(&b).unwrap_or_default());
+    tv_to_value(tv_str(out))
 }
 
 fn b_neg(vm: &mut VM, _: u8) -> Value {
@@ -2530,8 +2544,16 @@ fn echo_impl(vm: &mut VM, argc: u8, newline: bool) {
         return;
     }
     let sep = if newline { " " } else { "" };
-    let rendered: Vec<String> = parts.iter().map(encode_tv2echo).collect();
-    let body = rendered.join(sep);
+    // The body is bytes, not text: a VimL string may hold bytes that are not
+    // valid UTF-8 (`echo list2str([0x110000])` is the four bytes `f4 90 80 80`
+    // in vim), and rendering through a Rust `String` replaced them with U+FFFD.
+    let mut body = crate::vimstr::VimStr::new();
+    for (i, tv) in parts.iter().enumerate() {
+        if i > 0 {
+            body.push_str(sep);
+        }
+        body.push_bytes(&encode_tv2echo(tv));
+    }
     // To stdout, `:echo` ends with a newline (one message per line). Inside
     // execute(), Vim instead *prefixes* each `:echo` with a newline (so
     // string(execute("echo 5")) == "\n5"); `:echon` adds none.
@@ -2540,13 +2562,14 @@ fn echo_impl(vm: &mut VM, argc: u8, newline: bool) {
         // A capture is active. `execute()` has its own recorded convention (Vim
         // returns "\n5" for `execute('echo 5')`), and the embedding/test capture
         // keeps the line-per-message shape its callers already parse.
-        let line = if !newline {
-            body
-        } else if exec_capture {
-            format!("\n{body}")
-        } else {
-            format!("{body}\n")
-        };
+        let mut line = crate::vimstr::VimStr::new();
+        if newline && exec_capture {
+            line.push_char('\n');
+        }
+        line.push_bytes(&body);
+        if newline && !exec_capture {
+            line.push_char('\n');
+        }
         echo_write(&line);
         return;
     }
@@ -2557,14 +2580,14 @@ fn echo_impl(vm: &mut VM, argc: u8, newline: bool) {
 /// (see [`MSG_COL`]): `:echo` breaks the line first *if* there is anything on it,
 /// `:echon` never does, and neither appends a trailing newline. The line the run
 /// ends on is closed by [`msg_flush_line`].
-fn msg_put(body: &str, newline: bool) {
+fn msg_put(body: &[u8], newline: bool) {
     // c: `msg_silent` — while `:silent` is in effect nothing is shown, so the
     // message never reaches the column either.
     if message::msg_silent.with(|m| m.get()) != 0 {
         return;
     }
     if newline && MSG_COL.with(|c| c.get()) {
-        echo_write("\n");
+        echo_write(b"\n");
         MSG_COL.with(|c| c.set(false));
     }
     if body.is_empty() {
@@ -2572,8 +2595,13 @@ fn msg_put(body: &str, newline: bool) {
     }
     echo_write(body);
     // An embedded newline (`echo "a\nb"`) resets the column just like a break
-    // does, so what matters is only the text after the last one.
-    let tail = body.rsplit('\n').next().unwrap_or("");
+    // does, so what matters is only the text after the last one. `\n` is ASCII
+    // and cannot occur inside a UTF-8 multibyte sequence, so the byte scan is
+    // the same split the text version did.
+    let tail = match body.iter().rposition(|&b| b == b'\n') {
+        Some(i) => &body[i + 1..],
+        None => body,
+    };
     MSG_COL.with(|c| c.set(!tail.is_empty()));
 }
 
@@ -2586,7 +2614,7 @@ fn msg_put(body: &str, newline: bool) {
 pub fn msg_flush_line() {
     if MSG_COL.with(|c| c.get()) {
         MSG_COL.with(|c| c.set(false));
-        echo_write("\n");
+        echo_write(b"\n");
     }
 }
 
@@ -3556,7 +3584,7 @@ fn b_execute(vm: &mut VM, argc: u8) -> Value {
     };
     // Redirect output into a fresh capture buffer, run, then restore the sink.
     // EXECUTE_DEPTH switches `:echo` to the leading-newline capture convention.
-    let saved = ECHO_SINK.with(|s| s.borrow_mut().replace(String::new()));
+    let saved = ECHO_SINK.with(|s| s.borrow_mut().replace(Vec::new()));
     EXECUTE_DEPTH.with(|d| d.set(d.get() + 1));
     for cmd in cmds {
         let _ = run_source_nested(&cmd);
@@ -4229,7 +4257,7 @@ fn b_colorscheme(vm: &mut VM, _: u8) -> Value {
     if name.is_empty() {
         // Query: echo the active scheme (blank if none), matching Vim.
         let cur = crate::ported::eval::vars::get_var_value("g:colors_name").unwrap_or_default();
-        echo_write(&format!("{cur}\n"));
+        echo_write(format!("{cur}\n").as_bytes());
         return Value::Undef;
     }
     // Record the active scheme name (Vim sets this before sourcing).
@@ -4632,7 +4660,7 @@ fn slice_value(base: &typval_T, from: &typval_T, to: &typval_T) -> typval_T {
 
 // ── echo sink + per-run lifecycle (carve-out) ──
 
-fn echo_write(s: &str) {
+fn echo_write(s: &[u8]) {
     ECHO_SINK.with(|sink| {
         let mut sink = sink.borrow_mut();
         match sink.as_mut() {
@@ -4640,7 +4668,7 @@ fn echo_write(s: &str) {
             // whatever `msg_silent` says. `:silent` suppresses the *display* of a
             // message, not its existence — which is exactly why
             // `execute('silent echo "x"')` still returns "\nx" in Vim.
-            Some(buf) => buf.push_str(s),
+            Some(buf) => buf.extend_from_slice(s),
             None => {
                 // c: `msg_silent` — nothing is shown while `:silent` is in effect.
                 if message::msg_silent.with(|m| m.get()) != 0 {
@@ -4648,7 +4676,7 @@ fn echo_write(s: &str) {
                 }
                 use std::io::Write;
                 let out = std::io::stdout();
-                let _ = out.lock().write_all(s.as_bytes());
+                let _ = out.lock().write_all(s);
             }
         }
     });
@@ -4656,21 +4684,29 @@ fn echo_write(s: &str) {
 
 /// Begin capturing `:echo` output into a buffer (tests / embedding).
 pub fn capture_begin() {
-    ECHO_SINK.with(|s| *s.borrow_mut() = Some(String::new()));
+    ECHO_SINK.with(|s| *s.borrow_mut() = Some(Vec::new()));
 }
 
 /// Take and clear the captured echo buffer, restoring stdout output.
+///
+/// The buffer holds bytes (a `:echo`d VimL string need not be valid UTF-8), and
+/// the DAP/embedding callers of this hand the result on as text, so anything
+/// that is not UTF-8 is replaced here rather than at each call site. The
+/// byte-exact readers are `execute()` and the stdout path, which take the buffer
+/// as bytes.
 pub fn capture_take() -> String {
-    ECHO_SINK.with(|s| s.borrow_mut().take().unwrap_or_default())
+    String::from_utf8_lossy(&ECHO_SINK.with(|s| s.borrow_mut().take().unwrap_or_default()))
+        .into_owned()
 }
 
 /// Drain the captured echo buffer **without** disabling capture (the debugger
-/// streams output progressively as DAP `output` events at each pause).
+/// streams output progressively as DAP `output` events at each pause). Lossy for
+/// the same reason as [`capture_take`].
 pub fn capture_drain() -> String {
     ECHO_SINK.with(|s| {
         let mut s = s.borrow_mut();
         match s.as_mut() {
-            Some(buf) => std::mem::take(buf),
+            Some(buf) => String::from_utf8_lossy(&std::mem::take(buf)).into_owned(),
             None => String::new(),
         }
     })
@@ -5819,7 +5855,7 @@ pub fn dap_globals() -> Vec<(String, String)> {
         d.borrow()
             .dv_hashtab
             .iter()
-            .map(|(k, v)| (format!("g:{k}"), encode_tv2echo(v)))
+            .map(|(k, v)| (format!("g:{k}"), encode_tv2echo(v).to_string()))
             .collect()
     })
 }
@@ -5827,7 +5863,9 @@ pub fn dap_globals() -> Vec<(String, String)> {
 /// Evaluate a bare variable name for the debugger's `evaluate` request (reads
 /// `eval_variable`, no nested VM run — avoids disturbing the paused executor).
 pub fn dap_eval_var(name: &str) -> Option<String> {
-    eval_variable(name).as_ref().map(encode_tv2echo)
+    eval_variable(name)
+        .as_ref()
+        .map(|tv| encode_tv2echo(tv).to_string())
 }
 
 /// Bind `g:name` to a string from Rust, for an embedder that has data to hand a

@@ -484,7 +484,7 @@ pub fn typval_tostring(arg: Option<&typval_T>, quotes: bool) -> String {
                     _ => String::new(),
                 }
             } else {
-                crate::ported::eval::encode::encode_tv2string(tv)
+                crate::ported::eval::encode::encode_tv2string(tv).to_string()
             }
         }
     }
@@ -606,7 +606,7 @@ pub fn typval2string(tv: &typval_T, join_list: bool) -> String {
         }
         out
     } else if tv.v_type == VAR_LIST || tv.v_type == VAR_DICT {
-        encode_tv2string(tv)
+        encode_tv2string(tv).to_string()
     } else {
         tv_get_string(tv)
     }
@@ -790,7 +790,7 @@ pub fn ex_echo(arg: &str, skip: bool, echon: bool) -> String {
                 out.push(' ');
             }
             // c:6180 char *tofree = encode_tv2echo(&rettv, NULL);
-            out.push_str(&crate::ported::eval::encode::encode_tv2echo(&rettv));
+            out.push_str(&crate::ported::eval::encode::encode_tv2echo(&rettv).to_string_lossy());
         }
         crate::ported::eval::typval::tv_clear(&mut rettv); // c:6184
         arg = skipwhite(arg); // c:6185
@@ -859,9 +859,9 @@ pub fn ex_execute(arg: &str, skip: bool, echomsg: bool, echoerr: bool) -> String
             let argstr = if is_execute {
                 crate::ported::eval::typval::tv_get_string(&rettv)
             } else if rettv.v_type == VAR_STRING {
-                crate::ported::eval::encode::encode_tv2echo(&rettv)
+                crate::ported::eval::encode::encode_tv2echo(&rettv).to_string()
             } else {
-                crate::ported::eval::encode::encode_tv2string(&rettv)
+                crate::ported::eval::encode::encode_tv2string(&rettv).to_string()
             };
             // c:6251 if (!GA_EMPTY(&ga)) ga_data[ga_len++] = ' ';
             if !ga.is_empty() {
@@ -5120,8 +5120,10 @@ pub fn eval_dict(
             return FAIL;
         }
         let key = if evaluate {
+            // The Dict hashtab is keyed by text, so the key is read as text
+            // here; `tv_get_string_buf_chk` is the byte-exact accessor.
             match crate::ported::eval::typval::tv_get_string_buf_chk(&tvkey) {
-                Some(k) => k,
+                Some(k) => k.to_string(),
                 None => return FAIL, // c:4487 errmsg already given
             }
         } else {

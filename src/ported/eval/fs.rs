@@ -947,7 +947,11 @@ fn write_list(fp: &mut FileDescriptor, list: &list_T, binary: bool) -> bool {
     'write_list_error: {
         // TV_LIST_ITER_CONST(list, li, { … })
         for (idx, li) in list.lv_items.iter().enumerate() {
-            let s = match tv_get_string_chk(&li.li_tv) {
+            // c: `const char *const s = tv_get_string_chk(TV_LIST_ITEM_TV(li));`
+            // — a byte pointer. `tv_get_string_buf_chk` is the byte-exact read
+            // (see its doc); the `String`-returning wrappers would replace a
+            // non-UTF-8 byte, and writefile()'s whole job is to write the bytes.
+            let s = match tv_get_string_buf_chk(&li.li_tv) {
                 Some(s) => s,
                 None => return false,
             };
@@ -1039,8 +1043,8 @@ fn write_blob(fp: &mut FileDescriptor, blob: &blob_T) -> bool {
 }
 
 /// Port of `write_string()` from `vendor/eval/fs.c:1780`.
-fn write_string(fp: &mut FileDescriptor, data: &str) -> bool {
-    write_data(fp, data.as_bytes(), data.len())
+fn write_string(fp: &mut FileDescriptor, data: &[u8]) -> bool {
+    write_data(fp, data, data.len())
 }
 
 /// Port of `f_writefile()` from `vendor/eval/fs.c:1787` — write a List, Blob or
@@ -1103,7 +1107,7 @@ pub fn f_writefile(argvars: &[typval_T], rettv: &mut typval_T) {
     } else {
         let error = file_open(
             &mut fp,
-            &fname,
+            &fname.to_string_lossy(),
             (if append { kFileAppend } else { kFileTruncate })
                 | (if mkdir_p { kFileMkDir } else { kFileCreate })
                 | kFileCreate,
@@ -1121,7 +1125,10 @@ pub fn f_writefile(argvars: &[typval_T], rettv: &mut typval_T) {
                     _ => true, // argvars[0].vval.v_blob == NULL
                 }
             } else if argvars[0].v_type == VAR_STRING {
-                write_string(&mut fp, &tv_get_string(&argvars[0]))
+                write_string(
+                    &mut fp,
+                    &tv_get_string_buf_chk(&argvars[0]).unwrap_or_default(),
+                )
             } else {
                 match &argvars[0].vval {
                     v_list(Some(l)) => write_list(&mut fp, &l.borrow(), binary),

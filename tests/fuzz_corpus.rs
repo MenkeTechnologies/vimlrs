@@ -45,7 +45,7 @@ fn eval_as_corpus(expr: &str) -> String {
         // An expression can both produce a (recovered, empty) value and raise an
         // error; the error is the observable outcome, so it wins — the oracle
         // recorded it the same way.
-        Ok(v) if errs.is_empty() => encode_tv2string(&v),
+        Ok(v) if errs.is_empty() => encode_tv2string(&v).to_string(),
         Ok(_) => format!("!{}", enumber(&errs[0])),
         Err(e) => format!("!{}", enumber(&e.to_string())),
     }

@@ -470,7 +470,7 @@ fn tv_to_optval(tv: &typval_T, opt_idx: OptIndex, option: &str, error: &mut bool
         let strval = encode_tv2string(tv);
         // c:3211 err = strval == NULL;  (never NULL here)
         // c:3212 value = CSTR_AS_OPTVAL(strval);
-        value = STRING_OPTVAL(strval);
+        value = STRING_OPTVAL(strval.to_string());
     } else if option_has_bool || option_has_num {
         // c:3214 varnumber_T n = option_has_num ? tv_get_number_chk : tv_get_bool_chk;
         let n = if option_has_num {
@@ -515,7 +515,7 @@ fn tv_to_optval(tv: &typval_T, opt_idx: OptIndex, option: &str, error: &mut bool
             // c:3233 err = strval == NULL;
             err = strval.is_none();
             // c:3234 value = CSTR_TO_OPTVAL(strval);
-            value = STRING_OPTVAL(strval.unwrap_or_default());
+            value = STRING_OPTVAL(strval.unwrap_or_default().to_string());
         } else if !is_tty_opt {
             // c:3236 err = true; emsg(_(e_string_required));
             err = true;
