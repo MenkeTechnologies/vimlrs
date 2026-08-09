@@ -26,13 +26,7 @@ use std::process::Command;
 /// answer, the divergence is still printed by `scripts/parity.sh`, and a case
 /// listed here that starts *matching* fails this test — so an entry cannot
 /// outlive the gap it names. Every entry must also be an open item in BUGS.md.
-const KNOWN_OPEN: &[(&str, &str)] = &[(
-    "throwpoint",
-    "v:throwpoint is always empty: vim's value is the sourcing chain plus the \
-     line the exception was raised on, and this port only tracks source line \
-     numbers under --dap (the SET_LINENO markers a debug build emits). BUGS.md \
-     R20-O1.",
-)];
+const KNOWN_OPEN: &[(&str, &str)] = &[];
 
 /// Sorted list of `tests/parity_cases/*.vim`.
 fn cases(dir: &Path) -> Vec<PathBuf> {

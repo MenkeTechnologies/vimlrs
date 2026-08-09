@@ -1393,17 +1393,67 @@ List come back unbound — also verified. Carried: `FC_DICT` as
 `SHARD_FORMAT_VERSION` 4 -> 5 for the `UserFuncDef` layout change. Recorded as
 `tests/parity_cases/dict_partial.vim`.
 
-## Still open
+### R21-4. `v:throwpoint` was always empty — ✅ FIXED (was R20-O1)
+vim reports the whole exception stack plus the raising line
+(`…script /path/x.vim[23]..function Outer[1]..Thrower, line 1`). This port
+tracked source lines only in a `--dap` build, via `SET_LINENO` marker ops.
 
-### R20-O1. `v:throwpoint` is always empty
-vim reports the whole sourcing chain plus the line the exception was raised on
-(`command line..script /path/to/x.vim[29]..function F, line 1`). This port only
-tracks source line numbers in a *debug* build (the `SET_LINENO` markers the DAP
-compiler emits); a faithful `v:throwpoint` needs them unconditionally plus a
-sourcing-context stack that records the entry line of each nested frame. Recorded
-as `tests/parity_cases/throwpoint.vim` with vim's real answer and listed in
-`KNOWN_OPEN` in `tests/parity_cases.rs`, which fails if the gap ever closes
-without the entry being removed.
+**Line tracking costs nothing.** `fusevm::ChunkBuilder::emit` already takes a
+line and `fusevm::Chunk` already keeps a `lines` vector parallel to `ops`; the
+compiler was passing the constant `1` for every op. Passing the real line
+instead emits no bytecode at all — no marker op, no builtin call — so a numeric
+loop body stays `CallBuiltin`-free and JIT-eligible (`--tiers` and the
+`tiers::tests` trace tests are unchanged), and the line is readable from any
+builtin as `vm.chunk.lines[vm.ip - 1]`. The `SET_LINENO` markers remain the DAP
+path and were not touched.
+
+What that cost was an AST change: block bodies are now `viml_ast::Block`
+(`Vec<(u32, Stmt)>`) rather than `Vec<Stmt>`, so every statement carries the line
+the parser *already had* and was discarding in `strip_lines`. `parse_program` and
+`parse_program_lines` collapse into one function as a result. Inside a function
+body the line is made relative to the `:function` (`Compiler::line_base`),
+because that is what vim reports: a throw on the third body line is
+`…function F, line 3`, not the file line.
+
+The exception stack is `fs::sourcing_names()` (already maintained) plus
+`funccal_stack`'s `fc_name`s, with `CALL_SITE_LNUM` recording each frame's call
+site — that is the `[23]` and `[1]` above. Rendered by
+`fusevm_bridge::throw_point` (c: `estack_sfile` + `", line %ld"`,
+ex_eval.c:482-486 / 599-607), snapshotted at the raise (`:throw` *and* an
+error-turned-exception) and published by the `:catch`, with `:try`/`:endtry`
+saving and restoring it exactly as they already did for `v:exception`.
+
+`v:throwpoint` needs its own thread-local (`V_THROWPOINT`) for the same reason
+`v:exception` has one: `install()` runs `evalvars_init()` on every VM, and a user
+function body runs on a nested VM, so a value living only in the `vimvars` table
+is wiped the first time the `:catch` calls anything.
+
+RUST-PORT NOTE: vim's chain begins `command line..` because the harness launches
+it with `-c 'source …'`. This interpreter is handed a script path, so it has no
+such entry and its chain starts at the script. Everything after that is
+byte-identical. `tests/parity_cases/throwpoint.vim` compares the value with the
+directory stripped, which drops both that prefix and the absolute path
+(un-diffable between machines anyway) and keeps the frame chain, the per-frame
+entry lines and the raising line. Its `KNOWN_OPEN` entry in
+`tests/parity_cases.rs` is removed — the list is now empty.
+
+### R21-5. `Vim(cmd):` was wrong for `:if` / `:while` / `:for` — ✅ FIXED
+Found while wiring R21-4, which reads the line from the same per-statement
+marker. `Compiler::stmt_cmdname` named only the leaf commands, so an error in a
+block opener's condition was tagged with whatever the *previous* statement had
+set: `try | if [][0] | endif | catch` reported `Vim:E684` where vim reports
+`Vim(if):E684`, and `:while`/`:for` reported `Vim(echo)`. `:silent` is a modifier
+and now looks through to the command it modifies (`silent echo [][0]` is
+`Vim(echo)`, verified), and each bar-separated command of a `LineGroup` sets its
+own. All four verified against vim 9.2.
+
+### R21-6. `throw {expr}` threw the value even when the expression errored — ✅ FIXED
+`throw [][0]` caught a thrown `v:null`; vim raises `Vim(throw):E684: List index
+out of range: 0`. c: `ex_throw` evaluates the argument with `eval0()` first and
+throws only if that succeeded. `VIML_THROW` now yields when the error count rose
+while its argument was evaluated, the same `ERR_MARK` test `VIML_RAISE` uses.
+
+## Still open
 
 ### R21-O2. `function('F')` before `F` is defined is accepted
 vim resolves the name at the `function()` call and raises `E700: Unknown

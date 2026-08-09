@@ -261,6 +261,16 @@ pub enum ForVars {
     List(Vec<String>),
 }
 
+/// A block body: each statement paired with its 1-based source line.
+///
+/// The line travels with the statement all the way to the chunk builder, which
+/// records it in `fusevm::Chunk::lines` (a vector the VM already allocates and
+/// keeps parallel to `ops`). Nothing is emitted to carry it — no marker op, no
+/// builtin call — so a numeric loop body stays `CallBuiltin`-free and
+/// JIT-eligible, and the line is still recoverable at any point the interpreter
+/// holds the VM. That is what `v:throwpoint` and the `Vim(cmd):` tag read.
+pub type Block = Vec<(u32, Stmt)>;
+
 /// A Vimscript statement (one ex-command's worth of work).
 #[derive(Debug, Clone)]
 pub enum Stmt {
@@ -291,16 +301,16 @@ pub enum Stmt {
     /// optional trailing `else` body has no condition.
     If {
         /// `if` / `elseif` arms in source order.
-        arms: Vec<(Expr, Vec<Stmt>)>,
+        arms: Vec<(Expr, Block)>,
         /// `else` body, if present.
-        else_body: Option<Vec<Stmt>>,
+        else_body: Option<Block>,
     },
     /// `:while {cond} … :endwhile`.
     While {
         /// Loop condition.
         cond: Expr,
         /// Loop body.
-        body: Vec<Stmt>,
+        body: Block,
     },
     /// `:for {var} in {expr} … :endfor` (list iteration).
     For {
@@ -309,7 +319,7 @@ pub enum Stmt {
         /// Iterable expression (a List in Phase 3 of this port).
         iter: Expr,
         /// Loop body.
-        body: Vec<Stmt>,
+        body: Block,
     },
     /// `:break`.
     Break,
@@ -330,7 +340,7 @@ pub enum Stmt {
         /// when the argument is omitted (`:help optional-function-argument`).
         defaults: Vec<(usize, Expr)>,
         /// Function body.
-        body: Vec<Stmt>,
+        body: Block,
         /// `function!` — replace an existing definition.
         bang: bool,
         /// `true` for a vim9 `:def` (bare names in the body resolve to
@@ -352,11 +362,11 @@ pub enum Stmt {
     /// explicit `:throw` on the same line still *is* caught.
     Try {
         /// Protected body.
-        body: Vec<Stmt>,
+        body: Block,
         /// `catch` clauses: `(optional /pattern/, body)`.
-        catches: Vec<(Option<String>, Vec<Stmt>)>,
+        catches: Vec<(Option<String>, Block)>,
         /// `finally` body, always run.
-        finally: Option<Vec<Stmt>>,
+        finally: Option<Block>,
         /// Written on one source line (see above).
         inline: bool,
     },

@@ -11,7 +11,7 @@ use fusevm::{ChunkBuilder, Op, Value};
 use serde::{Deserialize, Serialize};
 
 use crate::fusevm_bridge as h;
-use crate::viml_ast::{ArithOp, Expr, ForVars, LetTarget, Stmt, UnaryOp, UnletArg};
+use crate::viml_ast::{ArithOp, Block, Expr, ForVars, LetTarget, Stmt, UnaryOp, UnletArg};
 use crate::viml_lexer::{CaseFlag, CmpOp, VimlError};
 
 /// A compiled user function: its name, parameter names, and body chunk.
@@ -198,8 +198,9 @@ fn build_user_func_def(
     name: &str,
     args: &[String],
     defaults: &[(usize, Expr)],
-    body: &[Stmt],
+    body: &[(u32, Stmt)],
     flags: FuncFlags,
+    def_line: u32,
     exc: bool,
 ) -> Result<UserFuncDef, VimlError> {
     let defaults = defaults
@@ -213,7 +214,7 @@ fn build_user_func_def(
         bang: flags.bang,
         vim9: flags.vim9,
         dict: flags.dict,
-        chunk: compile_function_body(body, exc)?,
+        chunk: compile_function_body(body, exc, def_line)?,
     })
 }
 
@@ -291,7 +292,7 @@ fn next_lambda_name() -> String {
 
 /// Compile a program: top-level statements into `main`, `:function` definitions
 /// into `funcs`.
-pub fn compile_program(stmts: &[Stmt]) -> Result<CompiledProgram, VimlError> {
+pub fn compile_program(stmts: &[(u32, Stmt)]) -> Result<CompiledProgram, VimlError> {
     compile_program_inner(stmts, true)
 }
 
@@ -304,11 +305,14 @@ pub fn compile_program(stmts: &[Stmt]) -> Result<CompiledProgram, VimlError> {
 /// a bare `let A = 1` compiled alone looks like a write nobody reads, so the
 /// slot absorbs it and `g:A` is never written — the next statement's `echo A`
 /// then raised E121 where vim prints 1.
-pub fn compile_script_stmt(stmts: &[Stmt]) -> Result<CompiledProgram, VimlError> {
+pub fn compile_script_stmt(stmts: &[(u32, Stmt)]) -> Result<CompiledProgram, VimlError> {
     compile_program_inner(stmts, false)
 }
 
-fn compile_program_inner(stmts: &[Stmt], slot_top: bool) -> Result<CompiledProgram, VimlError> {
+fn compile_program_inner(
+    stmts: &[(u32, Stmt)],
+    slot_top: bool,
+) -> Result<CompiledProgram, VimlError> {
     // Exceptions are global: if anything in the program throws or `:try`s, every
     // compilation unit emits unwind checks (so a throw can propagate through a
     // function call into a caller's `:try`).
@@ -317,8 +321,8 @@ fn compile_program_inner(stmts: &[Stmt], slot_top: bool) -> Result<CompiledProgr
     DEFERRED_FUNCS.with(|f| f.borrow_mut().clear());
     LAMBDA_COUNTER.with(|c| c.set(0));
     let mut funcs = Vec::new();
-    let mut top = Vec::new();
-    for s in stmts {
+    let mut top: Block = Vec::new();
+    for (line, s) in stmts {
         if let Stmt::Function {
             name,
             args,
@@ -349,20 +353,23 @@ fn compile_program_inner(stmts: &[Stmt], slot_top: bool) -> Result<CompiledProgr
                         dict: true,
                     };
                     funcs.push(build_user_func_def(
-                        &anon, args, defaults, body, flags, exc,
+                        &anon, args, defaults, body, flags, *line, exc,
                     )?);
-                    top.push(Stmt::Let {
-                        target: LetTarget::Index {
-                            base: Box::new(base),
-                            index: Box::new(Expr::Str(key)),
+                    top.push((
+                        *line,
+                        Stmt::Let {
+                            target: LetTarget::Index {
+                                base: Box::new(base),
+                                index: Box::new(Expr::Str(key)),
+                            },
+                            // NOT `function('1')`: vim rejects a numeric name there
+                            // (E129/E475 — verified), even though its own numbered
+                            // functions are named exactly that. The Funcref value is
+                            // built directly, through the same `\x01func\x01`
+                            // sentinel `Expr::NullFunc` uses.
+                            expr: Expr::Str(format!("\u{1}func\u{1}{anon}")),
                         },
-                        // NOT `function('1')`: vim rejects a numeric name there
-                        // (E129/E475 — verified), even though its own numbered
-                        // functions are named exactly that. The Funcref value is
-                        // built directly, through the same `\x01func\x01`
-                        // sentinel `Expr::NullFunc` uses.
-                        expr: Expr::Str(format!("\u{1}func\u{1}{anon}")),
-                    });
+                    ));
                 }
                 None => {
                     let flags = FuncFlags {
@@ -370,11 +377,13 @@ fn compile_program_inner(stmts: &[Stmt], slot_top: bool) -> Result<CompiledProgr
                         vim9: *vim9,
                         dict: *dict,
                     };
-                    funcs.push(build_user_func_def(name, args, defaults, body, flags, exc)?)
+                    funcs.push(build_user_func_def(
+                        name, args, defaults, body, flags, *line, exc,
+                    )?)
                 }
             }
         } else {
-            top.push(s.clone());
+            top.push((*line, s.clone()));
         }
     }
     let mut c = Compiler::new(false, exc);
@@ -417,8 +426,17 @@ fn compile_program_inner(stmts: &[Stmt], slot_top: bool) -> Result<CompiledProgr
 /// Compile a user function body to its own chunk. `:return` jumps to the end;
 /// with no explicit return the caller defaults the result to `0`. A pending
 /// exception unwinds to the same end (the call returns with it still pending).
-fn compile_function_body(body: &[Stmt], exc: bool) -> Result<fusevm::Chunk, VimlError> {
+fn compile_function_body(
+    body: &[(u32, Stmt)],
+    exc: bool,
+    def_line: u32,
+) -> Result<fusevm::Chunk, VimlError> {
     let mut c = Compiler::new(true, exc);
+    // vim numbers a function body's lines from 1 at the first line AFTER the
+    // `:function`, so `v:throwpoint` for a throw on the body's third line is
+    // `…function F, line 3` and not the file line. The parser records absolute
+    // file lines; `line_base` turns them into that relative numbering.
+    c.line_base = def_line;
     // Slot-allocate provably-Number locals so a numeric loop body lowers to
     // native ops the JIT can trace. (Exceptions add per-statement unwind
     // CallBuiltins that would break a native loop, so only when `!exc`.)
@@ -452,8 +470,8 @@ pub fn compile_expr_only(e: &Expr) -> Result<fusevm::Chunk, VimlError> {
 }
 
 /// Whether any statement (recursively) uses `:try` or `:throw`.
-fn uses_exceptions(stmts: &[Stmt]) -> bool {
-    stmts.iter().any(|s| match s {
+fn uses_exceptions(stmts: &[(u32, Stmt)]) -> bool {
+    stmts.iter().any(|(_, s)| match s {
         Stmt::Throw(_) | Stmt::Try { .. } => true,
         Stmt::If { arms, else_body } => {
             arms.iter().any(|(_, b)| uses_exceptions(b))
@@ -515,6 +533,18 @@ struct Compiler {
     /// `arith_int_fast` promotes int↔float exactly like VimL).
     slots: std::collections::HashMap<String, u16>,
     int_slots: std::collections::HashSet<String>,
+    /// The source line of the statement being compiled — written into
+    /// `fusevm::Chunk::lines` by [`Compiler::emit`] for every op it produces.
+    ///
+    /// Inside a function body it is the line *relative to the `:function`*
+    /// (`base_line` subtracted), because that is what vim reports:
+    /// `v:throwpoint` for a throw on the third line of a body is
+    /// `…function F, line 3`, not the file line.
+    cur_line: u32,
+    /// Subtracted from every statement's absolute source line to produce
+    /// [`Compiler::cur_line`]. Zero for a script chunk (absolute file lines) and
+    /// the `:function` header's line for a body chunk.
+    line_base: u32,
 }
 
 /// Decide which bare function-local variables can live in fusevm slots.
@@ -531,7 +561,7 @@ type SlotPlan = (
     std::collections::HashSet<String>,
 );
 
-fn slot_plan(stmts: &[Stmt], in_function: bool) -> SlotPlan {
+fn slot_plan(stmts: &[(u32, Stmt)], in_function: bool) -> SlotPlan {
     use std::collections::{HashMap, HashSet};
 
     fn is_bare(name: &str) -> bool {
@@ -629,8 +659,8 @@ fn slot_plan(stmts: &[Stmt], in_function: bool) -> SlotPlan {
         }
     }
 
-    fn walk(stmts: &[Stmt], cx: &mut Ctx) {
-        for s in stmts {
+    fn walk(stmts: &[(u32, Stmt)], cx: &mut Ctx) {
+        for (_, s) in stmts {
             if *cx.bail {
                 return;
             }
@@ -858,8 +888,8 @@ fn slot_plan(stmts: &[Stmt], in_function: bool) -> SlotPlan {
             _ => {}
         }
     }
-    fn scoped_s(stmts: &[Stmt], in_function: bool, out: &mut HashSet<String>) {
-        for s in stmts {
+    fn scoped_s(stmts: &[(u32, Stmt)], in_function: bool, out: &mut HashSet<String>) {
+        for (_, s) in stmts {
             match s {
                 Stmt::Let {
                     target: LetTarget::Var(n),
@@ -928,6 +958,8 @@ impl Compiler {
             unwind: Vec::new(),
             slots: std::collections::HashMap::new(),
             int_slots: std::collections::HashSet::new(),
+            cur_line: 0,
+            line_base: 0,
         }
     }
 
@@ -936,6 +968,21 @@ impl Compiler {
     /// the innermost boundary).
     /// The ex-command name a statement raises errors under — Vim tags an
     /// error-turned-exception with it (`Vim(echo):E730: …`).
+    ///
+    /// Block openers are named too. Verified against vim 9.2:
+    ///
+    /// ```text
+    /// try | if [][0] | endif | catch | echo v:exception | endtry
+    /// " Vim(if):E684: List index out of range: 0
+    /// ```
+    ///
+    /// and the same for `:while` and `:for`. Before they were listed, the tag on
+    /// such an error was whatever the *previous* statement had set — `Vim:` at
+    /// the top of a script, `Vim(echo)` after an `:echo`.
+    ///
+    /// The marker this drives is also where the statement's source line is
+    /// recorded (`fusevm_bridge::b_set_cmdname`), so a statement kind missing
+    /// here would report the previous statement's line in `v:throwpoint`.
     fn stmt_cmdname(s: &Stmt) -> Option<&'static str> {
         Some(match s {
             Stmt::Echo(_) => "echo",
@@ -949,12 +996,26 @@ impl Compiler {
             Stmt::Unlet(_) => "unlet",
             Stmt::LockVar { lock: true, .. } => "lockvar",
             Stmt::LockVar { lock: false, .. } => "unlockvar",
+            Stmt::If { .. } => "if",
+            Stmt::While { .. } => "while",
+            Stmt::For { .. } => "for",
+            Stmt::Try { .. } => "try",
+            Stmt::Source(_) => "source",
+            Stmt::Set(_) => "set",
+            // `:silent CMD` is a modifier, not a command: vim tags an error
+            // inside it with the command it modifies (`silent echo [][0]` is
+            // `Vim(echo):E684`, verified), so look through it.
+            Stmt::Silent { stmt, .. } => return Self::stmt_cmdname(stmt),
             _ => return None,
         })
     }
 
-    fn compile_stmts(&mut self, stmts: &[Stmt]) -> Result<(), VimlError> {
-        for s in stmts {
+    fn compile_stmts(&mut self, stmts: &[(u32, Stmt)]) -> Result<(), VimlError> {
+        for (line, s) in stmts {
+            // The line every op emitted for this statement is tagged with. It
+            // costs no bytecode: `fusevm::ChunkBuilder::emit` already takes a
+            // line and the chunk already keeps the vector.
+            self.cur_line = line.saturating_sub(self.line_base);
             // Only programs that use exceptions can observe the tag, and they are
             // the only ones that pay for it.
             if self.exc {
@@ -985,11 +1046,9 @@ struct LoopCtx {
     continues: Vec<usize>,
 }
 
-const LINE: u32 = 1;
-
 impl Compiler {
     fn emit(&mut self, op: Op) -> usize {
-        self.b.emit(op, LINE)
+        self.b.emit(op, self.cur_line)
     }
 
     fn load_str(&mut self, s: &str) {
@@ -1249,7 +1308,15 @@ impl Compiler {
                     vim9: *vim9,
                     dict: *dict,
                 };
-                let def = build_user_func_def(name, args, defaults, body, flags, self.exc)?;
+                let def = build_user_func_def(
+                    name,
+                    args,
+                    defaults,
+                    body,
+                    flags,
+                    self.cur_line,
+                    self.exc,
+                )?;
                 let key = deferred_key(&def);
                 DEFERRED_FUNCS.with(|f| f.borrow_mut().push(def));
                 self.load_str(&key);
@@ -1274,6 +1341,16 @@ impl Compiler {
                 for (i, inner) in stmts.iter().enumerate() {
                     self.emit(Op::CallBuiltin(h::VIML_ERR_MARK, 0));
                     self.emit(Op::Pop);
+                    // Each bar-separated command on the line is its own
+                    // ex-command and tags its own errors — the group shares a
+                    // source line but not a command name.
+                    if self.exc {
+                        if let Some(cmd) = Self::stmt_cmdname(inner) {
+                            self.load_str(cmd);
+                            self.emit(Op::CallBuiltin(h::VIML_SET_CMDNAME, 1));
+                            self.emit(Op::Pop);
+                        }
+                    }
                     self.stmt(inner)?;
                     // The last command has no successors to abandon.
                     if i + 1 < stmts.len() {
@@ -1304,6 +1381,13 @@ impl Compiler {
                 Ok(())
             }
             Stmt::Throw(e) => {
+                // c: `ex_throw` evaluates the argument with `eval0()` FIRST and
+                // only throws when that succeeded — an error while evaluating it
+                // is the outcome, not the value. Mark the error count so
+                // `VIML_THROW` can tell (vim 9.2: `throw [][0]` gives
+                // `Vim(throw):E684`, not a thrown `v:null`).
+                self.emit(Op::CallBuiltin(h::VIML_ERR_MARK, 0));
+                self.emit(Op::Pop);
                 self.expr(e)?;
                 self.emit(Op::CallBuiltin(h::VIML_THROW, 1));
                 self.emit(Op::Pop);
@@ -1324,9 +1408,9 @@ impl Compiler {
     /// the enclosing boundary.
     fn try_stmt(
         &mut self,
-        body: &[Stmt],
-        catches: &[(Option<String>, Vec<Stmt>)],
-        finally: &Option<Vec<Stmt>>,
+        body: &[(u32, Stmt)],
+        catches: &[(Option<String>, Block)],
+        finally: &Option<Block>,
         inline: bool,
     ) -> Result<(), VimlError> {
         // c: `:try` raises `trylevel`, which is what makes an error inside the body
@@ -1410,8 +1494,8 @@ impl Compiler {
     /// `:if`/`:elseif`/`:else`/`:endif` — a chain of `cond → body` arms.
     fn if_stmt(
         &mut self,
-        arms: &[(Expr, Vec<Stmt>)],
-        else_body: &Option<Vec<Stmt>>,
+        arms: &[(Expr, Block)],
+        else_body: &Option<Block>,
     ) -> Result<(), VimlError> {
         let mut end_jumps = Vec::new();
         for (cond, body) in arms {
@@ -1433,7 +1517,7 @@ impl Compiler {
     }
 
     /// `:while {cond} … :endwhile`.
-    fn while_stmt(&mut self, cond: &Expr, body: &[Stmt]) -> Result<(), VimlError> {
+    fn while_stmt(&mut self, cond: &Expr, body: &[(u32, Stmt)]) -> Result<(), VimlError> {
         // Loop rotation: enter at the test, put the body first, and make the
         // condition the CONDITIONAL BACKEDGE (`JumpIfTrue` back to the body).
         // This is semantically identical to a top-tested `while` (the initial
@@ -1490,7 +1574,7 @@ impl Compiler {
         slot: u16,
         args: &[Expr],
         step: i64,
-        body: &[Stmt],
+        body: &[(u32, Stmt)],
     ) -> Result<(), VimlError> {
         // 1 arg: `0 .. n-1` (test `i < n`). 2+ args: `a .. b` inclusive (`i <= b`).
         let (start, bound, cmp) = if args.len() == 1 {
@@ -1546,7 +1630,12 @@ impl Compiler {
         Ok(())
     }
 
-    fn for_stmt(&mut self, vars: &ForVars, iter: &Expr, body: &[Stmt]) -> Result<(), VimlError> {
+    fn for_stmt(
+        &mut self,
+        vars: &ForVars,
+        iter: &Expr,
+        body: &[(u32, Stmt)],
+    ) -> Result<(), VimlError> {
         // Native fast path: `for VAR in range(...)` with a slotted VAR and
         // integer bounds compiles to a native counter loop — no list is
         // materialized, the body is CallBuiltin-free, and the loop is rotated
@@ -2130,15 +2219,23 @@ impl Compiler {
                 let cap_params: Vec<String> = captures.iter().map(|c| cap_param(c)).collect();
                 let all_params: Vec<String> =
                     cap_params.iter().chain(params.iter()).cloned().collect();
-                let mut stmts: Vec<Stmt> = all_params
+                // A lambda body is one expression on one line, so every
+                // statement of the synthesized body reports line 1 — which is
+                // what vim reports for a throw inside `{x -> …}`.
+                let mut stmts: Block = all_params
                     .iter()
-                    .map(|p| Stmt::Let {
-                        target: LetTarget::Var(p.clone()),
-                        expr: Expr::Var(format!("a:{p}")),
+                    .map(|p| {
+                        (
+                            1,
+                            Stmt::Let {
+                                target: LetTarget::Var(p.clone()),
+                                expr: Expr::Var(format!("a:{p}")),
+                            },
+                        )
                     })
                     .collect();
-                stmts.push(Stmt::Return(Some((**body).clone())));
-                let chunk = compile_function_body(&stmts, self.exc)?;
+                stmts.push((1, Stmt::Return(Some((**body).clone()))));
+                let chunk = compile_function_body(&stmts, self.exc, 0)?;
                 LAMBDA_FUNCS.with(|f| {
                     f.borrow_mut().push(UserFuncDef {
                         name: name.clone(),

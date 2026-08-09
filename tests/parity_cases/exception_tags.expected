@@ -1,0 +1,10 @@
+1
+if      Vim(if):E684: List index out of range: 0
+while   Vim(while):E684: List index out of range: 0
+for     Vim(for):E684: List index out of range: 0
+echo    Vim(echo):E684: List index out of range: 0
+let     Vim(let):E684: List index out of range: 0
+silent  Vim(echo):E684: List index out of range: 0
+throw   Vim(throw):E684: List index out of range: 0
+ok
+E684: List index out of range: 0

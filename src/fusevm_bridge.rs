@@ -1392,6 +1392,13 @@ thread_local! {
     static PENDING_EXC: RefCell<Option<String>> = const { RefCell::new(None) };
     /// `v:exception` — the most recently caught exception text.
     static V_EXCEPTION: RefCell<String> = const { RefCell::new(String::new()) };
+    /// `v:throwpoint` — where the most recently caught exception was raised.
+    ///
+    /// Kept here rather than only in the `vimvars` table for the same reason
+    /// `v:exception` is: `install()` runs `evalvars_init()` on every VM it sets
+    /// up, and a user function body runs on a nested VM — so a value living only
+    /// in `vimvars` is reset the first time the `:catch` calls anything.
+    static V_THROWPOINT: RefCell<String> = const { RefCell::new(String::new()) };
     /// `v:val` — the current element during `map()`/`filter()`/`sort()`.
     static V_VAL: RefCell<Option<typval_T>> = const { RefCell::new(None) };
     /// `v:key` — the current key/index during `map()`/`filter()`.
@@ -1488,11 +1495,36 @@ thread_local! {
     /// The ex-command currently executing (`echo`, `call`, `let`, …), for the
     /// `Vim(cmd):` tag on an error-turned-exception.
     static CUR_CMDNAME: RefCell<String> = const { RefCell::new(String::new()) };
+    /// c: `SOURCING_LNUM` — the source line of the command currently executing,
+    /// relative to the enclosing script or function body. Read by
+    /// [`throw_point`] for `v:throwpoint`.
+    static SOURCING_LNUM: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// The line the VM is executing, from the chunk's own line table.
+///
+/// `fusevm::Chunk` keeps a `lines` vector parallel to `ops` and the compiler now
+/// fills it with real source lines (`compile_viml::Compiler::emit`), so the line
+/// costs no bytecode: nothing is emitted to carry it and a numeric loop body
+/// stays `CallBuiltin`-free. `vm.ip` has already been advanced past the op that
+/// invoked this builtin, hence the `- 1`.
+fn vm_line(vm: &VM) -> u32 {
+    vm.chunk
+        .lines
+        .get(vm.ip.wrapping_sub(1))
+        .copied()
+        .unwrap_or(0)
 }
 
 fn b_set_cmdname(vm: &mut VM, _: u8) -> Value {
+    let line = vm_line(vm);
     let name = tv_get_string(&pop_tv(vm));
     CUR_CMDNAME.with(|c| *c.borrow_mut() = name);
+    // The marker the compiler already emits once per statement is also where the
+    // statement's line is recorded — one read of the chunk's line table, no
+    // extra op. It is emitted only for a program that uses `:try`/`:throw`,
+    // which is exactly when `v:throwpoint` can be observed.
+    SOURCING_LNUM.with(|l| l.set(line));
     Value::Undef
 }
 
@@ -1587,6 +1619,12 @@ fn b_try_enter(_vm: &mut VM, _: u8) -> Value {
         let cur = V_EXCEPTION.with(|e| e.borrow().clone());
         s.borrow_mut().push(cur);
     });
+    // c: `ex_try` saves `v:throwpoint` next to `v:exception` (`v_throwpoint(NULL)`,
+    // vars.c:2322) and `ex_endtry` puts it back, so the pair always agree.
+    V_THROWPOINT_SAVE.with(|s| {
+        s.borrow_mut()
+            .push(V_THROWPOINT.with(|t| t.borrow().clone()));
+    });
     Value::Undef
 }
 
@@ -1596,6 +1634,9 @@ fn b_try_leave(_vm: &mut VM, _: u8) -> Value {
         set_vim_var_string(VV_EXCEPTION, &prev);
         V_EXCEPTION.with(|e| *e.borrow_mut() = prev);
     }
+    if let Some(prev) = V_THROWPOINT_SAVE.with(|s| s.borrow_mut().pop()) {
+        set_throwpoint_var(&prev);
+    }
     Value::Undef
 }
 
@@ -1604,6 +1645,8 @@ thread_local! {
     /// (see [`b_try_enter`]). One entry per open try-conditional, so nesting
     /// unwinds in order.
     static V_EXCEPTION_SAVE: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    /// `v:throwpoint` as it was at each live `:try`, restored by that `:endtry`.
+    static V_THROWPOINT_SAVE: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
 thread_local! {
@@ -1676,13 +1719,112 @@ pub fn errthrow(msg: &str) -> bool {
     });
     V_EXCEPTION.with(|e| *e.borrow_mut() = exc.clone());
     set_vim_var_string(VV_EXCEPTION, &exc);
+    // c: `throw_exception` records the point for an ET_ERROR exception too — the
+    // `msglist_T` carries the `sfile`/`slnum` captured when the message was
+    // queued (ex_eval.c:476-480).
+    set_throw_point();
     PENDING_EXC.with(|p| *p.borrow_mut() = Some(exc));
     EXC_FROM_ERR.with(|e| e.set(true));
     true
 }
 
+thread_local! {
+    /// The `SOURCING_LNUM` of each live call site, pushed alongside the
+    /// `funccal_stack` frame it belongs to. c: vim's exception stack records the
+    /// line *within* each enclosing frame, which is why `v:throwpoint` reads
+    /// `…script x.vim[23]..function Outer[1]..Thrower, line 1` — 23 is where the
+    /// script called `Outer`, 1 is where `Outer` called `Thrower`.
+    static CALL_SITE_LNUM: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+}
+
+/// c: `estack_sfile(ESTACK_NONE)` + `", line %ld"` (`throw_exception`,
+/// ex_eval.c:482-486, rendered by `catch_exception`, ex_eval.c:599-607) — the
+/// value `v:throwpoint` takes.
+///
+/// The chain is the scripts being sourced then the functions being called, joined
+/// by `..`, each entry but the last carrying `[N]`, the line *it* was at when it
+/// entered the next one; the last entry's line is the `, line N` suffix instead.
+/// A throw at script level therefore reads `script /path/x.vim, line 2`, and one
+/// two calls deep `script /path/x.vim[23]..function Outer[1]..Thrower, line 1`.
+///
+/// RUST-PORT NOTE: vim's own chain starts with the entry point that began the
+/// sourcing — `command line..` when it was launched with `-c 'source …'`. This
+/// interpreter is handed a script path directly, so it has no such entry and the
+/// chain starts at the script. Everything after that matches vim byte for byte;
+/// the absolute path in it makes the whole string un-diffable against another
+/// machine's vim regardless, which is why `tests/parity_cases/throwpoint.vim`
+/// records the observable parts rather than the literal value.
+fn throw_point() -> String {
+    let scripts = crate::ported::eval::fs::SOURCING_NAME.with(|s| s.borrow().clone());
+    let funcs: Vec<String> = crate::ported::eval::vars::funccal_stack
+        .with(|s| s.borrow().iter().map(|f| f.fc_name.clone()).collect());
+    if scripts.is_empty() && funcs.is_empty() {
+        return String::new();
+    }
+    // c: the first function in the chain is introduced by "function ", the rest
+    // are bare names — `function Outer[1]..Thrower`, not `…function Thrower`.
+    let mut entries: Vec<String> = scripts.iter().map(|s| format!("script {s}")).collect();
+    for (i, f) in funcs.iter().enumerate() {
+        entries.push(if i == 0 {
+            format!("function {f}")
+        } else {
+            f.clone()
+        });
+    }
+    // Each entry but the last is suffixed with the line it had reached. A
+    // function frame's is its call site; a script's is the line that called into
+    // the frame below it, i.e. the outermost call site once functions are in play.
+    let sites = CALL_SITE_LNUM.with(|c| c.borrow().clone());
+    let lnum = SOURCING_LNUM.with(|l| l.get());
+    let mut out = String::new();
+    for (i, e) in entries.iter().enumerate() {
+        if i > 0 {
+            out.push_str("..");
+        }
+        out.push_str(e);
+        if i + 1 < entries.len() {
+            // The call-site list is parallel to the function frames, and the
+            // entry *before* the first function is the script that called it.
+            let site = sites.get((i + 1).saturating_sub(scripts.len())).copied();
+            out.push_str(&format!("[{}]", site.unwrap_or(0)));
+        }
+    }
+    format!("{out}, line {lnum}")
+}
+
+/// Publish `v:throwpoint`, to both stores: the thread-local the `v:` read path
+/// uses (see [`V_THROWPOINT`]) and the `vimvars` slot ported code reads through
+/// `get_vim_var_str`.
+fn set_throwpoint_var(v: &str) {
+    V_THROWPOINT.with(|t| *t.borrow_mut() = v.to_string());
+    set_vim_var_string(crate::ported::eval::vars::vv::VV_THROWPOINT, v);
+}
+
+/// Record where the exception was raised, for `v:throwpoint`. c: `throw_exception`
+/// snapshots `estack_sfile()`/`SOURCING_LNUM` at the raise, and `catch_exception`
+/// publishes it when a `:catch` takes the exception — so the value survives the
+/// unwind past the frames it names.
+fn set_throw_point() {
+    PENDING_THROWPOINT.with(|p| *p.borrow_mut() = throw_point());
+}
+
+thread_local! {
+    /// The throw point of the exception currently unwinding, published to
+    /// `v:throwpoint` by the `:catch` that takes it.
+    static PENDING_THROWPOINT: RefCell<String> = const { RefCell::new(String::new()) };
+}
+
 fn b_throw(vm: &mut VM, _: u8) -> Value {
     let v = tv_get_string(&pop_tv(vm));
+    // c: `ex_throw` throws only when `eval0()` on the argument succeeded. An
+    // error while evaluating it has already become the exception (or been
+    // reported), and throwing the half-evaluated value on top of it would
+    // replace `Vim(throw):E684: List index out of range: 0` with a thrown
+    // `v:null` — which is what `throw [][0]` used to catch.
+    if message::err_count.with(|d| d.get()) > ERR_MARK.with(|m| m.get()) {
+        return Value::Undef;
+    }
+    set_throw_point();
     // c: throw_exception — set current_exception and v:exception.
     V_EXCEPTION.with(|e| *e.borrow_mut() = v.clone());
     set_vim_var_string(VV_EXCEPTION, &v);
@@ -1772,6 +1914,9 @@ fn b_catch_match(vm: &mut VM, _: u8) -> Value {
         PENDING_EXC.with(|p| *p.borrow_mut() = None);
         set_vim_var_string(VV_EXCEPTION, &exc);
         V_EXCEPTION.with(|e| *e.borrow_mut() = exc);
+        // c: `catch_exception` (ex_eval.c:593) publishes the point the exception
+        // was raised at alongside its value.
+        set_throwpoint_var(&PENDING_THROWPOINT.with(|p| p.borrow().clone()));
         // c: ex_catch (ex_eval.c:116) — "Make this ':catch' clause active and reset
         // did_emsg, got_int, did_throw". Handling the error clears the error state,
         // which is why a script that catches an error still exits successfully.
@@ -1818,6 +1963,9 @@ fn b_getvar(vm: &mut VM, _: u8) -> Value {
     // Dynamic v: state (not fixed v: constants).
     if name == "v:exception" {
         return Value::str(V_EXCEPTION.with(|e| e.borrow().clone()));
+    }
+    if name == "v:throwpoint" {
+        return Value::str(V_THROWPOINT.with(|t| t.borrow().clone()));
     }
     if name == "v:val" {
         return V_VAL
@@ -3030,6 +3178,8 @@ fn call_user_function_raw(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
     }
     bind_avar("000", new_list(extra));
 
+    // The caller's current line is this frame's call site, for `v:throwpoint`.
+    CALL_SITE_LNUM.with(|c| c.borrow_mut().push(SOURCING_LNUM.with(|l| l.get())));
     RETURN_STACK.with(|r| r.borrow_mut().push(None));
     // This frame's `:defer` list. Pushed with the frame so a nested call's defers
     // cannot land on ours.
@@ -3042,8 +3192,12 @@ fn call_user_function_raw(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
     // caller was tagged with it: `let g:z = G() + [][0]` reported
     // `Vim(return):E684` where vim reports `Vim(let):E684`.
     let caller_cmdname = CUR_CMDNAME.with(|c| c.borrow().clone());
+    let caller_lnum = SOURCING_LNUM.with(|l| l.get());
     run_chunk_nested(func.chunk.clone());
     CUR_CMDNAME.with(|c| *c.borrow_mut() = caller_cmdname);
+    // The body's lines are relative to its own `:function`; restore the caller's
+    // so a later error in the caller reports the caller's line.
+    SOURCING_LNUM.with(|l| l.set(caller_lnum));
 
     // vim runs deferred calls on the way out however the body ended — a `:return`,
     // falling off the end, or unwinding through a `:throw`. `:throw` sets a
@@ -3057,6 +3211,9 @@ fn call_user_function_raw(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
     });
     VIM9_DEF_STACK.with(|s| {
         s.borrow_mut().pop();
+    });
+    CALL_SITE_LNUM.with(|c| {
+        c.borrow_mut().pop();
     });
     // c: a function with no :return yields 0.
     Some(ret.unwrap_or_else(|| tv_num(0)))
@@ -3252,7 +3409,7 @@ fn run_chunk_capture(chunk: fusevm::Chunk) -> Option<typval_T> {
 /// `map()`/`filter()` string-expression callback form).
 fn compile_expr_chunk(src: &str) -> Result<fusevm::Chunk, VimlError> {
     let e = parse_expr(src)?;
-    Ok(crate::compile_viml::compile_program(&[Stmt::Expr(e)])?.main)
+    Ok(crate::compile_viml::compile_program(&[(1, Stmt::Expr(e))])?.main)
 }
 
 /// Parse + compile + run VimL source on a nested VM (refpool-safe — used by
@@ -3323,7 +3480,7 @@ fn b_eval(vm: &mut VM, _: u8) -> Value {
             return Value::Undef;
         }
     };
-    let chunk = match crate::compile_viml::compile_program(&[Stmt::Expr(expr)]) {
+    let chunk = match crate::compile_viml::compile_program(&[(1, Stmt::Expr(expr))]) {
         Ok(p) => p.main,
         Err(e) => {
             message::semsg(&format!("{e}"));
@@ -5629,7 +5786,7 @@ pub fn run_compiled(prog: crate::compile_viml::CompiledProgram) {
 /// Parse + debug-compile + run source with a `SET_LINENO` marker before each
 /// statement, so the DAP `check_line` hook can pause at breakpoints.
 pub fn eval_source_debug(src: &str) -> Result<(), VimlError> {
-    let numbered = crate::viml_parser::parse_program_lines(src)?;
+    let numbered = crate::viml_parser::parse_program(src)?;
     run_chunk(crate::compile_viml::compile_program_debug(&numbered)?);
     Ok(())
 }
@@ -5722,7 +5879,7 @@ fn jit_stats_report(main: &fusevm::Chunk) {
 
 /// Compile and run a statement list. `:echo` output and `emsg` errors happen as
 /// side effects.
-pub fn run_program(stmts: &[Stmt]) -> Result<(), VimlError> {
+pub fn run_program(stmts: &[(u32, Stmt)]) -> Result<(), VimlError> {
     run_compiled(compile_program(stmts)?);
     Ok(())
 }
@@ -5788,13 +5945,13 @@ pub fn source_tolerant(src: &str) -> (usize, usize) {
     // Each statement runs once in its own one-shot chunk; block-JITing those is
     // pointless and, for structurally-identical chunks, unsound (see SUPPRESS_JIT).
     let _no_jit = suppress_jit();
-    for (_lineno, stmt) in stmts {
+    for numbered in stmts {
         // Each statement compiles + runs independently; a compile error or an
         // uncaught run-time error ends only that statement's chunk.
         // `compile_script_stmt`, not `compile_program`: each statement is a
         // fragment of one script, so a top-level `let` has to reach `g:` rather
         // than a slot only this fragment can see.
-        match crate::compile_viml::compile_script_stmt(std::slice::from_ref(&stmt)) {
+        match crate::compile_viml::compile_script_stmt(std::slice::from_ref(&numbered)) {
             Ok(prog) => {
                 run_compiled(prog);
                 ran += 1;
@@ -5847,7 +6004,7 @@ pub fn cmdline_host_clear() {
 /// Parse + compile + run a single expression, returning its value.
 pub fn eval_expr(src: &str) -> Result<typval_T, VimlError> {
     let e = parse_expr(src)?;
-    run_program(&[Stmt::Expr(e)])?;
+    run_program(&[(1, Stmt::Expr(e))])?;
     Ok(take_last_result().unwrap_or_else(tv_special))
 }
 

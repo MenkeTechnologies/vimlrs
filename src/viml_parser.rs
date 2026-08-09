@@ -14,7 +14,7 @@
 //! ```
 //! ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-use crate::viml_ast::{ArithOp, Expr, ForVars, LetTarget, Stmt, UnaryOp, UnletArg};
+use crate::viml_ast::{ArithOp, Block, Expr, ForVars, LetTarget, Stmt, UnaryOp, UnletArg};
 use crate::viml_lexer::{lex, CaseFlag, CmpOp, InterpPart, Tok, Token, VimlError};
 use std::cell::Cell;
 
@@ -702,16 +702,12 @@ fn is_final_block_terminator(cmd: &str) -> bool {
 
 /// Parse a whole source block into a flat statement list with block structure
 /// (the `:if`/`:while`/`:for`/`:function`/`:try` bodies nested inside).
-pub fn parse_program(src: &str) -> Result<Vec<Stmt>, VimlError> {
-    Ok(parse_program_lines(src)?
-        .into_iter()
-        .map(|(_, s)| s)
-        .collect())
-}
-
-/// Like [`parse_program`] but pairs each TOP-LEVEL statement with its 1-based
-/// source line (for the debugger's statement markers).
-pub fn parse_program_lines(src: &str) -> Result<Vec<(u32, Stmt)>, VimlError> {
+///
+/// Every statement — top level and nested — is paired with its 1-based source
+/// line. The line is not debug-only bookkeeping: the compiler writes it into
+/// `fusevm::Chunk::lines`, which is what `v:throwpoint` reports and what the
+/// debugger's statement markers read.
+pub fn parse_program(src: &str) -> Result<Block, VimlError> {
     // Inline `rust { ... }` FFI blocks are rewritten to `call __rust_compile(...)`
     // (and their exported names recorded for builtin override) before lexing.
     let desugared = crate::rust_ffi::desugar(src);
@@ -765,7 +761,7 @@ fn group_by_line(stmts: Vec<(u32, Stmt)>) -> Vec<(u32, Stmt)> {
 /// statement that was skipped because it failed to parse.
 pub type TolerantParse = (Vec<(u32, Stmt)>, Vec<(u32, String)>);
 
-/// Like [`parse_program_lines`] but error-tolerant: a top-level statement (or
+/// Like [`parse_program`] but error-tolerant: a top-level statement (or
 /// block) that fails to parse is skipped — its first logical line is dropped and
 /// parsing resumes at the next — so one unsupported construct does not abort the
 /// whole file. Returns the statements that parsed, paired with `(line, message)`
@@ -773,7 +769,7 @@ pub type TolerantParse = (Vec<(u32, Stmt)>, Vec<(u32, String)>);
 /// and continuing; used for best-effort config sourcing (e.g. a real `.vimrc`).
 pub fn parse_program_lines_tolerant(src: &str) -> TolerantParse {
     // Desugar inline `rust { ... }` FFI blocks before lexing (see
-    // `parse_program_lines`).
+    // `parse_program`).
     let desugared = crate::rust_ffi::desugar(src);
     let src = desugared.as_str();
     let _vim9 = Vim9Guard::enter(script_is_vim9(src));
@@ -1317,7 +1313,7 @@ fn split_commands(line: &str) -> Vec<&str> {
 
 /// A parsed block body plus the terminator `(cmd, rest)` it stopped on
 /// (`None` at EOF).
-type ParseBlockResult = Result<(Vec<Stmt>, Option<(String, String)>), VimlError>;
+type ParseBlockResult = Result<(Block, Option<(String, String)>), VimlError>;
 
 /// Parse statements until a terminator in `terms`. Returns the body and the
 /// terminator `(cmd, rest)` it stopped on (`None` at EOF).
@@ -1328,7 +1324,7 @@ fn parse_block(cur: &mut Lines, terms: &[&str]) -> ParseBlockResult {
     loop {
         cur.skip_blanks();
         let Some(line) = cur.peek() else {
-            return Ok((strip_lines(stmts), None));
+            return Ok((group_by_line(stmts), None));
         };
         let (cmd, rest) = cmd_word(&line);
         // Compare (and hand back) the canonical keyword so an abbreviated
@@ -1336,7 +1332,10 @@ fn parse_block(cur: &mut Lines, terms: &[&str]) -> ParseBlockResult {
         let ck = canon_block_kw(cmd);
         if terms.contains(&ck) {
             cur.bump();
-            return Ok((strip_lines(stmts), Some((ck.to_string(), rest.to_string()))));
+            return Ok((
+                group_by_line(stmts),
+                Some((ck.to_string(), rest.to_string())),
+            ));
         }
         if is_block_terminator(cmd) {
             return Err(VimlError::msg(format!("E580: unexpected `:{cmd}`")));
@@ -1346,11 +1345,6 @@ fn parse_block(cur: &mut Lines, terms: &[&str]) -> ParseBlockResult {
             stmts.push((lineno, s));
         }
     }
-}
-
-/// Group a block body by source line, then drop the line numbers.
-fn strip_lines(stmts: Vec<(u32, Stmt)>) -> Vec<Stmt> {
-    group_by_line(stmts).into_iter().map(|(_, s)| s).collect()
 }
 
 const IF_TERMS: &[&str] = &["elseif", "else", "endif"];
@@ -1979,6 +1973,9 @@ fn parse_def(cur: &mut Lines, header: &str) -> Result<Stmt, VimlError> {
     // A `def … enddef` body is vim9 even inside a legacy script: its parameter
     // defaults and body statements parse with vim9 bare-key dict semantics.
     let _vim9 = Vim9Guard::enter(true);
+    // The `:def` header line — already consumed by `parse_one`, so it is the
+    // line *before* the cursor.
+    let def_line = cur.prev_line_no();
     let header = header.trim();
     // A leading `!` (`def!`) is accepted and discarded — vim9 `def` always
     // (re)defines, so there is no bang distinction as for legacy `:function`.
@@ -2049,13 +2046,18 @@ fn parse_def(cur: &mut Lines, header: &str) -> Result<Stmt, VimlError> {
         return Err(VimlError::msg("E1057: Missing :enddef"));
     }
     // Prepend `let {p} = a:{p}` so each bare parameter name resolves in the body.
-    let mut body: Vec<Stmt> = Vec::with_capacity(body_stmts.len() + args.len());
+    // These are synthetic, so they carry the `:def` header's own line — a body
+    // line number reported for one would point at a statement nobody wrote.
+    let mut body: Block = Vec::with_capacity(body_stmts.len() + args.len());
     for p in &args {
         if is_plain_ident(p) {
-            body.push(Stmt::Let {
-                target: LetTarget::Var(p.clone()),
-                expr: Expr::Var(format!("a:{p}")),
-            });
+            body.push((
+                def_line,
+                Stmt::Let {
+                    target: LetTarget::Var(p.clone()),
+                    expr: Expr::Var(format!("a:{p}")),
+                },
+            ));
         }
     }
     body.extend(body_stmts);
@@ -3807,7 +3809,7 @@ mod tests {
         // `if … | … | endif` on one line parses as a full If block.
         assert!(matches!(
             parse_program("if 1 | echo 'y' | endif").unwrap().as_slice(),
-            [Stmt::If { .. }]
+            [(1, Stmt::If { .. })]
         ));
         // A leaf command then a one-line block: two statements — and because they
         // are on ONE line, they form a `LineGroup`, so an error in the first
@@ -3816,7 +3818,7 @@ mod tests {
             .unwrap()
             .as_slice()
         {
-            [Stmt::LineGroup(g)] => {
+            [(1, Stmt::LineGroup(g))] => {
                 assert!(matches!(g.as_slice(), [Stmt::Let { .. }, Stmt::If { .. }]));
             }
             s => panic!("expected [LineGroup([Let, If])], got {s:?}"),
@@ -3826,11 +3828,11 @@ mod tests {
             parse_program("for i in [1] | echo i | endfor")
                 .unwrap()
                 .as_slice(),
-            [Stmt::For { .. }]
+            [(1, Stmt::For { .. })]
         ));
         // A plain bar line is one `LineGroup` holding the two leaf statements.
         match parse_program("let a = 1 | echo a").unwrap().as_slice() {
-            [Stmt::LineGroup(g)] => assert_eq!(g.len(), 2),
+            [(1, Stmt::LineGroup(g))] => assert_eq!(g.len(), 2),
             s => panic!("expected [LineGroup(2)], got {s:?}"),
         }
     }
@@ -3839,7 +3841,7 @@ mod tests {
     fn line_continuation() {
         // A `\` continuation line joins onto the previous logical line.
         let prog = parse_program("let x = [1,\n      \\ 2,\n      \\ 3]").unwrap();
-        match &prog[0] {
+        match &prog[0].1 {
             Stmt::Let {
                 expr: Expr::List(items),
                 ..
@@ -3848,7 +3850,7 @@ mod tests {
         }
         // Line numbers: the statement after a 2-physical-line logical line keeps
         // its real physical number.
-        let lines = parse_program_lines("let a = 1\nlet b = [10,\n  \\ 20]\nlet c = 3").unwrap();
+        let lines = parse_program("let a = 1\nlet b = [10,\n  \\ 20]\nlet c = 3").unwrap();
         assert_eq!(lines[0].0, 1);
         assert_eq!(lines[1].0, 2); // the [10, 20] let starts on physical line 2
         assert_eq!(lines[2].0, 4); // `let c` is on physical line 4

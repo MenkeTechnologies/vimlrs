@@ -1680,7 +1680,14 @@ thread_local! {
     /// Stack of paths of the scripts currently being sourced, for `<sfile>` /
     /// `<script>` in `expand()` (Neovim's `sourcing_name`/`SOURCING_NAME`). The
     /// bridge pushes/pops this around `eval_file()`.
-    static SOURCING_NAME: std::cell::RefCell<Vec<String>> =
+    ///
+    /// RUST-PORT NOTE: exposed `pub` (as `vars::globvardict` is) because these
+    /// are also the `script …` entries of the exception stack the C builds in
+    /// `estack_sfile()` (`ex_eval.c:482` reads it for `v:throwpoint`). The C
+    /// keeps one `exestack` holding script *and* function entries; this port
+    /// splits them across `SOURCING_NAME` and `vars::funccal_stack`, so the
+    /// bridge — which owns the call-site line of each frame — joins the two.
+    pub static SOURCING_NAME: std::cell::RefCell<Vec<String>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 

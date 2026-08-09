@@ -1,4 +1,12 @@
 0
 direct 1
+direct throwpoint.vim, line 19
 in-function 1
+in-function throwpoint.vim[29]..function Thrower, line 1
 from-error 1
+from-error throwpoint.vim, line 36
+nested throwpoint.vim[48]..function Outer[1]..Thrower, line 1
+body-line throwpoint.vim[61]..function Deep, line 3
+in-loop throwpoint.vim, line 69
+restored throwpoint.vim, line 78
+after 1
