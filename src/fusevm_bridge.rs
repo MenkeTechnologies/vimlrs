@@ -3269,6 +3269,11 @@ fn call_user_function_raw(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
     // `Vim(return):E684` where vim reports `Vim(let):E684`.
     let caller_cmdname = CUR_CMDNAME.with(|c| c.borrow().clone());
     let caller_lnum = SOURCING_LNUM.with(|l| l.get());
+    // Debugger (`--dap`): the one place a user function's body is entered, so
+    // the one place a function breakpoint can arm. Every caller — plain
+    // `Foo()`, `:call`, a Funcref, `intercept_proceed`'s re-run of the original
+    // — reaches the body through here.
+    crate::dap::check_func_entry(name);
     run_chunk_nested(func.chunk.clone());
     CUR_CMDNAME.with(|c| *c.borrow_mut() = caller_cmdname);
     // The body's lines are relative to its own `:function`; restore the caller's
@@ -5927,6 +5932,19 @@ pub fn dap_globals() -> Vec<(String, String)> {
             .iter()
             .map(|(k, v)| (format!("g:{k}"), encode_tv2echo(v).to_string()))
             .collect()
+    })
+}
+
+/// Name of the user function whose body is currently executing, for the
+/// debugger's stack frame — the innermost `funccal_stack` frame's `fc_name`, or
+/// `""` at script level. Must be read on the executor thread (`funccal_stack` is
+/// thread-local).
+pub fn dap_current_func() -> String {
+    crate::ported::eval::vars::funccal_stack.with(|s| {
+        s.borrow()
+            .last()
+            .map(|f| f.fc_name.clone())
+            .unwrap_or_default()
     })
 }
 

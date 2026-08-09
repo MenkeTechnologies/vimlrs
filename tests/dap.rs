@@ -227,3 +227,90 @@ fn dap_breakpoint_inside_function_body() {
     assert_eq!(dap.output(), "5\ndone\n");
     dap.shutdown();
 }
+
+/// `setFunctionBreakpoints` must be advertised, accepted, and honoured: naming a
+/// function stops at the first statement of its body, with the frame named after
+/// the function.
+#[test]
+fn dap_function_breakpoint_stops_at_body() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = script(&dir, FN_SCRIPT);
+    let mut dap = Dap::spawn();
+    dap.request("initialize", json!({}));
+    let caps = dap.wait_response("initialize");
+    assert_eq!(caps["body"]["supportsFunctionBreakpoints"], true);
+    dap.request(
+        "setFunctionBreakpoints",
+        json!({ "breakpoints": [{ "name": "Add" }] }),
+    );
+    let set = dap.wait_response("setFunctionBreakpoints");
+    assert_eq!(set["body"]["breakpoints"][0]["verified"], true);
+    dap.request("configurationDone", json!({}));
+    dap.request("launch", json!({ "program": path }));
+    let stopped = dap.wait_event("stopped");
+    assert_eq!(stopped["body"]["reason"], "function breakpoint");
+    dap.request("stackTrace", json!({ "threadId": 1 }));
+    let st = dap.wait_response("stackTrace");
+    // Line 2 is `return a:a + a:b` — the body's first statement, not the call.
+    assert_eq!(st["body"]["stackFrames"][0]["line"], 2);
+    assert_eq!(st["body"]["stackFrames"][0]["name"], "Add");
+    dap.request("continue", json!({ "threadId": 1 }));
+    dap.wait_event("terminated");
+    assert_eq!(dap.output(), "5\ndone\n");
+    dap.shutdown();
+}
+
+/// Reference output for [`FUNCREF_SCRIPT`], from
+/// `VIM - Vi IMproved 9.2 (2026 Feb 14, compiled Aug 02 2026 19:00:41)`:
+///
+/// ```text
+/// $ vim -N -u NONE -es -c 'redir! > out' -c 'source fr.vim' -c 'redir END' -c 'qa!'
+/// hi a
+/// hi b
+/// end
+/// ```
+const FUNCREF_SCRIPT: &str = "function! Greet(who)\n  echo \"hi \" . a:who\nendfunction\nlet F = function('Greet')\ncall F('a')\ncall Greet('b')\necho \"end\"\n";
+
+/// A function breakpoint fires however the function is reached — through a
+/// Funcref as well as by name.
+///
+/// This is the property that makes one hook site sufficient: every caller
+/// (`Foo()`, `:call`, a Funcref, an AOP intercept's re-run of the original)
+/// enters the body through `call_user_function_raw`, so the breakpoint is
+/// checked exactly once, in one place. A per-call-site check would have missed
+/// the Funcref path.
+#[test]
+fn dap_function_breakpoint_fires_through_funcref() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = script(&dir, FUNCREF_SCRIPT);
+    let mut dap = Dap::spawn();
+    dap.request("initialize", json!({}));
+    dap.wait_event("initialized");
+    dap.request(
+        "setFunctionBreakpoints",
+        json!({ "breakpoints": [{ "name": "Greet" }] }),
+    );
+    dap.wait_response("setFunctionBreakpoints");
+    dap.request("configurationDone", json!({}));
+    dap.request("launch", json!({ "program": path }));
+
+    // `call F('a')` — reached through the Funcref.
+    let first = dap.wait_event("stopped");
+    assert_eq!(first["body"]["reason"], "function breakpoint");
+    dap.request("continue", json!({ "threadId": 1 }));
+
+    // `call Greet('b')` — reached by name. Two `stopped` events in all.
+    let deadline = Instant::now() + WAIT;
+    while dap.seen.iter().filter(|v| v["event"] == "stopped").count() < 2 {
+        assert!(
+            dap.next_message(deadline).is_some(),
+            "only one function-breakpoint stop; the Funcref and by-name calls \
+             should each produce one: {:#?}",
+            dap.seen
+        );
+    }
+    dap.request("continue", json!({ "threadId": 1 }));
+    dap.wait_event("terminated");
+    assert_eq!(dap.output(), "hi a\nhi b\nend\n");
+    dap.shutdown();
+}

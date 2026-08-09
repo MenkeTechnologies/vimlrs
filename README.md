@@ -66,7 +66,7 @@ In active development.
 | Bytecode disassembler (`--disasm`) | Working |
 | Execution-tier report (`--tiers`) | Working |
 | LSP server (`--lsp`) — diagnostics, completion, hover, document symbols | Working |
-| DAP debugger (`--dap`) — breakpoints, stepping, variables, evaluate | Working |
+| DAP debugger (`--dap`) — line + function breakpoints, stepping, variables, evaluate | Working |
 | Control flow — `:if`/`:elseif`/`:else`, `:while`, `:for`, `:break`/`:continue` | Working |
 | `:execute`, `:let [a, b; rest] = …` & `:for [k, v] in …` destructuring | Working |
 | `:let` compound assignment (`+=`/`-=`/`*=`/`/=`/`%=`/`.=`) — desugars to `target = target op rhs`, so accumulator loops trace-JIT | Working |

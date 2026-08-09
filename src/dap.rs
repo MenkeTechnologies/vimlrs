@@ -42,11 +42,20 @@ enum Pending {
 #[derive(Default)]
 struct DapState {
     breakpoints: HashSet<u32>,
+    /// Names from `setFunctionBreakpoints` — stop at the first statement of any
+    /// user function called with one of these names.
+    function_breakpoints: HashSet<String>,
     resume: Option<Resume>,
     stepping: bool,
+    /// A function breakpoint just armed [`Self::stepping`], so the stop it
+    /// produces is reported as `"function breakpoint"` rather than `"step"`.
+    func_bp_armed: bool,
     pause_requested: bool,
     terminated: bool,
     current_line: u32,
+    /// Name of the user function whose body is executing, for the stack frame.
+    /// Empty at script level.
+    current_func: String,
     pending: VecDeque<Pending>,
 }
 
@@ -132,6 +141,9 @@ pub fn check_line(line: u32) {
     flush_output();
     let mut st = sh.state.lock().unwrap();
     st.current_line = line;
+    // Read on the executor thread: `funccal_stack` is thread-local, so the
+    // request-reader thread would only ever see it empty.
+    st.current_func = crate::fusevm_bridge::dap_current_func();
     let stop = st.breakpoints.contains(&line) || st.stepping || st.pause_requested;
     if !stop {
         return;
@@ -140,6 +152,8 @@ pub fn check_line(line: u32) {
     st.stepping = false;
     let reason = if st.breakpoints.contains(&line) {
         "breakpoint"
+    } else if std::mem::take(&mut st.func_bp_armed) {
+        "function breakpoint"
     } else {
         "step"
     };
@@ -170,6 +184,30 @@ pub fn check_line(line: u32) {
             return;
         }
         st = sh.cv.wait(st).unwrap();
+    }
+}
+
+/// Called on the executor thread at entry to every user function, with its
+/// canonical name. When the client has a function breakpoint on that name, arm
+/// stepping so the body's FIRST statement stops.
+///
+/// Port of awkrs `vm::debugger_enter_sub` (`src/vm.rs:3226-3230`), which does
+/// exactly this — `if d.should_stop_at_sub(name) { d.set_step_mode(true) }`.
+/// Arming the step rather than pausing here is what puts the stop on a real
+/// source line the client can show, instead of on the call itself.
+///
+/// One deviation, deliberate: awkrs's ensuing stop reports `reason: "step"`,
+/// because arming step mode is all it records. `func_bp_armed` carries the
+/// cause through to [`check_line`], which reports the DAP-specified
+/// `"function breakpoint"` instead. Same mechanism, accurate label.
+pub fn check_func_entry(name: &str) {
+    let Some(sh) = SHARED.get() else {
+        return; // not running under --dap
+    };
+    let mut st = sh.state.lock().unwrap();
+    if st.function_breakpoints.contains(name) {
+        st.stepping = true;
+        st.func_bp_armed = true;
     }
 }
 
@@ -217,6 +255,7 @@ pub fn run_stdio() -> Result<(), String> {
                     "initialize",
                     json!({
                         "supportsConfigurationDoneRequest": true,
+                        "supportsFunctionBreakpoints": true,
                         "supportsEvaluateForHovers": true,
                     }),
                 );
@@ -241,6 +280,34 @@ pub fn run_stdio() -> Result<(), String> {
                     .map(|l| json!({ "verified": true, "line": l }))
                     .collect();
                 send_response(seq, "setBreakpoints", json!({ "breakpoints": verified }));
+            }
+            // Port of the flagship handler (awkrs `src/dap.rs:408-425`,
+            // strykelang `strykelang/dap.rs:414-431`): take `breakpoints[].name`,
+            // replace the whole set (the client always sends the full list), and
+            // answer with one `verified` entry per name.
+            "setFunctionBreakpoints" => {
+                let names: Vec<String> = args
+                    .get("breakpoints")
+                    .and_then(Value::as_array)
+                    .map(|bps| {
+                        bps.iter()
+                            .filter_map(|b| {
+                                b.get("name").and_then(Value::as_str).map(str::to_string)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                {
+                    let mut st = shared().state.lock().unwrap();
+                    st.function_breakpoints = names.iter().cloned().collect();
+                }
+                let verified: Vec<Value> =
+                    names.iter().map(|_| json!({ "verified": true })).collect();
+                send_response(
+                    seq,
+                    "setFunctionBreakpoints",
+                    json!({ "breakpoints": verified }),
+                );
             }
             "setExceptionBreakpoints" => {
                 send_response(seq, "setExceptionBreakpoints", json!({}));
@@ -277,13 +344,20 @@ pub fn run_stdio() -> Result<(), String> {
                 json!({ "threads": [{ "id": 1, "name": "main" }] }),
             ),
             "stackTrace" => {
-                let line = shared().state.lock().unwrap().current_line;
+                let (line, func) = {
+                    let st = shared().state.lock().unwrap();
+                    (st.current_line, st.current_func.clone())
+                };
+                // Name the frame after the function whose body is stopped in —
+                // a function breakpoint that reports `script` tells the client
+                // nothing about where it landed.
+                let name = if func.is_empty() { "script" } else { &func };
                 send_response(
                     seq,
                     "stackTrace",
                     json!({
                         "stackFrames": [{
-                            "id": 1, "name": "script", "line": line, "column": 1,
+                            "id": 1, "name": name, "line": line, "column": 1,
                         }],
                         "totalFrames": 1,
                     }),
