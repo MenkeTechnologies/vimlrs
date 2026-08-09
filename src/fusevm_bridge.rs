@@ -2560,9 +2560,15 @@ fn echo_impl(vm: &mut VM, argc: u8, newline: bool) {
     let mut body = crate::vimstr::VimStr::new();
     for (i, tv) in parts.iter().enumerate() {
         if i > 0 {
+            // c: `msg_puts_hl(" ", echo_hl_id, false)` — the separator between
+            // two `:echo` arguments is written directly, not through the
+            // translation below (it is a plain space either way).
             body.push_str(sep);
         }
-        body.push_bytes(&encode_tv2echo(tv));
+        // c: `msg_multiline(cstr_as_string(encode_tv2echo(&rettv)), …)`
+        // (`vendor/eval.c:6181`). This is where a byte the terminal cannot show
+        // becomes `^A` / `<ff>` / `<200b>`, and where `\n` and TAB stay literal.
+        message::msg_multiline(&encode_tv2echo(tv), &mut body);
     }
     // To stdout, `:echo` ends with a newline (one message per line). Inside
     // execute(), Vim instead *prefixes* each `:echo` with a newline (so
@@ -2854,12 +2860,33 @@ fn b_unlet(vm: &mut VM, _: u8) -> Value {
 /// entry. Mirrors the two element branches of `do_unlet_var()`
 /// (vendor/eval/vars.c): list → `tv_list_item_remove`, dict → `tv_dict_item_remove`
 /// (with a watcher notification), else E689.
+///
+/// The whole body runs under [`eval_op`], so an error here is HARD and takes the
+/// rest of the command line with it. That is `ex_unletlock()`
+/// (`vendor/eval/vars.c`): resolving an element lval is `get_lval()`, and when it
+/// fails the loop `break`s — reaching `eap->nextcmd = check_nextcmd(arg)` with
+/// `arg` still on the *unconsumed* name, where `check_nextcmd` finds no `|` and
+/// answers NULL. With no next command the `| catch | … | endtry` on that line is
+/// never executed, so the exception escapes the one-line `:try`:
+///
+///   try | unlet b[9] | catch | echo 'never' | endtry   " aborts, in both engines
+///
+/// The plain-name form ([`b_unlet`]) is the opposite and must stay that way: its
+/// E108 comes from the `callback` (`do_unlet`), which only sets `error = true`
+/// and lets the loop run on to `check_nextcmd`, so `try | unlet nosuchvar |
+/// catch | … | endtry` IS caught. Both engines agree on both.
 fn b_unlet_index(vm: &mut VM, _: u8) -> Value {
+    let index = pop_tv(vm);
+    let base = pop_tv(vm);
+    eval_op(|| unlet_index(base, index))
+}
+
+/// The element-removal body of [`b_unlet_index`], split out so the whole of it
+/// runs inside `eval_op`'s error window.
+fn unlet_index(base: typval_T, index: typval_T) -> Value {
     use crate::ported::eval::typval::{
         tv_dict_item_remove, tv_dict_watcher_notify, tv_list_item_remove,
     };
-    let index = pop_tv(vm);
-    let base = pop_tv(vm);
     match (base.v_type, &base.vval) {
         (VAR_DICT, v_dict(Some(d))) => {
             let key = tv_get_string(&index);

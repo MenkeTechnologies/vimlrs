@@ -1,0 +1,6 @@
+1
+C-name: Vim(unlet):E108: No such variable: "nosuchvar"
+C-let: Vim(let):E684: List index out of range: 9
+C-multiline: Vim(unlet):E684: List index out of range: 9
+after-neg: [2, 3]
+E684: List index out of range: 9

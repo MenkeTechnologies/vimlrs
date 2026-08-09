@@ -6243,10 +6243,23 @@ pub fn f_msgpackdump(argvars: &[typval_T], rettv: &mut typval_T) {
     if bytes.is_empty() {
         return;
     }
-    let text = String::from_utf8_lossy(&bytes);
+    // The split is on BYTES. MessagePack is a binary format — dumping
+    // `[v:true, v:false, v:null]` is the three bytes `c3 c2 c0`, none of which
+    // is valid UTF-8 — so routing it through `String::from_utf8_lossy` turned
+    // every one of them into `U+FFFD` and `echo msgpackdump(…)` printed
+    // `<fffd><fffd><fffd>`'s bytes where nvim prints `<c3><c2><c0>`.
+    // `'\n'` is ASCII and cannot occur inside a UTF-8 sequence, so splitting on
+    // the byte is the same split.
     let mut lb = l.borrow_mut();
-    for line in text.split('\n') {
-        tv_list_append_string(&mut lb, line);
+    for line in bytes.split(|&b| b == b'\n') {
+        tv_list_append_tv(
+            &mut lb,
+            typval_T {
+                v_type: VAR_STRING,
+                v_lock: VarLockStatus::VAR_UNLOCKED,
+                vval: v_string(line.into()),
+            },
+        );
     }
 }
 

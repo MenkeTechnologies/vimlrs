@@ -630,31 +630,20 @@ pub fn f_strcharlen(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.vval = v_number(n as varnumber_T);
 }
 
-/// Port of `f_strtrans()` from `Src/strings.c` — translate unprintable
-/// characters to their displayed form: control chars `0x00..0x1F` become `^@`…
-/// `^_` (char + 0x40) and `0x7F` becomes `^?`; printable (incl. multibyte) is
-/// kept. Matches `transchar` for the common case.
+/// Port of `f_strtrans()` from `Src/nvim/strings.c:2960` — the two-line C:
+/// `rettv->vval.v_string = transstr(tv_get_string(&argvars[0]), true)`.
+///
+/// The argument is read with the BYTE-exact accessor. `strtrans()` exists to
+/// name bytes a terminal cannot show, so reading it as text first would destroy
+/// the very input it is asked about: `strtrans(list2str([-1]))` is `<ff>`, and
+/// through a lossy `String` the `0xff` had already become `U+FFFD` and printed
+/// as itself.
 pub fn f_strtrans(argvars: &[typval_T], rettv: &mut typval_T) {
-    let s = tv_get_string(&argvars[0]);
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        let mut u = c as u32;
-        if u < 0x20 {
-            // c: `transchar_nonprint()` — `if (c == NL) { c = NUL; }` ("we use
-            // newline in place of a NUL"), so `strtrans("a\nb")` is `a^@b`.
-            if u == 0x0a {
-                u = 0;
-            }
-            out.push('^');
-            out.push((u as u8 + 0x40) as char);
-        } else if u == 0x7F {
-            out.push_str("^?");
-        } else {
-            out.push(c);
-        }
-    }
+    let s = crate::ported::eval::typval::tv_get_string_buf_chk(&argvars[0]).unwrap_or_default();
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(out.into());
+    // c: `transstr(…, untab = true)` — a TAB is translated to `^I` here, unlike
+    // the `:echo` path, where `msg_multiline` keeps it literal.
+    rettv.vval = v_string(crate::ported::charset::transstr(s.as_bytes(), true).into());
 }
 
 /// Port of `f_slice()` from `Src/strings.c` — `slice({expr}, {start} [, {end}])`,

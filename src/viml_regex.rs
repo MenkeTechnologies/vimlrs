@@ -1764,7 +1764,8 @@ impl SubCase {
 }
 
 /// Expand a substitute replacement: `\0`/`&` → whole match, `\1`..`\9` → group,
-/// `\\` → `\`, `\n` → NUL (0x00), `\r` → carriage return, `\t` → tab,
+/// `\\` → `\`, `\n` → newline (0x0a), `\r` → carriage return, `\t` → tab,
+/// `\b` → backspace (0x08),
 /// `\u`/`\l`/`\U`/`\L`/`\e`/`\E` → case folding (matching Vim's `vim_regsub`).
 fn expand_sub(sub: &str, chars: &[char], groups: &[Option<(usize, usize)>]) -> String {
     let s: Vec<char> = sub.chars().collect();
@@ -1788,13 +1789,22 @@ fn expand_sub(sub: &str, chars: &[char], groups: &[Option<(usize, usize)>]) -> S
                             cs.push_str(&mut out, chars[*a..*b].iter().copied());
                         }
                     }
-                    // Vim's `vim_regsub` replacement quirk: `\n` inserts a NUL
-                    // (0x00), NOT a newline; `\r` inserts a carriage return
-                    // (0x0d); `\t` a tab. (The PATTERN side is the opposite — there
-                    // `\n` means newline.)
-                    'n' => out.push('\0'),
+                    // c: `vim_regsub_both()` (`Src/nvim/regexp.c:2295-2307`) —
+                    //   case 'r': c = CAR;  case 'n': c = NL;
+                    //   case 't': c = TAB;  case 'b': c = Ctrl_H;
+                    // `\n` is a NEWLINE (0x0a) here, not a NUL. The widespread
+                    // "`\n` inserts a NUL" line is about `:s` in a BUFFER, where
+                    // a NL byte in stored line text stands for a NUL — it is the
+                    // storage convention, not this expansion. Measured: both
+                    // `vim` and `nvim` answer
+                    // `str2list(substitute('x','x','a\nb','')) == [97, 10, 98]`.
+                    // What made it look like a NUL is that `strtrans()` DISPLAYS
+                    // 0x0a as `^@` (`transchar_nonprint`: "we use newline in
+                    // place of a NUL").
+                    'n' => out.push('\n'),
                     't' => out.push('\t'),
                     'r' => out.push('\r'),
+                    'b' => out.push('\u{8}'),
                     '\\' => cs.push(&mut out, '\\'),
                     '&' => cs.push(&mut out, '&'),
                     'u' => cs.one_shot = Some(true),

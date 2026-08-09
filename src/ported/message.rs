@@ -1,13 +1,19 @@
-//! Port of the `emsg()` / `did_emsg` error path from `src/nvim/message.c`.
+//! Port of the `emsg()` / `did_emsg` error path and the `msg_outtrans` display
+//! path from `vendor/message.c`.
 //!
-//! `message.c` is not vendored under `vendor/` (only the eval tree is), so these
-//! are the extern dependencies the eval ports call, ported against their home
-//! file (PORT.md Rule 9 — extern deps get local impls citing the home file).
 //! The eval functions signal failure by calling `emsg()`, which sets the global
 //! `did_emsg` and writes to the message area; callers checkpoint `did_emsg`
 //! before an operation and compare afterward.
+//!
+//! `msg_multiline`/`msg_outtrans_len` are the other half: the transform every
+//! message goes through on its way to the screen, which shows a control byte as
+//! `^A` and a byte that is not part of a valid character as `<ff>`. `:echo`
+//! reaches it through `ex_echo` → `msg_multiline` (`vendor/eval.c:6181`).
 #![allow(non_upper_case_globals)]
 
+use crate::ported::charset::{transchar_buf, transchar_byte_buf, vim_isprintc};
+use crate::ported::mbyte::{utf_ptr2char, utfc_ptr2len};
+use crate::vimstr::VimStr;
 use std::cell::{Cell, RefCell};
 
 thread_local! {
@@ -55,7 +61,7 @@ pub fn capture_errors_take() -> Vec<String> {
     ERROR_CAPTURE.with(|c| c.borrow_mut().take().unwrap_or_default())
 }
 
-/// Port of `emsg(const char *s)` from `Src/nvim/message.c`.
+/// Port of `emsg(const char *s)` from `vendor/message.c:900`.
 ///
 /// Record an error message and set `did_emsg`. C writes to the message area;
 /// the faithful sink here is stderr (Vim prints errors to the user) — unless a
@@ -107,10 +113,115 @@ pub fn emsg(s: &str) {
     }
 }
 
-/// Port of `semsg(const char *fmt, ...)` from `Src/nvim/message.c`.
+/// Port of `semsg(const char *fmt, ...)` from `vendor/message.c:913`.
 ///
 /// The variadic C form is reduced to a pre-formatted message (callers format
 /// with Rust's `format!` at the call site, then pass the result).
 pub fn semsg(s: &str) {
     emsg(s);
+}
+
+// ─── the display path: msg_multiline / msg_outtrans_len ─────────────────────
+
+/// Port of `msg_outtrans_len()` from `vendor/message.c:1866` — write `msgstr`
+/// with unprintable characters translated.
+///
+/// Normal characters are passed through in runs (the C's `plain_start` window,
+/// flushed by `msg_puts_len`); an unprintable character is replaced by its
+/// `transchar` text. Which of the two `transchar` entry points applies is the
+/// whole point: a byte that starts no valid UTF-8 sequence goes through
+/// `transchar_byte_buf` and comes out `<ff>`, while a *decoded* character goes
+/// through `transchar_buf` and comes out `<200b>` — or is left alone when
+/// `vim_isprintc` accepts it.
+///
+/// RUST-PORT NOTE: the C returns the number of screen CELLS written, for callers
+/// doing cursor arithmetic against a real grid. This port's sink is a byte
+/// stream — `MSG_COL` in the bridge is a boolean "line is dirty" flag, not a
+/// column — so there is no consumer for that count, and producing it would need
+/// `utf_char2cells`, whose width data comes from utf8proc's property tables (not
+/// vendored). The translation itself, which is what has an observable effect
+/// here, is complete.
+pub fn msg_outtrans_len(msgstr: &[u8], out: &mut VimStr) {
+    let mut str_ = 0usize; // c: const char *str
+    let mut plain_start = 0usize; // c: const char *plain_start
+    while str_ < msgstr.len() {
+        // c: utfc_ptr2len_len(str, len + 1) — bounded by the bytes that remain.
+        // Passing the remaining slice is the same bound: this port's
+        // `utfc_ptr2len` reads a past-the-end byte as the C's NUL, so an
+        // incomplete trailing sequence answers 1 either way.
+        let mb_l = utfc_ptr2len(&msgstr[str_..]) as usize;
+        if mb_l > 1 {
+            let c = utf_ptr2char(&msgstr[str_..]);
+            if vim_isprintc(c) {
+                // c: printable multi-byte char: count the cells (see the note
+                // above) and leave the bytes in the plain run.
+            } else {
+                // c: unprintable multi-byte char: print the printable chars so
+                // far and the translation of the unprintable char.
+                if str_ > plain_start {
+                    out.push_bytes(&msgstr[plain_start..str_]);
+                }
+                plain_start = str_ + mb_l;
+                out.push_bytes(&transchar_buf(c));
+            }
+            str_ += mb_l;
+        } else {
+            let s = transchar_byte_buf(msgstr[str_] as i32);
+            if s.len() > 1 {
+                // c: `if (s[1] != NUL)` — an unprintable byte translates to more
+                // than one character; a printable one translates to itself.
+                if str_ > plain_start {
+                    out.push_bytes(&msgstr[plain_start..str_]);
+                }
+                plain_start = str_ + 1;
+                out.push_bytes(&s);
+            }
+            str_ += 1;
+        }
+    }
+    // c: print the printable chars at the end (or emit empty string).
+    if str_ > plain_start || plain_start == 0 {
+        out.push_bytes(&msgstr[plain_start..str_]);
+    }
+}
+
+/// Port of `msg_outtrans()` from `vendor/message.c:1845` — [`msg_outtrans_len`]
+/// over a whole NUL-terminated string.
+pub fn msg_outtrans(s: &[u8], out: &mut VimStr) {
+    msg_outtrans_len(s, out);
+}
+
+/// Port of `msg_multiline()` from `vendor/message.c:279` — like
+/// [`msg_outtrans_len`], but `\n`, TAB, `\r` and BELL are delimiters rather than
+/// text: the run before each is translated, then the delimiter itself is written
+/// RAW (`msg_putchar_hl`). That is why `echo "a\tb"` keeps a real tab while
+/// `strtrans("a\tb")` — which does not go through here — is `a^Ib`.
+///
+/// RUST-PORT NOTE: BELL does not reach the output at all; the C calls
+/// `vim_beep()` instead of writing it. `hl_id`/`hist`/`need_clear` are the
+/// highlight id, the `:messages` history and the "still need to clear to end of
+/// screen" flag — three things a stdout sink does not have.
+pub fn msg_multiline(str_: &[u8], out: &mut VimStr) {
+    const TAB: u8 = 0x09;
+    const BELL: u8 = 0x07;
+    let mut s = 0usize;
+    let mut chunk = 0usize;
+    while s < str_.len() {
+        let b = str_[s];
+        if b == b'\n' || b == TAB || b == b'\r' || b == BELL {
+            // c: print all chars before the delimiter
+            msg_outtrans_len(&str_[chunk..s], out);
+            if b == BELL {
+                // c: vim_beep(kOptBoFlagShell) — the byte is consumed, not shown.
+            } else {
+                out.push_bytes(&[b]);
+            }
+            chunk = s + 1;
+        }
+        s += 1;
+    }
+    // c: print the remainder or emit empty event if entire message is empty.
+    if chunk < str_.len() || chunk == 0 {
+        msg_outtrans_len(&str_[chunk..], out);
+    }
 }

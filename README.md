@@ -131,8 +131,12 @@ cargo test
 ```
 
 `fusevm` is pulled from crates.io with the `jit` and `jit-disk-cache` features.
-The vendored Neovim C eval sources under `vendor/` are the porting spec and are
-excluded from the crate build.
+The vendored Neovim C sources under `vendor/` are the porting spec and are
+excluded from the crate build. They are the eval tree plus the files the eval
+tree calls out to that have observable behaviour of their own — `mbyte.c`,
+`hashtab.c`, `charset.c` and `message.c` among them. `charset.c`/`message.c`
+carry the display transform (`transchar` / `msg_outtrans`) that decides how
+`:echo` and `strtrans()` render a byte a terminal cannot show.
 
 ## Parity testing
 

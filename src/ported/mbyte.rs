@@ -1,11 +1,16 @@
 //! Port of the UTF-8 codec helpers from `src/nvim/mbyte.c` (vendored at
 //! `vendor/mbyte.c`).
 //!
-//! Only the four routines the JSON decoder (`eval/decode.c`) needs are ported
-//! here: `utf_ptr2char`, `utf_ptr2len`, `utf_char2len` and
-//! `utf_char2bytes`, plus the `utf8len_tab` lookup table they share. The
-//! rest of `mbyte.c` (composing-char logic, iconv, screen-cell width) is a
-//! separate concern and is not ported.
+//! Ported here are the routines the rest of the crate reaches for: the codec
+//! (`utf_ptr2char`, `utf_ptr2len`, `utf_char2len`, `utf_char2bytes` and the
+//! `utf8len_tab` they share, which is what the JSON decoder in `eval/decode.c`
+//! needs), the cluster walk (`utfc_ptr2len`, `utf_head_off`, `mb_charlen`), the
+//! case folds, and `utf_printable` — the "can this be displayed as itself"
+//! predicate that `vim_isprintc` consults above 0xFF, and so the reason
+//! `echo nr2char(0x200b)` is `<200b>`.
+//!
+//! Not ported: iconv, and screen-cell width (`utf_char2cells` and friends), whose
+//! data is utf8proc's property tables.
 //!
 //! RUST-PORT NOTE: C walks `const char *` pointers into a NUL-terminated buffer,
 //! so reads past the last byte land on the terminating NUL (`0x00`). Here the
@@ -329,6 +334,38 @@ pub fn mb_charlen(s: &str) -> i32 {
         count += 1;
     }
     count
+}
+
+/// Port of `utf_printable()` from `vendor/mbyte.c:1202` (the portable,
+/// non-`__SSE2__` arm — the SSE2 arm above it computes the same predicate with
+/// `_mm_cmpgt_epi16` over the same bounds).
+///
+/// True for characters that can be displayed in a normal way. Only meaningful
+/// for characters of 0x100 and above; [`crate::ported::charset::vim_isprintc`]
+/// consults `g_chartab[]` below that.
+///
+/// Everything outside these nine intervals is printable — including U+110000
+/// and up, which is why `echo list2str([0x110000])` writes its four raw bytes
+/// rather than `<110000>`.
+pub fn utf_printable(c: i32) -> bool {
+    // c: sorted list of non-overlapping intervals; 0xd800-0xdfff is reserved
+    // for UTF-16, actually illegal.
+    const NONPRINT: &[(i32, i32)] = &[
+        (0x070f, 0x070f),
+        (0x180b, 0x180e),
+        (0x200b, 0x200f),
+        (0x202a, 0x202e),
+        (0x2060, 0x206f),
+        (0xd800, 0xdfff),
+        (0xfeff, 0xfeff),
+        (0xfff9, 0xfffb),
+        (0xfffe, 0xffff),
+    ];
+    // c: intable() — binary search; a linear scan over nine entries is the same
+    // predicate and reads as the interval list it is.
+    !NONPRINT
+        .iter()
+        .any(|&(first, last)| c >= first && c <= last)
 }
 
 #[cfg(test)]

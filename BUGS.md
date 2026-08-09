@@ -1915,3 +1915,255 @@ so what is left is exactly the display transform, which is its own port
 It is why `tests/parity_cases/list2str_bytes.vim` pins the byte model through
 `str2list()`/`len()` rather than through `:echo` of the raw bytes: that would
 make the case about message escaping instead of about the value.
+
+
+---
+
+# Round 24 — the display transform
+
+Round 23 closed every *value*-level question about a byte string and left one
+thing between vimlrs and vim on one: `:echo` wrote the bytes instead of rendering
+them. Round 24 ports that transform from the C, which also closed R23-O2 and
+turned up three defects the transform had been masking. `tests/parity_cases` is
+**28/28** byte-identical to vim with an EMPTY `KNOWN_OPEN`.
+
+The C for it was not vendored. `charset.c` and `message.c` are now, from Neovim
+master at `982d2f253168be9dbfecd0c1a41ec9cff8017a4e` — the commit whose
+`src/nvim/eval.c` is byte-identical to the `vendor/eval.c` already here, so the
+caller (`ex_echo`) and the callee (`msg_multiline`) come from one revision. That
+widens the name gate's legal set by 228 names (3756 → 3984); none of them is one
+of the gate's 3 standing violations, and the gate still reports exactly those
+three with no allowlist entry added.
+
+## R24-1. `:echo` did not escape unprintable bytes — ✅ FIXED (was R23-O3)
+
+`ex_echo` does not print the string it built. It calls
+`msg_multiline(cstr_as_string(tofree), …)` (`vendor/eval.c:6181`), which chunks
+on `\n`/TAB/`\r`/BELL and hands each run to `msg_outtrans_len`
+(`vendor/message.c:1866`), which replaces every character the terminal cannot
+show with its `transchar` text (`vendor/charset.c:541`).
+
+Three different answers come out of that, and telling them apart is the whole
+job — a single "escape the unprintable bytes" rule gets all three wrong:
+
+| input | what it is | vim + nvim | vimlrs before |
+|---|---|---|---|
+| `echo nr2char(1)` | a control BYTE | `^A` | raw `01` |
+| `echo list2str([-1,0,1])` | an ILLEGAL UTF-8 byte | `<ff>^A` | raw `ff 01` |
+| `echo list2str([0x80])` | an unprintable CHARACTER (`c2 80`) | `<80>` | raw `c2 80` |
+| `echo nr2char(0x200b)` | ditto, above 0xFF | `<200b>` | raw `e2 80 8b` |
+| `echo list2str([0x110000])` | a PRINTABLE character | raw `f4 90 80 80` | raw `f4 90 80 80` |
+| `echo "é"` | a printable character | `c3 a9` | `c3 a9` |
+| `echo "a\tb"` | a msg_multiline delimiter | literal TAB | literal TAB |
+
+The split that produces them: a byte that starts no valid UTF-8 sequence goes
+through `transchar_byte_buf`, whose `c >= 0x80` arm goes straight to
+`transchar_hex` — so `<ff>`, without ever asking whether the *character* 0xff is
+printable. A decoded character goes through `transchar_buf`, which asks
+`vim_isprintc` — `g_chartab[]` below 0x100, `utf_printable()` above it. All nine
+of `utf_printable`'s unprintable intervals sit below 0x10000, which is why
+U+110000 is printable and echoes as its four raw bytes.
+
+Ported: `vim_isprintc`, `byte2cells`, `transchar_hex`, `transchar_nonprint`,
+`transchar_buf`, `transchar_byte_buf`, `transstr_buf`, `transstr` and the
+`g_chartab[]` build (`src/ported/charset.rs`); `utf_printable`
+(`src/ported/mbyte.rs`); `msg_outtrans_len`, `msg_outtrans`, `msg_multiline`
+(`src/ported/message.rs`); the `:echo`/`:echon`/`:echomsg` sink calls
+`msg_multiline` per argument (`src/fusevm_bridge.rs`).
+
+Two deliberate omissions, both documented at the port:
+
+- `msg_outtrans_len` does not return the C's screen-CELL count. There is no
+  consumer — this port's sink is a byte stream, and `MSG_COL` is a boolean
+  "line is dirty" flag, not a column — and producing it needs `utf_char2cells`,
+  whose width data is utf8proc property tables that are not vendored.
+- `transchar_buf`'s opening `IS_SPECIAL(c)` arm is not ported. No caller can
+  reach it (`c` comes from `utf_ptr2char` or from a byte, never negative) and
+  its `K_SECOND` resolves against `K_SPECIAL`/`KS_ZERO`, which this port has no
+  producer for. A guessed stand-in would be a wrong answer behind an unreachable
+  branch — and `k_second` was in fact caught by the name gate as a fn with no C
+  origin, which is what the gate is for.
+
+`tests/parity_cases/echo_transchar.vim`.
+
+### R24-1a. `strtrans()` was an approximation, and read its argument as text
+
+`f_strtrans` is two lines of C — `transstr(tv_get_string(&argvars[0]), true)`
+(`Src/nvim/strings.c:2960`) — but was a hand-written `.chars()` loop over
+`^X` and `^?`, on a `String`. Both halves were wrong, and the second is the
+`tv_get_string` hazard R23-1 recorded: `strtrans()` exists to name bytes a
+terminal cannot show, so reading it as text first destroys the input.
+
+| expression | vim + nvim | vimlrs before |
+|---|---|---|
+| `strtrans(list2str([-1]))` | `<ff>` | `ef bf bd` (`U+FFFD`) |
+| `strtrans(nr2char(0x110000))` | `f4 90 80 80` | `U+FFFD` ×4 |
+| `strtrans(nr2char(0x200b))` | `<200b>` | raw `e2 80 8b` |
+| `strtrans(list2str([0x80]))` | `<80>` | raw `c2 80` |
+
+It now reads `tv_get_string_buf_chk` and calls the ported `transstr`.
+
+### R24-1b. `substitute()`'s `\n` inserted a NUL — ✅ FIXED
+
+Unmasked by R24-1a: the old `strtrans` mapped 0x00 and 0x0a to the same `^@`, so
+`examples/substitute_edge.vim` passed over a wrong value. `vim_regsub_both`
+(`Src/nvim/regexp.c:2300`) is explicit — `case 'n': c = NL;` — and both engines
+agree:
+
+| expression | vim + nvim | vimlrs before |
+|---|---|---|
+| `str2list(substitute('x','x','a\nb',''))` | `[97, 10, 98]` | `[97, 0, 98]` |
+| `str2list(substitute('x','x','a\bb',''))` | `[97, 8, 98]` | `[97, 98, 98]` (`\b` unhandled) |
+
+The "`\n` in a `:s` replacement inserts a NUL" line that the old comment cited is
+about `:s` in a BUFFER, where a NL byte in stored line text stands for a NUL. It
+is the storage convention, not this expansion. What made it look like a NUL in a
+string is that `strtrans()` *displays* 0x0a as `^@` (`transchar_nonprint`: "we
+use newline in place of a NUL").
+
+### R24-1c. `msgpackdump()` returned `U+FFFD` where the bytes were — ✅ FIXED
+
+Also the `tv_get_string` hazard, one layer along: the byte stream was split into
+lines with `String::from_utf8_lossy`. MessagePack is binary —
+`msgpackdump([v:true,v:false,v:null])` is `c3 c2 c0`, none of it valid UTF-8 —
+so every byte became `U+FFFD`.
+
+| expression | nvim (vim has no `msgpackdump`) | vimlrs before |
+|---|---|---|
+| `let d.a = msgpackdump([v:true,v:false,v:null]) \| echo d` | `{'a': ['<c3><c2><c0>']}` | `{'a': ['<fffd>×3']}` |
+
+The split is now on the byte `\n`, which cannot occur inside a UTF-8 sequence,
+so it is the same split. This moved a 43-instance entry out of the fuzzer's
+`NEITHER` bucket.
+
+## R24-2. A `|`-separated `:unlet` inside `:try` was caught — ✅ FIXED (was R23-O2)
+
+The mechanism is in the vendored C, and it is not about `:unlet` being special —
+it is about where the command left the parse cursor. `ex_unletlock`
+(`vendor/eval/vars.c`) resolves an ELEMENT lval with `get_lval()`; when that
+fails the loop `break`s, and the tail
+
+```c
+  eap->nextcmd = check_nextcmd(arg);
+```
+
+runs with `arg` still on the UNCONSUMED name — so `check_nextcmd` finds no `|`
+and answers NULL. With no next command, the `| catch | … | endtry` that follows
+on the line is never executed and the exception escapes the one-line `:try`.
+
+The plain-NAME form is the opposite, and the contrast is the proof: its E108
+comes from the `callback` (`do_unlet`), which only sets `error = true`; the loop
+runs on, `arg` reaches the `|`, and the same-line `:catch` DOES run.
+
+| one-line form | vim + nvim | vimlrs before |
+|---|---|---|
+| `try \| unlet b[9] \| catch \| … \| endtry` | aborts, `E684` uncaught | caught |
+| `try \| unlet nosuchvar \| catch \| … \| endtry` | caught | caught |
+| `try \| let b[9] = 1 \| catch \| … \| endtry` | caught | caught |
+| multi-line `try` / `unlet b[9]` / `catch` | caught | caught |
+
+vimlrs already had the machinery: `VIML_EXC_IS_HARD` is exactly "this error
+abandoned the command line, so an inline `:catch` must not see it". The fix is
+that `b_unlet_index` now runs under `eval_op`, the existing helper that marks any
+error raised inside it as hard. `b_unlet` (the name form) deliberately does not.
+
+`tests/parity_cases/unlet_bar_try.vim`, which pins all four rows above.
+
+## R24-3. The parity gate compared expectations as UTF-8 — ✅ FIXED
+
+Not a language bug; a hole in the gate that this round walked straight into.
+`tests/parity_cases.rs` read `<name>.expected` with `read_to_string` and compared
+with `from_utf8_lossy`. vim writes non-UTF-8 output as a matter of routine, so:
+
+- a case whose recorded answer contains such a byte could not be read at all —
+  it failed with "has no recorded vim output", naming a file that was right
+  there. `echo_transchar.vim` is such a case (`f4 90 80 80`).
+- worse, the comparison could pass on a difference. Verified:
+  `String::from_utf8_lossy(b"\xf4\x90\x80\x80") == String::from_utf8_lossy(b"\xff\xff\xff\xff")`
+  is `true` — both collapse to four `U+FFFD`.
+
+Both sides are now handled as bytes end to end; only the failure *report* is
+lossy. `scripts/parity.sh` was never affected — it has always compared with
+`cmp`. This makes the gate strictly stricter; it reports more, never less.
+
+## Still open
+
+### R24-O1. vim shows a BELL, nvim consumes it
+
+Found while porting `msg_multiline`. The oracles disagree, so this is the
+`NEITHER` class, and the vendored C decides which side this port lands on.
+
+| expression | vim | nvim | vimlrs before | after |
+|---|---|---|---|---|
+| `echo 'A' . nr2char(7) . 'B'` | `A^GB` | `AB` | `A` `0x07` `B` | `AB` |
+
+`msg_multiline` treats BELL as a delimiter and calls `vim_beep(kOptBoFlagShell)`
+in place of writing it (`vendor/message.c:296`), so the byte never reaches the
+output. Vim's message layer shows `^G` instead. Porting the vendored C gives
+nvim's answer; matching vim as well would mean writing a rule the vendored C does
+not contain — the same call R23-O1 records for the empty-list clamp. Before this
+round vimlrs matched NEITHER (it wrote the raw `0x07`), so the bucket improved
+either way.
+
+Excluded from `tests/parity_cases/echo_transchar.vim`, with this reason in the
+case file.
+
+### R24-O2. `:unlet` on a bad element reports a shorter name than vim
+
+The abort behaviour matches after R24-2; the message text does not, for the two
+errors vim raises from inside `get_lval` with the rest of the line still
+unconsumed. vim embeds that remainder in the message because it is genuinely part
+of the name it failed on; vimlrs splits the line on `|` at parse time, so it
+never had it.
+
+| one-line form | vim | vimlrs |
+|---|---|---|
+| `try \| unlet d.nokey \| catch \| … \| endtry` | `E716: Key not present in Dictionary: "nokey \| catch \| … "` | `E716: … "nokey"` |
+| `try \| unlet n[0] \| catch \| … \| endtry` | `E689: Index not allowed after a number: n[0] \| catch \| … ` | `E689: Can only index a List, Dictionary or Blob` |
+
+Both now abort the script in all three, which is the part R23-O2 was about. The
+E689 row is a second, independent difference: vim and nvim use a different
+message for indexing a Number than the one this port emits. Closing either needs
+the un-split command line to reach the lval resolver, which is a parser change.
+
+### R24-O3. `msgpackparse(msgpackdump(…))` does not round-trip
+
+Found while fixing R24-1c; PRE-EXISTING and unchanged by it (the pre-change
+binary fails identically).
+
+```vim
+echo msgpackparse(msgpackdump([v:true,v:false,v:null]))
+```
+
+nvim: `[v:true, v:false, v:null]`. vimlrs: `E5766: failed to parse msgpack
+string`. The Blob form (`msgpackdump([…], 'B')`) is `0zC3C2C0` in both, so the
+DUMP side is right and the failure is on the parse side, in how a
+readfile()-style List of byte strings is turned back into a byte stream. vim has
+no `msgpackdump`, so nvim is the only oracle.
+
+### R22-O3. Vim-only builtins — the C IS available now
+
+The blocker recorded in round 22 was "there is no C to read":
+`str2blob`/`blob2str`/`js_encode` are Vim-only and absent from the vendored
+Neovim source. Half of that is now resolved — the C exists and was located, at
+the exact patch level of the vim this repo tests against (`vim --version`:
+`9.2`, "Included patches: 1-900"):
+
+| function | vim/vim@v9.2.0900 |
+|---|---|
+| `f_blob2str` | `src/strings.c:1422` |
+| `f_str2blob` | `src/strings.c:1567` |
+| `f_js_encode` | `src/json.c:1544` |
+
+What is still open is not availability but placement, and it is an architecture
+decision rather than a porting one: `vendor/` is currently defined as Neovim's
+sources and `src/ported/` as strict 1:1 ports of them, the name gate resolves
+against `vendor/`, and vendoring a second upstream into the same tree changes
+what a `Port of` citation means. The 13-row measured contract recorded in round
+22 still stands and is unchanged.
+
+### R23-O1. vim and nvim disagree on the empty-list clamp index — still open, re-verified
+
+Unchanged this round, and re-measured against both engines: `let e[-9] = 1` on
+`[]` is `E684: … : -9` in vim, `… : 0` in nvim, `… : 0` here. The exclusion note
+in `tests/parity_cases/list_index_e684.vim` still describes it correctly.
