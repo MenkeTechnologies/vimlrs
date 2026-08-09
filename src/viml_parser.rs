@@ -2771,6 +2771,39 @@ impl Parser {
         }
     }
 
+    /// `{cond} ? {then}` with no `:` — c: `eval1()` (eval.c) parses the
+    /// then-branch, *then* checks for the colon and `emsg(_(e_missing_colon_
+    /// after_questionmark))`. So E109 is a **run-time** error tagged with the
+    /// ex-command (`Vim(echo):E109: …`), not a parse failure, and the truthy
+    /// branch's side effects have already happened when it fires. Verified
+    /// against vim 9.2 with a counter-bumping function:
+    ///
+    /// ```text
+    /// try | echo 1 ? Bump() | catch | endtry   " Vim(echo):E109: …, g:n == 1
+    /// try | echo 0 ? Bump() | catch | endtry   " Vim(echo):E109: …, g:n == 1
+    /// ```
+    ///
+    /// [`Expr::ScriptErrorGuard`] is exactly that "evaluate, discard, raise"
+    /// shape, so the truthy arm gets one wrapped around the parsed then-branch
+    /// and the falsy arm gets the bare [`Expr::ScriptError`] — no side effect
+    /// on a branch vim never evaluates.
+    ///
+    /// Returning a node rather than `Err` matters beyond the message: a parse
+    /// error here is swallowed whole by the tolerant source path
+    /// (`fusevm_bridge::source_tolerant`), which is why vimlrs used to accept
+    /// `echo 1 ? 'a'` *silently* — more permissive than the reference.
+    fn missing_colon(cond: Expr, then: Expr) -> Expr {
+        const E109: &str = "E109: Missing ':' after '?'";
+        Expr::Ternary {
+            cond: Box::new(cond),
+            then: Box::new(Expr::ScriptErrorGuard {
+                inner: Box::new(then),
+                msg: E109.to_string(),
+            }),
+            otherwise: Box::new(Expr::ScriptError(E109.to_string())),
+        }
+    }
+
     fn eval1(&mut self) -> Result<Expr, VimlError> {
         let cond = self.eval2()?;
         match self.peek() {
@@ -2779,7 +2812,10 @@ impl Parser {
                 let junk_before_then = self.deferred_e15.len();
                 let then = self.eval1()?;
                 let then_junk = self.deferred_e15.len() > junk_before_then;
-                self.eat(&Tok::Colon)?;
+                if self.peek() != &Tok::Colon {
+                    return Ok(Self::missing_colon(cond, then));
+                }
+                self.advance();
                 let junk_before_else = self.deferred_e15.len();
                 let otherwise = self.eval1()?;
                 let else_junk = self.deferred_e15.len() > junk_before_else;

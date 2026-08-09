@@ -1335,6 +1335,39 @@ clause's value rather than clearing it — both verified.
 c: `get_lambda_name()` (userfunc.c:269) is `"<lambda>%d", ++lambda_no` — a
 pre-increment. Observable through `string({x -> x})`.
 
+### R21-1. `expr ?` with no `:` was accepted, silently — ✅ FIXED (was R20-O2)
+`echo 1 ? 'a'` ran and printed nothing where vim raises E109 — vimlrs was *more
+permissive* than the reference, so a script vim refuses to run ran here.
+
+The parser did raise `E15: expected Colon, found Eof`, but that is a parse
+failure, and `fusevm_bridge::source_tolerant` (the fallback that keeps a real
+`.vimrc` sourcing past a construct this port cannot parse) drops a statement that
+fails to parse without a word. The error never reached the user.
+
+c: `eval1()` (eval.c) parses the then-branch, *evaluates* it when the condition
+is true, and only then checks for the colon and
+`emsg(_(e_missing_colon_after_questionmark))`. So E109 is a **run-time** error
+carrying the ex-command tag, not a parse failure. Verified against vim 9.2 with a
+counter-bumping function: `try | echo 1 ? Bump() | catch | endtry` catches
+`Vim(echo):E109: …` with `g:n` already 1, and `echo 0 ? Bump()` raises the same
+error without calling `Bump()`.
+
+`Expr::ScriptErrorGuard` (evaluate, discard, raise) is exactly that shape, so
+`viml_parser::missing_colon` builds a `Ternary` whose then-arm is the parsed
+branch wrapped in a guard and whose else-arm is a bare `Expr::ScriptError` —
+side effects on the truthy path only, E109 on both. Recorded as
+`tests/parity_cases/ternary_e109.vim`.
+
+### R21-2. The `Vim(cmd):` tag leaked out of a returning function — ✅ FIXED
+Found while pinning R21-1: `let g:z = G() + [][0]` reported
+`Vim(return):E684` where vim reports `Vim(let):E684`. `CUR_CMDNAME` is set per
+statement and was never restored when a user function returned, so the *callee's
+last* command tagged the *caller's* next error. c: the tag names the command
+`do_cmdline` is executing at the throw site, and a function body is its own
+`do_cmdline`, so the caller's command is back in force on return —
+`call_user_function_raw` now saves it across the body chunk. Covered by the
+`after-call` lines of `tests/parity_cases/ternary_e109.vim`.
+
 ## Still open
 
 ### R20-O1. `v:throwpoint` is always empty
@@ -1347,6 +1380,9 @@ as `tests/parity_cases/throwpoint.vim` with vim's real answer and listed in
 `KNOWN_OPEN` in `tests/parity_cases.rs`, which fails if the gap ever closes
 without the entry being removed.
 
-### R20-O2. `expr ?:` (no `then` branch) is accepted
-vim raises `E109: Missing ':' after '?'`; vimlrs treats it as a falsy-coalesce.
-Accepting more than vim, so no valid script observes it.
+### R21-O1. `:unlet` on a missing variable is silently accepted
+vim raises `E108: No such variable: "g:nope"` for `:unlet g:nope` and only
+`:unlet!` suppresses it. `Stmt::Unlet` carries no bang — the parser strips `!`
+and throws it away — and `b_unlet` passes `forceit: true` unconditionally, so
+both forms succeed silently. Another *more permissive than vim* divergence, in
+the same class as R21-1. Found by the probe that pinned R21-2.

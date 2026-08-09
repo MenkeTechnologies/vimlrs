@@ -2961,7 +2961,15 @@ fn call_user_function_raw(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
     // cannot land on ours.
     DEFER_STACK.with(|d| d.borrow_mut().push(Vec::new()));
 
+    // c: the `Vim(cmd):` tag names the ex-command `do_cmdline` is executing at
+    // the throw site, and a function body is its own `do_cmdline` — so the
+    // caller's command is back in force the moment the body returns. Without
+    // this restore the *callee's last* command leaked out, and an error in the
+    // caller was tagged with it: `let g:z = G() + [][0]` reported
+    // `Vim(return):E684` where vim reports `Vim(let):E684`.
+    let caller_cmdname = CUR_CMDNAME.with(|c| c.borrow().clone());
     run_chunk_nested(func.chunk.clone());
+    CUR_CMDNAME.with(|c| *c.borrow_mut() = caller_cmdname);
 
     // vim runs deferred calls on the way out however the body ended — a `:return`,
     // falling off the end, or unwinding through a `:throw`. `:throw` sets a

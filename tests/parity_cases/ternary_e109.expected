@@ -1,0 +1,9 @@
+1
+truthy Vim(echo):E109: Missing ':' after '?'
+n 1
+falsy Vim(echo):E109: Missing ':' after '?'
+n 1
+after-call Vim(let):E684: List index out of range: 0
+after-call Vim(echo):E684: List index out of range: 0
+E109: Missing ':' after '?'
+still running
