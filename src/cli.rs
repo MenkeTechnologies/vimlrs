@@ -370,17 +370,9 @@ fn dump_bytecode(file: &Path) -> Result<(), String> {
     let stmts = crate::viml_parser::parse_program(&src).map_err(|e| e.to_string())?;
     let prog = crate::compile_viml::compile_program(&stmts).map_err(|e| e.to_string())?;
     println!("== main ==\n{:#?}", prog.main.ops);
-    for f in &prog.funcs {
+    for f in prog.all_funcs() {
         println!(
             "== function {}({}) ==\n{:#?}",
-            f.name,
-            f.params.join(", "),
-            f.chunk.ops
-        );
-    }
-    for f in &prog.deferred_funcs {
-        println!(
-            "== function {}({}) [deferred] ==\n{:#?}",
             f.name,
             f.params.join(", "),
             f.chunk.ops

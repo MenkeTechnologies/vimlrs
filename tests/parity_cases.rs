@@ -26,7 +26,13 @@ use std::process::Command;
 /// answer, the divergence is still printed by `scripts/parity.sh`, and a case
 /// listed here that starts *matching* fails this test — so an entry cannot
 /// outlive the gap it names. Every entry must also be an open item in BUGS.md.
-const KNOWN_OPEN: &[(&str, &str)] = &[];
+const KNOWN_OPEN: &[(&str, &str)] = &[(
+    "typename_lambda_capture",
+    "BUGS.md R22-O1: typename() of a lambda that declares no parameters but \
+     captures one. Captures are desugared into leading parameters bound by a \
+     Partial, which makes `{-> a}` indistinguishable from \
+     `function({x -> x}, [1])` — and vim prints a different answer for each.",
+)];
 
 /// Sorted list of `tests/parity_cases/*.vim`.
 fn cases(dir: &Path) -> Vec<PathBuf> {

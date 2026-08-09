@@ -141,12 +141,13 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
             // `:unlet[!] x y …` — the optional `!` suppresses the missing-var
             // error. Each argument is a bare name or a List/Dict element target
             // (`l[i]` / `d.key`), matching `do_unlet_var()` (vendor/eval/vars.c).
+            let bang = rest.starts_with('!');
             let args = rest.trim_start_matches('!').trim();
             split_unlet_args(args)
                 .into_iter()
                 .map(parse_unlet_arg)
                 .collect::<Result<Vec<_>, _>>()
-                .map(Stmt::Unlet)
+                .map(|args| Stmt::Unlet { args, bang })
         }
         // `:lockvar[!] [depth] {name}…` / `:unlockvar[!] …` — `ex_lockvar`
         // (vendor/eval/vars.c): `!` locks/unlocks all levels (`DICT_MAXNEST`), an

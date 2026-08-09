@@ -11,7 +11,7 @@
 #![allow(non_snake_case)]
 
 use crate::ported::eval::typval_defs_h::{
-    typval_T, typval_vval_union::*, BoolVarValue::*, SpecialVarValue::*, VarType::*,
+    typval_T, typval_vval_union::*, BoolVarValue::*, VarType::*,
 };
 
 /// Render a float for `"%g"` the way neovim's `vim_vsnprintf_typval()`
@@ -64,6 +64,22 @@ pub(crate) fn vim_float_g(f: f64, precision: Option<i32>) -> String {
     }
     String::from_utf8(s).unwrap()
 }
+
+/// Port of `encode_special_var_names[]` from `Src/eval/encode.c:41` — the name a
+/// `VAR_SPECIAL` value prints under, indexed by its `SpecialVarValue`.
+///
+/// c: `const char *const encode_special_var_names[] = { [kSpecialVarNull] =
+/// "v:null" };` — one entry, because Neovim has only `v:null`. Vim carries
+/// `v:none` as a second special and prints it under its own name
+/// (`get_var_special_name()`), which is the second entry. A table, not a
+/// function, exactly as the C is: both readers INDEX it.
+///
+/// Those readers are `encode_vim_to_string()` here and `tv_get_string_buf_chk()`
+/// (c: `STRCPY(buf, encode_special_var_names[tv->vval.v_special])`,
+/// `Src/eval/typval.c:4602`), so `v:none` in string context and `string(v:none)`
+/// cannot disagree. They did while the latter had `"v:null"` written into it.
+#[allow(non_upper_case_globals)]
+pub const encode_special_var_names: [&str; 2] = ["v:null", "v:none"];
 
 /// Port of `encode_blob_write()` from `Src/eval/encode.c:48`.
 ///
@@ -478,7 +494,7 @@ pub fn encode_vim_to_string(tv: &typval_T) -> String {
             "v:false"
         }
         .to_string(),
-        (VAR_SPECIAL, v_special(kSpecialVarNone)) => "v:none".to_string(),
+        (VAR_SPECIAL, v_special(v)) => encode_special_var_names[*v as usize].to_string(),
         (VAR_SPECIAL, _) => "v:null".to_string(),
         // TYPVAL_ENCODE_CONV_LIST_START / _BETWEEN_ITEMS / _END
         (VAR_LIST, v_list(l)) => match l {

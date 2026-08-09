@@ -816,19 +816,39 @@ pub fn list_script_vars(_first: &mut i32) {}
 
 // ── more vars.c helpers (unlet, funcref-name check, reg var, clears) ──
 
-/// Port of `do_unlet()` from `Src/eval/vars.c` — delete variable `name` from its
-/// scope. Returns OK if removed (or `forceit`), FAIL if it did not exist.
+/// Port of `do_unlet()` from `Src/eval/vars.c:1713` — delete variable `name`
+/// from its scope. Returns OK if it existed, FAIL otherwise.
+///
+/// c: every "not found" path falls through to the same two lines at the end,
+/// which are the whole of `:unlet` vs `:unlet!`:
+///
+/// ```text
+///   if (forceit) { return OK; }
+///   semsg(_("E108: No such variable: \"%s\""), name);   // vars.c:1772
+///   return FAIL;
+/// ```
+///
+/// The message carries the name AS WRITTEN (`g:nope`, not `nope`). This used to
+/// be reached with `forceit` hardcoded true by the caller, so both `:unlet` and
+/// `:unlet!` were silent.
 pub fn do_unlet(name: &str, _name_len: usize, forceit: bool) -> i32 {
     let ok = crate::ported::eval_h::OK;
     let fail = crate::ported::eval_h::FAIL;
+    // c: the tail shared by every path that did not find the variable.
+    let missing = || -> i32 {
+        if forceit {
+            return ok;
+        }
+        crate::ported::message::semsg(&format!("E108: No such variable: \"{name}\""));
+        fail
+    };
     let rm = |store: &'static std::thread::LocalKey<RefCell<dict_T>>, key: &str| -> i32 {
-        store.with(|d| {
-            if d.borrow_mut().dv_hashtab.shift_remove(key).is_some() || forceit {
-                ok
-            } else {
-                fail
-            }
-        })
+        let removed = store.with(|d| d.borrow_mut().dv_hashtab.shift_remove(key).is_some());
+        if removed {
+            ok
+        } else {
+            missing()
+        }
     };
     if let Some(k) = name.strip_prefix("g:") {
         return rm(&globvardict, k);
@@ -853,13 +873,7 @@ pub fn do_unlet(name: &str, _name_len: usize, forceit: bool) -> i32 {
     });
     match in_func {
         Some(true) => ok,
-        Some(false) => {
-            if forceit {
-                ok
-            } else {
-                fail
-            }
-        }
+        Some(false) => missing(),
         None => rm(&globvardict, name),
     }
 }

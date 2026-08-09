@@ -1472,82 +1472,233 @@ fuzzed expressions across four fresh seeds, 179 divergent cases had vimlrs
 agreeing with vim, 0 with neovim, and **36 with neither** — so the bucket is not
 purely advisory and has to be read case by case, never skipped because an oracle
 split is expected. The triage rule as written cannot separate the two; that is a
-gap in the fuzzer's reporting, not in its findings.
+gap in the fuzzer's reporting, not in its findings. Closed by R22-1.
+
+## Round 22 — the `Divergent` bucket re-read, and the six gaps it named
+
+Every fix below is byte-diffed against vim 9.2 by `scripts/parity.sh`, and each
+has a case in `tests/parity_cases/` whose `.expected` is vim's own output.
+
+### R22-1. The fuzzer could not tell "oracles disagree" from "vimlrs is wrong" — ✅ FIXED
+
+R21-7 closed `reverse(10)` but left the reporting gap that hid it: `Divergent`
+lumped "vimlrs matches vim, neovim differs" (advisory) together with "vimlrs
+matches NEITHER" (a bug). `classify()` now separates them and `Class::Neither`
+is reported under its own actionable heading, counted separately, and included
+in the non-zero exit alongside `GAPS`/`PANICS`:
+
+```text
+  NEITHER:     2 (2 distinct)
+  divergent:   78 (advisory — vimlrs matches vim)
+```
+
+Two references that disagree still *bracket* the answer; a third result outside
+that bracket is vimlrs's own, whatever the oracles are doing. This is the
+standing check R21-7 asked for — it costs nothing to keep and cannot be skipped.
+
+**What the re-read found.** Over six seeds x 2,500 expressions, the `Divergent`
+bucket resolved to (a) `v:none .. -2` -> R22-5, (b) `list2str([-1,0,1])` ->
+R22-6, (c) `id()`, which is not a finding at all (R22-11), and (d) two classes
+that are not bugs: a vim-only builtin vimlrs has not ported (R22-O3) and a
+neovim builtin vim lacks (`msgpackdump`), where being a superset of both means
+matching neither. After the fixes the bucket is 1-2 cases per seed, all named
+below.
+
+### R22-2. `typename()` of a builtin Funcref / lambda was `func(...): any` — ✅ FIXED (was R21-O5)
+
+`scripts/gen_builtin_signatures.sh` drives vim once over the builtin names vim
+itself reports (`getcompletion('', 'function')`) and records
+`typename(function(name))` verbatim into the generated
+`src/ported/eval/builtin_signatures.rs` — 588 signatures. No argument-type table
+exists or is needed: vim prints every builtin argument as `[unknown]`, so the
+only per-builtin facts are the argument count and the return type, and a
+recorded string cannot be wrong about what vim prints.
+
+`type_name_of()` then reproduces vim's whole rule set, each row measured:
+
+| value | vim, and now vimlrs |
+|---|---|
+| `function('strlen')` | `func([unknown]): number` |
+| `function('add')` | `func([unknown], [unknown])` |
+| `function('argv')` | `func(?[unknown], ?[unknown]): list<string>` |
+| `function('function')` | `func([unknown], ?[unknown], ?[unknown]): func(...): unknown` |
+| `function('strlen', {})` | `func` |
+| `function('UF')`, `function('UF', [1])` | `func(...): any` |
+| `{-> 1}` | `func(...): [unknown]` |
+| `{x -> x}` / `{x, y -> x}` | `func(any): [unknown]` / `func(any, any): [unknown]` |
+| `function({x -> x}, [1])` | `func(): [unknown]` |
+| `function({x, y -> x}, [1])` | `func(any): [unknown]` |
+| `function({x, y -> x}, [1,2,3])` | `func(...): [unknown]` |
+
+A partial over a builtin is the bare `func` because vim's `partial_T.pt_func` is
+NULL for one, so there is no `ufunc_T` to read a type from. Lambdas store
+nothing per-function: the shape is the declared parameter count `d` minus what a
+partial bound `k`, with `d == 0` or `k > d` rendering `...`. One shape is still
+open — R22-O1.
+
+`typename` is Vim-only, so it is absent from the neovim-derived `funcs_argc.rs`
+and `function('typename')` raised `E700: Unknown function: typename`. The
+existing `EXTRA_BUILTIN_ARGC` supplement already carried it;
+`translated_function_exists()` was reading the GENERATED table directly instead
+of `builtin_argc_range()`, the one place that merges the two. Generated tables
+stay untouched; the supplement is the only place a Vim-only name is written.
+
+`tests/parity_cases/typename_funcref.vim`.
+
+### R22-3. `:unlet` on a missing variable was silently accepted — ✅ FIXED (was R21-O1)
+
+`vim(unlet):E108: No such variable: "g:nope"`. The parser stripped the `!` and
+threw it away, so `Stmt::Unlet` could not tell the two forms apart and `b_unlet`
+passed `forceit: true` unconditionally. The bang is now carried on the statement
+and reaches `do_unlet`, whose tail is the C's verbatim (`vendor/eval/vars.c`):
+
+```c
+  if (forceit) { return OK; }
+  semsg(_("E108: No such variable: \"%s\""), name);   // vars.c:1772
+  return FAIL;
+```
+
+`:unlet!` stays silent; the message carries the name as written; a failing name
+mid-list aborts the rest exactly as vim does.
+`tests/parity_cases/unlet_e108.vim`.
+
+### R22-4. `function('F')` before `F` was defined was accepted — ✅ FIXED (was R21-O2)
+
+vim reads the whole script but EXECUTES it line by line, and `:function` is an
+ordinary command: `F` does not exist until its `:function` line has run, so
+`let F = function('Later')` above `:function Later()` is
+`Vim(let):E700: Unknown function: Later`.
+
+`compile_program` hoisted every script-level definition into
+`CompiledProgram::funcs`, which registers at load. It now leaves them in the
+statement stream, where the register-on-reach path built for block-level
+`:function` already existed (`deferred_funcs` + `VIML_DEFINE_FUNC`). Nothing new
+was written — the correct machinery was there and script level was the one case
+routed around it. `deferred_funcs` now means "every named definition" and
+`funcs` means "bodies with no `:function` line to reach" (lambdas, `d.key()`);
+`CompiledProgram::all_funcs()` is for callers that just want to inspect.
+`tests/parity_cases/function_forward.vim`.
+
+### R22-5. `v:none` stringified as `v:null`, and compared equal to it — ✅ FIXED (was R21-O3)
+
+One table, as the C has it. `tv_get_string_buf_chk` had `"v:null"` written into
+its `VAR_SPECIAL` arm and `encode_vim_to_string` open-coded the two names, so
+the two could disagree — and did. Both now index the ported
+`encode_special_var_names[]` (`vendor/eval/encode.c:41`), a table and not a
+function, because both readers INDEX it.
+
+That one change also settles the COMPARISON, which is why this was left whole
+rather than half-done: neither operand of `v:null == v:none` is a
+Blob/List/Dict/Funcref/Float/Number, so `typval_compare` falls through to its
+string branch and compares exactly these two names. `v:null != v:none` is 1 and
+`repeat(v:none, 3)` is `'v:nonev:nonev:none'` because the names now differ.
+`tests/parity_cases/none_special.vim`.
+
+### R22-6. `list2str()` stopped at a 0 instead of skipping it — ✅ FIXED (partial: was R21-O4)
+
+c: `buf[utf_char2bytes((int)n, buf)] = NUL; ga_concat(&ga, buf);` — a 0 encodes
+to a single NUL byte, which the STRLEN-based `ga_concat` measures as length 0.
+The item contributes nothing and **the walk continues**. The port `break`ed,
+dropping every element after a 0: `list2str([65, 0, 66])` was `'A'` where vim
+gives `'AB'` (verified byte-for-byte via `writefile(..., 'b')`).
+
+**Still open: the out-of-range half.** `list2str([-1,0,1])` is the two bytes
+`ff 01` in vim (`utf_char2bytes` writes `buf[0] = (char_u)c` for any `c < 0x80`,
+including negatives, and encodes above `U+10FFFF` without a range check —
+`list2str([0x110000])` is `f4 90 80 80`). vimlrs cannot represent those: a
+VimL string is `typval_vval_union::v_string(String)`, a Rust `String`, which is
+UTF-8 by construction and cannot hold a lone `0xff`. This is not a missing check
+but the string model, so it stays open rather than being papered over.
+`tests/parity_cases/list2str_nul.vim`.
+
+### R22-7. `eval()` of a lambda literal raised E700 — ✅ FIXED (was R21-O6)
+
+`compile_program` returns a lambda's body as a SEPARATE `<lambda>N` chunk
+alongside `main`. `b_eval` and `compile_expr_chunk` both took `.main` and dropped
+the rest, so the Funcref `main` produced named a body nobody had registered.
+Both now register them the way the script loader and `run_source_nested` already
+did. This is not only `eval()`: `map(l, '{a, b -> b * 10}(0, v:val)')` went
+through the same drop (proved by reverting the one line — `E700: Unknown
+function: <lambda>1`). `tests/parity_cases/eval_lambda.vim`.
+
+### R22-8. Nested compiles re-used `<lambda>1` and clobbered the outer one — ✅ FIXED
+
+Found by R22-7, which exposed it: registering the nested lambda is what made the
+collision reachable.
+
+```vim
+let A = {x -> x * 2}
+let B = eval('{x -> x + 100}')
+echo A(5)      " 105 here, 10 in vim
+```
+
+`compile_program_inner` reset `LAMBDA_COUNTER` to 0 on EVERY compile, so every
+nested compile (`eval()`, an expression string handed to `map()`, `:execute`)
+restarted at `<lambda>1` and registered over the outer script's. c: `lambda_no`
+is a `static int` inside `get_lambda_name()` (userfunc.c:271) that is only ever
+incremented — one counter for the life of the process. The reset is gone. A
+side effect is that the generated names now line up with vim's for the cases in
+`eval_lambda.vim`.
+
+### R22-9. `scripts/parity.sh` truncated vim's output at the first non-UTF-8 byte — ✅ FIXED
+
+`norm()` piped vim through `tr -d '\r'`. In a UTF-8 locale macOS `tr` aborts
+with "Illegal byte sequence" on a byte that is not valid UTF-8 and TRUNCATES the
+rest of the stream — and vim writes such bytes for real (`list2str([-1])` is the
+single byte `0xff`). Any case whose output contained one would have had its
+`.expected` silently recorded SHORT, and the harness would then have "passed" it
+against a truncated record. Found while pinning R22-6, whose expected output is
+exactly such a byte. The CR strip is now folded into the existing perl pass,
+which is byte-transparent without `use utf8`.
+
+### R22-10. The fuzzer allow-listed `id()`, which can never match — ✅ FIXED
+
+`id()` returns the address of the value's heap object: `'0x9ab06df80'` in nvim,
+`'000c4ce17'` in vim, a third pointer in vimlrs, different on every run. It was
+in `FUNCS`, whose own rule is that every entry is "pure, deterministic … an
+impure builtin would report a false gap on every run" — which is precisely what
+it did, 4-5 permanent false findings per seed, all landing in the bucket R22-1
+had just made actionable. Removed. No outcome it can produce carries signal.
 
 ## Still open
 
-### R21-O3. `v:none` stringifies as `v:null`, and compares equal to it
-From the same divergent bucket, verified directly against vim 9.2:
+### R22-O1. `typename()` of a zero-parameter lambda that captures
+
+`{-> a}` prints `func(): [unknown]` where vim prints `func(...): [unknown]`.
+Every other lambda shape matches (R22-2).
+
+This port desugars a capture into a LEADING PARAMETER pre-bound by a Partial
+(`compile_viml.rs`, `Expr::Lambda`); vim keeps captures in the closure
+environment and out of `uf_args`. So `{-> a}` is (declared 1, bound 1) here
+while vim sees (declared 0, bound 0), and it is indistinguishable from
+`function({x -> x}, [1])`, which is (declared 1, bound 1) in vim too — and vim
+prints a DIFFERENT answer for that one. No rule over the two numbers can
+separate them; it needs a capture count recorded on the function. Left open
+rather than guessed at.
+`tests/parity_cases/typename_lambda_capture.vim`, listed in `KNOWN_OPEN`.
+
+### R22-O2. `E684` omits the index, and a negative index should not raise at all
+
+Found while pinning R22-3. Two separate divergences in one place:
 
 | expression | vim | vimlrs |
 |---|---|---|
-| `repeat(v:none, 3)` | `'v:nonev:nonev:none'` | `'v:nullv:nullv:null'` |
-| `v:null != v:none` | `0` | `1` |
+| `let l[9] = 1` | `E684: List index out of range: 9` | `E684: List index out of range` |
+| `echo l[9]` | `E684: List index out of range: 9` | `E684: List index out of range` |
+| `let l[-9] = 1` on `[1,2,3]` | no error, list unchanged | `E684` |
+| `unlet l[-9]` on `[1,2,3]` | no error, removes item 0 -> `[2, 3]` | `E684` |
 
-`string(v:none)` alone is already right (`'v:none'`), so the gap is in
-`tv_get_string` of a `VAR_SPECIAL` and in the `VAR_SPECIAL` comparison, not in
-the encoder. Left open rather than half-fixed: both sit on `v:none`/`v:null`
-identity, which wants one deliberate pass over `tv_equal`/`tv_get_string`.
+The message half is the C's `semsg(_(e_list_index_out_of_range_nr), idx)`. The
+negative half is `tv_list_find_nr` ("when a negative index is used that is not
+found use zero and when a larger index is used use the last item",
+`vendor/eval/typval.c:1714`) — and `:let` and `:unlet` do not agree with each
+other about it, so it wants its own pass rather than a guess bolted onto the
+message fix.
 
-### R21-O4. `list2str()` drops out-of-range code points
-`list2str([-1,0,1])` is `''` where vim gives `'<ff>^A'` (and neovim the same
-bytes). Found by the fuzzer; verified against vim 9.2.
+### R22-O3. Vim-only builtins vimlrs has not ported
 
-### R21-O5. `typename()` of a builtin Funcref / lambda is `func(...): any`
-The remaining half of R20-7. vim's real answers, read from vim 9.2:
+`str2blob()` and `js_encode()` reach the fuzzer's `NEITHER` bucket as
+`E117: Unknown function` against vim's `E119: Not enough arguments`. Not a
+semantics bug — the functions are simply absent. Recorded so the bucket's
+remaining contents are accounted for rather than re-triaged every wave.
 
-```text
-strlen      func([unknown]): number
-substitute  func([unknown], [unknown], [unknown], [unknown]): string
-has         func([unknown], ?[unknown]): number
-argv        func(?[unknown], ?[unknown]): list<string>
-add         func([unknown], [unknown])          " no return suffix at all
-{-> 1}      func(...): [unknown]
-{x -> x}    func(any): [unknown]
-{x, y -> x} func(any, any): [unknown]
-```
-
-**Assessment: no argument-type table is needed, and what IS needed is
-generable.** Every builtin argument prints as `[unknown]` — vim's `typename()`
-never reports a real argument type for one. The only per-builtin facts are
-(min argc, max argc) — already carried by `funcs_argc.rs`, though from
-*neovim's* `eval.lua`, which can disagree with vim — and the return-type string,
-which is missing. Lambdas need nothing per-function at all: the shape follows
-from the declared parameter count, with zero parameters rendering `...` rather
-than `()`.
-
-Two ways to generate the return types:
-
-1. Scrape vim's `global_functions[]` in `evalfunc.c` (`{"strlen", 1, 1, FEARG_1,
-   NULL, ret_number, f_strlen}`) and map each `ret_*` to its printed name. Needs
-   vim's source vendored; only neovim's is today.
-2. Ask the reference binary — the same methodology `scripts/gen_c_functions.sh`
-   and `scripts/parity.sh -r` already use: run `typename(function(n))` over the
-   known builtin names in vim once and record the answer verbatim.
-
-(2) is strictly better here — the recorded string *is* what vim prints, so no
-`ret_number` → `number` mapping layer can be wrong — and it was proved out
-before this was written: driving vim over the 486 names in `funcs_argc.rs`
-yields a signature for 423 of them, the other 63 being neovim-only names vim
-answers E700 for (`api_info`, …), which is exactly the set that should be
-excluded. What is left is a `scripts/gen_builtin_signatures.sh` plus wiring the
-table into `f_typename` — no hand-authored type data.
-
-### R21-O6. `eval()` of a lambda literal raises E700
-`typename(eval('{x -> x}'))` gives `E700: Unknown function: <lambda>1`: the
-lambda compiles into a nested chunk whose generated `<lambda>N` body is not
-registered where the outer call can find it. Found while measuring R21-O5.
-
-### R21-O2. `function('F')` before `F` is defined is accepted
-vim resolves the name at the `function()` call and raises `E700: Unknown
-function: F` when the `:function F()` line has not executed yet; vimlrs
-registers every top-level definition in a script before the main chunk runs, so
-the forward reference succeeds. Another *more permissive than vim* divergence.
-Found while pinning R21-3.
-
-### R21-O1. `:unlet` on a missing variable is silently accepted
-vim raises `E108: No such variable: "g:nope"` for `:unlet g:nope` and only
-`:unlet!` suppresses it. `Stmt::Unlet` carries no bang — the parser strips `!`
-and throws it away — and `b_unlet` passes `forceit: true` unconditionally, so
-both forms succeed silently. Another *more permissive than vim* divergence, in
-the same class as R21-1. Found by the probe that pinned R21-2.

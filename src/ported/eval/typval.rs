@@ -134,8 +134,9 @@ pub fn tv_get_float(tv: &typval_T) -> f64 {
 /// Port of `tv_get_string_buf_chk()` from `Src/eval/typval.c`.
 ///
 /// Number → decimal; Float → `%g`; String → itself; Bool → `v:false`/`v:true`;
-/// Special → `v:null`. List/Dict/Blob/Func raise `emsg` and yield "". (We return
-/// an owned `String`, so the C single-static-buffer caveat does not apply.)
+/// Special → its own name (`v:null` / `v:none`). List/Dict/Blob/Func raise
+/// `emsg` and yield "". (We return an owned `String`, so the C
+/// single-static-buffer caveat does not apply.)
 pub fn tv_get_string_buf_chk(tv: &typval_T) -> Option<String> {
     match (tv.v_type, &tv.vval) {
         // c: snprintf(buf, NUMBUFLEN, "%" PRIdVARNUMBER, tv->vval.v_number);
@@ -160,6 +161,17 @@ pub fn tv_get_string_buf_chk(tv: &typval_T) -> Option<String> {
             .to_string(),
         ),
         // c: STRCPY(buf, encode_special_var_names[tv->vval.v_special]);
+        //
+        // The table is indexed by the value, so `v:none` is `'v:none'` here and
+        // not `'v:null'`. That also settles the COMPARISON: neither operand of
+        // `v:null == v:none` is a Blob/List/Dict/Funcref/Float/Number, so
+        // `typval_compare` falls through to its string branch and compares these
+        // two names — vim answers 0 for `==` and 1 for `!=` because the names
+        // differ, and did so here only once this stopped printing one name for
+        // both.
+        (VAR_SPECIAL, v_special(v)) => {
+            Some(crate::ported::eval::encode::encode_special_var_names[*v as usize].to_string())
+        }
         (VAR_SPECIAL, _) => Some("v:null".to_string()),
         // c: emsg(_(str_errors[tv->v_type])); return NULL;
         //

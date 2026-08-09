@@ -48,18 +48,36 @@ pub struct UserFuncDef {
 pub struct CompiledProgram {
     /// Top-level statements.
     pub main: fusevm::Chunk,
-    /// User functions defined at the top level.
+    /// Functions with no `:function` line of their own to reach, so there is
+    /// nothing to defer: the anonymous bodies behind `{args -> body}` lambdas
+    /// and behind `:function d.key()`. Registered unconditionally at load.
     pub funcs: Vec<UserFuncDef>,
-    /// User functions whose `:function` sits inside a script-level `:if`/
-    /// `:while`/`:for`/`:try` block. Unlike [`funcs`](Self::funcs) (registered
-    /// unconditionally at load), these are *staged* into the runtime's pending
-    /// registry and only inserted into the live `FUNCTIONS` table when their
-    /// `:function` line actually executes — so the idempotent
-    /// `if !exists('*F') | function F() … | endif` guard defines `F` only on the
-    /// first source, exactly as Vim does. Faithful to userfunc.c: `:function`
-    /// inside `if`/`while`/`for`/`try` is legal (those only adjust `indent`,
-    /// userfunc.c:2485-2494); the def executes when control flow reaches it.
+    /// Every NAMED `:function` definition — whether at script level or nested in
+    /// an `:if`/`:while`/`:for`/`:try` — *staged* into the runtime's pending
+    /// registry and inserted into the live `FUNCTIONS` table only when its
+    /// `:function` line actually executes.
+    ///
+    /// That is what `:function` is: an ordinary command, not a declaration. It
+    /// makes the idempotent `if !exists('*F') | function F() … | endif` guard
+    /// define `F` only on the first source, and it makes a forward reference
+    /// fail — `function('Later')` written above `:function Later()` is
+    /// `E700: Unknown function: Later` in vim, and was accepted here while
+    /// script-level definitions were hoisted into [`funcs`](Self::funcs).
+    /// Faithful to userfunc.c: `:function` inside `if`/`while`/`for`/`try` is
+    /// legal (those only adjust `indent`, userfunc.c:2485-2494) and the def
+    /// executes when control flow reaches it.
     pub deferred_funcs: Vec<UserFuncDef>,
+}
+
+impl CompiledProgram {
+    /// Every user function the program compiled, whichever list it landed in.
+    ///
+    /// Callers that want to *inspect* the program (dump bytecode, report
+    /// execution tiers, find a body in a test) want all of them; only the
+    /// runtime loader cares about the registered/staged distinction.
+    pub fn all_funcs(&self) -> impl Iterator<Item = &UserFuncDef> {
+        self.funcs.iter().chain(self.deferred_funcs.iter())
+    }
 }
 
 thread_local! {
@@ -319,7 +337,16 @@ fn compile_program_inner(
     let exc = uses_exceptions(stmts);
     LAMBDA_FUNCS.with(|f| f.borrow_mut().clear());
     DEFERRED_FUNCS.with(|f| f.borrow_mut().clear());
-    LAMBDA_COUNTER.with(|c| c.set(0));
+    // LAMBDA_COUNTER is NOT reset here. c: `lambda_no` is a `static int` inside
+    // `get_lambda_name()` (userfunc.c:271) that is only ever incremented — one
+    // counter for the life of the process. Resetting it per compile made every
+    // NESTED compile (`eval()`, an expression string handed to `map()`,
+    // `:execute`) restart at `<lambda>1` and REGISTER OVER the outer script's
+    // `<lambda>1`:
+    //
+    //   let A = {x -> x * 2}
+    //   let B = eval('{x -> x + 100}')
+    //   echo A(5)                       " 105 here, 10 in vim
     let mut funcs = Vec::new();
     let mut top: Block = Vec::new();
     for (line, s) in stmts {
@@ -330,7 +357,7 @@ fn compile_program_inner(
             body,
             bang,
             vim9,
-            dict,
+            dict: _,
         } = s
         {
             // `:function d.key()` defines an ANONYMOUS function and stores a
@@ -371,16 +398,20 @@ fn compile_program_inner(
                         },
                     ));
                 }
-                None => {
-                    let flags = FuncFlags {
-                        bang: *bang,
-                        vim9: *vim9,
-                        dict: *dict,
-                    };
-                    funcs.push(build_user_func_def(
-                        name, args, defaults, body, flags, *line, exc,
-                    )?)
-                }
+                // A plain `:function F()` at script level. Vim reads the whole
+                // script but EXECUTES it line by line, and `:function` is an
+                // ordinary command: `F` does not exist until its `:function`
+                // line has run. So this is not hoisted — it goes back into the
+                // statement stream and `Compiler::stmt`'s `Stmt::Function` arm
+                // stages it into `deferred_funcs` with a register-on-reach
+                // `VIML_DEFINE_FUNC`, exactly as a `:function` nested in an
+                // `:if` already was.
+                //
+                // Hoisting made a forward reference succeed:
+                // `let F = function('Later')` written above `:function Later()`
+                // was accepted, where vim raises
+                // `Vim(let):E700: Unknown function: Later` (verified).
+                None => top.push((*line, s.clone())),
             }
         } else {
             top.push((*line, s.clone()));
@@ -993,7 +1024,7 @@ impl Compiler {
             Stmt::Return(_) => "return",
             Stmt::Throw(_) => "throw",
             Stmt::Execute(_) => "execute",
-            Stmt::Unlet(_) => "unlet",
+            Stmt::Unlet { .. } => "unlet",
             Stmt::LockVar { lock: true, .. } => "lockvar",
             Stmt::LockVar { lock: false, .. } => "unlockvar",
             Stmt::If { .. } => "if",
@@ -1204,12 +1235,16 @@ impl Compiler {
                 self.emit(Op::Pop);
                 Ok(())
             }
-            Stmt::Unlet(args) => {
+            Stmt::Unlet { args, bang } => {
                 for arg in args {
                     match arg {
+                        // c: `do_unlet(lp->ll_name, lp->ll_name_len, eap->forceit)`
+                        // — `forceit` reaches the leaf, where it decides between
+                        // "silently OK" and E108.
                         UnletArg::Name(name) => {
                             self.load_str(name);
-                            self.emit(Op::CallBuiltin(h::VIML_UNLET, 1));
+                            self.emit(Op::LoadInt(*bang as i64));
+                            self.emit(Op::CallBuiltin(h::VIML_UNLET, 2));
                         }
                         // `unlet base[index]` / `unlet base.key` — push the
                         // container then the index; the bridge removes the

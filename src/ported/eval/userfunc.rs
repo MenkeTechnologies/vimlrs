@@ -1147,9 +1147,13 @@ pub fn callback_call_retnr(
 /// user function via the interpreter's function-existence hook (`find_func`).
 pub fn translated_function_exists(name: &str) -> bool {
     if builtin_function(name, -1) {
-        crate::ported::eval::funcs_argc::BUILTIN_ARGC
-            .binary_search_by(|e| e.0.cmp(name))
-            .is_ok()
+        // The generated `BUILTIN_ARGC` is transcribed from NEOVIM's `eval.lua`,
+        // so a Vim-only builtin vimlrs implements (`typename`) is absent from it
+        // and would be reported as not existing — `function('typename')` raised
+        // `E700: Unknown function: typename`. `builtin_argc_range` is the single
+        // place that merges the generated table with the vimlrs-only supplement,
+        // so ask it rather than the generated table directly.
+        crate::compile_viml::builtin_argc_range(name).is_some()
     } else {
         crate::ported::eval::typval::FUNC_EXISTS_HOOK
             .with(|h| *h.borrow())

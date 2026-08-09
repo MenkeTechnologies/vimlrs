@@ -25,6 +25,9 @@ pub mod funcs;
 /// Generated builtin arg-count table (from `vendor/eval.lua`); see
 /// `scripts/gen_builtin_argc.sh`.
 pub mod funcs_argc;
+/// Generated builtin `typename()` signature table (recorded from real vim); see
+/// `scripts/gen_builtin_signatures.sh`.
+pub mod builtin_signatures;
 /// Port of `eval/list.c` (the `count()` family; callback ops stay bridge-side).
 pub mod list;
 /// Port of `eval/typval.c`.

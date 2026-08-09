@@ -397,7 +397,15 @@ pub enum Stmt {
     /// `:unlet[!] {name}…` — delete one or more variables, list items, or dict
     /// entries. Each argument is either a bare name or a List/Dict element
     /// target (`l[i]` / `d.key`); see [`UnletArg`].
-    Unlet(Vec<UnletArg>),
+    Unlet {
+        /// The targets, in the order they were written.
+        args: Vec<UnletArg>,
+        /// `:unlet!` — `eap->forceit`, which makes a missing variable silent.
+        /// Without it `do_unlet()` raises E108 (`vendor/eval/vars.c:1772`), so
+        /// this flag is the whole difference between the two forms and cannot
+        /// be dropped at parse time.
+        bang: bool,
+    },
     /// `:lockvar[!] [depth] {name}…` / `:unlockvar[!] …` — lock or unlock
     /// variables. The argument text is kept raw and handed to the ported
     /// `ex_lockvar` (vendor/eval/vars.c), which owns the `!`/depth/name parsing;

@@ -115,17 +115,55 @@ pub fn f_type(argvars: &[typval_T], rettv: &mut typval_T) {
 ///   typename([[]])        → list<list<any>>  typename({'a':1}) → dict<number>
 ///   typename(v:null)      → special        typename(v:none)   → special
 ///
-/// KNOWN GAP: a Funcref reports `func(...): any`, which is what vim prints for
-/// every *legacy* `:function` (verified: `function('UF')`, `funcref('UF')`, a
-/// partial over one, and a varargs function all give exactly that). vim prints a
-/// precise signature only for a builtin (`func([unknown], [unknown], [unknown]):
-/// string` for `tr`) or a vim9 lambda, both of which need the vim9 builtin
-/// argument-type table that this port does not carry.
+/// A Funcref's signature is built by [`func_type_name_of`].
 pub fn f_typename(argvars: &[typval_T], rettv: &mut typval_T) {
     *rettv = typval_T::from(type_name_of(&argvars[0]));
 }
 
 /// The vim9 type name of one value — see [`f_typename`].
+///
+/// A Funcref's answer depends on WHICH kind of callee it names, and every rule
+/// is one row of a table read out of vim 9.2 (see
+/// `tests/parity_cases/typename_funcref.vim`, whose `.expected` is vim's own
+/// output):
+///
+/// | value                            | vim                                          |
+/// |----------------------------------|----------------------------------------------|
+/// | `function('strlen')`             | `func([unknown]): number`                    |
+/// | `function('add')`                | `func([unknown], [unknown])`                 |
+/// | `function('argv')`               | `func(?[unknown], ?[unknown]): list<string>` |
+/// | `function('strlen', {})`         | `func`                                       |
+/// | `function('UF')` (`:function`)   | `func(...): any`                             |
+/// | `function('UF', [1])`            | `func(...): any`                             |
+/// | `{-> 1}`                         | `func(...): [unknown]`                       |
+/// | `{x -> x}`                       | `func(any): [unknown]`                       |
+/// | `{x, y -> x}`                    | `func(any, any): [unknown]`                  |
+/// | `function({x -> x}, [1])`        | `func(): [unknown]`                          |
+/// | `function({x, y -> x}, [1])`     | `func(any): [unknown]`                       |
+/// | `function({x, y -> x}, [1,2,3])` | `func(...): [unknown]`                       |
+///
+/// A **builtin** never reports a real argument type — every argument prints as
+/// `[unknown]` (required) or `?[unknown]` (optional) — so the whole string is
+/// recorded verbatim from vim in `builtin_signatures::BUILTIN_SIGNATURE` rather
+/// than rebuilt from an argument-type table this port would have to invent. A
+/// **partial** over a builtin drops to a bare `func`: vim's `partial_T.pt_func`
+/// is NULL for one, so there is no `ufunc_T` to read a type from.
+///
+/// A **legacy `:function`** is `func(...): any` whatever its arity, because its
+/// arguments and return are untyped.
+///
+/// A **lambda**'s shape is its declared parameter count `d` and how many leading
+/// arguments `k` a partial has bound: `d == 0` or `k > d` renders `...`, else
+/// `d - k` parameters of `any`. Nothing per-lambda is stored.
+///
+/// KNOWN GAP (BUGS.md R22-O1): a lambda with NO declared parameters that
+/// captures a variable (`{-> a}`) prints `func(): [unknown]` here where vim
+/// prints `func(...): [unknown]`. This port desugars a capture into a leading
+/// parameter pre-bound by a Partial (`compile_viml.rs`, `Expr::Lambda`), while
+/// vim keeps captures in the closure environment and out of `uf_args` — so
+/// `{-> a}` (d=1, k=1 here) is indistinguishable from `function({x -> x}, [1])`
+/// (d=1, k=1 in vim too), and those two have DIFFERENT answers in vim. Telling
+/// them apart needs a capture count recorded on the function, not a rule.
 fn type_name_of(tv: &typval_T) -> String {
     // The member type of a container: the shared type of every item, else "any".
     fn member_of<'a>(mut items: impl Iterator<Item = &'a typval_T>) -> String {
@@ -146,7 +184,39 @@ fn type_name_of(tv: &typval_T) -> String {
         (VAR_BOOL, _) => "bool".into(),
         (VAR_SPECIAL, _) => "special".into(),
         (VAR_BLOB, _) => "blob".into(),
-        (VAR_FUNC | VAR_PARTIAL, _) => "func(...): any".into(),
+        // A Funcref: vim builds this from the callee's `ufunc_T`
+        // (`typval2type_int`, `Src/vim9type.c`), so what it prints depends on
+        // WHICH kind of callee it is. Every branch below is a row of the table
+        // in this function's doc comment, read out of vim 9.2.
+        (VAR_FUNC | VAR_PARTIAL, _) => {
+            use crate::ported::eval::builtin_signatures::BUILTIN_SIGNATURE;
+            // c: `pt_name` for a partial, `v_string` for a plain Funcref.
+            let (name, bound) = match (tv.v_type, &tv.vval) {
+                (VAR_PARTIAL, v_partial(Some(p))) => (p.pt_name.clone(), p.pt_argv.len()),
+                (VAR_FUNC, v_string(s)) => (s.clone(), 0),
+                _ => return "func(...): any".into(),
+            };
+            // c: `if (name != NULL) ufunc = find_func(name);` — a user function
+            // (or a lambda, which is one) is described by its own ufunc_T.
+            if let Some(f) = crate::ported::eval::userfunc::find_func(&name) {
+                if !name.starts_with("<lambda>") {
+                    return "func(...): any".into();
+                }
+                let d = f.uf_args.len();
+                if d == 0 || bound > d {
+                    return "func(...): [unknown]".into();
+                }
+                let params = vec!["any"; d - bound].join(", ");
+                return format!("func({params}): [unknown]");
+            }
+            // A builtin: vim's own answer, recorded verbatim. A partial over one
+            // has no `pt_func` to read a type from and prints the bare name.
+            match BUILTIN_SIGNATURE.binary_search_by(|(n, _)| (*n).cmp(&name.as_str())) {
+                Ok(_) if tv.v_type == VAR_PARTIAL => "func".into(),
+                Ok(i) => BUILTIN_SIGNATURE[i].1.to_string(),
+                Err(_) => "func(...): any".into(),
+            }
+        }
         (VAR_LIST, v_list(l)) => {
             let m = l.as_ref().map_or_else(
                 || "any".to_string(),
@@ -2147,10 +2217,15 @@ pub fn f_list2str(argvars: &[typval_T], rettv: &mut typval_T) {
     if let (VAR_LIST, v_list(Some(l))) = (argvars[0].v_type, &argvars[0].vval) {
         for it in &l.borrow().lv_items {
             let n = tv_get_number_chk(&it.li_tv, None);
-            // c: the codepoints are written into a C string, so a 0 terminates it —
-            // `list2str([65, 0, 66])` is `'A'`, not `'A<NUL>B'`.
+            // c: `buf[utf_char2bytes((int)n, buf)] = NUL; ga_concat(&ga, buf);`
+            // — each code point is encoded into `buf`, NUL-terminated, and
+            // appended with the STRLEN-based `ga_concat`. A 0 encodes to a
+            // single NUL byte, which `ga_concat` measures as length 0: the item
+            // contributes nothing and the walk CONTINUES to the next one.
+            // `list2str([65, 0, 66])` is `'AB'` in vim (verified), not `'A'` —
+            // this used to `break`, which dropped every element after a 0.
             if n == 0 {
-                break;
+                continue;
             }
             if let Some(c) = char::from_u32(n as u32) {
                 out.push(c);

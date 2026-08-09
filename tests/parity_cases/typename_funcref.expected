@@ -1,0 +1,26 @@
+0
+func([unknown]): number
+func([unknown], [unknown])
+func([unknown], ?[unknown]): number
+func(?[unknown], ?[unknown]): list<string>
+func([unknown], [unknown], [unknown]): string
+func([unknown], ?[unknown], ?[unknown])
+func([unknown]): number
+func([unknown], ?[unknown], ?[unknown]): func(...): unknown
+func([unknown]): string
+func
+func
+func(...): any
+func(...): any
+func(...): any
+func(...): [unknown]
+func(any): [unknown]
+func(any, any): [unknown]
+func(any, any, any): [unknown]
+func(...): [unknown]
+func(): [unknown]
+func(any): [unknown]
+func(): [unknown]
+func(...): [unknown]
+func(any): [unknown]
+func(any, any): [unknown]

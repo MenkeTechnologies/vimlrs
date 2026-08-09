@@ -145,19 +145,13 @@ pub fn report(src: &str) -> Result<Report, String> {
 /// A Vim script is not one chunk: the top level and every `:function` body
 /// lower to their own chunk (plus one per parameter default), and a hot loop
 /// usually lives in a function, so reporting only `main` would answer the wrong
-/// question. Deferred functions — those whose `:function` sits inside a
-/// script-level `:if`/`:while`/`:for`/`:try` — are reported too, marked as
-/// such, because whether their line executed is a runtime fact the report's
+/// question. Every function is reported, including those whose `:function` line
+/// may not execute at all — whether it did is a runtime fact the report's
 /// `traced` column already answers.
 fn program_chunks(prog: &crate::compile_viml::CompiledProgram) -> Vec<(String, Chunk)> {
     let mut out = vec![("main".to_string(), prog.main.clone())];
-    let funcs = prog
-        .funcs
-        .iter()
-        .map(|f| (f, ""))
-        .chain(prog.deferred_funcs.iter().map(|f| (f, " [deferred]")));
-    for (f, tag) in funcs {
-        let sig = format!("function {}({}){tag}", f.name, f.params.join(", "));
+    for f in prog.all_funcs() {
+        let sig = format!("function {}({})", f.name, f.params.join(", "));
         out.push((sig.clone(), f.chunk.clone()));
         for (i, ch) in &f.defaults {
             out.push((format!("{sig} default[{i}]"), ch.clone()));

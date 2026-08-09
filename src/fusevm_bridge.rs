@@ -2805,8 +2805,10 @@ fn b_lockvar(vm: &mut VM, _: u8) -> Value {
 
 /// `:unlet {name}` — delete a variable (forceit: missing is not an error here).
 fn b_unlet(vm: &mut VM, _: u8) -> Value {
+    // Pushed name-then-bang, so pop bang first.
+    let forceit = tv_get_number_chk(&pop_tv(vm), None) != 0;
     let name = tv_get_string(&pop_tv(vm));
-    crate::ported::eval::vars::do_unlet(&name, name.len(), true);
+    crate::ported::eval::vars::do_unlet(&name, name.len(), forceit);
     Value::Undef
 }
 
@@ -3409,7 +3411,16 @@ fn run_chunk_capture(chunk: fusevm::Chunk) -> Option<typval_T> {
 /// `map()`/`filter()` string-expression callback form).
 fn compile_expr_chunk(src: &str) -> Result<fusevm::Chunk, VimlError> {
     let e = parse_expr(src)?;
-    Ok(crate::compile_viml::compile_program(&[(1, Stmt::Expr(e))])?.main)
+    let prog = crate::compile_viml::compile_program(&[(1, Stmt::Expr(e))])?;
+    // A lambda in the expression compiles to its own `<lambda>N` chunk, which
+    // `compile_program` returns alongside `main` — dropping it left the funcref
+    // `main` produces pointing at a body nothing had registered, so
+    // `map(l, '{a,b -> b*10}(0, v:val)')` raised `E700: Unknown function:
+    // <lambda>1` (vim evaluates it fine). Register them as `run_source_nested`
+    // does.
+    register_prog_funcs(&mut prog.funcs.into_iter());
+    stage_deferred_funcs(prog.deferred_funcs);
+    Ok(prog.main)
 }
 
 /// Parse + compile + run VimL source on a nested VM (refpool-safe — used by
@@ -3481,7 +3492,17 @@ fn b_eval(vm: &mut VM, _: u8) -> Value {
         }
     };
     let chunk = match crate::compile_viml::compile_program(&[(1, Stmt::Expr(expr))]) {
-        Ok(p) => p.main,
+        // A lambda in the expression compiles to a SEPARATE `<lambda>N` chunk,
+        // returned alongside `main`. Taking only `main` left the Funcref that
+        // `main` produces naming a body nobody had registered, so
+        // `eval('{x -> x}')` raised `E700: Unknown function: <lambda>1` where vim
+        // returns a working Funcref. Register them exactly as the script loader
+        // and `run_source_nested` do.
+        Ok(p) => {
+            register_prog_funcs(&mut p.funcs.into_iter());
+            stage_deferred_funcs(p.deferred_funcs);
+            p.main
+        }
         Err(e) => {
             message::semsg(&format!("{e}"));
             return Value::Undef;
@@ -6263,8 +6284,7 @@ mod tests {
         let src = "function! Count()\n  let i = 0\n  while i < 1000\n    let i = i + 1\n  endwhile\n  return i\nendfunction";
         let prog = compile_program(&parse_program(src).unwrap()).unwrap();
         let chunk = prog
-            .funcs
-            .iter()
+            .all_funcs()
             .find(|f| f.name == "Count")
             .unwrap()
             .chunk
@@ -6340,8 +6360,7 @@ mod tests {
         let src = "function! S()\n  let s = 0\n  for i in range(1000)\n    let s = s + i\n  endfor\n  return s\nendfunction";
         let prog = compile_program(&parse_program(src).unwrap()).unwrap();
         let chunk = prog
-            .funcs
-            .iter()
+            .all_funcs()
             .find(|f| f.name == "S")
             .unwrap()
             .chunk
@@ -6527,8 +6546,7 @@ mod tests {
         let src = "function! Helper()\n  return 99\nendfunction\nfunction! F()\n  let s = 0\n  for i in range(1000)\n    let s = s + i\n  endfor\n  let x = Helper()\n  return s + x\nendfunction";
         let prog = compile_program(&parse_program(src).unwrap()).unwrap();
         let chunk = prog
-            .funcs
-            .iter()
+            .all_funcs()
             .find(|f| f.name == "F")
             .unwrap()
             .chunk
@@ -6580,8 +6598,7 @@ mod tests {
         let src = "function! F(n)\n  let s = 0\n  for i in range(a:n)\n    let s += i\n  endfor\n  return s\nendfunction\ncall F(3000)";
         let prog = compile_program(&parse_program(src).unwrap()).unwrap();
         let chunk = prog
-            .funcs
-            .iter()
+            .all_funcs()
             .find(|f| f.name == "F")
             .unwrap()
             .chunk
@@ -6631,8 +6648,7 @@ mod tests {
         let src = "function! H()\n  let h = 0\n  for i in range(2000)\n    let h = xor(h, i)\n    let h = and(h, 65535)\n  endfor\n  return h\nendfunction";
         let prog = compile_program(&parse_program(src).unwrap()).unwrap();
         let chunk = prog
-            .funcs
-            .iter()
+            .all_funcs()
             .find(|f| f.name == "H")
             .unwrap()
             .chunk
@@ -6692,8 +6708,7 @@ mod tests {
         let src = "function! F()\n  let s = 0\n  for i in range(2000)\n    let s += i % 2 == 0 ? i : 0\n  endfor\n  return s\nendfunction";
         let prog = compile_program(&parse_program(src).unwrap()).unwrap();
         let chunk = prog
-            .funcs
-            .iter()
+            .all_funcs()
             .find(|f| f.name == "F")
             .unwrap()
             .chunk
@@ -6744,8 +6759,7 @@ mod tests {
         let src = "function! F()\n  let s = 0\n  for i in range(2000)\n    let s += i > 500\n  endfor\n  return s\nendfunction";
         let prog = compile_program(&parse_program(src).unwrap()).unwrap();
         let chunk = prog
-            .funcs
-            .iter()
+            .all_funcs()
             .find(|f| f.name == "F")
             .unwrap()
             .chunk
@@ -6801,8 +6815,7 @@ mod tests {
         let src = "function! F()\n  let s = 0\n  for i in range(2000)\n    let s += !(i % 2)\n  endfor\n  return s\nendfunction";
         let prog = compile_program(&parse_program(src).unwrap()).unwrap();
         let chunk = prog
-            .funcs
-            .iter()
+            .all_funcs()
             .find(|f| f.name == "F")
             .unwrap()
             .chunk
@@ -6918,8 +6931,7 @@ mod tests {
         let src = "function! S()\n  let l:s = 0\n  for l:i in range(2000)\n    let l:s += l:i\n  endfor\n  return l:s\nendfunction";
         let prog = compile_program(&parse_program(src).unwrap()).unwrap();
         let chunk = prog
-            .funcs
-            .iter()
+            .all_funcs()
             .find(|f| f.name == "S")
             .unwrap()
             .chunk

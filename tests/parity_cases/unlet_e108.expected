@@ -1,0 +1,10 @@
+0
+start
+caught: Vim(unlet):E108: No such variable: "g:nope"
+after bang
+caught2: Vim(unlet):E108: No such variable: "g:nope2"
+exists a: 0
+exists b: 0
+caught3: Vim(unlet):E108: No such variable: "x"
+fn done
+done
