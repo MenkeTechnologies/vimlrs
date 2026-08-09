@@ -203,11 +203,25 @@ fn type_name_of(tv: &typval_T) -> String {
                 if !name.starts_with("<lambda>") {
                     return "func(...): any".into();
                 }
-                let d = f.uf_args.len();
-                if d == 0 || bound > d {
+                // A lambda stores nothing per-function beyond its arity, so the
+                // shape is the DECLARED parameter count `d` minus what a Partial
+                // bound, `k`, with `d == 0` or `k > d` rendering `...`.
+                //
+                // "Declared" is the source's count, not `uf_args.len()`: this
+                // port desugars each captured variable into a leading parameter
+                // that the lambda's own Partial pre-binds (`uf_captures`), so
+                // both counts carry the same synthetic entries and both must
+                // drop them. Without that, `{-> a}` is (1, 1) here and so is
+                // `function({x -> x}, [1])` — and vim prints `func(...)` for the
+                // first and `func()` for the second. Measured across all twelve
+                // shapes (`tests/parity_cases/typename_lambda_capture.vim`).
+                let caps = f.uf_captures;
+                let d = f.uf_args.len().saturating_sub(caps);
+                let k = bound.saturating_sub(caps);
+                if d == 0 || k > d {
                     return "func(...): [unknown]".into();
                 }
-                let params = vec!["any"; d - bound].join(", ");
+                let params = vec!["any"; d - k].join(", ");
                 return format!("func({params}): [unknown]");
             }
             // A builtin: vim's own answer, recorded verbatim. A partial over one

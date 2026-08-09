@@ -39,6 +39,18 @@ pub struct UserFuncDef {
     pub dict: bool,
     /// Compiled function body.
     pub chunk: fusevm::Chunk,
+    /// How many of the leading [`Self::params`] are SYNTHETIC capture
+    /// parameters rather than parameters the source declared.
+    ///
+    /// No C counterpart: Vim keeps a closure's captured variables in the
+    /// funccal chain and out of `uf_args` entirely, while this port desugars
+    /// each capture into a leading parameter pre-bound by a Partial (see the
+    /// `Expr::Lambda` arm). That desugaring is invisible to callers but not to
+    /// anything that READS the arity — `typename()` renders a lambda from its
+    /// declared parameter count, and without this it could not tell `{-> a}`
+    /// (0 declared, 1 captured) from `function({x -> x}, [1])` (1 declared, 1
+    /// bound), which vim renders differently. Always 0 for a `:function`.
+    pub captures: usize,
 }
 
 /// A compiled program: the top-level `main` chunk plus the user functions it
@@ -226,6 +238,9 @@ fn build_user_func_def(
         .map(|(i, e)| Ok((*i, compile_expr_only(e)?)))
         .collect::<Result<Vec<_>, VimlError>>()?;
     Ok(UserFuncDef {
+        // A `:function` body reads its enclosing scope at call time; nothing is
+        // desugared into a leading parameter, so there are no capture params.
+        captures: 0,
         name: name.to_string(),
         params: args.to_vec(),
         defaults,
@@ -2271,10 +2286,14 @@ impl Compiler {
                     .collect();
                 stmts.push((1, Stmt::Return(Some((**body).clone()))));
                 let chunk = compile_function_body(&stmts, self.exc, 0)?;
+                let n_captures = cap_params.len();
                 LAMBDA_FUNCS.with(|f| {
                     f.borrow_mut().push(UserFuncDef {
                         name: name.clone(),
                         params: all_params,
+                        // The leading `cap_params` are this desugaring's doing,
+                        // not the source's — `typename()` must not count them.
+                        captures: n_captures,
                         defaults: Vec::new(),
                         bang: true,
                         // A lambda captures its free vars by value (they are

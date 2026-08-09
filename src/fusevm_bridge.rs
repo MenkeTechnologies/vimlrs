@@ -3816,6 +3816,7 @@ fn find_func_hook(name: &str) -> Option<crate::ported::eval::userfunc::ufunc_T> 
             .map(|(i, _)| def.params[*i].clone())
             .collect(),
         uf_varargs: def.params.iter().any(|p| p == "..."),
+        uf_captures: def.captures,
         ..Default::default()
     })
 }

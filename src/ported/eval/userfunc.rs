@@ -438,6 +438,19 @@ pub struct ufunc_T {
     pub uf_luaref: i32,
     /// `sctx_T uf_script_ctx` — script context where the function was defined.
     pub uf_script_ctx: sctx_T,
+    /// RUST-PORT NOTE — NO C COUNTERPART. How many leading [`Self::uf_args`]
+    /// entries are captured variables this port desugared into parameters
+    /// rather than parameters the source declared.
+    ///
+    /// In C a closure's captures live in the `funccal` chain and never enter
+    /// `uf_args`, so `uf_args.ga_len` IS the declared count and no such field is
+    /// needed. This port pre-binds each capture as a leading parameter (see
+    /// `compile_viml`'s `Expr::Lambda`), which makes `uf_args.len()` the declared
+    /// count PLUS the captures — indistinguishable, without this, from a Partial
+    /// that bound the same number of real parameters. `typename()` is the reader
+    /// that can tell the difference and must: vim prints `func(...)` for
+    /// `{-> a}` and `func()` for `function({x -> x}, [1])`.
+    pub uf_captures: usize,
 }
 
 /// "Look up a user function's metadata by name → reduced `ufunc_T`" hook,

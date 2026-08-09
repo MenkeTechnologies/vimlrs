@@ -1533,8 +1533,9 @@ recorded string cannot be wrong about what vim prints.
 A partial over a builtin is the bare `func` because vim's `partial_T.pt_func` is
 NULL for one, so there is no `ufunc_T` to read a type from. Lambdas store
 nothing per-function: the shape is the declared parameter count `d` minus what a
-partial bound `k`, with `d == 0` or `k > d` rendering `...`. One shape is still
-open — R22-O1.
+partial bound `k`, with `d == 0` or `k > d` rendering `...`. One shape was left
+open at the time — R22-O1, a zero-parameter lambda that captures — and is now
+closed too.
 
 `typename` is Vim-only, so it is absent from the neovim-derived `funcs_argc.rs`
 and `function('typename')` raised `E700: Unknown function: typename`. The
@@ -1656,22 +1657,52 @@ impure builtin would report a false gap on every run" — which is precisely wha
 it did, 4-5 permanent false findings per seed, all landing in the bucket R22-1
 had just made actionable. Removed. No outcome it can produce carries signal.
 
-## Still open
+## Left open by round 22
 
-### R22-O1. `typename()` of a zero-parameter lambda that captures
+Both were closed in round 23; R22-O3 is still open, with a different reason than
+the one recorded here.
 
-`{-> a}` prints `func(): [unknown]` where vim prints `func(...): [unknown]`.
-Every other lambda shape matches (R22-2).
+### R22-O1. `typename()` of a zero-parameter lambda that captures — ✅ FIXED
 
-This port desugars a capture into a LEADING PARAMETER pre-bound by a Partial
-(`compile_viml.rs`, `Expr::Lambda`); vim keeps captures in the closure
-environment and out of `uf_args`. So `{-> a}` is (declared 1, bound 1) here
-while vim sees (declared 0, bound 0), and it is indistinguishable from
-`function({x -> x}, [1])`, which is (declared 1, bound 1) in vim too — and vim
-prints a DIFFERENT answer for that one. No rule over the two numbers can
-separate them; it needs a capture count recorded on the function. Left open
-rather than guessed at.
-`tests/parity_cases/typename_lambda_capture.vim`, listed in `KNOWN_OPEN`.
+`{-> a}` printed `func(): [unknown]` where vim prints `func(...): [unknown]`.
+
+vim renders a lambda from its DECLARED parameter count `d` and the count `k` a
+Partial bound: `d == 0` or `k > d` prints `...`, else `d - k` `any`s. vim keeps a
+closure's captures in the funccal chain and out of `uf_args`, so `{-> a}` is
+(d 0, k 0). This port desugars each capture into a leading parameter that the
+lambda's own Partial pre-binds, making it (1, 1) — numerically identical to
+`function({x -> x}, [1])`, which vim answers differently. No rule over the two
+numbers can separate them; it needed the capture count, which is now recorded.
+
+`UserFuncDef.captures` counts the leading parameters the `Expr::Lambda`
+desugaring synthesized, and it reaches the ported reader as
+`ufunc_T.uf_captures` (marked NO C COUNTERPART, because in C the situation cannot
+arise). `type_name_of` subtracts it from BOTH `d` and `k` — the desugaring
+inflates both, which is exactly why the four capturing shapes that bind an
+argument already matched by accident and the two zero-parameter ones did not.
+
+All twelve shapes, read out of vim 9.2 and now matched:
+
+| lambda | vim | before |
+|---|---|---|
+| `{-> a}` | `func(...): [unknown]` | `func(): [unknown]` |
+| `{-> a + b}` | `func(...): [unknown]` | `func(): [unknown]` |
+| `{x -> x + a}` | `func(any): [unknown]` | matched |
+| `{x, y -> x + y + a}` | `func(any, any): [unknown]` | matched |
+| `{-> 1}` | `func(...): [unknown]` | matched |
+| `{x -> x}` | `func(any): [unknown]` | matched |
+| `{x, y -> x}` | `func(any, any): [unknown]` | matched |
+| `function({x -> x+a}, [1])` | `func(): [unknown]` | matched |
+| `function({x -> x}, [1])` | `func(): [unknown]` | matched |
+| `function({x,y -> x+y+a}, [1])` | `func(any): [unknown]` | matched |
+| `function({x,y -> x}, [1])` | `func(any): [unknown]` | matched |
+| `function({-> a}, [1])` | `func(...): [unknown]` | matched |
+
+`tests/parity_cases/typename_lambda_capture.vim` now carries the whole matrix
+instead of the single open shape, and its `KNOWN_OPEN` entry is gone —
+`parity_cases.rs` reported the entry as stale on the first run after the fix,
+which is what that check is for. `KNOWN_OPEN` is now empty and the corpus is
+26/26 byte-identical to vim.
 
 ### R22-O2. `E684` omits the index, and a negative index should not raise at all — ✅ FIXED
 
@@ -1759,6 +1790,11 @@ Measured contract, for whoever does vendor it:
 ---
 
 # Round 23 — the string model
+
+Round 23 replaced the string model, which unblocked R21-O4/R22-6, and closed the
+two items round 22 left open that were about semantics rather than about a
+missing source (R22-O1, R22-O2). `tests/parity_cases` is 26/26 byte-identical to
+vim with an EMPTY `KNOWN_OPEN`.
 
 ## R23-1. A VimL string is bytes, not UTF-8 — ✅ FIXED (unblocks R21-O4 / R22-6)
 

@@ -1,2 +1,15 @@
 0
 func(...): [unknown]
+func(...): [unknown]
+func(any): [unknown]
+func(any, any): [unknown]
+func(...): [unknown]
+func(any): [unknown]
+func(any, any): [unknown]
+func(): [unknown]
+func(): [unknown]
+func(any): [unknown]
+func(any): [unknown]
+func(...): [unknown]
+11
+1
