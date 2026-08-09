@@ -1738,7 +1738,14 @@ pub fn tv_list_append_dict(l: &mut list_T, dict: Rc<RefCell<dict_T>>) {
 
 /// Port of `tv_list_append_allocated_string()` from `Src/eval/typval.c` (c:555)
 /// — append `str` as a String item, taking ownership.
-pub fn tv_list_append_allocated_string(l: &mut list_T, str: String) {
+///
+/// The C parameter is `char *`, so this takes the byte-exact [`VimStr`] and not
+/// a Rust `String`: `encode_list_write()` feeds this the lines of a raw byte
+/// stream (a `msgpackdump()` payload is binary), and a `String` parameter forced
+/// that through `from_utf8_lossy` at the call site.
+///
+/// [`VimStr`]: crate::vimstr::VimStr
+pub fn tv_list_append_allocated_string(l: &mut list_T, str: crate::vimstr::VimStr) {
     tv_list_append_tv(
         l,
         typval_T {

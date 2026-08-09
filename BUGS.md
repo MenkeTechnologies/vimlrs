@@ -2250,3 +2250,337 @@ what a `Port of` citation means. The 13-row measured contract recorded in round
 Unchanged this round, and re-measured against both engines: `let e[-9] = 1` on
 `[]` is `E684: … : -9` in vim, `… : 0` in nvim, `… : 0` here. The exclusion note
 in `tests/parity_cases/list_index_e684.vim` still describes it correctly.
+
+# Round 25 — the gate that could not fail
+
+This round set out to close R24-O3 and assess R24-O2. It closed R24-O3, and on
+the way it found the reason the example corpus had never reported a failure: a
+`v:errors` reset that discarded assertion results mid-script. Eight scripts were
+failing in silence. That find outranks the one that surfaced it.
+
+Versions used as oracles throughout, verbatim:
+
+```
+$ vim --version | head -1
+VIM - Vi IMproved 9.2 (2026 Feb 14, compiled Aug 02 2026 19:00:41)
+$ vim --version | grep 'Included patches'
+Included patches: 1-900
+$ nvim --version | head -1
+NVIM v0.12.4
+```
+
+## R25-1. Every nested VM emptied `v:errors` — ✅ FIXED (the masking bug)
+
+`install()` ran `crate::ported::eval::vars::evalvars_init()` unconditionally, and
+`install()` runs for EVERY VM — including the nested ones built for `execute()`,
+`assert_fails()`, `assert_beeps()` and user-function bodies. `evalvars_init()`
+rebuilds `vimvars[]` from its type-zero defaults, so each of those emptied
+`v:errors` mid-script.
+
+The C calls it exactly once, from startup:
+
+```c
+void eval_init(void)      // vendor/eval.c:204
+{
+  evalvars_init();
+  func_init();
+}
+```
+
+`eval_init()` was an empty stub in this port (`src/ported/eval.rs`) while the
+thing it exists to sequence was being called per-VM. Measured:
+
+| step | nvim 0.12.4 | vimlrs before |
+|---|---|---|
+| `call assert_equal(1, 2)` | `len(v:errors)` = 1 | 1 |
+| `call execute('echo 1')` | 1 | **0** |
+| `call assert_fails(…)` | 1 | **0** |
+| `call assert_beeps(…)` | grows | **0** |
+
+Why it mattered more than any single wrong value: `examples/*.vim` are
+self-testing scripts whose epilogue throws when `v:errors` is non-empty. An
+example whose last assertion was `assert_fails()` printed "all assertions
+passed" **no matter what had failed above it**. `tests/examples.rs` reported a
+clean corpus for the same reason.
+
+Fixed by porting `eval_init()` faithfully and seeding once per thread
+(`EVAL_INITED`), since `install()` is per-VM by design here.
+
+The blast radius, measured by running every `examples/*.vim` under the
+pre-change binary and the fixed one:
+
+```
+BASE failures: 0
+NEW  failures: 8
+newly failing: builtin_arity json map_commands msgpack strings testing
+               varargs vim9_script_scope
+newly passing: (none)
+```
+
+Three of the eight were **wrong expectations in the example**, not port defects —
+verified by running the same script files through vim and nvim, which fail the
+identical assertions:
+
+| example | assertion | vim 9.2 | nvim 0.12.4 | vimlrs |
+|---|---|---|---|---|
+| `varargs.vim:20` | `Sum(10,20,30)/10*1` | 6 | 6 | 6 (script said 3) |
+| `varargs.vim:56` | `map([1,2,3], {i,v -> Sum(v, i*v)})` | `[1,4,9]` | `[1,4,9]` | `[1,4,9]` (script said `[1,3,6]`) |
+| `strings.vim:109` | `printf('%g %g %g', 0.1, 1000000.0, 0.0001)` | `0.1 1000000.0 1.0e-4` | same | same (script said `0.1 1e+06 0.0001`) |
+| `strings.vim:110` | `printf('%.3g', 3.14159)` | `3.142` | `3.142` | `3.142` (script said `3.14`) |
+| `msgpack.vim:34` | `msgpackparse(msgpackdump(['hi'],'B'))` | *(no `msgpackdump`)* | `['hi']` | `['hi']` (script said `[0z6869]`) |
+
+Those five expectations were corrected to the measured values. The remaining
+five scripts are genuine open gaps and are now named in a `KNOWN_OPEN` table in
+`tests/examples.rs`, the same contract `tests/parity_cases.rs` uses: an entry
+that starts passing FAILS the test, every entry must be an open item here, and a
+script not listed must still pass outright. That is strictly stricter than the
+previous state, which reported nothing at all.
+
+## R25-2. `msgpackparse(msgpackdump(…))` did not round-trip — ✅ FIXED (was R24-O3)
+
+The recorded diagnosis ("the failure is on the PARSE side") was right, and the
+cause was one layer further back than a bug in the decoder: **the faithful ports
+were already present and unreachable.** `msgpackparse_unpack_list()` and
+`msgpackparse_unpack_blob()` (`src/ported/eval/funcs.rs`) — including
+`encode_read_from_list()`, the `List item is not a string` check and the
+NL→NUL mapping — were dead code, referenced only by one unit test.
+`f_msgpackparse()` ignored them and decoded an inline stream instead, built by a
+helper that read each List item with `tv_get_string`, i.e. as a Rust `String`.
+
+MessagePack is binary, so that read destroyed it. Only accidentally-ASCII
+payloads survived:
+
+| expression | nvim (vim has no `msgpackdump`) | vimlrs before |
+|---|---|---|
+| `msgpackparse(msgpackdump([1,2,3]))` | `[1, 2, 3]` | `[1, 2, 3]` (bytes `01 02 03` are valid UTF-8) |
+| `msgpackparse(msgpackdump([v:true,v:false,v:null]))` | `[v:true, v:false, v:null]` | `E5766` |
+| `msgpackparse(msgpackdump(['abc']))` | `['abc']` | `E5766` |
+| `msgpackparse(msgpackdump([[1,2]]))` | `[[1, 2]]` | `E5766` |
+
+Fixing only that would still have left the DUMP side wrong, which the round-24
+record did not have. The C's readfile() convention is a byte stream split on NL
+in which each line's NUL bytes are stored as NL — `memchrsub(str, NUL, NL, …)`
+in `encode_list_write()` (`vendor/eval/encode.c:78`, `:90`), inverted by
+`ch == NL ? NUL` in `encode_read_from_list()` (`:269`). This port did neither, so
+the round trip was self-consistent but the intermediate List diverged:
+
+| expression | nvim | vimlrs before |
+|---|---|---|
+| `str2list(msgpackdump([0])[0])` | `[10]` | `[0]` |
+| `str2list(msgpackdump([0,0])[0])` | `[10, 10]` | `[0, 0]` |
+
+`encode_list_write()` took a `&str` and so could not carry a msgpack payload at
+all; its C signature is `(void *, const char *buf, size_t len)` and it is a byte
+buffer here now. That also removed a `String::from_utf8_lossy` on the msgpack
+**ext** payload in `decode.rs`, which had a note admitting it was lossy.
+
+Three error messages were wrong as well, all verified against nvim:
+
+| call | nvim | vimlrs before |
+|---|---|---|
+| `msgpackparse('x')` | `E899: Argument of msgpackparse() must be a List or Blob` | `E5070: msgpackparse() argument must be a List or Blob` |
+| `msgpackparse(0zC1)` | `E475: Invalid argument: Failed to parse msgpack string` | `E5766: failed to parse msgpack string` |
+| `msgpackparse(0z93)` | `E475: Invalid argument: Incomplete msgpack string` | `E5766: failed to parse msgpack string` |
+| `msgpackparse([1])` | `E475: Invalid argument: List item is not a string` | *(no error — `[49]`)* |
+
+`emsg_mpack_error()` was a stub that collapsed the C's three-way switch
+(`vendor/eval/funcs.c:4666`) into one wrong message; it is a faithful port now.
+
+The stand-in helper was **removed, not allowlisted** — `mpack_input_bytes` is
+gone from `tests/data/fake_fn_allowlist.txt` with a note saying why.
+
+Covered by `examples/msgpack.vim`, extended with the List form. It cannot be a
+`tests/parity_cases/` case: `scripts/parity.sh` records **real vim** as ground
+truth and vim answers `E117: Unknown function: msgpackdump`, so nvim is the only
+oracle and every added value is cited to it.
+
+## R24-O1 — DECISION: this port follows Neovim, and that is now a standing rule
+
+`echo 'A' . nr2char(7) . 'B'` is `A^GB` in vim and `AB` in nvim, because
+`msg_multiline` treats BELL as a delimiter and calls `vim_beep()` in place of
+writing it (`vendor/message.c:296`).
+
+**vimlrs follows nvim.** Not as a preference for that output, but because
+`vendor/` **is** Neovim: `src/ported/` is defined as 1:1 ports of it, every
+`Port of` citation resolves against it, and `tests/ported_fn_names_match_c.rs`
+computes its legal name set by scanning it. Matching vim here would mean writing
+a body that no vendored C contains and citing it as a port — the exact thing the
+name gate exists to catch.
+
+The value of stating it as a rule rather than settling this one case: R24-O4 (a
+leading composing char) and R23-O1 (the empty-list clamp index) are the same
+call, and deciding them case-by-case would make the port's oracle
+non-deterministic — no citation would tell you which engine a given function
+follows. One invariant is worth more than three individually-defensible choices.
+
+**Consequence that must be recorded with it:** `scripts/parity.sh` measures
+against **real vim**. So the port follows nvim while its main gate follows vim,
+and every vim/nvim divergence is therefore permanently ineligible as a parity
+case and must be excluded with a reason in the case file (as R24-O1 and R24-O4
+already are). That tension is structural, not a bug, and it is the price of the
+rule above.
+
+## R22-O3 — CALL: do not vendor vim's C into `vendor/`
+
+The blocker is availability no longer; the C is real and the round-22 citations
+are verified byte-for-byte at the installed vim's exact patch level
+(`vim/vim@v9.2.0900`):
+
+| function | file:line | line content |
+|---|---|---|
+| `f_blob2str` | `src/strings.c:1422` | `f_blob2str(typval_T *argvars, typval_T *rettv)` |
+| `f_str2blob` | `src/strings.c:1567` | `f_str2blob(typval_T *argvars, typval_T *rettv)` |
+| `f_js_encode` | `src/json.c:1544` | `f_js_encode(typval_T *argvars, typval_T *rettv)` |
+
+The placement question is now measurable rather than a matter of taste. Running
+the name gate's own extraction (an identifier immediately followed by `(`) over
+the vendored tree and over vim's two files:
+
+| quantity | count |
+|---|---|
+| callable names in vendored Neovim `vendor/` | 3984 |
+| callable names in vim `strings.c` + `json.c` | 312 |
+| names vendoring would ADD | 175 |
+| names that COLLIDE with the Neovim set | **137** |
+
+The 137 is the decision. Those names exist in both upstreams with independent
+semantics, and they are not obscure — `emsg`, `dict_add`, `concat_str`,
+`convert_setup`, `eval_expr_typval`, and `byteidx`/`byteidxcomp`/`charidx`, which
+are themselves a known vim/nvim behavioural divergence point. Dropping vim's C
+into `vendor/` would mean the gate could no longer say which upstream a name
+traces to; it would only say "some upstream". That trades the one mechanism
+keeping this port honest for three builtins.
+
+**Call: `vendor/` stays Neovim-only.** The constructive path, when these three
+are actually wanted, is a separate tree the name gate does NOT scan (e.g.
+`vendor_vim/`), ports carrying a distinct citation form
+(`/// Port of vim's f_blob2str() — vim/vim@v9.2.0900 src/strings.c:1422`) and
+their own allowlist section. The Neovim name set then keeps its exact present
+meaning and a vim-sourced port is syntactically obvious.
+
+Deliberately NOT implemented in this round: it changes the audit gate, and a
+gate change has to be reviewed in isolation from the work it measures. It is a
+proposal here, not a fait accompli.
+
+## R24-O2 — ASSESSED, not attempted; and the round-24 record was wrong
+
+Cost, measured: the AST carries **no source spans**. `Block` is
+`Vec<(u32, Stmt)>` — a line number and nothing else — and by the time E716 is
+raised, `b_unlet_index` holds two evaluated `typval_T`s popped off the VM stack.
+The `|` split happens in `viml_parser.rs` pass 2, which converts `&str` slices
+into owned `String`s keyed only by line number, destroying the offset. Reaching
+the un-split line means threading a per-argument source tail through `Lines`,
+`parse_one`, `parse_stmt`, `split_unlet_args`, `parse_unlet_arg`, a new
+`UnletArg::Item` field, the lowering, and the runtime builtin — about 5 files and
+10 functions. **Not attempted this round.**
+
+Two corrections to what round 24 recorded, both measured with a MULTI-line
+`:try`, which separates the message from the `|`-remainder effect:
+
+| case | vim 9.2 | nvim 0.12.4 | vimlrs |
+|---|---|---|---|
+| `unlet d.nokey` | `E716: … "nokey"` | `E716: … "nokey"` | `E716: … "nokey"` — **all three agree** |
+| `unlet n[0]` | `E689: Index not allowed after a number: n[0]` | `E689: Can only index a List, Dictionary or Blob` | **identical to nvim** |
+| `unlet s.key` | `E1203: Dot not allowed after a string: s.key` | `E1203: Dot can only be used on a dictionary: s.key` | `E689: Can only index a List, Dictionary or Blob` |
+
+1. **The E689 row is not a vimlrs defect.** Round 24 recorded that "vim and nvim
+   use a different message for indexing a Number than the one this port emits".
+   That is wrong: nvim emits *exactly* this port's message. Only vim differs, and
+   vim is not the vendored spec (see the R24-O1 decision above). `grep -rn E689
+   vendor/` is one nameless `emsg` at `vendor/eval.c:1039`; "Index not allowed
+   after a number" does not exist in the vendored source. Closing that row would
+   mean deliberately deviating from `vendor/`. **This row is closed as
+   not-a-bug.**
+2. **The E716 remainder only appears in the one-line `|` form**, where vim and
+   nvim agree with each other and differ from this port:
+   `E716: Key not present in Dictionary: "nokey | catch | echo 'A-caught' | endtry"`.
+   That row remains open and is what the parser change above would buy.
+
+## Still open
+
+### R25-O1. `assert_fails()` misses a builtin/user-function arity error in context
+
+`examples/builtin_arity.vim` reports `command did not fail` for
+`call assert_fails('call abs()', 'E119')` and three siblings; `examples/testing.vim`
+does the same for a user function. In ISOLATION the identical call works on both
+the pre-change and fixed binaries, and inserting any statement between the
+assertions makes the whole file pass — so this is context-dependent, not a plain
+detection bug, and it is not the JIT (`VIMLRS_NO_JIT=1` reproduces it). Both
+oracles pass both scripts. `call abs()` does raise `E119: Not enough arguments
+for function: abs` in vim, nvim and vimlrs alike, so the error exists and
+`assert_fails` is not seeing it. Newly visible, not newly introduced — the
+pre-change binary fails identically once `v:errors` survives.
+
+### R25-O2. `json_encode()` Dict key order
+
+`examples/json.vim:20` hardcodes vim 9.2's key order, which vim reproduces and
+this port does not. nvim emits this port's order but with a space after `:` and
+`,`. All three disagree, so the assertion is oracle-dependent and needs
+rewriting to be order-independent rather than "fixed" toward any one engine.
+
+### R25-O3. `len(maplist())` is an absolute count in a relative world
+
+`examples/map_commands.vim` expects 5 and 4. vimlrs gives 6 and 5, nvim gives
+103 and 102, vim gives 12 and 11 — the editors count their own default mappings.
+The expectation has to be made relative (a delta around the mappings the script
+itself defines).
+
+### R25-O4. A vim9 script-scope counter reads 0
+
+`examples/vim9_script_scope.vim:44` expects 3 and gets 0. Both oracles pass the
+script, so this is a real vim9 scoping gap.
+
+### R25-O5. A one-line `try | call … | catch` does not abort
+
+Found while measuring R25-2's error paths, and **general, not msgpack-specific**.
+Both oracles agree with each other and differ from this port:
+
+| one-line form | vim 9.2 | nvim 0.12.4 | vimlrs |
+|---|---|---|---|
+| `try \| echo 'ok' \| catch \| … \| endtry` | runs on | runs on | same |
+| `try \| throw 'boom' \| catch \| … \| endtry` | caught | caught | same |
+| `try \| call add(1, 2) \| catch \| … \| endtry` | **not caught, script aborts** | same | **caught, script survives** |
+| `try \| echo add(1, 2) \| catch \| … \| endtry` | caught | caught | same |
+| `try \| let x = add(1, 2) \| catch \| … \| endtry` | caught | caught | same |
+| `try \| unlet nosuchvar \| catch \| … \| endtry` | caught | caught | same |
+
+It is specific to `:call` whose function raised an ERROR — the `:echo` and `:let`
+rows evaluate the same failing expression and ARE caught. The mechanism is the
+same family as R24-2 and the C says so at the site:
+
+```c
+  // When inside :try we need to check for following "| catch" or "| endtry".
+  // Not when there was an error, but do check if an exception was thrown.
+  if ((!aborting() || did_throw) && (!failed || eap->cstack->cs_trylevel > 0)) {
+```
+
+(`vendor/eval/userfunc.c:3614`, in `ex_call`.) vimlrs already has the machinery
+this needs — `VIML_EXC_IS_HARD` / `eval_op`, which R24-2 used for
+`b_unlet_index`. Not attempted here: it changes `:call`'s error path and deserves
+its own round with its own parity case.
+
+### R25-O6. `unlet <String>.key` reports E689 instead of E1203
+
+The third row of the R24-O2 table above. Both oracles raise `E1203` (differing
+only in wording); this port raises `E689`, because `parse_unlet_arg`
+(`src/viml_parser.rs`) collapses `s.key` and `s['key']` into the same node while
+both engines distinguish them (`s['key']` really is E689 — verified). The ported
+`get_lval` already gets this right; the synthesized `:unlet` path does not reach
+it.
+
+### R25-O7. `assert_beeps()` does not record a failure where nvim does
+
+`call assert_beeps("call nosuchfunc()")` adds an entry to `v:errors` in nvim and
+none here. Visible only now that `v:errors` survives. Not investigated.
+
+### `tv_get_string` and its two siblings are still lossy — narrowed, not closed
+
+`tv_get_string`, `tv_get_string_chk` and `tv_get_string_buf` still return a Rust
+`String` and replace a non-UTF-8 byte with `U+FFFD`; all four are `char *` in the
+C and only `tv_get_string_buf_chk` is byte-exact. Two call sites moved off the
+lossy read this round (`encode_list_write`'s input, via
+`tv_list_append_allocated_string` now taking a `VimStr`; and the msgpack ext
+payload in `decode.rs`). The remaining several hundred are text-shaped and
+mostly safe, but the two defects this round fixed were both this hazard, one
+layer along from where R23-1 first recorded it. Each fix so far has been found by
+a symptom rather than by auditing the call sites, which is not a strategy.

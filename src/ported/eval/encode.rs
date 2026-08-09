@@ -389,24 +389,44 @@ pub fn encode_read_from_list(
 /// line continues the list's last item (so streamed chunks join), and a buffer
 /// ending in `NL` yields a trailing empty item. RUST-PORT NOTE: the C's NULL
 /// (never-set) string item is an empty string here.
-pub fn encode_list_write(list: &mut crate::ported::eval::typval_defs_h::list_T, buf: &str) {
-    use crate::ported::eval::typval::tv_list_append_string;
+///
+/// The C signature is `(void *data, const char *buf, size_t len)` — a BYTE
+/// buffer, and it must stay one here. This took a `&str` and so could not carry
+/// the one payload its main caller produces: `msgpackdump()` writes MessagePack,
+/// which is binary (`msgpackdump([v:true])` is the single byte `0xc3`), and
+/// routing it through a `str` destroyed it. The `NUL` → `NL` substitution is the
+/// C's `memchrsub(str, NUL, NL, line_length)` (c:78, c:90) and is what makes
+/// `msgpackparse()`'s `encode_read_from_list()` an exact inverse.
+pub fn encode_list_write(list: &mut crate::ported::eval::typval_defs_h::list_T, buf: &[u8]) {
+    use crate::ported::eval::typval::tv_list_append_allocated_string;
     use crate::ported::eval::typval_defs_h::typval_vval_union::v_string;
+    // c:59 if (len == 0) return;
     if buf.is_empty() {
         return;
     }
-    let mut segments = buf.split('\n');
-    // Continue the last existing list item with the first (partial) line.
+    // c: memchrsub(str, NUL, NL, line_length) — a NUL byte in the stream is
+    // stored as NL inside a line, the readfile() convention.
+    let subst = |seg: &[u8]| -> crate::vimstr::VimStr {
+        let mut v = seg.to_vec();
+        for b in v.iter_mut() {
+            if *b == 0 {
+                *b = b'\n';
+            }
+        }
+        v.into()
+    };
+    let mut segments = buf.split(|&b| b == b'\n');
+    // c:68 "Continue the last list element" with the first (partial) line.
     if !list.lv_items.is_empty() {
         if let Some(first) = segments.next() {
-            let chunk = first.replace('\0', "\n");
             if let v_string(s) = &mut list.lv_items.last_mut().unwrap().li_tv.vval {
-                s.push_str(&chunk);
+                s.push_bytes(subst(first).as_bytes());
             }
         }
     }
+    // c:83 each remaining NL-delimited run becomes its own item.
     for seg in segments {
-        tv_list_append_string(list, &seg.replace('\0', "\n"));
+        tv_list_append_allocated_string(list, subst(seg));
     }
 }
 

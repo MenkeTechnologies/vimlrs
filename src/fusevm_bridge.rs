@@ -1400,6 +1400,10 @@ thread_local! {
     /// up, and a user function body runs on a nested VM — so a value living only
     /// in `vimvars` is reset the first time the `:catch` calls anything.
     static V_THROWPOINT: RefCell<String> = const { RefCell::new(String::new()) };
+    /// Whether `eval_init()` has run on this thread. The C reaches its single
+    /// `eval_init()` call from startup (`eval.c:206`); `install()` runs per-VM,
+    /// so the "once" has to be explicit here.
+    static EVAL_INITED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// `v:val` — the current element during `map()`/`filter()`/`sort()`.
     static V_VAL: RefCell<Option<typval_T>> = const { RefCell::new(None) };
     /// `v:key` — the current key/index during `map()`/`filter()`.
@@ -5131,8 +5135,28 @@ pub fn install(vm: &mut VM) {
     if std::env::var_os("VIMLRS_NO_JIT").is_none() && !SUPPRESS_JIT.with(|c| c.get()) {
         vm.enable_tracing_jit();
     }
-    // Seed the v: variable store (vimvars[]) before any script runs.
-    crate::ported::eval::vars::evalvars_init();
+    // c: eval.c:206 — `eval_init()` seeds the v: store (vimvars[]) and the
+    // function table ONCE, at interpreter startup.
+    //
+    // This called `evalvars_init()` unconditionally, and `install()` runs for
+    // EVERY VM — including the nested ones built for `execute()`,
+    // `assert_fails()`, `assert_beeps()` and user-function bodies. Since
+    // `evalvars_init()` rebuilds `vimvars[]` from its type-zero defaults, each of
+    // those emptied `v:errors` mid-script:
+    //
+    //     call assert_equal(1, 2)   " v:errors: 1 entry
+    //     call execute('echo 1')    " v:errors: 0 entries   (nvim: still 1)
+    //
+    // which silently DISCARDED assertion failures — an `examples/*.vim` whose
+    // last assertion is `assert_fails()` reported "all assertions passed" no
+    // matter what had failed above it. Seeding once per thread is the C's
+    // single `eval_init()` call.
+    EVAL_INITED.with(|done| {
+        if !done.get() {
+            done.set(true);
+            crate::ported::eval::eval_init();
+        }
+    });
     vm.register_builtin(VIML_GETVAR, b_getvar);
     vm.register_builtin(VIML_SETVAR, b_setvar);
     vm.register_builtin(VIML_SETENV, b_setenv);

@@ -1531,17 +1531,16 @@ fn typval_parse_exit(parser: &mut mpack_parser_t<TypvalNodeData>, node: usize) {
             );
             set_result(&result, tmp);
             // c: encode_list_write(ext_val_list, node->data[1].p, node->tok.length);
-            // RUST-PORT NOTE: the ported encode_list_write takes a `&str` (it
-            // splits on '\n' into list items); the raw ext bytes are passed
-            // lossily, matching the readfile()-style text convention used
-            // elsewhere in this crate.
+            // The ext payload is arbitrary bytes and reaches the list verbatim:
+            // `encode_list_write` takes a byte buffer, as the C does. It went
+            // through `String::from_utf8_lossy` while that port took a `&str`,
+            // which replaced every non-UTF-8 byte of the payload with U+FFFD.
             let buf = match &parser.items[node].data[1] {
                 mpack_data_t::p(TypvalNodeData::bytes(b)) => b.clone(),
                 _ => std::process::abort(),
             };
             let len = parser.items[node].tok.length as usize;
-            let ext_bytes = String::from_utf8_lossy(&buf.borrow()[..len]).into_owned();
-            encode_list_write(&mut ext_val_list.borrow_mut(), &ext_bytes);
+            encode_list_write(&mut ext_val_list.borrow_mut(), &buf.borrow()[..len]);
             parser.items[node].data[1] = mpack_data_t::Null; // c: XFREE_CLEAR
         }
         MPACK_TOKEN_MAP => {

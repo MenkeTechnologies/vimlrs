@@ -401,7 +401,10 @@ mpack_pack_bin
 mpack_pack_array_len
 mpack_pack_map_len
 mpack_decode_one
-mpack_input_bytes
+# mpack_input_bytes: REMOVED in round 25, not re-allowlisted. It was a stand-in
+# for the C's encode_read_from_list()/tv_blob input handling, and the faithful
+# ports of both were already present but unreachable — f_msgpackparse now calls
+# msgpackparse_unpack_list()/msgpackparse_unpack_blob() as the C does.
 
 # ── round 22: stdpath appname (eval/funcs.c get_xdg_var_list + os/env.c) ──
 # get_appname is Neovim's $NVIM_APPNAME resolver (os/env.c, home file not under

@@ -573,9 +573,30 @@ pub fn func_equal(tv1: &typval_T, tv2: &typval_T, ic: bool) -> bool {
 
 // ── eval.c misc helpers (init/clear are no-ops; renderers + arg validation) ──
 
-/// Port of `eval_init()` from `Src/eval.c` — global eval state is initialised
-/// lazily by the value/var layers, so there is nothing to do here.
-pub fn eval_init() {}
+/// Port of `eval_init()` from `Src/eval.c:204` — seed the `v:` store and the
+/// function table.
+///
+/// ```c
+/// void eval_init(void)
+/// {
+///   evalvars_init();
+///   func_init();
+/// }
+/// ```
+///
+/// The C calls this ONCE, from the interpreter's startup. That "once" is the
+/// contract, not an incidental detail: `evalvars_init()` rebuilds `vimvars[]`
+/// from its type-zero defaults, so calling it again wipes every mutable `v:`
+/// variable. This was an empty stub while `install()` called `evalvars_init()`
+/// directly on every VM it set up — and a nested VM is set up for `execute()`,
+/// `assert_fails()` and every user-function body, so `v:errors` was emptied by
+/// any of them (see the caller for the measured effect).
+pub fn eval_init() {
+    // c:206 evalvars_init();
+    crate::ported::eval::vars::evalvars_init();
+    // c:207 func_init();
+    crate::ported::eval::userfunc::func_init();
+}
 
 /// Port of `eval_clear()` from `Src/eval.c` — teardown of eval globals; the
 /// `Rc`-managed value layer needs no explicit clear.
@@ -1688,7 +1709,7 @@ pub fn string_to_list(
         s
     };
     let list = crate::ported::eval::typval::tv_list_alloc(-1);
-    crate::ported::eval::encode::encode_list_write(&mut list.borrow_mut(), s);
+    crate::ported::eval::encode::encode_list_write(&mut list.borrow_mut(), s.as_bytes());
     list
 }
 

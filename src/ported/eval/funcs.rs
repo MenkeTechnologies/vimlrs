@@ -6179,31 +6179,6 @@ fn mpack_pack_map_len(n: usize, out: &mut Vec<u8>) {
     }
 }
 
-/// Collect the input byte stream of `msgpackparse()`: a Blob is taken verbatim;
-/// a readfile()-style List is joined on '\n' (the project's text convention).
-fn mpack_input_bytes(tv: &typval_T) -> Result<Vec<u8>, &'static str> {
-    match (tv.v_type, &tv.vval) {
-        (VAR_BLOB, v_blob(b)) => Ok(b
-            .as_ref()
-            .map(|b| b.borrow().bv_ga.clone())
-            .unwrap_or_default()),
-        (VAR_LIST, v_list(l)) => {
-            let items: Vec<String> = l
-                .as_ref()
-                .map(|l| {
-                    l.borrow()
-                        .lv_items
-                        .iter()
-                        .map(|it| tv_get_string(&it.li_tv))
-                        .collect()
-                })
-                .unwrap_or_default();
-            Ok(items.join("\n").into_bytes())
-        }
-        _ => Err("E5070: msgpackparse() argument must be a List or Blob"),
-    }
-}
-
 /// Port of `f_msgpackdump()` (funcs.c → encode.c). Encode a List of objects to
 /// MessagePack. The default return is a readfile()-style List; when `{type}`
 /// contains "B" a Blob is returned instead. `Funcref`s raise E5004.
@@ -6236,58 +6211,51 @@ pub fn f_msgpackdump(argvars: &[typval_T], rettv: &mut typval_T) {
         blob.borrow_mut().bv_ga = bytes;
         return;
     }
-    // readfile()-style List: split the byte stream on '\n' (project convention).
-    // An empty stream yields an empty List (as readfile() of an empty file does),
-    // not a single empty line.
+    // c:4661 encode_list_write(tv_list_alloc_ret(rettv, …), data.data, data.size)
+    //
+    // The readfile()-style List is `encode_list_write`'s job and not an inline
+    // split: besides splitting on NL it maps each line's NUL bytes to NL
+    // (c:78/c:90 `memchrsub`), which an inline split does not. Without it
+    // `str2list(msgpackdump([0])[0])` was `[0]` here against nvim's `[10]`, and
+    // the round trip only appeared to work because `msgpackparse()` skipped the
+    // matching inverse as well.
     let l = tv_list_alloc_ret(rettv, 0);
-    if bytes.is_empty() {
-        return;
-    }
-    // The split is on BYTES. MessagePack is a binary format — dumping
-    // `[v:true, v:false, v:null]` is the three bytes `c3 c2 c0`, none of which
-    // is valid UTF-8 — so routing it through `String::from_utf8_lossy` turned
-    // every one of them into `U+FFFD` and `echo msgpackdump(…)` printed
-    // `<fffd><fffd><fffd>`'s bytes where nvim prints `<c3><c2><c0>`.
-    // `'\n'` is ASCII and cannot occur inside a UTF-8 sequence, so splitting on
-    // the byte is the same split.
-    let mut lb = l.borrow_mut();
-    for line in bytes.split(|&b| b == b'\n') {
-        tv_list_append_tv(
-            &mut lb,
-            typval_T {
-                v_type: VAR_STRING,
-                v_lock: VarLockStatus::VAR_UNLOCKED,
-                vval: v_string(line.into()),
-            },
-        );
-    }
+    crate::ported::eval::encode::encode_list_write(&mut l.borrow_mut(), &bytes);
 }
 
-/// Port of `f_msgpackparse()` (funcs.c → decode.c). Convert a readfile()-style
-/// List or a Blob of MessagePack into a List of Vimscript objects.
+/// Port of `f_msgpackparse()` from `Src/eval/funcs.c:4772` (→ decode.c). Convert
+/// a readfile()-style List or a Blob of MessagePack into a List of Vimscript
+/// objects.
+///
+/// This is a dispatcher in the C and nothing more, and it is one here now. It
+/// had an inline decode over a `tv_get_string`-joined byte stream instead, and
+/// the two faithful ports it should have called — [`msgpackparse_unpack_list`]
+/// and [`msgpackparse_unpack_blob`] — were unreachable. That inline path read
+/// each List item as a Rust `String`, so every byte of a MessagePack payload
+/// that is not valid UTF-8 became `U+FFFD` and `msgpackparse(msgpackdump(…))`
+/// answered `E5766` for all but the accidentally-ASCII payloads.
 pub fn f_msgpackparse(argvars: &[typval_T], rettv: &mut typval_T) {
-    let bytes = match mpack_input_bytes(&argvars[0]) {
-        Ok(b) => b,
-        Err(e) => {
-            emsg(e);
-            tv_list_alloc_ret(rettv, 0);
-            return;
-        }
-    };
+    // c:4776 if (v_type != VAR_LIST && v_type != VAR_BLOB) { semsg(_(e_listblobarg), …); return; }
+    //
+    // The C returns WITHOUT allocating the return List, so the result is the
+    // default Number 0, not an empty List. `e_listblobarg` is
+    // `E899: Argument of %s must be a List or Blob`, verified against nvim.
+    if argvars[0].v_type != VAR_LIST && argvars[0].v_type != VAR_BLOB {
+        crate::ported::message::semsg("E899: Argument of msgpackparse() must be a List or Blob");
+        return;
+    }
     let l = tv_list_alloc_ret(rettv, 0);
-    // Faithful decode.c path: unpack_typval advances the (data,size) cursor by
-    // one top-level object per call (mpack_parse returns MPACK_OK after one).
-    let mut data: &[u8] = &bytes;
-    let mut size = bytes.len();
-    while size > 0 {
-        let mut item = typval_T::default();
-        if crate::ported::eval::decode::unpack_typval(&mut data, &mut size, &mut item)
-            != crate::ported::mpack::MPACK_OK
-        {
-            emsg("E5766: failed to parse msgpack string");
-            break;
+    match &argvars[0].vval {
+        // c:4782 msgpackparse_unpack_list(argvars[0].vval.v_list, ret_list);
+        v_list(Some(list)) => {
+            msgpackparse_unpack_list(&list.borrow(), &mut l.borrow_mut());
         }
-        tv_list_append_tv(&mut l.borrow_mut(), item);
+        // c:4784 msgpackparse_unpack_blob(argvars[0].vval.v_blob, ret_list);
+        v_blob(Some(blob)) => {
+            msgpackparse_unpack_blob(&blob.borrow(), &mut l.borrow_mut());
+        }
+        // c: a NULL list/blob has length 0 — both unpack fns return at once.
+        _ => {}
     }
 }
 /// Port of `f_rpcnotify()` (funcs.c) — no RPC channel → 0.
@@ -6474,10 +6442,25 @@ pub fn has_wsl() -> bool {
         .unwrap_or(false)
 }
 
-/// Port of `emsg_mpack_error()` (funcs.c) — report a msgpack decode error.
+/// Port of `emsg_mpack_error()` from `Src/eval/funcs.c:4666` — report a msgpack
+/// decode error.
+///
+/// The C is a three-way switch over the parser status, and each arm is a
+/// `semsg(_(e_invarg2), …)` — that is `E475: Invalid argument: %s`, verified
+/// against nvim (`msgpackparse(0zC1)` → `E475: Invalid argument: Failed to parse
+/// msgpack string`). `MPACK_OK` and every other status report nothing (the C's
+/// `default:` arm breaks).
 pub fn emsg_mpack_error(status: i32) {
-    if status != 0 {
-        emsg("E5004: Error while dumping or parsing msgpack");
+    use crate::ported::mpack::{MPACK_EOF, MPACK_ERROR, MPACK_NOMEM};
+    match status {
+        // c:4669 case MPACK_ERROR: semsg(_(e_invarg2), "Failed to parse msgpack string");
+        MPACK_ERROR => crate::ported::message::semsg("E475: Invalid argument: Failed to parse msgpack string"),
+        // c:4673 case MPACK_EOF: semsg(_(e_invarg2), "Incomplete msgpack string");
+        MPACK_EOF => crate::ported::message::semsg("E475: Invalid argument: Incomplete msgpack string"),
+        // c:4677 case MPACK_NOMEM: semsg(_(e_invarg2), "object was too deep to unpack");
+        MPACK_NOMEM => crate::ported::message::semsg("E475: Invalid argument: object was too deep to unpack"),
+        // c:4681 default: break;
+        _ => {}
     }
 }
 
@@ -11424,7 +11407,7 @@ pub fn msgpackparse_unpack_blob(
         let status = crate::ported::eval::decode::unpack_typval(&mut data, &mut remaining, &mut tv);
         if status != crate::ported::mpack::MPACK_OK {
             // c:4765 emsg_mpack_error(status);
-            crate::ported::message::emsg("E5071: Failed to parse msgpack");
+            emsg_mpack_error(status);
             return;
         }
         // c:4769 tv_list_append_owned_tv(ret_list, tv);
@@ -11485,7 +11468,8 @@ pub fn msgpackparse_unpack_list(
         let mut tv = typval_T::default();
         let status = crate::ported::eval::decode::unpack_typval(&mut data, &mut remaining, &mut tv);
         if status != crate::ported::mpack::MPACK_OK {
-            crate::ported::message::emsg("E5071: Failed to parse msgpack");
+            // c:4741 if (status != MPACK_OK) { … emsg_mpack_error(status); }
+            emsg_mpack_error(status);
             return;
         }
         tv_list_append_owned_tv(ret_list, tv);

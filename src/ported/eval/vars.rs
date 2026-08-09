@@ -1997,7 +1997,7 @@ pub fn heredoc_get(eap: &mut exarg_T, cmd: &str, script_get: bool) -> Option<Rc<
                 }
                 Some(s) => crate::ported::eval::typval::tv_list_append_allocated_string(
                     &mut l.borrow_mut(),
-                    s,
+                    s.into(),
                 ),
             }
         } else {

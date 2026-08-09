@@ -17,7 +17,7 @@ endfunction
 
 call assert_equal(0, Sum())
 call assert_equal(10, Sum(1, 2, 3, 4))
-call assert_equal(3, Sum(10, 20, 30) / 10 * 1)
+call assert_equal(6, Sum(10, 20, 30) / 10 * 1)
 
 " ── fixed params then varargs: a:000 holds only the extras ──
 function! Tag(label, ...) abort
@@ -53,7 +53,8 @@ endfunction
 call assert_equal(['x', 'y', ['x', 'y']], Both('x', 'y'))
 
 " ── a vararg function works as a lambda body's callee, too ──
-call assert_equal([1, 3, 6], map([1, 2, 3], {i, v -> Sum(v, i * v)}))
+" map() passes (index, value), so the calls are Sum(1,0), Sum(2,2), Sum(3,6).
+call assert_equal([1, 4, 9], map([1, 2, 3], {i, v -> Sum(v, i * v)}))
 
 " ── :unlet removes variables (single, multiple, and :unlet!) ──
 let g:tmp = 99
