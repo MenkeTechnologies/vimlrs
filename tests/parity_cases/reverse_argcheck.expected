@@ -1,0 +1,13 @@
+0
+reverse(10)  =>  E1253: String, List, Tuple or Blob required for argument 1
+reverse(1.0)  =>  E1253: String, List, Tuple or Blob required for argument 1
+reverse(v:none)  =>  E1253: String, List, Tuple or Blob required for argument 1
+reverse(v:null)  =>  E1253: String, List, Tuple or Blob required for argument 1
+reverse(v:true)  =>  E1253: String, List, Tuple or Blob required for argument 1
+reverse({'a':1})  =>  E1253: String, List, Tuple or Blob required for argument 1
+reverse(function('strlen'))  =>  E1253: String, List, Tuple or Blob required for argument 1
+string  cba
+list    [3, 2, 1]
+blob    0z030201
+inplace 1
+empty   [] ''

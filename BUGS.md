@@ -1453,7 +1453,90 @@ out of range: 0`. c: `ex_throw` evaluates the argument with `eval0()` first and
 throws only if that succeeded. `VIML_THROW` now yields when the error count rose
 while its argument was evaluated, the same `ERR_MARK` test `VIML_RAISE` uses.
 
+### R21-7. `reverse()` accepted any type — ✅ FIXED
+`reverse(10)` silently returned 0; both oracles raise. c: the FIRST statement of
+`f_reverse` is `tv_check_for_string_or_list_or_blob_arg` (vendor/eval/list.c:828),
+which the port had dropped. Another *more permissive than vim* divergence.
+
+The two oracles disagree on the message — vim 9.2 `E1253: String, List, Tuple or
+Blob required for argument 1`, neovim `E1252: String, List or Blob …` — and this
+follows vim, the reference `scripts/parity.sh` drives. The ported
+`tv_check_for_string_or_list_or_blob_arg` in `typval.rs` keeps neovim's wording
+and is left alone. Recorded as `tests/parity_cases/reverse_argcheck.vim`.
+
+**How it was found, and what that says about the fuzzer.** It sat in
+`fuzz-parity`'s `Divergent` bucket — the advisory one, for "vim and neovim
+disagree, vimlrs matches one of them". vim and neovim *did* disagree (E1253 vs
+E1252), which is what put it there, but vimlrs matched NEITHER. Over ~9,500
+fuzzed expressions across four fresh seeds, 179 divergent cases had vimlrs
+agreeing with vim, 0 with neovim, and **36 with neither** — so the bucket is not
+purely advisory and has to be read case by case, never skipped because an oracle
+split is expected. The triage rule as written cannot separate the two; that is a
+gap in the fuzzer's reporting, not in its findings.
+
 ## Still open
+
+### R21-O3. `v:none` stringifies as `v:null`, and compares equal to it
+From the same divergent bucket, verified directly against vim 9.2:
+
+| expression | vim | vimlrs |
+|---|---|---|
+| `repeat(v:none, 3)` | `'v:nonev:nonev:none'` | `'v:nullv:nullv:null'` |
+| `v:null != v:none` | `0` | `1` |
+
+`string(v:none)` alone is already right (`'v:none'`), so the gap is in
+`tv_get_string` of a `VAR_SPECIAL` and in the `VAR_SPECIAL` comparison, not in
+the encoder. Left open rather than half-fixed: both sit on `v:none`/`v:null`
+identity, which wants one deliberate pass over `tv_equal`/`tv_get_string`.
+
+### R21-O4. `list2str()` drops out-of-range code points
+`list2str([-1,0,1])` is `''` where vim gives `'<ff>^A'` (and neovim the same
+bytes). Found by the fuzzer; verified against vim 9.2.
+
+### R21-O5. `typename()` of a builtin Funcref / lambda is `func(...): any`
+The remaining half of R20-7. vim's real answers, read from vim 9.2:
+
+```text
+strlen      func([unknown]): number
+substitute  func([unknown], [unknown], [unknown], [unknown]): string
+has         func([unknown], ?[unknown]): number
+argv        func(?[unknown], ?[unknown]): list<string>
+add         func([unknown], [unknown])          " no return suffix at all
+{-> 1}      func(...): [unknown]
+{x -> x}    func(any): [unknown]
+{x, y -> x} func(any, any): [unknown]
+```
+
+**Assessment: no argument-type table is needed, and what IS needed is
+generable.** Every builtin argument prints as `[unknown]` — vim's `typename()`
+never reports a real argument type for one. The only per-builtin facts are
+(min argc, max argc) — already carried by `funcs_argc.rs`, though from
+*neovim's* `eval.lua`, which can disagree with vim — and the return-type string,
+which is missing. Lambdas need nothing per-function at all: the shape follows
+from the declared parameter count, with zero parameters rendering `...` rather
+than `()`.
+
+Two ways to generate the return types:
+
+1. Scrape vim's `global_functions[]` in `evalfunc.c` (`{"strlen", 1, 1, FEARG_1,
+   NULL, ret_number, f_strlen}`) and map each `ret_*` to its printed name. Needs
+   vim's source vendored; only neovim's is today.
+2. Ask the reference binary — the same methodology `scripts/gen_c_functions.sh`
+   and `scripts/parity.sh -r` already use: run `typename(function(n))` over the
+   known builtin names in vim once and record the answer verbatim.
+
+(2) is strictly better here — the recorded string *is* what vim prints, so no
+`ret_number` → `number` mapping layer can be wrong — and it was proved out
+before this was written: driving vim over the 486 names in `funcs_argc.rs`
+yields a signature for 423 of them, the other 63 being neovim-only names vim
+answers E700 for (`api_info`, …), which is exactly the set that should be
+excluded. What is left is a `scripts/gen_builtin_signatures.sh` plus wiring the
+table into `f_typename` — no hand-authored type data.
+
+### R21-O6. `eval()` of a lambda literal raises E700
+`typename(eval('{x -> x}'))` gives `E700: Unknown function: <lambda>1`: the
+lambda compiles into a nested chunk whose generated `<lambda>N` body is not
+registered where the outer call can find it. Found while measuring R21-O5.
 
 ### R21-O2. `function('F')` before `F` is defined is accepted
 vim resolves the name at the `function()` call and raises `E700: Unknown

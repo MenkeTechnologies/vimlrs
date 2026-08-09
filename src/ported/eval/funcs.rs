@@ -1003,8 +1003,24 @@ pub fn f_add(argvars: &[typval_T], rettv: &mut typval_T) {
 
 /// Port of `f_reverse()` — `vendor/eval/list.c:826`. Reverse a List or Blob in
 /// place (returning the same object), or a String (returning a new, reversed
-/// String via `reverse_text()`). Anything else returns 0.
+/// String via `reverse_text()`).
+///
+/// c:828 the FIRST statement is an argument-type check
+/// (`tv_check_for_string_or_list_or_blob_arg`), which this port had dropped —
+/// so `reverse(10)` silently returned 0 where BOTH oracles raise. Being more
+/// permissive than the reference is the worst kind of divergence: a script vim
+/// refuses to run ran here.
+///
+/// The two oracles disagree on the message, and this follows vim, the stated
+/// reference (`scripts/parity.sh`): vim 9.2 raises `E1253: String, List, Tuple
+/// or Blob required for argument 1`, neovim `E1252: String, List or Blob …` —
+/// the ported `tv_check_for_string_or_list_or_blob_arg` (typval.rs) carries
+/// neovim's wording faithfully and is left alone.
 pub fn f_reverse(argvars: &[typval_T], rettv: &mut typval_T) {
+    if !matches!(argvars[0].v_type, VAR_STRING | VAR_LIST | VAR_BLOB) {
+        crate::ported::message::semsg("E1253: String, List, Tuple or Blob required for argument 1");
+        return;
+    }
     match (argvars[0].v_type, &argvars[0].vval) {
         // c: VAR_LIST — reversed in place, the same List returned.
         (VAR_LIST, v_list(Some(l))) => {
