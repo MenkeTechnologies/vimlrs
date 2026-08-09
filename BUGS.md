@@ -1594,7 +1594,7 @@ string branch and compares exactly these two names. `v:null != v:none` is 1 and
 `repeat(v:none, 3)` is `'v:nonev:nonev:none'` because the names now differ.
 `tests/parity_cases/none_special.vim`.
 
-### R22-6. `list2str()` stopped at a 0 instead of skipping it — ✅ FIXED (partial: was R21-O4)
+### R22-6. `list2str()` stopped at a 0 instead of skipping it — ✅ FIXED (was R21-O4)
 
 c: `buf[utf_char2bytes((int)n, buf)] = NUL; ga_concat(&ga, buf);` — a 0 encodes
 to a single NUL byte, which the STRLEN-based `ga_concat` measures as length 0.
@@ -1602,14 +1602,10 @@ The item contributes nothing and **the walk continues**. The port `break`ed,
 dropping every element after a 0: `list2str([65, 0, 66])` was `'A'` where vim
 gives `'AB'` (verified byte-for-byte via `writefile(..., 'b')`).
 
-**Still open: the out-of-range half.** `list2str([-1,0,1])` is the two bytes
-`ff 01` in vim (`utf_char2bytes` writes `buf[0] = (char_u)c` for any `c < 0x80`,
-including negatives, and encodes above `U+10FFFF` without a range check —
-`list2str([0x110000])` is `f4 90 80 80`). vimlrs cannot represent those: a
-VimL string is `typval_vval_union::v_string(String)`, a Rust `String`, which is
-UTF-8 by construction and cannot hold a lone `0xff`. This is not a missing check
-but the string model, so it stays open rather than being papered over.
-`tests/parity_cases/list2str_nul.vim`.
+**The out-of-range half is now closed too — see R23-1**, which replaced the
+string model this entry was blocked on. `list2str([-1,0,1])` is the two bytes
+`ff 01` in vim and now here.
+`tests/parity_cases/list2str_nul.vim`, `tests/parity_cases/list2str_bytes.vim`.
 
 ### R22-7. `eval()` of a lambda literal raised E700 — ✅ FIXED (was R21-O6)
 
@@ -1677,23 +1673,45 @@ separate them; it needs a capture count recorded on the function. Left open
 rather than guessed at.
 `tests/parity_cases/typename_lambda_capture.vim`, listed in `KNOWN_OPEN`.
 
-### R22-O2. `E684` omits the index, and a negative index should not raise at all
+### R22-O2. `E684` omits the index, and a negative index should not raise at all — ✅ FIXED
 
-Found while pinning R22-3. Two separate divergences in one place:
+Both named halves, in one place. `b_setindex` (`:let l[i] = v`) and
+`b_unlet_index` (`:unlet l[i]`) each open-coded the index resolution as
+`if i < 0 { i += len }` + a range test + a bare `emsg`. The C does neither: both
+reach the same `get_lval` list arm (`vendor/eval.c:978-984`), which resolves the
+index with the already-ported `tv_list_check_range_index_one` ->
+`tv_list_find_index` (`vendor/eval/typval.c:1716`):
 
-| expression | vim | vimlrs |
-|---|---|---|
-| `let l[9] = 1` | `E684: List index out of range: 9` | `E684: List index out of range` |
-| `echo l[9]` | `E684: List index out of range: 9` | `E684: List index out of range` |
-| `let l[-9] = 1` on `[1,2,3]` | no error, list unchanged | `E684` |
-| `unlet l[-9]` on `[1,2,3]` | no error, removes item 0 -> `[2, 3]` | `E684` |
+```c
+  listitem_T *li = tv_list_find(l, *idx);
+  if (li != NULL) { return li; }
+  if (*idx < 0) { *idx = 0; li = tv_list_find(l, *idx); }
+  return li;
+```
 
-The message half is the C's `semsg(_(e_list_index_out_of_range_nr), idx)`. The
-negative half is `tv_list_find_nr` ("when a negative index is used that is not
-found use zero and when a larger index is used use the last item",
-`vendor/eval/typval.c:1714`) — and `:let` and `:unlet` do not agree with each
-other about it, so it wants its own pass rather than a guess bolted onto the
-message fix.
+That helper was correct and correctly reported the index the whole time — the
+two call sites simply routed around it. They now call it, which fixes the
+message and the negative index together, and deletes the duplicate arithmetic
+rather than adding anything.
+
+Reading an index (`echo l[9]`) goes through `eval_index`, which has NO such
+clamp, so a negative out-of-range index IS an error there. vimlrs already
+matched that and still does; the asymmetry is real and is what the case pins.
+
+| expression | vim & nvim | vimlrs before | after |
+|---|---|---|---|
+| `echo l[9]` | `E684: List index out of range: 9` | same | same |
+| `echo l[-9]` | `E684: List index out of range: -9` | same | same |
+| `let l[9] = 1` | `E684: List index out of range: 9` | `E684: List index out of range` | matches |
+| `let l[-9] = 99` on `[1,2,3]` | no error, `[99, 2, 3]` | `E684` | matches |
+| `unlet l[9]` | `E684: List index out of range: 9` | `E684: List index out of range` | matches |
+| `unlet l[-9]` on `[1,2,3]` | no error, `[2, 3]` | `E684` | matches |
+
+`tests/parity_cases/list_index_e684.vim`.
+
+Two things found while pinning it are NOT fixed and are recorded below as
+R23-O1 (the oracles disagree about the empty-list clamp) and R23-O2 (a `|`-form
+`:unlet` inside `:try`).
 
 ### R22-O3. Vim-only builtins vimlrs has not ported
 
@@ -1702,3 +1720,162 @@ message fix.
 semantics bug — the functions are simply absent. Recorded so the bucket's
 remaining contents are accounted for rather than re-triaged every wave.
 
+**`str2blob` is no longer blocked on the string model** (R23-1 replaced it —
+`str2blob([list2str([-1,0,1])])` is `0zFF01` in vim, which this port can now
+represent). It is blocked on something else, and so are `blob2str`/`js_encode`:
+`grep -rn 'str2blob\|blob2str\|js_encode\|js_decode' vendor/` returns nothing.
+These are Vim-only, absent from the vendored Neovim source, so there is no C to
+port and the porting rule ("the C source is the spec") has nothing to read.
+Writing them from observed behaviour would be an ad-hoc reimplementation, which
+is exactly what `src/ported/` exists to prevent — and it would also add
+ported-name-gate violations, since the gate resolves names against `vendor/`.
+(The same is true of `f_typename`/`type_name_of`/`member_of`, which is why those
+are the gate's 3 standing violations.)
+
+What it needs, in order: Vim's own source vendored alongside Neovim's, and a
+decision about where a Vim-only builtin lives given that `src/ported/` is
+defined as "strict 1:1 ports of the Neovim eval C source". Neither is a guess
+that can be bolted on here.
+
+Measured contract, for whoever does vendor it:
+
+| expression | vim |
+|---|---|
+| `str2blob(["ab"])` | `0z6162` |
+| `str2blob(["ab","cd"])` | `0z61620A6364` (items joined with NL) |
+| `str2blob([])` / `str2blob([""])` | `0z` |
+| `str2blob([list2str([-1,0,1])])` | `0zFF01` |
+| `blob2str(0z6162)` | `['ab']` |
+| `blob2str(0z61620a6364)` | `['ab', 'cd']` |
+| `blob2str(0zff)` | `E1515: Unable to convert from 'utf-8' encoding`, then `[]` |
+| `js_encode(v:none)` | `''` (empty) |
+| `js_encode(v:null)` | `null` |
+| `js_encode([1,v:none,3])` | `[1,,3]` |
+| `js_encode({'a':1,'b':'s'})` | `{a:1,b:"s"}` (identifier keys unquoted) |
+| `js_encode({'a b':1})` | `{"a b":1}` (non-identifier key quoted) |
+| `js_encode(function('strlen'))` | `E1161: Cannot json encode a func` |
+
+
+---
+
+# Round 23 — the string model
+
+## R23-1. A VimL string is bytes, not UTF-8 — ✅ FIXED (unblocks R21-O4 / R22-6)
+
+`typval_vval_union::v_string` held a Rust `String`. A Vim string is `char_u *` —
+a byte array with no encoding invariant — and Vim writes bytes into one that are
+not valid UTF-8 as a matter of routine:
+
+```c
+utf_char2bytes(c, buf)                          // Src/mbyte.c:1076
+    if (c < 0x80) { buf[0] = (char_u)c; return 1; }
+```
+
+`c` is a signed `int`, so `list2str([-1])` takes that arm and stores
+`(char_u)-1` == `0xff`. There is no range check above `U+10FFFF` either, so
+`list2str([0x110000])` is `f4 90 80 80`. A Rust `String` cannot hold either, so
+those items were dropped on the floor — the concrete symptom R22-6 recorded as
+blocked.
+
+`v_string` now holds `vimstr::VimStr`, a `Vec<u8>`. The type lives in the
+synthesis zone, not under `src/ported/`, because it has no C counterpart (the C
+just dereferences a pointer) — so the ported-name gate still reports only its 3
+pre-existing violations, with no allowlist entry added.
+
+Measured with `writefile(..., 'b')` + `xxd -p`:
+
+| expression | vim | nvim | vimlrs before | after |
+|---|---|---|---|---|
+| `list2str([-1,0,1])` | `ff01` | `ff` | `01` | `ff01` |
+| `list2str([0x110000])` | `f4908080` | `f4908080` | *(empty)* | `f4908080` |
+| `list2str([-1])` | `ff` | `ff` | *(empty)* | `ff` |
+| `list2str([200,300,255])` | `c388c4acc3bf` | same | `c388c4acc3bf` | `c388c4acc3bf` |
+
+(vim and nvim disagree on the first: Vim's `ga_concat` is STRLEN-based so the NUL
+contributes nothing and the walk continues, while nvim's `ga_concat_len` appends
+it and the C string ends there. This port follows vim, as R22-6 decided.)
+
+Carrying the bytes to an observer took five further places, each measured:
+
+| path | before | after |
+|---|---|---|
+| `fusevm::Value::Str` (an `Arc<String>`) | could not carry them | a non-UTF-8 string rides the REFPOOL handle Lists/Dicts/Blobs already use |
+| `writefile()` | wrote `ef bf bd` per byte | writes the bytes |
+| `strlen(list2str([-1,0,1]))` | `4` | `2`, as vim |
+| `str2list(list2str([-1,0,1]))` | `[65533, 1]` | `[255, 1]`, as vim and nvim |
+| `.` concat, the `:echo` sink | lost the byte to `U+FFFD` | byte paths |
+
+`tv_get_string_buf_chk` is the byte-exact accessor (the C returns `char *`). The
+three `String`-returning wrappers over it stay as the *text* read for the several
+hundred text-shaped call sites; their doc says so, and says which sites must not
+use them. That split is the deliberate boundary of this change, not an oversight:
+converting all ~400 to bytes would force a `to_string_lossy()` at nearly every
+one for no behaviour change, while the sites where bytes are observable are the
+named few above.
+
+`tests/parity_cases/list2str_bytes.vim`.
+
+## Still open
+
+### R23-O1. vim and nvim disagree on the index reported for an empty-list clamp
+
+Found while pinning R22-O2.
+
+| expression | vim | nvim | vimlrs |
+|---|---|---|---|
+| `let e[-9] = 1` on `[]` | `E684: List index out of range: -9` | `E684: … : 0` | `… : 0` |
+
+`tv_list_find_index` (`vendor/eval/typval.c:1716`) writes `0` into `*idx` before
+its second lookup, and `tv_list_check_range_index_one` then reports whatever is
+left in `*idx` — so `0` is what the vendored C produces, and nvim agrees with it.
+vim reports the original `-9`, which means Vim's own source (not vendored here)
+does something the Neovim source does not.
+
+Every non-empty case matches both oracles; this is only the list with no item at
+index 0 for the clamp to land on. Following vim would mean writing a rule the
+vendored C does not contain, so it is recorded rather than guessed at. It is
+excluded from `tests/parity_cases/list_index_e684.vim` with this reason in the
+case file.
+
+### R23-O2. A `|`-separated `:unlet` inside `:try` should not be caught
+
+Found while pinning R22-O2. Both oracles agree, so this is a real gap.
+
+```vim
+let b = [1,2,3]
+try | unlet b[9] | catch | echo 'UNLET-BAR:' v:exception | endtry
+echo 'still here'
+```
+
+vim and nvim: the `E684` escapes the bar-form `:try` and ABORTS the script —
+neither `UNLET-BAR:` nor `still here` is printed. vimlrs catches it and carries
+on. The same line with `:let` instead of `:unlet` IS caught by all three, so this
+is specific to `:unlet` in the `|` form, not to `:try` or to E684.
+
+The multi-line `try` / `catch` / `endtry` form matches all three exactly,
+including which command tags the exception (`Vim(unlet):`), so the divergence is
+in how a `|`-separated `:unlet` joins the enclosing `:try`, not in `:unlet`
+itself. Not investigated further; recorded with the repro.
+
+### R23-O3. `:echo` does not escape unprintable bytes the way vim's message layer does
+
+Pre-existing (measured before the R23-1 work: `echo nr2char(1)` wrote a raw
+`0x01` then and now), and now the only thing between vimlrs and vim on a byte
+string.
+
+| expression | vim | vimlrs |
+|---|---|---|
+| `echo nr2char(1)` | `^A` | raw `0x01` |
+| `echo "a\x01b"` | `a^Ab` | `a` `0x01` `b` |
+| `echo list2str([-1,0,1])` | `<ff>^A` | raw `ff 01` |
+
+Vim renders a message through `msg_outtrans`/`transchar`, which shows a control
+character as `^X` and a byte that is not part of a valid character as `<ff>`.
+This port writes the bytes. Every *value*-level answer about such a string now
+matches vim (`len`, `strlen`, `str2list`, `==#`, `.`, `writefile`) — see R23-1 —
+so what is left is exactly the display transform, which is its own port
+(`transchar` is not ported) and its own pass.
+
+It is why `tests/parity_cases/list2str_bytes.vim` pins the byte model through
+`str2list()`/`len()` rather than through `:echo` of the raw bytes: that would
+make the case about message escaping instead of about the value.

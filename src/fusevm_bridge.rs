@@ -2437,16 +2437,26 @@ fn b_setindex(vm: &mut VM, _: u8) -> Value {
             );
         }
         (VAR_LIST, v_list(Some(l))) => {
-            let len = l.borrow().lv_len as varnumber_T;
-            let mut i = tv_get_number_chk(&index, None);
-            if i < 0 {
-                i += len;
-            }
-            if i >= 0 && i < len {
-                l.borrow_mut().lv_items[i as usize].li_tv = value;
-            } else {
-                message::emsg("E684: List index out of range");
-            }
+            // c: `get_lval` (eval.c:978-984) — `lp->ll_n1 = (int)tv_get_number(var1);
+            // lp->ll_li = tv_list_check_range_index_one(lp->ll_list, &lp->ll_n1, quiet);`
+            //
+            // The index resolution belongs to that ported helper, which does two
+            // things this open-coded `i += len` did not: it reports the INDEX in
+            // the message, and — via `tv_list_find_index` — it does NOT fail for
+            // a negative index that is out of range, it clamps to 0. Both were
+            // measured; vim and nvim agree:
+            //
+            //   let l[9] = 1    on [1,2,3]  E684: List index out of range: 9
+            //   let l[-9] = 99  on [1,2,3]  no error, l is [99, 2, 3]
+            let mut n1 = tv_get_number_chk(&index, None) as i32;
+            let pos = crate::ported::eval::typval::tv_list_check_range_index_one(
+                &l.borrow(),
+                &mut n1,
+                false,
+            );
+            if let Some(p) = pos {
+                l.borrow_mut().lv_items[p].li_tv = value;
+            } // else: E684 already emitted, with the index
         }
         (VAR_BLOB, v_blob(Some(b))) => {
             let len = crate::ported::eval::typval::tv_blob_len(&b.borrow()) as varnumber_T;
@@ -2865,16 +2875,21 @@ fn b_unlet_index(vm: &mut VM, _: u8) -> Value {
             }
         }
         (VAR_LIST, v_list(Some(l))) => {
-            let len = l.borrow().lv_len as varnumber_T;
-            let mut i = tv_get_number_chk(&index, None);
-            if i < 0 {
-                i += len;
-            }
-            if i >= 0 && i < len {
-                tv_list_item_remove(&mut l.borrow_mut(), i as usize);
-            } else {
-                message::emsg("E684: List index out of range");
-            }
+            // c: `:unlet l[i]` reaches the same `get_lval` list arm as `:let`, so
+            // it resolves the index identically — including the clamp-to-0 for a
+            // negative index that is out of range. Measured, vim and nvim agree:
+            //
+            //   unlet l[-9]  on [1,2,3]  no error, removes item 0 -> [2, 3]
+            //   unlet l[9]   on [1,2,3]  E684: List index out of range: 9
+            let mut n1 = tv_get_number_chk(&index, None) as i32;
+            let pos = crate::ported::eval::typval::tv_list_check_range_index_one(
+                &l.borrow(),
+                &mut n1,
+                false,
+            );
+            if let Some(p) = pos {
+                tv_list_item_remove(&mut l.borrow_mut(), p);
+            } // else: E684 already emitted, with the index
         }
         _ => message::emsg("E689: Can only index a List, Dictionary or Blob"),
     }

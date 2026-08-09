@@ -14,8 +14,12 @@
 //! - **Crate-root carve-outs** — net-new synthesis with no C counterpart
 //!   (Neovim's eval is a string-walking interpreter with no AST/bytecode):
 //!   [`viml_lexer`], [`viml_ast`], [`viml_parser`], [`compile_viml`],
-//!   [`fusevm_bridge`]. These mirror zshrs's `compile_zsh.rs`/`fusevm_bridge.rs`
-//!   carve-outs and are clearly headed "EXTENSION — NO vendor/ counterpart".
+//!   [`fusevm_bridge`], [`vimstr`]. These mirror zshrs's
+//!   `compile_zsh.rs`/`fusevm_bridge.rs` carve-outs and are clearly headed
+//!   "EXTENSION — NO vendor/ counterpart". [`vimstr`] is the odd one out: it is
+//!   a *representation* rather than a stage — the byte string backing a
+//!   `VAR_STRING`, which the C reaches by dereferencing a `char_u *` and so has
+//!   no named counterpart to port.
 
 // The `ported` zone keeps Vim's exact C identifiers (e.g. `ufunc_T`,
 // `except_type_T`, `VAR_FLAVOUR_*`) for 1:1 fidelity, so the non-camel-case
