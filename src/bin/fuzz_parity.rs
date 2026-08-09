@@ -27,14 +27,23 @@
 //!    | `Ok`       | vimlrs == oracle                             | parity                        |
 //!    | `Panic`    | vimlrs panicked / crashed / hung             | crash bug (always a finding)  |
 //!    | `Gap`      | `nvim == vim` and vimlrs differs             | confirmed parity gap          |
+//!    | `Neither`  | `nvim != vim` and vimlrs matches *neither*   | parity gap (always a finding) |
 //!    | `Divergent`| `nvim != vim`, vimlrs matches one of them    | Vim/Neovim differ — advisory  |
 //!
-//!    Only `Gap` and `Panic` are actionable; `Divergent` is reported separately
+//!    `Gap`, `Panic` and `Neither` are actionable; only `Divergent` is advisory,
 //!    so a Vim-vs-Neovim behavior split is never mistaken for a vimlrs bug.
 //!    An expression the *oracle* couldn't answer (it crashed or hung Vim too —
 //!    `range(9223372036854775807)` does exactly that) is `OracleFail`, and is
 //!    never counted against vimlrs: with no spec there is nothing to be wrong
 //!    about.
+//!
+//!    **`Neither` exists because "the oracles disagree" is not a reason to stop
+//!    looking.** It used to be folded into `Divergent`, and that hid a real bug:
+//!    `reverse(10)` returned `0` where vim raises `E1253` and neovim `E1252` —
+//!    filed as advisory *because the oracles disagreed*, when in fact vimlrs
+//!    agreed with neither and was simply missing an argument check (BUGS.md
+//!    R21-7). When the two references disagree they still bracket the answer;
+//!    landing outside the bracket is a gap no matter how they split.
 //!
 //! Errors compare by **E-number only** (`E121`), never by message prose: the
 //! number is Vim's stable contract, the wording is not.
@@ -367,7 +376,12 @@ const FUNCS: &[(&str, &[Shape])] = &[
     ("js_encode", &[Any]),
     ("js_decode", &[Str]),
     ("msgpackdump", &[List]),
-    ("id", &[Any]),
+    // `id()` is NOT here, deliberately: it returns the address of the value's
+    // heap object (`'0x9ab06df80'` in nvim, `'000c4ce17'` in vim, a third
+    // pointer here), so its result differs on every run of every engine and can
+    // never be compared. It was on the list, and it produced 4-5 permanent false
+    // findings per seed — exactly the "false gap on every run" this list's rule
+    // above forbids. Nothing is lost: no outcome it can produce carries signal.
 ];
 
 // ─── Value pools ────────────────────────────────────────────────────────────
@@ -1362,6 +1376,11 @@ enum Class {
     Ok,
     Gap,
     Panic,
+    /// The oracles disagree AND vimlrs matches neither of them.
+    ///
+    /// Actionable, not advisory. Two references that disagree still bracket the
+    /// answer between them; a third result outside that bracket is vimlrs's own.
+    Neither,
     Divergent,
     OracleFail,
 }
@@ -1383,13 +1402,17 @@ fn classify(v: &Outcome, nv: &Outcome, vi: &Outcome) -> Class {
             }
         }
         // Vim and Neovim genuinely differ here. vimlrs ports the *Neovim* eval
-        // engine, so matching nvim is parity; matching neither is still only
-        // advisory, because there is no single spec to be wrong about.
+        // engine, so matching nvim is parity, and matching vim alone is the
+        // advisory split. Matching NEITHER is a finding: there is no single spec
+        // to be wrong about, but there is no reading of either spec that
+        // produces a third answer.
         _ => {
             if v == nv {
                 Class::Ok
-            } else {
+            } else if v == vi {
                 Class::Divergent
+            } else {
+                Class::Neither
             }
         }
     }
@@ -1566,7 +1589,7 @@ fn main() {
 
     // Triage, deduplicated by signature.
     let mut buckets: BTreeMap<(u8, String), (usize, String, String, String)> = BTreeMap::new();
-    let mut counts = [0usize; 5];
+    let mut counts = [0usize; 6];
     let mut corpus_lines: Vec<String> = Vec::new();
 
     for (i, e) in exprs.iter().enumerate() {
@@ -1575,8 +1598,9 @@ fn main() {
             Class::Ok => 0,
             Class::Gap => 1,
             Class::Panic => 2,
-            Class::Divergent => 3,
-            Class::OracleFail => 4,
+            Class::Neither => 3,
+            Class::Divergent => 4,
+            Class::OracleFail => 5,
         };
         counts[slot] += 1;
         if args.verbose {
@@ -1586,6 +1610,7 @@ fn main() {
                     Class::Ok => "ok",
                     Class::Gap => "GAP",
                     Class::Panic => "PANIC",
+                    Class::Neither => "NEITHER",
                     Class::Divergent => "div",
                     Class::OracleFail => "oracle-fail",
                 },
@@ -1622,7 +1647,8 @@ fn main() {
     let heading = |slot: u8| match slot {
         1 => "CONFIRMED GAPS (nvim == vim, vimlrs differs)",
         2 => "PANICS (vimlrs crashed)",
-        3 => "VIM/NEOVIM DIVERGENCE (advisory — no single spec)",
+        3 => "MATCHES NEITHER ORACLE (nvim != vim, and vimlrs is a third answer)",
+        4 => "VIM/NEOVIM DIVERGENCE (advisory — vimlrs matches vim)",
         _ => "OTHER",
     };
     let mut last = 0u8;
@@ -1638,13 +1664,15 @@ fn main() {
     }
 
     println!(
-        "\n── summary ──\n  ok:          {}\n  GAPS:        {} ({} distinct)\n  PANICS:      {}\n  divergent:   {}\n  oracle-fail: {}",
+        "\n── summary ──\n  ok:          {}\n  GAPS:        {} ({} distinct)\n  PANICS:      {}\n  NEITHER:     {} ({} distinct)\n  divergent:   {} (advisory — vimlrs matches vim)\n  oracle-fail: {}",
         counts[0],
         counts[1],
         buckets.keys().filter(|(s, _)| *s == 1).count(),
         counts[2],
         counts[3],
-        counts[4]
+        buckets.keys().filter(|(s, _)| *s == 3).count(),
+        counts[4],
+        counts[5]
     );
 
     if let Some(path) = &args.corpus {
@@ -1664,7 +1692,7 @@ fn main() {
     }
 
     // Exit non-zero when there is something to fix, so the harness can gate.
-    if counts[1] > 0 || counts[2] > 0 {
+    if counts[1] > 0 || counts[2] > 0 || counts[3] > 0 {
         std::process::exit(1);
     }
 }

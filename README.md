@@ -159,9 +159,13 @@ vimlrs. The corpus is replayed against the recorded output by
 `tests/parity_cases.rs`, which needs no editor installed and therefore runs in CI.
 
 On top of that, `fuzz-parity` is a **differential fuzzer**: it generates random
-VimL expressions, runs each through vimlrs *and* through `nvim` *and* `vim`, and
-reports a bug only when both engines agree and vimlrs differs — so a Vim-vs-Neovim
-behavior split is never mistaken for a vimlrs defect.
+VimL expressions and runs each through vimlrs *and* through `nvim` *and* `vim`.
+It reports a bug when both engines agree and vimlrs differs — so a Vim-vs-Neovim
+behavior split is never mistaken for a vimlrs defect — and, separately, when the
+two engines disagree and vimlrs matches *neither*. That second bucket is a bug
+too: two references that disagree still bracket the answer between them, and a
+third result outside that bracket is vimlrs's own. Only "the engines disagree and
+vimlrs matches one of them" is advisory.
 
 ```sh
 cargo run --bin fuzz-parity -- --count 1500 --seed 11

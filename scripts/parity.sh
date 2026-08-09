@@ -78,7 +78,14 @@ OUT=target/parity
 rm -rf "$OUT"; mkdir -p "$OUT"
 
 # Drop vim's error preamble and its CRs. See the header for why only these two.
-norm() { tr -d '\r' | perl -ne 'next if /^Error detected while processing /; next if /^line\s+\d+:$/; print'; }
+#
+# Both are done in ONE perl pass, on bytes. `tr -d '\r'` cannot do this job: in a
+# UTF-8 locale macOS `tr` aborts with "Illegal byte sequence" the moment vim
+# writes a byte that is not valid UTF-8, TRUNCATING the rest of the stream — and
+# vim writes such bytes for real (`list2str([-1])` is the single byte 0xff). A
+# case like that would have had its `.expected` silently recorded short. perl
+# without `use utf8` is byte-transparent and passes them through untouched.
+norm() { perl -ne 's/\r//g; next if /^Error detected while processing /; next if /^line\s+\d+:$/; print'; }
 
 # run_vim FILE -> prints "status<NL>output"; the status is vim's, taken before
 # the normaliser runs (a pipeline would otherwise report perl's).
