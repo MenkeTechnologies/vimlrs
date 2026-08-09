@@ -15,6 +15,15 @@
 //! To extend it: write a probe, run `bash scripts/parity.sh probe.vim`, confirm
 //! the divergence is real, fix it, then drop the probe into `tests/parity_cases/`
 //! and record it with `-r`. Never edit an `.expected` by hand.
+//!
+//! Both sides are handled as BYTES, never as `String`. vim writes output that is
+//! not valid UTF-8 as a matter of routine (`echo list2str([0x110000])` is the
+//! four bytes `f4 90 80 80`), and this harness exists to catch exactly that class
+//! of difference. Reading the record with `read_to_string` rejected such a case
+//! outright — with a "no recorded vim output" panic naming a file that was right
+//! there — and comparing with `from_utf8_lossy` would have made two DIFFERENT
+//! byte strings compare EQUAL once both collapsed to `U+FFFD`. `scripts/parity.sh`
+//! has always compared with `cmp`, on bytes; this is the same comparison.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -55,13 +64,14 @@ fn parity_cases_match_vim() {
 
     for case in cases(&dir) {
         let expected_path = case.with_extension("expected");
-        let expected = match fs::read_to_string(&expected_path) {
+        let expected = match fs::read(&expected_path) {
             Ok(s) => s,
-            Err(_) => panic!(
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => panic!(
                 "{} has no recorded vim output — record it with \
                  `bash scripts/parity.sh -r tests/parity_cases`",
                 case.display()
             ),
+            Err(e) => panic!("{}: {e}", expected_path.display()),
         };
         checked += 1;
 
@@ -79,24 +89,29 @@ fn parity_cases_match_vim() {
             .status()
             .expect("run viml on a parity case");
         let merged = fs::read(sink.path()).expect("read captured output");
-        // The record is "status\noutput".
-        let got = format!(
-            "{}\n{}",
-            status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&merged)
-        );
+        // The record is "status\noutput", as bytes.
+        let mut got = format!("{}\n", status.code().unwrap_or(-1)).into_bytes();
+        got.extend_from_slice(&merged);
         // Both sides are compared with trailing newlines removed: vim's message
         // model never writes the final one and viml always does (see
         // `fusevm_bridge::msg_flush_line`), which is a terminal convenience, not
         // a difference in what the script printed.
+        let trim_nl = |b: &[u8]| {
+            let end = b.iter().rposition(|&c| c != b'\n').map_or(0, |i| i + 1);
+            b[..end].to_vec()
+        };
+        let (got, expected) = (trim_nl(&got), trim_nl(&expected));
         let name = case.file_stem().unwrap().to_string_lossy().into_owned();
         let known = KNOWN_OPEN.iter().find(|(n, _)| *n == name);
-        let matches = got.trim_end_matches('\n') == expected.trim_end_matches('\n');
+        let matches = got == expected;
         match (known, matches) {
+            // Only the failure REPORT is lossy — the comparison above was not, so
+            // a difference that survives only in the raw bytes still fails here
+            // even when the two render identically.
             (None, false) => failures.push(format!(
                 "── {name} ── (diverges from vim)\n--- vim (recorded) ---\n{}\n--- viml ---\n{}",
-                expected.trim_end_matches('\n'),
-                got.trim_end_matches('\n')
+                String::from_utf8_lossy(&expected),
+                String::from_utf8_lossy(&got)
             )),
             // The gap named by the entry is gone: delete the entry (and close the
             // BUGS.md item) rather than leave a stale exemption in place.
