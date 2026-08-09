@@ -591,6 +591,7 @@ pub fn evalvars_init() {
                 pt_name: String::new(),
                 pt_argv: Vec::new(),
                 pt_dict: None,
+                pt_auto: false,
             }))),
         };
         // c: set_reg_var(0) → v:register defaults to '"'.

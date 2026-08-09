@@ -2173,7 +2173,72 @@ fn b_make_dict(vm: &mut VM, argc: u8) -> Value {
 fn b_index(vm: &mut VM, _: u8) -> Value {
     let index = pop_tv(vm);
     let base = pop_tv(vm);
-    tv_to_value(index_value(&base, &index))
+    let rettv = index_value(&base, &index);
+    // c: eval.c:6005 — "Turn `dict.Func` into a partial for `Func` bound to
+    // `dict`". Both `d.key` and `d['key']` lower to this builtin, which is the
+    // one place the C reaches (`handle_subscript` holds the `selfdict` only for
+    // a Dict subscript), so `get(d, 'key')` and a Funcref inside a List are NOT
+    // bound — verified against vim 9.2.
+    match (base.v_type, &base.vval) {
+        (VAR_DICT, v_dict(Some(d))) => tv_to_value(set_selfdict(rettv, d)),
+        _ => tv_to_value(rettv),
+    }
+}
+
+/// Port of `set_selfdict()` (`vendor/eval.c:6014`) + `make_partial()`
+/// (`vendor/eval/userfunc.c:3805`): reading a function out of a Dict binds that
+/// Dict as the function's `self`.
+///
+/// Two gates, both from the C and both verified against vim 9.2:
+///
+/// * `make_partial` only binds when the function was declared with the `dict`
+///   attribute (`fp->uf_flags & FC_DICT`, userfunc.c:3837). A plain function
+///   stored in a Dict stays a plain Funcref — `string(d.plain)` is
+///   `function('NoDict')`, not `function('NoDict', {…})`.
+/// * `set_selfdict` declines to *re*-bind a partial whose dict was bound
+///   explicitly by the script (`!pt_auto && pt_dict != NULL`, eval.c:6018), so
+///   `function('F', d)` keeps `d` after being stored in another Dict, while a
+///   `d.key` reference re-binds to whichever Dict it is read out of.
+///
+/// The binding is what makes `self` reachable: before this, `let F = d.key`
+/// followed by `F()` raised `E121: Undefined variable: self`.
+fn set_selfdict(
+    rettv: typval_T,
+    selfdict: &std::rc::Rc<RefCell<crate::ported::eval::typval_defs_h::dict_T>>,
+) -> typval_T {
+    use crate::ported::eval::typval_defs_h::partial_T;
+    // c:6018 an explicitly-bound partial is left alone.
+    let (name, argv) = match (rettv.v_type, &rettv.vval) {
+        (VAR_FUNC, v_string(s)) => (s.clone(), Vec::new()),
+        (VAR_PARTIAL, v_partial(Some(p))) => {
+            if !p.pt_auto && p.pt_dict.is_some() {
+                return rettv;
+            }
+            (p.pt_name.clone(), p.pt_argv.clone())
+        }
+        // c:6006 `tv_is_func(*rettv)` — anything else is not a function.
+        _ => return rettv,
+    };
+    // c:3837 `fp != NULL && (fp->uf_flags & FC_DICT)`.
+    let is_dict_func = FUNCTIONS.with(|f| {
+        f.borrow()
+            .get(&*canon_func_name(&name))
+            .is_some_and(|d| d.dict)
+    });
+    if !is_dict_func {
+        return rettv;
+    }
+    typval_T {
+        v_type: VAR_PARTIAL,
+        v_lock: VAR_UNLOCKED,
+        vval: v_partial(Some(std::rc::Rc::new(partial_T {
+            pt_refcount: 1,                  // c:3839
+            pt_name: name,                   // c:3845 / c:3853
+            pt_argv: argv,                   // c:3858 the partial's args are copied over
+            pt_dict: Some(selfdict.clone()), // c:3840
+            pt_auto: true,                   // c:3842
+        }))),
+    }
 }
 
 /// Runtime type test backing the no-space `base.key` dispatch: `true` iff the
@@ -2717,7 +2782,16 @@ fn b_call_member(vm: &mut VM, argc: u8) -> Value {
     args.reverse();
     let key = pop_tv(vm);
     let base = pop_tv(vm);
-    let member = index_value(&base, &key);
+    // The same `set_selfdict` the plain read in `b_index` applies: `d.key(…)` is
+    // a subscript followed by a call, and the rebinding happens on the subscript.
+    // It matters when the member is ALREADY an auto-bound partial: `let e.get =
+    // d.get` stores a partial bound to `d`, and `e.get()` must run with `e` as
+    // `self` (vim 9.2 prints `e.n`), which `call_funcref_self`'s
+    // "partial's own dict wins" rule alone would not do.
+    let member = match (base.v_type, &base.vval) {
+        (VAR_DICT, v_dict(Some(d))) => set_selfdict(index_value(&base, &key), d),
+        _ => index_value(&base, &key),
+    };
     if !matches!(member.v_type, VAR_FUNC | VAR_PARTIAL) {
         // E716 (missing key) has already been raised by `index_value`; only a
         // present-but-not-callable member reaches this.

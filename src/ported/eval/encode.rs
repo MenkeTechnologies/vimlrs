@@ -444,15 +444,33 @@ pub fn encode_vim_to_string(tv: &typval_T) -> String {
         (VAR_STRING, v_string(s)) => format!("'{}'", s.replace('\'', "''")),
         // TYPVAL_ENCODE_CONV_FUNC_START — function('name').
         (VAR_FUNC, v_string(s)) => format!("function('{}')", s.replace('\'', "''")),
-        // A Partial — function('name'[, [args]]).
+        // A Partial — function('name'[, [args]][, {self}]).
+        //
+        // c: TYPVAL_ENCODE_CONV_FUNC_BEFORE_ARGS writes ", " when there are
+        // bound args and TYPVAL_ENCODE_CONV_FUNC_BEFORE_SELF writes ", " when
+        // `pt_dict` is not NULL (encode.c:393-405), so the two suffixes are
+        // independent: `function('F', {…})` is what a dict-bound partial with no
+        // bound arguments prints. Both oracles agree — vim 9.2 and nvim 0.12
+        // print `function('P', [1], {'n': 7})`.
         (VAR_PARTIAL, v_partial(Some(p))) => {
             let name = p.pt_name.replace('\'', "''");
-            if p.pt_argv.is_empty() {
-                format!("function('{name}')")
-            } else {
+            let mut out = format!("function('{name}'");
+            if !p.pt_argv.is_empty() {
                 let args: Vec<String> = p.pt_argv.iter().map(encode_tv2string).collect();
-                format!("function('{name}', [{}])", args.join(", "))
+                out.push_str(&format!(", [{}]", args.join(", ")));
             }
+            if let Some(d) = &p.pt_dict {
+                out.push_str(", ");
+                out.push_str(&encode_tv2string(&typval_T {
+                    v_type: VAR_DICT,
+                    v_lock: crate::ported::eval::typval_defs_h::VarLockStatus::VAR_UNLOCKED,
+                    vval: crate::ported::eval::typval_defs_h::typval_vval_union::v_dict(Some(
+                        d.clone(),
+                    )),
+                }));
+            }
+            out.push(')');
+            out
         }
         (VAR_BOOL, v_bool(b)) => if *b == kBoolVarTrue {
             "v:true"

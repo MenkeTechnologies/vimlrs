@@ -10646,6 +10646,10 @@ pub fn common_function(argvars: &[typval_T], rettv: &mut typval_T, is_funcref: b
             pt_name: String::new(),
             pt_argv: Vec::new(),
             pt_dict: None,
+            // c: `f_function` sets `pt_auto` only via `set_selfdict`; a dict
+            // written in the call (`function('F', d)`) is an EXPLICIT binding,
+            // so it is never re-bound by a later Dict read.
+            pt_auto: false,
         };
 
         // c:1752 collect bound arguments: arg_pt's then the new list's.

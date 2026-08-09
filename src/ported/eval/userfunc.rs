@@ -1899,6 +1899,9 @@ pub fn get_lambda_tv(
             pt_name: name,
             pt_argv: Vec::new(),
             pt_dict: None,
+            // c:360 `xcalloc` zeroes the struct — a lambda's partial carries no
+            // dict, so nothing was auto-bound.
+            pt_auto: false,
         };
         *rettv = typval_T {
             v_type: VAR_PARTIAL, // c:412

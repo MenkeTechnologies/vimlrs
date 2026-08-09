@@ -162,6 +162,12 @@ pub struct partial_T {
     pub pt_argv: Vec<typval_T>,
     /// `dict_T *pt_dict` — the `self` dict, if bound.
     pub pt_dict: Option<Rc<RefCell<dict_T>>>,
+    /// `bool pt_auto` — the dict was bound *automatically* by reading the
+    /// function out of a Dict (`make_partial`), not written by the script. c:
+    /// `set_selfdict` (eval.c:6014) declines to rebind a partial whose dict was
+    /// bound explicitly, so `function('F', d)` stored in another Dict keeps `d`
+    /// while a `d.key` reference re-binds to whichever Dict it is read from.
+    pub pt_auto: bool,
 }
 
 /// `typedef struct { VarType v_type; VarLockStatus v_lock; union … vval; }

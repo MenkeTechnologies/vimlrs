@@ -32,6 +32,11 @@ pub struct UserFuncDef {
     /// parameters resolve to script-scope vars/functions (which vimlrs keeps in
     /// the global dict). `false` for a legacy `:function`.
     pub vim9: bool,
+    /// c: `FC_DICT` — the function takes a `self` dict, either from the `dict`
+    /// attribute or implicitly from the `:function d.key()` form. Reading such a
+    /// function out of a Dict binds it to that Dict (c: `make_partial`,
+    /// userfunc.c:3805, whose only gate is `fp->uf_flags & FC_DICT`).
+    pub dict: bool,
     /// Compiled function body.
     pub chunk: fusevm::Chunk,
 }
@@ -194,8 +199,7 @@ fn build_user_func_def(
     args: &[String],
     defaults: &[(usize, Expr)],
     body: &[Stmt],
-    bang: bool,
-    vim9: bool,
+    flags: FuncFlags,
     exc: bool,
 ) -> Result<UserFuncDef, VimlError> {
     let defaults = defaults
@@ -206,10 +210,24 @@ fn build_user_func_def(
         name: name.to_string(),
         params: args.to_vec(),
         defaults,
-        bang,
-        vim9,
+        bang: flags.bang,
+        vim9: flags.vim9,
+        dict: flags.dict,
         chunk: compile_function_body(body, exc)?,
     })
+}
+
+/// The definition-site flags a `:function` carries into its registry entry.
+/// Grouped so [`build_user_func_def`] takes one parameter for the three rather
+/// than three positional `bool`s a call site can silently transpose.
+#[derive(Clone, Copy)]
+struct FuncFlags {
+    /// `function!` — replace an existing definition.
+    bang: bool,
+    /// vim9 `:def` — bare names in the body resolve to script scope.
+    vim9: bool,
+    /// c: `FC_DICT` — the function takes a `self` dict.
+    dict: bool,
 }
 
 /// Split a `:function` name that targets a Dict key (`d.key`, `g:d.key`,
@@ -308,6 +326,7 @@ fn compile_program_inner(stmts: &[Stmt], slot_top: bool) -> Result<CompiledProgr
             body,
             bang,
             vim9,
+            dict,
         } = s
         {
             // `:function d.key()` defines an ANONYMOUS function and stores a
@@ -319,8 +338,18 @@ fn compile_program_inner(stmts: &[Stmt], slot_top: bool) -> Result<CompiledProgr
             match dict_func_target(name) {
                 Some((base, key)) => {
                     let anon = next_dict_func_name();
+                    // c: `ex_function` sets `FC_DICT` for the `d.key()` form
+                    // whether or not `dict` was written (`fudi.fd_dict != NULL`).
+                    // Verified against vim 9.2: `function d.nodict()` with no
+                    // attribute still gives `string(d.nodict)` ==
+                    // `function('1', {…})`.
+                    let flags = FuncFlags {
+                        bang: *bang,
+                        vim9: *vim9,
+                        dict: true,
+                    };
                     funcs.push(build_user_func_def(
-                        &anon, args, defaults, body, *bang, *vim9, exc,
+                        &anon, args, defaults, body, flags, exc,
                     )?);
                     top.push(Stmt::Let {
                         target: LetTarget::Index {
@@ -335,9 +364,14 @@ fn compile_program_inner(stmts: &[Stmt], slot_top: bool) -> Result<CompiledProgr
                         expr: Expr::Str(format!("\u{1}func\u{1}{anon}")),
                     });
                 }
-                None => funcs.push(build_user_func_def(
-                    name, args, defaults, body, *bang, *vim9, exc,
-                )?),
+                None => {
+                    let flags = FuncFlags {
+                        bang: *bang,
+                        vim9: *vim9,
+                        dict: *dict,
+                    };
+                    funcs.push(build_user_func_def(name, args, defaults, body, flags, exc)?)
+                }
             }
         } else {
             top.push(s.clone());
@@ -1190,6 +1224,7 @@ impl Compiler {
                 body,
                 bang,
                 vim9,
+                dict,
             } => {
                 // A `:function` reached HERE (in `stmt`, not `compile_program`'s
                 // top-level loop) is nested inside a control-flow block and/or
@@ -1209,7 +1244,12 @@ impl Compiler {
                 // is staged into the program's `deferred_funcs`; the runtime
                 // define-op inserts it into the live registry, keyed by a
                 // content-stable staging key.
-                let def = build_user_func_def(name, args, defaults, body, *bang, *vim9, self.exc)?;
+                let flags = FuncFlags {
+                    bang: *bang,
+                    vim9: *vim9,
+                    dict: *dict,
+                };
+                let def = build_user_func_def(name, args, defaults, body, flags, self.exc)?;
                 let key = deferred_key(&def);
                 DEFERRED_FUNCS.with(|f| f.borrow_mut().push(def));
                 self.load_str(&key);
@@ -2109,6 +2149,10 @@ impl Compiler {
                         // rebound as leading params), so it needs no runtime
                         // script-scope fallback.
                         vim9: false,
+                        // c: `get_lambda_tv` builds the ufunc with
+                        // `FC_LAMBDA|FC_CLOSURE`, never `FC_DICT` — a lambda
+                        // stored in a Dict is not bound to it.
+                        dict: false,
                         chunk,
                     })
                 });

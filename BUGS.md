@@ -1302,10 +1302,7 @@ Three separate holes in the same feature:
   `self` dict is now bound into the function-local scope for a `d.key()` call, a
   `d['key']()` call, a Partial carrying `pt_dict`, and `call(F, args, dict)`.
 
-Known remaining divergence: `string(d.get)` is `function('1')` where vim prints
-`function('1', {…})` — vim stores a *partial* bound to the dict, this stores a
-plain Funcref. Calls behave identically (including the re-binding vim does when
-the same reference is stored in another dict), so only `string()` differs.
+Its remaining divergence is closed by R21-3 below.
 
 ### R20-7. `typename()` was missing — ✅ FIXED
 Ported as `f_typename` (c: `type_name(typval2type(…))`, vim9type.c). Scalars,
@@ -1368,6 +1365,34 @@ last* command tagged the *caller's* next error. c: the tag names the command
 `call_user_function_raw` now saves it across the body chunk. Covered by the
 `after-call` lines of `tests/parity_cases/ternary_e109.vim`.
 
+### R21-3. A Funcref read out of a Dict was not bound to it — ✅ FIXED
+`string(d.get)` was `function('1')` where vim prints `function('1', {…})`, and
+the divergence was wider than `string()`: `let F = d.get` followed by `F()`
+raised `E121: Undefined variable: self`, and `let e.get = d.get` then `e.get()`
+ran with the *old* dict.
+
+c: `set_selfdict` (eval.c:6014) -> `make_partial` (userfunc.c:3805) — a Dict
+subscript that yields a function turns it into a partial bound to that Dict.
+Two gates, both ported and both verified against vim 9.2:
+
+- `make_partial` binds only when the function carries `FC_DICT`
+  (userfunc.c:3837) — the `dict` attribute after the parameter list, or the
+  `:function d.key()` form, which sets it implicitly (`function d.nodict()` with
+  no attribute still yields `function('1', {…})`). A plain function stored in a
+  Dict stays a plain Funcref.
+- `set_selfdict` declines to *re*-bind a partial the script bound explicitly
+  (`!pt_auto && pt_dict != NULL`, eval.c:6018), so `function('F', d)` keeps `d`
+  after being stored in another Dict while a `d.key` reference follows whichever
+  Dict it is read from.
+
+The binding fires on the subscript, so `get(d, 'key')` and a Funcref inside a
+List come back unbound — also verified. Carried: `FC_DICT` as
+`UserFuncDef::dict`, `pt_auto` on `partial_T`, the `, {self}` suffix in
+`encode_tv2string` (c: `TYPVAL_ENCODE_CONV_FUNC_BEFORE_SELF`, encode.c:400), and
+`set_selfdict` on both `VIML_INDEX` and `VIML_CALL_MEMBER`.
+`SHARD_FORMAT_VERSION` 4 -> 5 for the `UserFuncDef` layout change. Recorded as
+`tests/parity_cases/dict_partial.vim`.
+
 ## Still open
 
 ### R20-O1. `v:throwpoint` is always empty
@@ -1379,6 +1404,13 @@ sourcing-context stack that records the entry line of each nested frame. Recorde
 as `tests/parity_cases/throwpoint.vim` with vim's real answer and listed in
 `KNOWN_OPEN` in `tests/parity_cases.rs`, which fails if the gap ever closes
 without the entry being removed.
+
+### R21-O2. `function('F')` before `F` is defined is accepted
+vim resolves the name at the `function()` call and raises `E700: Unknown
+function: F` when the `:function F()` line has not executed yet; vimlrs
+registers every top-level definition in a script before the main chunk runs, so
+the forward reference succeeds. Another *more permissive than vim* divergence.
+Found while pinning R21-3.
 
 ### R21-O1. `:unlet` on a missing variable is silently accepted
 vim raises `E108: No such variable: "g:nope"` for `:unlet g:nope` and only

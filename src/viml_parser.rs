@@ -1939,6 +1939,11 @@ fn parse_function(cur: &mut Lines, header: &str) -> Result<Stmt, VimlError> {
             None => args.push(raw.to_string()),
         }
     }
+    // c: `ex_function` reads the attributes that follow the parameter list —
+    // `range`, `abort`, `dict`, `closure` — and `dict` sets `FC_DICT`. Only
+    // `dict` is observable outside the body (it makes a Dict read of the
+    // function bind a `self`), so the rest are accepted and ignored.
+    let dict = header[rparen + 1..].split_whitespace().any(|w| w == "dict");
     let (body, term) = parse_block(cur, &["endfunction"])?;
     if term.is_none() {
         return Err(VimlError::msg("E126: Missing :endfunction"));
@@ -1949,6 +1954,7 @@ fn parse_function(cur: &mut Lines, header: &str) -> Result<Stmt, VimlError> {
         defaults,
         body,
         bang,
+        dict,
         // Legacy `:function`: bare names in the body do NOT see script-scope
         // vars (that requires an explicit `s:`/`g:` prefix).
         vim9: false,
@@ -2064,6 +2070,9 @@ fn parse_def(cur: &mut Lines, header: &str) -> Result<Stmt, VimlError> {
         // vim9 `def`: bare names in the body resolve to script-scope
         // vars/functions when they are not locals or parameters.
         vim9: true,
+        // A vim9 `:def` has no `dict` attribute — vim9 has no `self`-dict
+        // functions, so `FC_DICT` is never set for one.
+        dict: false,
     })
 }
 

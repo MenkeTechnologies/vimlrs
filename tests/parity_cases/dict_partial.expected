@@ -1,0 +1,15 @@
+0
+plain    function('NoDict')
+bound    function('WithDict', {'plain': function('NoDict'), 'bound': function('WithDict'), 'n': 7})
+index    function('WithDict', {'plain': function('NoDict'), 'bound': function('WithDict'), 'n': 7})
+get      function('WithDict')
+inlist   function('WithDict')
+dict     {'plain': function('NoDict'), 'bound': function('WithDict'), 'n': 7}
+read     function('WithDict', {'plain': function('NoDict'), 'bound': function('WithDict'), 'n': 7})
+call     8
+rebind   function('WithDict', {'bound': function('WithDict', {'plain': function('NoDict'), 'bound': function('WithDict'), 'n': 7}), 'n': 90})
+recall   91
+fixed    function('WithDict', [2], {'plain': function('NoDict'), 'bound': function('WithDict'), 'n': 7})
+fixcall  9
+implied  function('1', {'implied': function('1'), 'n': 3})
+impcall  3

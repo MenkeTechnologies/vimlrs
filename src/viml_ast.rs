@@ -336,6 +336,11 @@ pub enum Stmt {
         /// `true` for a vim9 `:def` (bare names in the body resolve to
         /// script-scope vars/functions), `false` for a legacy `:function`.
         vim9: bool,
+        /// c: `FC_DICT` — the function takes a `self` dict. Set by the `dict`
+        /// attribute after the parameter list, and implicitly by the
+        /// `:function d.key()` form (`fudi.fd_dict != NULL`). Reading such a
+        /// function out of a Dict binds it to that Dict (`make_partial`).
+        dict: bool,
     },
     /// `:try … :catch {pat} … :finally … :endtry`.
     /// `:try` … `:endtry`.
