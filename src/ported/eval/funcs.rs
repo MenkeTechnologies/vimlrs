@@ -918,6 +918,19 @@ fn find_some_match(argvars: &[typval_T]) -> Option<SomeMatch> {
             .nth(ci as usize)
             .map_or(subject.len() as i64, |(b, _)| b as i64)
     };
+    // c:4111/4137/4146 `{start}` is a BYTE offset too — `len = strlen(str)`,
+    // `if (start > len) goto theend`, `str += start`. The matcher here indexes
+    // by char, so convert. A `{start}` that lands inside a multi-byte sequence
+    // has no char index: the C hands the regex the orphan continuation bytes
+    // and matches them one byte at a time, which a `char`-indexed matcher
+    // cannot express, so the search begins at the next whole character (see
+    // BUGS.md R26-O1 for the measured residue).
+    let byte_to_char = |subject: &str, bi: i64| -> i64 {
+        subject
+            .char_indices()
+            .position(|(b, _)| b as i64 >= bi)
+            .map_or(subject.chars().count() as i64, |ci| ci as i64)
+    };
     let has_count = argvars.len() > 3 && argvars[3].v_type != VAR_UNKNOWN;
     let count = if has_count {
         tv_get_number(&argvars[3])
@@ -971,16 +984,17 @@ fn find_some_match(argvars: &[typval_T]) -> Option<SomeMatch> {
 
     // String subject.
     let s = tv_get_string(&argvars[0]);
-    let nchars = s.chars().count() as i64;
     let hit = match argvars.get(2).filter(|t| t.v_type != VAR_UNKNOWN) {
         // c: no {start} — search from the head for the nth match.
         None => crate::viml_regex::regex_search_nth(&pat, &s, ic, 0, count),
         Some(t) => {
-            // c: if (start < 0) start = 0; if (start > len) goto theend;
-            let st = tv_get_number(t).max(0);
-            if st > nchars {
+            // c:4134 if (start < 0) start = 0; c:4137 if (start > len) goto
+            // theend — `len` is `strlen(str)`, so the bound is in bytes.
+            let st_byte = tv_get_number(t).max(0);
+            if st_byte > s.len() as i64 {
                 return None;
             }
+            let st = byte_to_char(&s, st_byte);
             if has_count {
                 // c: with {count}, {start} is a startcol — `^`/`\<` anchor to 0.
                 crate::viml_regex::regex_search_nth(&pat, &s, ic, st as usize, count)
@@ -5972,7 +5986,7 @@ pub fn f_islocked(argvars: &[typval_T], rettv: &mut typval_T) {
         } else if let Some(newkey) = lv.ll_newkey.as_ref() {
             // c:3249 semsg(e_dictkey, lv.ll_newkey);
             crate::ported::message::semsg(&format!(
-                "E716: Key not present in Dictionary: {newkey}"
+                "E716: Key not present in Dictionary: \"{newkey}\""
             ));
         } else if let (Some(l), Some(li)) = (lv.ll_list.as_ref(), lv.ll_li) {
             // c:3251 List item — tv_islocked(TV_LIST_ITEM_TV(lv.ll_li)).
@@ -6454,11 +6468,17 @@ pub fn emsg_mpack_error(status: i32) {
     use crate::ported::mpack::{MPACK_EOF, MPACK_ERROR, MPACK_NOMEM};
     match status {
         // c:4669 case MPACK_ERROR: semsg(_(e_invarg2), "Failed to parse msgpack string");
-        MPACK_ERROR => crate::ported::message::semsg("E475: Invalid argument: Failed to parse msgpack string"),
+        MPACK_ERROR => {
+            crate::ported::message::semsg("E475: Invalid argument: Failed to parse msgpack string")
+        }
         // c:4673 case MPACK_EOF: semsg(_(e_invarg2), "Incomplete msgpack string");
-        MPACK_EOF => crate::ported::message::semsg("E475: Invalid argument: Incomplete msgpack string"),
+        MPACK_EOF => {
+            crate::ported::message::semsg("E475: Invalid argument: Incomplete msgpack string")
+        }
         // c:4677 case MPACK_NOMEM: semsg(_(e_invarg2), "object was too deep to unpack");
-        MPACK_NOMEM => crate::ported::message::semsg("E475: Invalid argument: object was too deep to unpack"),
+        MPACK_NOMEM => {
+            crate::ported::message::semsg("E475: Invalid argument: object was too deep to unpack")
+        }
         // c:4681 default: break;
         _ => {}
     }
@@ -7561,9 +7581,16 @@ thread_local! {
     /// The window match list (`w_match_head` in window.c), each entry a Dict
     /// `{group, pattern|pos…, priority, id}`. One global list standalone.
     static MATCHES: std::cell::RefCell<Vec<typval_T>> = const { std::cell::RefCell::new(Vec::new()) };
-    /// Counter for auto-assigned match ids (`-1` argument), like Vim's
-    /// increasing default ids.
-    static MATCH_LAST_ID: std::cell::Cell<varnumber_T> = const { std::cell::Cell::new(1000) };
+    /// Counter for auto-assigned match ids (the `-1` argument). It is READ and
+    /// then incremented, so the first auto id is the seed itself (1000, not
+    /// 1001), and an explicit `{id}` never advances it.
+    ///
+    /// `match_add` is NOT in the vendored subset — `vendor/window.c` carries
+    /// only `find_tabpage`/`win_get_tabwin` — and `:help matchadd()` promises
+    /// only "a free ID, which is at least 1000". Both rules above are therefore
+    /// measured off vim 9.2 and pinned by
+    /// `tests/parity_cases/matchadd_priority.vim`, not read from C.
+    static MATCH_NEXT_ID: std::cell::Cell<varnumber_T> = const { std::cell::Cell::new(1000) };
 }
 
 /// Make a `VAR_DICT` typval owning `d`.
@@ -7600,9 +7627,9 @@ pub fn f_matchadd(argvars: &[typval_T], rettv: &mut typval_T) {
         return;
     }
     if id == -1 {
-        id = MATCH_LAST_ID.with(|c| {
-            let v = c.get() + 1;
-            c.set(v);
+        id = MATCH_NEXT_ID.with(|c| {
+            let v = c.get();
+            c.set(v + 1);
             v
         });
     }
@@ -7614,7 +7641,24 @@ pub fn f_matchadd(argvars: &[typval_T], rettv: &mut typval_T) {
         tv_dict_add_nr(&mut db, "priority", priority);
         tv_dict_add_nr(&mut db, "id", id);
     }
-    MATCHES.with(|m| m.borrow_mut().push(match_dict_val(d)));
+    // The list is kept in ascending priority order, so an equal priority appends
+    // after its peers and a higher one sinks to the end regardless of insertion
+    // order. Measured off vim 9.2, not read from C (`match_add` is not vendored
+    // — see the `MATCH_NEXT_ID` note above): adding priorities 10, 10, 20, 10 in
+    // that order yields ids `[1000, 1001, 1002, 42]`, i.e. the 20 last.
+    MATCHES.with(|m| {
+        let mut m = m.borrow_mut();
+        // Written out rather than shared with `f_matchaddpos` below: a helper
+        // would need a name, and `src/ported/` may only define names that exist
+        // in the Neovim C (`tests/ported_fn_names_match_c.rs`).
+        let at = m.partition_point(|tv| match (tv.v_type, &tv.vval) {
+            (VAR_DICT, v_dict(Some(e))) => {
+                tv_dict_find(&e.borrow(), "priority").map_or(0, tv_get_number) <= priority
+            }
+            _ => true,
+        });
+        m.insert(at, match_dict_val(d));
+    });
     rettv.vval = v_number(id);
 }
 
@@ -7639,9 +7683,9 @@ pub fn f_matchaddpos(argvars: &[typval_T], rettv: &mut typval_T) {
         return;
     }
     if id == -1 {
-        id = MATCH_LAST_ID.with(|c| {
-            let v = c.get() + 1;
-            c.set(v);
+        id = MATCH_NEXT_ID.with(|c| {
+            let v = c.get();
+            c.set(v + 1);
             v
         });
     }
@@ -7658,7 +7702,17 @@ pub fn f_matchaddpos(argvars: &[typval_T], rettv: &mut typval_T) {
             }
         }
     }
-    MATCHES.with(|m| m.borrow_mut().push(match_dict_val(d)));
+    // Ascending priority order, same rule as `f_matchadd` — see the note there.
+    MATCHES.with(|m| {
+        let mut m = m.borrow_mut();
+        let at = m.partition_point(|tv| match (tv.v_type, &tv.vval) {
+            (VAR_DICT, v_dict(Some(e))) => {
+                tv_dict_find(&e.borrow(), "priority").map_or(0, tv_get_number) <= priority
+            }
+            _ => true,
+        });
+        m.insert(at, match_dict_val(d));
+    });
     rettv.vval = v_number(id);
 }
 
@@ -7716,6 +7770,17 @@ pub fn f_setmatches(argvars: &[typval_T], rettv: &mut typval_T) {
         }
         next.push(it.li_tv.clone());
     }
+    // `setmatches()` re-adds each entry rather than adopting the list verbatim,
+    // so the rebuilt list comes out in ascending priority order — and a STABLE
+    // sort by `priority` is the same permutation as adding them in turn. vim 9.2
+    // restoring ids 3 (prio 10), 4 (prio 2), 5 (prio 10) in that order answers
+    // `[[4, 2], [3, 10], [5, 10]]`; pinned in the parity case, not read from C.
+    next.sort_by_key(|tv| match (tv.v_type, &tv.vval) {
+        (VAR_DICT, v_dict(Some(e))) => {
+            tv_dict_find(&e.borrow(), "priority").map_or(0, tv_get_number)
+        }
+        _ => 0,
+    });
     MATCHES.with(|m| *m.borrow_mut() = next);
 }
 

@@ -1226,7 +1226,8 @@ impl Regex {
             return None;
         }
         let ic = self.effective_ic(ic);
-        for start in from..=text.len() {
+        let mut start = from.min(text.len());
+        loop {
             // Two extra trailing slots hold the `\zs`/`\ze` positions, if any.
             let mut groups = vec![None; self.ngroups + 3];
             if let Some(end) = self.match_alt(&self.branches, text, start, &mut groups, ic) {
@@ -1244,8 +1245,17 @@ impl Regex {
                 groups.truncate(self.ngroups + 1);
                 return Some(Captures { groups });
             }
+            if start >= text.len() {
+                return None;
+            }
+            // The scan advances one *character* — `MB_PTR_ADV` / `utfc_ptr2len`,
+            // base codepoint plus its composing marks — so a match can never
+            // BEGIN on a mark that belongs to the character before it:
+            // `match("éx", '\W')` is -1 in both engines, not 1. `from`
+            // itself is always tried, which is why a subject that *opens* with a
+            // composing mark still matches it at 0.
+            start = cluster_end(text, start);
         }
-        None
     }
 
     /// Whether the pattern matches anywhere in `text`.
@@ -1577,9 +1587,10 @@ pub fn regex_search_nth(
         // START of this match, not past its end —
         //   `startcol = startp[0] + utfc_ptr2len(startp[0]) - str`
         // so e.g. `matchstr('hello world', '\w\+', 0, 2)` == 'ello', not 'world'.
-        // `utfc_ptr2len` is one char, i.e. `s + 1` in char-index space; this also
-        // covers the zero-width case (still advances by one to make progress).
-        pos = s + 1;
+        // `utfc_ptr2len` is a base codepoint plus its composing marks, so the
+        // step is the whole cluster, not `s + 1`; that also covers the
+        // zero-width case (a cluster is at least one char, so it progresses).
+        pos = cluster_end(&chars, s);
         if pos > chars.len() {
             return None;
         }
@@ -1660,7 +1671,10 @@ pub fn regex_substitute(subject: &str, pat: &str, sub: &str, flags: &str) -> Str
     loop {
         // Find the next match at or after `tail`.
         let mut found = None;
-        for start in tail..=chars.len() {
+        // The scan advances one whole character at a time, composing marks
+        // included — see the note in `Regex::find_from`.
+        let mut start = tail.min(chars.len());
+        loop {
             // Two extra trailing slots hold the `\zs`/`\ze` positions (see
             // `find_from`): `\zs` moves the replaced region's start, `\ze` its end.
             // Without them the `MatchStart`/`MatchEnd` writes land out of bounds and
@@ -1689,6 +1703,10 @@ pub fn regex_substitute(subject: &str, pat: &str, sub: &str, flags: &str) -> Str
                 found = Some((s, e, groups));
                 break;
             }
+            if start >= chars.len() {
+                break;
+            }
+            start = cluster_end(&chars, start);
         }
         let Some((s, e, groups)) = found else {
             break;
@@ -1845,17 +1863,20 @@ pub fn regex_split(subject: &str, pat: &str, ic: bool, keepempty: bool) -> Vec<S
     // Find the first match at or after `from` (match_alt is anchored, so scan).
     // Returns the separator span (`\zs`/`\ze`-adjusted, like Vim's startp/endp).
     let find_from = |from: usize| -> Option<(usize, usize)> {
-        let mut p = from;
-        while p <= n {
+        let mut p = from.min(n);
+        loop {
             let mut groups = vec![None; re.ngroups + 3];
             if let Some(end) = re.match_alt(&re.branches, &chars, p, &mut groups, eic) {
                 let startp = groups[re.ngroups + 1].map_or(p, |(zp, _)| zp);
                 let endp = groups[re.ngroups + 2].map_or(end, |(ep, _)| ep);
                 return Some((startp, endp));
             }
-            p += 1;
+            if p >= n {
+                return None;
+            }
+            // One whole character — see the note in `Regex::find_from`.
+            p = cluster_end(&chars, p);
         }
-        None
     };
 
     let mut out: Vec<String> = Vec::new();

@@ -2083,7 +2083,7 @@ pub fn ex_call(eap: &mut exarg_T) {
     );
     if let Some(nk) = fudi.fd_newkey.take() {
         // c:3568 Still need to give an error message for a missing key.
-        semsg(&format!("E716: Key not present in Dictionary: {nk}")); // e_dictkey
+        semsg(&format!("E716: Key not present in Dictionary: \"{nk}\"")); // e_dictkey
     }
     let tofree = match tofree {
         Some(t) => t, // c:3572
@@ -2344,7 +2344,7 @@ pub fn ex_function(eap: &mut exarg_T) {
     if name.is_none() && (fudi.fd_dict.is_none() || !paren) && !eap.skip {
         // c:2692 aborting() is false here.
         if let Some(nk) = fudi.fd_newkey.take() {
-            semsg(&format!("E716: Key not present in Dictionary: {nk}")); // c:2694 e_dictkey
+            semsg(&format!("E716: Key not present in Dictionary: \"{nk}\"")); // c:2694 e_dictkey
         }
         return; // c:2697
     }

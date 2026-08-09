@@ -4536,7 +4536,9 @@ fn index_value(base: &typval_T, index: &typval_T) -> typval_T {
             match crate::ported::eval::typval::tv_dict_find(&d.borrow(), &key) {
                 Some(v) => v.clone(),
                 None => {
-                    message::semsg(&format!("E716: Key not present in Dictionary: {key}"));
+                    // c:3346 semsg(_(e_dictkey), key) — the shared e_dictkey
+                    // format quotes the key.
+                    message::semsg(&format!("E716: Key not present in Dictionary: \"{key}\""));
                     tv_special()
                 }
             }

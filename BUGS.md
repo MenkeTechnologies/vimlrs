@@ -2584,3 +2584,501 @@ payload in `decode.rs`). The remaining several hundred are text-shaped and
 mostly safe, but the two defects this round fixed were both this hazard, one
 layer along from where R23-1 first recorded it. Each fix so far has been found by
 a symptom rather than by auditing the call sites, which is not a strategy.
+
+---
+
+# Round 26 — the id nobody was checking, and a byte that was read as a character
+
+Two independent things this round. First, a class of defect that had already hit
+two sibling fusevm frontends and had no guard here at all: hand-assigned builtin
+ids, where a duplicate number is a silent handler replacement rather than a
+build failure. Second, the parity work — an argument documented in bytes that
+this port read in characters, a shared error format string that four sites
+wrote by hand and got wrong, and a regex scan that stepped a codepoint where the
+C steps a character.
+
+Versions used as oracles throughout, verbatim:
+
+```
+$ vim --version | head -1
+VIM - Vi IMproved 9.2 (2026 Feb 14, compiled Aug 02 2026 19:00:41)
+$ vim --version | grep 'Included patches'
+Included patches: 1-900
+$ nvim --version | head -1
+NVIM v0.12.4
+```
+
+Every table in this section was re-derived from a fresh oracle run before the
+round landed, rather than carried over from the draft that produced it. That
+review changed three things, all recorded in place below:
+
+| | outcome |
+|---|---|
+| the `E28` / `setmatches()` claim in R26-5 | **wrong, corrected.** vim *is* a usable oracle; the setmatches rows moved out of prose and into the parity case, and the real E28 divergence became R26-O5 |
+| `match_add` / `w_next_match_id` / `w_match_head` C citations | **unverifiable, removed.** `vendor/window.c` is a 70-line subset that does not contain `match_add`; the rules are measured off vim instead |
+| a `message.c` line cited for vim's leading space (R24-O4) | **unverifiable, removed.** vim's C is not in this repo; the conclusion never depended on it |
+
+Everything else survived re-derivation unchanged, including all four `.expected`
+files, which were re-run against this vim and matched byte for byte.
+
+## R26-1. Builtin ids had no collision guard — ✅ ADDED (`tests/opcodes.rs`)
+
+`src/fusevm_bridge.rs` hands out 537 `pub const VIML_*: u16` numbers by hand, and
+fusevm's registration is a plain overwrite:
+
+```rust
+pub fn register_builtin(&mut self, id: u16, handler: BuiltinHandler) {
+    let idx = id as usize;
+    if idx >= self.builtin_table.len() {
+        self.builtin_table.resize(idx + 1, None);
+    }
+    self.builtin_table[idx] = Some(handler);
+}
+```
+
+(fusevm 0.17.0, `src/vm.rs:912`.) Two constants on one number does not fail to
+build, does not warn and does not panic — the later registration silently
+replaces the earlier handler. Two edits adding one builtin each can pick the same
+free number and merge without a conflict marker. scalars shipped `MAKE_ORDERING`
+and `MAKE_QUEUE` both at 754; phplang shipped `INDEX_ISSET` at 105 where
+`LIST_ELEM_GET` already sat.
+
+**Audit result: no collision exists today.** 537 constants over 3000..=3602, all
+distinct, 536 registered exactly once, and the one that is not
+(`VIML_CMP_BASE`) is a family base that `cmp_id` adds an offset to.
+
+The shape has bitten here before, in its derived form. The comment above
+`VIML_CMP_IC_OFFSET` records two ignore-case offsets that were shipped and
+withdrawn because the ids `cmp_id` derived from them landed on
+`VIML_INDEX`/`VIML_SLICE`/`VIML_ECHO` and on the `VIML_FN_GETCHAR` cluster, so
+`==?` dispatched to those instead of comparing. `tests/opcodes.rs` pins five
+invariants, all read out of the source rather than from a hand-kept list:
+
+| test | what a violation means |
+|---|---|
+| `every_builtin_id_is_used_by_exactly_one_constant` | two constants, one number |
+| `no_derived_comparison_id_collides_with_a_registered_constant` | a `cmp_id` result shadows another builtin |
+| `no_builtin_id_reaches_below_the_viml_block` | an id under 3000 shadows fusevm's own builtins or awk's block |
+| `no_constant_is_registered_twice` | two `register_builtin` calls, one id |
+| `the_only_unregistered_constant_is_the_comparison_family_base` | a declared builtin the compiler can emit with no handler |
+
+The comparison ids are obtained by calling the real `cmp_id`, not by re-deriving
+its arithmetic in the test, and the `ALL_CMP_OPS`/`ALL_CASE_FLAGS` arrays are
+length-checked against the enums as written in `src/viml_lexer.rs`.
+
+Each of the five was confirmed to fail by injecting the defect it describes and
+reverting. Every row below was re-run from scratch at pre-landing review; the two
+injections that change dispatch were also *executed*, to show that the thing the
+guard prevents is a wrong answer and not merely an untidy table:
+
+| injection | `cargo build` | runtime | guard |
+|---|---|---|---|
+| `VIML_FN_TYPE` 3101 → 3100 (onto `VIML_FN_LEN`) | clean, no warning | `echo type("abcde") len("abcde")` → `1 1`, vim says `1 5` | `3100 => VIML_FN_LEN, VIML_FN_TYPE` |
+| `VIML_CMP_IC_OFFSET` 10 → `0x20` (the historical value) | clean, no warning | `echo ("ABC" ==? "abc")` → `A`, vim says `1` | `3052 => VIML_INDEX, cmp_id(Equal, IgnoreCase); 3053 => VIML_SLICE, cmp_id(NotEqual, IgnoreCase); 3054 => VIML_SETINDEX, …; 3055 => VIML_SETRANGE, …; 3056 => VIML_IS_DICT, …; 3060 => VIML_ECHO, cmp_id(Is, IgnoreCase); 3061 => VIML_ECHON, cmp_id(IsNot, IgnoreCase)` |
+| a second `register_builtin(VIML_FN_EMPTY, …)` | clean | — | `registered more than once — only the last handler survives: VIML_FN_EMPTY` |
+| a new `VIML_FN_ORPHAN = 3990`, unregistered | clean | — | ``left: ["VIML_CMP_BASE", "VIML_FN_ORPHAN"]`` |
+| `VIML_FN_TYPE` 3101 → 101 | clean | — | `builtin ids below the VimL block start (3000) …: VIML_FN_TYPE = 101` |
+
+`"ABC" ==? "abc"` answering `A` is the whole argument for this file: the compiler
+emitted a comparison, the VM ran a string index, nothing warned, and the only
+symptom was a wrong value.
+
+### The other registry — keyed by NAME — is already gated, by rustc
+
+The id space is not the only place a duplicate could hide. `builtin_fn_id`
+(`src/compile_viml.rs:2776`) is the name→id registry the compiler resolves
+through, and it is large: **469 arms** over `"len" => h::VIML_FN_LEN` and the
+like. A sibling frontend found 340 name-keyed registrations where a duplicate
+name silently wins with no build signal at all, so this one was audited the same
+way.
+
+- **No duplicate names.** All 469 are distinct.
+- **7 groups of names share an id**, and all 7 are vim's own documented aliases,
+  not typos: `bufexists`/`buffer_exists`, `bufname`/`buffer_name`,
+  `bufnr`/`buffer_number`, `chanclose`/`jobclose`, `chansend`/`jobsend`,
+  `filereadable`/`file_readable`, `hlID`/`highlightID`.
+- **A duplicate would not be silent.** It is a `match` on `&str`, so rustc
+  reports `unreachable pattern`, and CI escalates that: `.github/workflows/ci.yml`
+  runs `cargo clippy --all-targets --locked -- -D warnings`. Injecting a second
+  `"len" =>` arm was verified to produce a plain warning under `cargo build` and
+  a hard `error: unreachable pattern --> src/compile_viml.rs:2780:9` under the
+  CI command. Reverted.
+
+So no test was added for the name registry: the compiler already is the test.
+The id space needed `tests/opcodes.rs` precisely because `u16` constants carry no
+such structure — two names for one number is legal Rust.
+
+## R26-2. `match()`'s `{start}` is a byte offset, not a character index — ✅ FIXED
+
+`find_some_match` (`src/ported/eval/funcs.rs:910`) measured `{start}` in
+characters. The C measures it in bytes: `len = (int64_t)strlen(str)`
+(`vendor/eval/funcs.c:4111`), `if (start > len) goto theend` (4137), `str +=
+start` (4146), and with `{count}` `startcol = (colnr_T)start` (4144) — a byte
+column. On a multi-byte subject every `{start}` past the first such character
+searched from the wrong place, and any `{start}` at or past the character count
+returned "no match" while the subject still had bytes left.
+
+Subject `"ünïcø∂é"` (7 characters, 13 bytes at 0 2 3 5 6 8 11), columns
+`match(s,'.',i)  match(s,'\p',i)  matchend(s,'\p',i)  matchstr(s,'\p',i)`:
+
+| `i` | vim | nvim | vimlrs before | vimlrs after |
+|---|---|---|---|---|
+| 0 | `0 0 2 'ü'` | same | `0 0 2 'ü'` | `0 0 2 'ü'` |
+| 2 | `2 2 3 'n'` | same | `3 3 5 'ï'` | `2 2 3 'n'` |
+| 3 | `3 3 5 'ï'` | same | `5 5 6 'c'` | `3 3 5 'ï'` |
+| 5 | `5 5 6 'c'` | same | `8 8 11 '∂'` | `5 5 6 'c'` |
+| 6 | `6 6 8 'ø'` | same | `11 11 13 'é'` | `6 6 8 'ø'` |
+| 8 | `8 8 11 '∂'` | same | `-1 -1 -1 ''` | `8 8 11 '∂'` |
+| 11 | `11 11 13 'é'` | same | `-1 -1 -1 ''` | `11 11 13 'é'` |
+| 13 | `-1 -1 -1 ''` | same | `-1 -1 -1 ''` | `-1 -1 -1 ''` |
+
+Pinned in `tests/parity_cases/match_start_bytes.vim`, together with the
+`{count}` startcol form, the negative clamp, the ASCII rows and the List-subject
+form (where `{start}` really is an item index).
+
+This also closed one of the two gaps the differential fuzzer was reporting:
+`matchlist('ünïcø∂é','\p',10)[-5]` was `E684` (empty list) against `''` in both
+engines.
+
+## R26-3. E716 printed the key unquoted at four sites — ✅ FIXED
+
+Every E716 in the C goes through one format string, `semsg(_(e_dictkey), key)` —
+`vendor/eval.c:901`, `:3346`, `vendor/eval/funcs.c:3250`,
+`vendor/eval/userfunc.c:2694`, `:3568`, `vendor/eval/typval.c:3355` — and it
+quotes the key. Six sites in this port wrote the message out by hand and four of
+them dropped the quotes: `index_value` (`src/fusevm_bridge.rs:4534`),
+`f_islocked` (`src/ported/eval/funcs.rs`), and both `fd_newkey` reports in
+`src/ported/eval/userfunc.rs`.
+
+| expression | vim / nvim | vimlrs before |
+|---|---|---|
+| `{'a':1}['b']` | `E716: Key not present in Dictionary: "b"` | `… : b` |
+| `d.b` | `… : "b"` | `… : b` |
+| `call d.nokey()` | `… : "nokey"` | `… : nokey` |
+| `islocked("d.nokey")` | `… : "nokey"` | `… : nokey` |
+
+`unlet d.nokey` and `let d.a.b` were already quoted. Pinned in
+`tests/parity_cases/dict_key_e716.vim`, which also covers a key containing a
+space and one containing a `"` (the quoting is literal, not an escape pass).
+
+## R26-4. A regex scan stepped a codepoint where the C steps a character — ✅ FIXED
+
+R6-6 made a matching *atom* consume a base codepoint plus its composing marks.
+The other half was never done: the scan that chooses where to try the next match
+advanced one `char`, so a match could BEGIN on a mark belonging to the character
+before it. All three scan loops in `src/viml_regex.rs` had it — `Regex::find_from`,
+`regex_substitute`, and the local `find_from` inside the split helper — as did
+the `{count}` step in `regex_search_nth`, which advanced `s + 1` where the C
+advances `startp[0] + utfc_ptr2len(startp[0])`.
+
+Subject `nr2char(0x65) . nr2char(0x301) . "x"` — a decomposed `é` followed by `x`:
+
+| expression | vim | nvim | vimlrs before | vimlrs after |
+|---|---|---|---|---|
+| `match(a, '\W')` | `-1` | `-1` | `1` | `-1` |
+| `matchlist(a, '\W')` | `[]` | `[]` | `['́', '', …]` | `[]` |
+| `matchstr(a, '\W')` | `''` | `''` | `'́'` | `''` |
+| `substitute(a, '\W', '!', 'g')` | `'éx'` | `'éx'` | `'e!x'` | `'éx'` |
+
+A subject that *opens* with a composing mark still matches it at 0 in all three
+— the scan always tries its starting position before advancing — so
+`match(nr2char(0x301) . "z", '\W')` is 0 everywhere. Pinned in
+`tests/parity_cases/regex_composing_start.vim`.
+
+This closed the fuzzer's second gap, `matchlist('écombining','\W')`. Seed 260001
+over 4000 expressions went from `GAPS: 2` to `GAPS: 0` with `PANICS: 0`,
+`NEITHER: 3` and `divergent: 167` unchanged.
+
+## R26-5. `matchadd()` ids started at 1001 and ignored priority order — ✅ FIXED
+
+Two defects in the same function. The auto-id counter is READ and then
+incremented, so the first auto-assigned id is the seed itself; this port
+pre-incremented, so every id was one too high. And the match list is kept in
+ascending priority order, so an equal priority appends after its peers and a
+higher one sinks to the end regardless of insertion order; this port appended
+everything.
+
+**The evidence here is measured, not cited.** `match_add` is NOT in the vendored
+tree: `vendor/window.c` is a 70-line subset carrying only `find_tabpage` and
+`win_get_tabwin` (its own header says so), and `grep -rn 'match_add' vendor/`
+returns nothing. `:help matchadd()` promises only "a free ID, which is at least
+1000" (`/opt/homebrew/share/vim/vim92/doc/builtin.txt:7376`) and documents no
+ordering at all. So the rule this port now implements is read off vim 9.2's
+output and pinned in `tests/parity_cases/matchadd_priority.vim`, whose
+`.expected` is vim's own bytes. An earlier draft of this section wrote it as a
+`w_next_match_id` / `w_match_head` / `prio >= cur->priority` C citation; that
+attribution was removed because it cannot be checked from this repo.
+
+```
+matchadd('Search','a') / ('Search','b') / ('Search','c',20,42) / ('Search','d')
+```
+
+| | vim | nvim | vimlrs before | vimlrs after |
+|---|---|---|---|---|
+| ids returned | `1000 1001 42 1002` | same | `1001 1002 42 1003` | `1000 1001 42 1002` |
+| `getmatches()` ids | `[1000, 1001, 1002, 42]` | same | `[1001, 1002, 42, 1003]` | `[1000, 1001, 1002, 42]` |
+
+`setmatches()` re-adds every entry, so it re-sorts too — a *stable* sort by
+`priority` is the same permutation as adding them in turn.
+
+An earlier draft recorded that "vim cannot be the oracle for that row (`-u NONE` has no
+highlight groups, so it stops at `E28`)" and fell back to nvim. **That is wrong
+and has been corrected.** `Search` is a default highlight group, so `-u NONE`
+resolves it and vim answers normally; only an *unknown* group raises E28 (see
+R26-O5). Re-measured this round, all three engines on the same script:
+
+```vim
+call setmatches([{'group':'Search','pattern':'p','priority':50,'id':7},
+              \  {'group':'Search','pattern':'q','priority':1, 'id':8}])
+echo string(map(getmatches(), {_, v -> [v.id, v.priority]}))
+echo matchadd('Search','r')
+echo string(map(getmatches(), {_, v -> v.id}))
+```
+
+| | vim | nvim | vimlrs |
+|---|---|---|---|
+| restored list | `[[8, 1], [7, 50]]` | same | same |
+| next auto id | `1000` | same | same |
+| after `matchadd` | `[8, 1000, 7]` | same | same |
+
+Because vim *is* a usable oracle, the setmatches rows were moved INTO
+`tests/parity_cases/matchadd_priority.vim` rather than left as prose, including
+an equal-priority row that pins the sort's stability — input ids `3`(prio 10),
+`4`(prio 2), `5`(prio 10) come back as `[[4, 2], [3, 10], [5, 10]]`, from vim.
+
+## Still open
+
+### R26-O1. A `{start}` inside a multi-byte sequence
+
+The residue of R26-2. The C chops the subject with `str += start` even when that
+lands mid-sequence, and the regex then matches the orphan continuation bytes one
+byte at a time — `matchstr("ünïcø∂é", '\p', 1)` is `'<bc>'` in both engines. The
+matcher here indexes `Vec<char>` and has no way to represent a lone continuation
+byte, so it begins at the next whole character instead. Measured, subject as in
+R26-2:
+
+| `i` | vim / nvim `match(s,'.',i)` | vimlrs | vim / nvim `matchstr(s,'\p',i)` | vimlrs |
+|---|---|---|---|---|
+| 1 | `1` | `2` | `'<bc>'` | `'n'` |
+| 4 | `4` | `5` | `'<af>'` | `'c'` |
+| 7 | `7` | `8` | `'<b8>'` | `'∂'` |
+| 9 | `9` | `11` | `'é'` | `'é'` |
+| 10 | `10` | `11` | `'é'` | `'é'` |
+| 12 | `12` | `-1` | `'<a9>'` | `''` |
+
+Closing it means a byte-indexed matcher, which is a `src/viml_regex.rs` rewrite
+and its own round. Rounding the other way (down to the character containing the
+offset) would be worse: it reports matches starting *before* the requested
+`{start}`, which `{start}` exists to forbid.
+
+### R26-O2. A builtin that reports an error but returns still aborts the command
+
+`ex_echo` prints an argument whenever `eval1()` returned OK and consults
+`did_emsg` only to decide whether to add E15 (`vendor/eval.c:6146`, `:6150`). A
+`f_*` that calls `semsg` and then returns normally therefore still contributes
+its value, and the arguments to its left have already been printed, because
+`ex_echo` evaluates and prints one argument at a time. This port evaluates every
+argument, then checks whether the error count rose since the statement started
+and prints nothing if it did (`echo_impl`, `src/fusevm_bridge.rs:2557`).
+
+```vim
+let d = {}
+echo "A" islocked("d.nokey")
+echo "B" str2nr("10", 99)
+echo "C" range(1,5,0)
+echo "D" sort([3,1,2], "NoSuchCmpFn")
+```
+
+| | vim | nvim | vimlrs |
+|---|---|---|---|
+| A | `A` / `E716: … "nokey"` / ` -1` | same | `E716: … "nokey"` |
+| B | `B` / `E474: Invalid argument 0` | same | `E474: Invalid argument` |
+| C | `C` / `E726: Stride is zero` / ` []` | `… / ` 0`` | `E726: Stride is zero` |
+| D | `D` / `E117: …NoSuchCmpFn` / `E702: …` / ` [3, 1, 2]` | same | `E702: …` |
+
+Row D shows a second defect on the same line: the E117 from inside sort's
+compare callback is never reported at all.
+
+Fixing this is two changes, both to the statement model rather than to a
+builtin: `:echo` has to lower as a per-argument evaluate-then-print loop, and the
+abort has to key on "the evaluator returned FAIL" (the existing `HARD_ERR`
+signal) rather than on "an error was reported". The 32 parity cases and the
+`:silent!` rule in `echo_impl`'s comment both depend on the current behaviour, so
+this is its own round.
+
+### R26-O3. `setreg()` with a Dict value
+
+`setreg("a", {})` is `1` in both engines; here it is
+`E908: Using an invalid value as a String`. Found while measuring R26-O2, not
+investigated.
+
+### R26-O4. `tr()` checks its two strings for equal length eagerly, and counts codepoints
+
+Found by the fuzzer on seed 260002, pre-existing (nothing this round touches
+`f_tr`). Two things at once, with `f` = `nr2char(0x65) . nr2char(0x301) . "combining"`
+(11 codepoints, 10 characters):
+
+| expression | vim | nvim | vimlrs |
+|---|---|---|---|
+| `tr("0x1f", f, "  padded  ")` | `'0x1f'` | `'0x1f'` | `E475: Invalid argument: écombining` |
+| `tr("éx", nr2char(0x65) . nr2char(0x301), "Z")` | `'éx'` | `'éx'` | `E475: Invalid argument: é` |
+| `tr("abc", "ab", "xy")` | `'xyc'` | `'xyc'` | `'xyc'` |
+
+Neither engine compares the two strings up front: `f_tr` walks the input, looks
+each character up in `{fromstr}`, and only raises `E475` when a character that IS
+present has no counterpart left in `{tostr}` — `"0x1f"` shares no character with
+`f`, so nothing is looked up and nothing errors. This port compares the lengths
+first, and counts them in codepoints rather than in the `mb_ptr2len` units the C
+walks. `f_tr`'s home file is `strings.c`, which is not vendored (it is one of the
+allowlisted names), so closing this needs the same placement decision R22-O3 is
+waiting on.
+
+### R26-O5. vim rejects an unknown highlight group; nvim and this port accept it
+
+Found while disproving an earlier draft's `E28` claim in R26-5 (which had it backwards —
+it read the error as "`-u NONE` has no highlight groups", when in fact `Search`
+resolves fine and only an *unknown* name errors). Measured this round:
+
+| | vim | nvim | vimlrs |
+|---|---|---|---|
+| `matchadd('NoSuchGrp','a')` | `E28: No such highlight group name: NoSuchGrp`, returns `-1` | `1000` | `1000` |
+| `len(getmatches())` after it | `0` | `1` | `1` |
+| `setmatches([{'group':'NoSuchGrp',…}])` then `getmatches()` | `E28: …`, `[]` | the entry, restored | the entry, restored |
+
+This port follows nvim, which is the standing rule (R24-O1), so it is **not a
+defect** — but it is a real engine divergence on a *whole builtin's* success or
+failure rather than on formatting, and the parity harness's oracle is **vim**.
+Any future case that names a highlight group vim does not know will diverge for
+this reason and not because of a bug. Recorded so the next case author sees it
+before re-deriving it. Nothing in `tests/parity_cases/` names an unknown group
+today.
+
+### R26-O6. `fusevm_bridge::tests::vim_vars` has been failing since round 25 — the TEST is stale, not the code
+
+Found by running the lib suite before landing this round. Not caused by anything
+here; bisected to the previous commit by checking out each and running the one
+test:
+
+| commit | `cargo test --lib fusevm_bridge::tests::vim_vars` |
+|---|---|
+| `a7228bd0e3` | PASS |
+| `203fcee768` | PASS |
+| `1a79e9c235` (round 25, HEAD) | **FAIL** |
+
+```
+assertion `left == right` failed
+  left: "boom\n"
+ right: "\n"
+```
+
+The two lines at issue (`src/fusevm_bridge.rs`):
+
+```rust
+assert_eq!(run("let v:errmsg = 'boom'\necho v:errmsg"), "boom\n");
+assert_eq!(run("echo v:errmsg"), "\n");
+```
+
+`run()` builds a fresh VM per call but stays on one thread, so the second line
+asserts that a new VM resets `v:`. Round 25 deliberately removed exactly that:
+`install()` used to call `evalvars_init()` on every VM — including the nested VMs
+built for `execute()`, `assert_fails()` and every user-function body — which
+emptied `v:errors` mid-script; it now seeds once per thread, matching the C,
+which calls it once from `eval_init()` (`vendor/eval.c:206`).
+
+**The new behaviour is the correct one**, measured across a `:source` boundary in
+one session:
+
+```sh
+$ vim  -es -u NONE -i NONE -c "source $S/a1.vim" -c "verbose source $S/a2.vim" -c 'qa!'
+errmsg=[boom]
+$ nvim --clean -es -c "source $S/a1.vim" -c "verbose source $S/a2.vim" -c 'qa!'
+errmsg=[boom]
+```
+
+(`a1.vim` is `let v:errmsg = 'boom'`, `a2.vim` echoes it.) So `v:` state
+surviving between two `run()` calls is right, and the second assertion encodes
+the pre-round-25 model.
+
+**Deliberately not touched.** Editing an assertion so the suite goes green is the
+shape of change that has to be proposed on its own and reviewed apart from the
+work it grades — and this one is not this round's work at all. The fix is to make
+the test state the semantics it actually wants (one script, or an explicit reset
+between the two reads) rather than to relax the expectation, and it belongs to
+whoever owns round 25's change. Reported, left failing.
+
+### R24-O4 — re-verified, still correctly excluded
+
+`nr2char(0x180b)` re-measured again at pre-landing review, all three from commands run
+that session (`$S` is the session scratch dir):
+
+```sh
+$ printf 'echo nr2char(0x180b)\n' > $S/o4.vim
+$ vim  -es -u NONE -i NONE -c "verbose source $S/o4.vim" -c 'qa!' 2>&1 | xxd
+00000000: 203c 3138 3062 3e                         <180b>
+$ nvim --clean -es -c "verbose source $S/o4.vim" -c 'qa!' 2>&1 | xxd
+00000000: 3c31 3830 623e                           <180b>
+$ ./target/debug/viml $S/o4.vim 2>&1 | xxd
+00000000: 3c31 3830 623e 0a                        <180b>.
+```
+
+vim opens with byte `0x20`; nvim and this port do not.
+
+**What is verified, and what is not.** The vendored `msg_outtrans_len`
+(`vendor/message.c:1866`) has no leading-space branch: the whole body,
+1866..1935, was read again at pre-landing review, and `grep -n utf_iscomposing
+vendor/message.c` returns **nothing at all**. That is the part that decides the
+question, because `vendor/` is Neovim and this port follows Neovim (R24-O1).
+This round also originally attributed vim's space to a specific line of *vim's* `message.c`;
+vim's C is not in this repo and that citation could not be re-checked, so it has
+been dropped rather than repeated. The conclusion does not rest on it.
+Unchanged.
+
+### R24-O5 — still open, and still not bundled
+
+Re-confirmed as a harness limit rather than a language divergence. The fix is a
+`scripts/parity.sh` change — telling a message CR from the line-terminator CR
+needs a different normalisation than the single byte-filter pass the harness runs
+— and `scripts/parity.sh` is measurement infrastructure, so it gets reviewed on
+its own and in isolation from the behaviour it measures. **Nothing about the
+harness was touched this round or last.** The proposal, unchanged: normalise only
+a CR that is immediately followed by LF (the tty artifact), leaving a lone CR
+inside a message intact.
+
+### R22-O3 — the three name-gate violations are still open, and still will not be allowlisted
+
+`cargo test --test ported_fn_names_match_c`, run unmodified at pre-landing review, reports
+exactly three and no others:
+
+```
+fn names under src/ported/ with no Neovim C origin and not allowlisted:
+  src/ported/eval/funcs.rs: fn f_typename
+  src/ported/eval/funcs.rs: fn type_name_of
+  src/ported/eval/funcs.rs: fn member_of
+```
+
+All three implement vim's `typename()` / `type_name()` (`vim9type.c`), which
+Neovim does not have, so there is no Neovim name for them to take. Three ways to
+make the gate green were considered and all three rejected:
+
+1. **Add them to `tests/data/fake_fn_allowlist.txt`.** Forbidden. The allowlist
+   is the audit tool; editing it to accept your own code is exactly the failure
+   the file exists to catch. `git diff --exit-code -- tests/data/fake_fn_allowlist.txt`
+   is clean.
+2. **Rename them to Neovim names.** There are none. Any name that passed would be
+   a false citation, which is worse than the failure.
+3. **Move them out of `src/ported/` so the scan misses them.** This is the same
+   bypass wearing a different hat — the code would not change, only the
+   detector's view of it.
+
+The real fix is the one R22-O3 already adjudicated above: a separate
+`vendor_vim/` tree the name gate does not scan, a distinct citation form, and its
+own allowlist section. That restructures the gate, so it is its own reviewed
+change. **Left failing and reported**, which is the correct end state for a gap
+that cannot be closed honestly inside this round.
+
+Note that this round's own additions were written to avoid *adding* to the count:
+the priority-insert in `f_matchadd`/`f_matchaddpos` is spelled out at both call
+sites rather than factored into a helper, because a helper would need a name the
+gate has no C origin for.
+
+### R23-O1, R25-O1..O7 — unchanged

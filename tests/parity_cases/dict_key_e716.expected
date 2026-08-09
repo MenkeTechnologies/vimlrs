@@ -1,0 +1,8 @@
+0
+Vim(echo):E716: Key not present in Dictionary: "b"
+Vim(echo):E716: Key not present in Dictionary: "b"
+Vim(call):E716: Key not present in Dictionary: "nokey"
+Vim(unlet):E716: Key not present in Dictionary: "nokey"
+Vim(echo):E716: Key not present in Dictionary: "b"
+Vim(echo):E716: Key not present in Dictionary: "a b"
+Vim(echo):E716: Key not present in Dictionary: "q"q"
