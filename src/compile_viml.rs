@@ -109,6 +109,17 @@ thread_local! {
     /// [`CompiledProgram::deferred_funcs`].
     static DEFERRED_FUNCS: std::cell::RefCell<Vec<UserFuncDef>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    /// Whether the compile in progress is a debug (`--dap`) build, so every
+    /// [`Compiler`] it creates emits a `SET_LINENO` marker before each
+    /// statement. Set for the duration of [`compile_program_debug`] only.
+    ///
+    /// A flag rather than a `Compiler::new` parameter because the compilers that
+    /// need it are not all reachable from one call: `compile_program_inner`
+    /// builds the top-level one, `compile_function_body` builds one per
+    /// `:function` body, and lambda bodies build their own from inside
+    /// expression compilation. Marking only the top-level chunk is what left
+    /// function bodies unbreakable.
+    static DEBUG_MARKERS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Stable, content-derived staging key for a deferred (block-level) `:function`.
@@ -530,25 +541,34 @@ fn uses_exceptions(stmts: &[(u32, Stmt)]) -> bool {
     })
 }
 
-/// Debug build: emit a `SET_LINENO` marker (source line → the DAP `check_line`
-/// hook) before each statement so the debugger can pause at breakpoints. Used
-/// only under `--dap`; the normal `compile_program` carries no markers.
-pub fn compile_program_debug(stmts: &[(u32, Stmt)]) -> Result<fusevm::Chunk, VimlError> {
-    // Debug (DAP) chunks don't carry exception-unwind checks; `:try` stepping
-    // is a later refinement.
-    let mut c = Compiler::new(false, false);
-    for (line, s) in stmts {
-        // `:function` defs carry no top-level bytecode; their markers/bodies are
-        // compiled separately, so skip them in the debug main chunk.
-        if matches!(s, Stmt::Function { .. }) {
-            continue;
-        }
-        c.emit(Op::LoadInt(*line as i64));
-        c.emit(Op::CallBuiltin(h::VIML_SET_LINENO, 1));
-        c.emit(Op::Pop);
-        c.stmt(s)?;
-    }
-    Ok(c.b.build())
+/// Debug build: [`compile_program`] with a `SET_LINENO` marker (source line →
+/// the DAP `check_line` hook) emitted before every statement, so the debugger
+/// can pause at breakpoints. Used only under `--dap`; the normal
+/// `compile_program` carries no markers.
+///
+/// This is the ordinary compile with one flag set, not a parallel one. It used
+/// to be a separate top-level loop that both `continue`d over every
+/// `Stmt::Function` and returned a bare `Chunk`, discarding `funcs` /
+/// `deferred_funcs` — so under `--dap` no user function was ever defined:
+///
+/// ```text
+/// function! Add(a, b)
+///   return a:a + a:b
+/// endfunction
+/// echo Add(2, 3)
+/// echo "done"
+/// ```
+///
+/// printed `5` / `done` in vim (and in `viml` without `--dap`), but only `done`
+/// under `--dap` — the `Add(2, 3)` call resolved to nothing. Markers now come
+/// from [`Compiler::compile_stmts`], the one place every statement is compiled,
+/// so bodies nested in `:if`/`:while`/`:for` and inside `:function` bodies carry
+/// them too — which is what makes a breakpoint inside a function reachable.
+pub fn compile_program_debug(stmts: &[(u32, Stmt)]) -> Result<CompiledProgram, VimlError> {
+    DEBUG_MARKERS.with(|d| d.set(true));
+    let r = compile_program(stmts);
+    DEBUG_MARKERS.with(|d| d.set(false));
+    r
 }
 
 struct Compiler {
@@ -591,6 +611,10 @@ struct Compiler {
     /// [`Compiler::cur_line`]. Zero for a script chunk (absolute file lines) and
     /// the `:function` header's line for a body chunk.
     line_base: u32,
+    /// Debug (`--dap`) build: emit a `SET_LINENO` marker before each statement.
+    /// Copied from [`DEBUG_MARKERS`] at construction so every chunk of the
+    /// program — main, `:function` bodies, lambda bodies — is marked alike.
+    dbg: bool,
 }
 
 /// Decide which bare function-local variables can live in fusevm slots.
@@ -1006,6 +1030,7 @@ impl Compiler {
             int_slots: std::collections::HashSet::new(),
             cur_line: 0,
             line_base: 0,
+            dbg: DEBUG_MARKERS.with(|d| d.get()),
         }
     }
 
@@ -1062,6 +1087,14 @@ impl Compiler {
             // costs no bytecode: `fusevm::ChunkBuilder::emit` already takes a
             // line and the chunk already keeps the vector.
             self.cur_line = line.saturating_sub(self.line_base);
+            // Debug (`--dap`) build only: hand the debugger the statement's
+            // ABSOLUTE file line before it runs — `cur_line` is relative inside a
+            // function body, but a DAP client sets breakpoints on file lines.
+            if self.dbg {
+                self.emit(Op::LoadInt(*line as i64));
+                self.emit(Op::CallBuiltin(h::VIML_SET_LINENO, 1));
+                self.emit(Op::Pop);
+            }
             // Only programs that use exceptions can observe the tag, and they are
             // the only ones that pay for it.
             if self.exc {

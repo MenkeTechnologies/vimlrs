@@ -5911,7 +5911,10 @@ pub fn run_compiled(prog: crate::compile_viml::CompiledProgram) {
 /// statement, so the DAP `check_line` hook can pause at breakpoints.
 pub fn eval_source_debug(src: &str) -> Result<(), VimlError> {
     let numbered = crate::viml_parser::parse_program(src)?;
-    run_chunk(crate::compile_viml::compile_program_debug(&numbered)?);
+    // `run_compiled`, not a bare `run_chunk`: the debug program carries `funcs`
+    // and `deferred_funcs` exactly as a normal one does, and dropping them left
+    // every user function undefined under `--dap`.
+    run_compiled(crate::compile_viml::compile_program_debug(&numbered)?);
     Ok(())
 }
 
