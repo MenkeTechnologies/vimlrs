@@ -4,6 +4,7 @@
 //! signatures, and control flow match the C source (PORT.md Rules A/B/4).
 #![allow(non_snake_case, non_upper_case_globals, non_camel_case_types)]
 
+use crate::vimstr::VimStr;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -59,7 +60,7 @@ pub fn tv_get_number_chk(tv: &typval_T, ret_error: Option<&mut bool>) -> varnumb
             let mut n: varnumber_T = 0;
             if let v_string(s) = &tv.vval {
                 vim_str2nr(
-                    s,
+                    &s.to_string_lossy(),
                     None,
                     None,
                     STR2NR_ALL,
@@ -149,8 +150,8 @@ pub fn tv_get_string_buf_chk(tv: &typval_T) -> Option<String> {
         // and produced `1` / `0.0000000001` here.
         (VAR_FLOAT, v_float(f)) => Some(crate::ported::eval::encode::vim_float_g(*f, None)),
         // c: return tv->vval.v_string == NULL ? "" : v_string;
-        (VAR_STRING, v_string(s)) => Some(s.clone()),
-        (VAR_FUNC, v_string(s)) => Some(s.clone()),
+        (VAR_STRING, v_string(s)) => Some(s.to_string()),
+        (VAR_FUNC, v_string(s)) => Some(s.to_string()),
         // c: STRCPY(buf, encode_bool_var_names[tv->vval.v_bool]);
         (VAR_BOOL, v_bool(b)) => Some(
             if *b == kBoolVarTrue {
@@ -217,7 +218,7 @@ pub fn tv_equal(tv1: &typval_T, tv2: &typval_T, ic: bool) -> bool {
             // c: with `ic` the compare is case-insensitive (mb_strcmp_ic).
             tv1.v_type == tv2.v_type
                 && if ic {
-                    a.to_lowercase() == b.to_lowercase()
+                    a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
                 } else {
                     a == b
                 }
@@ -279,7 +280,7 @@ pub fn tv_list_append_string(l: &mut list_T, s: &str) {
         typval_T {
             v_type: VAR_STRING,
             v_lock: VarLockStatus::VAR_UNLOCKED,
-            vval: v_string(s.to_string()),
+            vval: v_string(s.to_string().into()),
         },
     );
 }
@@ -598,7 +599,7 @@ pub fn tv_dict_add_allocated_str(d: &mut dict_T, key: &str, val: String) -> i32 
         typval_T {
             v_type: VAR_STRING,
             v_lock: VarLockStatus::VAR_UNLOCKED,
-            vval: v_string(val),
+            vval: v_string(val.into()),
         },
     )
 }
@@ -1614,11 +1615,11 @@ pub fn tv_dict2items(argvars: &[typval_T], rettv: &mut typval_T) {
 pub fn tv_string2items(argvars: &[typval_T], rettv: &mut typval_T) {
     let s = match (argvars[0].v_type, &argvars[0].vval) {
         (VAR_STRING, v_string(s)) => s.clone(),
-        _ => String::new(),
+        _ => VimStr::new(),
     };
     let out = tv_list_alloc_ret(rettv, 0);
     let mut ob = out.borrow_mut();
-    for (idx, ch) in s.chars().enumerate() {
+    for (idx, ch) in s.to_string_lossy().chars().enumerate() {
         let l2 = tv_list_alloc(2);
         {
             let mut lb = l2.borrow_mut();
@@ -1731,7 +1732,7 @@ pub fn tv_list_append_allocated_string(l: &mut list_T, str: String) {
         typval_T {
             v_type: VAR_STRING,
             v_lock: VarLockStatus::VAR_UNLOCKED,
-            vval: v_string(str),
+            vval: v_string(str.into()),
         },
     );
 }
@@ -2243,7 +2244,7 @@ pub fn f_join(argvars: &[typval_T], rettv: &mut typval_T) {
         match tv_get_string_chk(&argvars[1]) {
             Some(s) => s,
             None => {
-                rettv.vval = v_string(String::new());
+                rettv.vval = v_string(VimStr::new());
                 return;
             }
         }
@@ -2252,7 +2253,7 @@ pub fn f_join(argvars: &[typval_T], rettv: &mut typval_T) {
     if let v_list(Some(l)) = &argvars[0].vval {
         tv_list_join(&mut ga, &l.borrow(), &sep);
     }
-    rettv.vval = v_string(ga);
+    rettv.vval = v_string(ga.into());
 }
 
 /// Port of `tv_list_slice_or_index()` from `Src/eval/typval.c:932`.
@@ -2707,7 +2708,7 @@ pub fn callback_put(cb: &Callback, tv: &mut typval_T) {
     match cb {
         Callback::Funcref(name) => {
             tv.v_type = VAR_FUNC;
-            tv.vval = v_string(name.clone());
+            tv.vval = v_string(name.clone().into());
         }
         Callback::None => {
             tv.v_type = VAR_SPECIAL;
@@ -2873,13 +2874,13 @@ pub fn tv_dict_watcher_notify(
         vval: v,
     };
     let dict_tv = mk(VAR_DICT, v_dict(Some(dict.clone())));
-    let key_tv = mk(VAR_STRING, v_string(key.to_string()));
+    let key_tv = mk(VAR_STRING, v_string(key.to_string().into()));
     let change_tv = mk(VAR_DICT, v_dict(Some(change)));
     let hook = CALL_FUNC_HOOK.with(|h| *h.borrow());
     for cb in matching {
         if let Callback::Funcref(name) = cb {
             if let Some(f) = hook {
-                let func_tv = mk(VAR_FUNC, v_string(name.clone()));
+                let func_tv = mk(VAR_FUNC, v_string(name.clone().into()));
                 let _ = f(
                     &func_tv,
                     &[dict_tv.clone(), key_tv.clone(), change_tv.clone()],
@@ -3071,7 +3072,7 @@ pub fn tv_dict_add_func(d: &mut dict_T, key: &str, fname: &str) -> i32 {
         typval_T {
             v_type: VAR_FUNC,
             v_lock: VarLockStatus::VAR_UNLOCKED,
-            vval: v_string(fname.to_string()),
+            vval: v_string(fname.to_string().into()),
         },
     )
 }
@@ -3290,7 +3291,7 @@ mod tests {
         typval_T {
             v_type: VAR_STRING,
             v_lock: VarLockStatus::VAR_UNLOCKED,
-            vval: v_string(s.to_string()),
+            vval: v_string(s.to_string().into()),
         }
     }
 
@@ -3307,7 +3308,7 @@ mod tests {
         let func = |n: &str| typval_T {
             v_type: VAR_FUNC,
             v_lock: VarLockStatus::VAR_UNLOCKED,
-            vval: v_string(n.to_string()),
+            vval: v_string(n.to_string().into()),
         };
         // copy / to_string / equal.
         let mut c = Callback::None;
@@ -3565,12 +3566,12 @@ mod tests {
         assert!(!tv2bool(&typval_T {
             v_type: VAR_STRING,
             v_lock: VarLockStatus::VAR_UNLOCKED,
-            vval: v_string(String::new()),
+            vval: v_string(VimStr::new()),
         }));
         assert!(tv2bool(&typval_T {
             v_type: VAR_STRING,
             v_lock: VarLockStatus::VAR_UNLOCKED,
-            vval: v_string("x".to_string()),
+            vval: v_string("x".to_string().into()),
         }));
         // Empty list is falsy; a one-item list is truthy.
         let l = tv_list_alloc(0);

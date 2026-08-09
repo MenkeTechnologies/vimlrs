@@ -134,7 +134,7 @@ fn tv_str(s: String) -> typval_T {
     typval_T {
         v_type: VAR_STRING,
         v_lock: VAR_UNLOCKED,
-        vval: v_string(s),
+        vval: v_string(s.into()),
     }
 }
 fn tv_special() -> typval_T {
@@ -1467,7 +1467,7 @@ fn value_to_tv(v: &Value) -> typval_T {
             Some(name) => typval_T {
                 v_type: VAR_FUNC,
                 v_lock: VAR_UNLOCKED,
-                vval: v_string(name.to_string()),
+                vval: v_string(name.to_string().into()),
             },
             None => tv_str(s.to_string()),
         },
@@ -2357,7 +2357,7 @@ fn set_selfdict(
     use crate::ported::eval::typval_defs_h::partial_T;
     // c:6018 an explicitly-bound partial is left alone.
     let (name, argv) = match (rettv.v_type, &rettv.vval) {
-        (VAR_FUNC, v_string(s)) => (s.clone(), Vec::new()),
+        (VAR_FUNC, v_string(s)) => (s.to_string(), Vec::new()),
         (VAR_PARTIAL, v_partial(Some(p))) => {
             if !p.pt_auto && p.pt_dict.is_some() {
                 return rettv;

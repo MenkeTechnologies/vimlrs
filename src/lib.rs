@@ -50,6 +50,8 @@ pub mod viml_ast;
 pub mod viml_lexer;
 pub mod viml_parser;
 pub mod viml_regex;
+/// The byte-string backing a VimL `VAR_STRING` (the C's `char_u *`).
+pub mod vimstr;
 
 pub use fusevm_bridge::{eval_expr, eval_source};
 pub use ported::eval::typval_defs_h::typval_T;

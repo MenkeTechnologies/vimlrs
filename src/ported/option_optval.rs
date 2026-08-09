@@ -494,8 +494,8 @@ fn tv_to_optval(tv: &typval_T, opt_idx: OptIndex, option: &str, error: &mut bool
                 err = true;
                 // c:3224 semsg(_("E521: Number required: &%s = '%s'"), option, …);
                 let sstr = match &tv.vval {
-                    typval_vval_union::v_string(sv) => sv.as_str(),
-                    _ => "",
+                    typval_vval_union::v_string(sv) => sv.to_string_lossy(),
+                    _ => "".into(),
                 };
                 semsg(&format!("E521: Number required: &{option} = '{sstr}'"));
             }
@@ -586,7 +586,7 @@ pub fn optval_as_tv(value: OptVal, numbool: bool) -> typval_T {
             };
             // c:3277 rettv.v_type = VAR_STRING; rettv.vval.v_string = value.data.string.data;
             rettv.v_type = VarType::VAR_STRING;
-            rettv.vval = typval_vval_union::v_string(string);
+            rettv.vval = typval_vval_union::v_string(string.into());
         }
     }
 

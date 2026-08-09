@@ -5,6 +5,7 @@
 //! Rust `std::fs`/`std::env` — the same os-layer adaptation as `os/time.rs`.
 #![allow(non_snake_case, non_upper_case_globals)]
 
+use crate::vimstr::VimStr;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
@@ -61,8 +62,8 @@ pub fn f_pathshorten(argvars: &[typval_T], rettv: &mut typval_T) {
     // c: p = tv_get_string_chk(&argvars[0]); if (p == NULL) v_string = NULL;
     //    else { v_string = xstrdup(p); shorten_dir_len(v_string, trim_len); }
     match tv_get_string_chk(&argvars[0]) {
-        Some(p) => rettv.vval = v_string(shorten_dir_len(&p, trim_len)),
-        None => rettv.vval = v_string(String::new()),
+        Some(p) => rettv.vval = v_string(shorten_dir_len(&p, trim_len).into()),
+        None => rettv.vval = v_string(VimStr::new()),
     }
 }
 
@@ -78,7 +79,7 @@ pub fn f_pathshorten(argvars: &[typval_T], rettv: &mut typval_T) {
 macro_rules! ret_str {
     ($rettv:expr, $s:expr) => {{
         $rettv.v_type = VAR_STRING;
-        $rettv.vval = v_string(($s).unwrap_or_default());
+        $rettv.vval = v_string(($s).unwrap_or_default().into());
     }};
 }
 
@@ -468,7 +469,7 @@ pub fn f_getcwd(_argvars: &[typval_T], rettv: &mut typval_T) {
 /// ("" on failure).
 pub fn f_chdir(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(String::new());
+    rettv.vval = v_string(VimStr::new());
     if argvars[0].v_type != VAR_STRING {
         return;
     }
@@ -478,7 +479,7 @@ pub fn f_chdir(argvars: &[typval_T], rettv: &mut typval_T) {
     };
     let dir = tv_get_string(&argvars[0]);
     if std::env::set_current_dir(&dir).is_ok() {
-        rettv.vval = v_string(old);
+        rettv.vval = v_string(old.into());
     }
 }
 
@@ -838,7 +839,7 @@ fn read_file_or_blob(argvars: &[typval_T], rettv: &mut typval_T, always_blob: bo
                     typval_T {
                         v_type: VAR_STRING,
                         v_lock: VarLockStatus::VAR_UNLOCKED,
-                        vval: v_string(s),
+                        vval: v_string(s.into()),
                     },
                 );
 
@@ -1640,7 +1641,7 @@ pub fn f_glob(argvars: &[typval_T], rettv: &mut typval_T) {
         }
     } else {
         rettv.v_type = VAR_STRING;
-        rettv.vval = v_string(matches.join("\n"));
+        rettv.vval = v_string(matches.join("\n").into());
     }
 }
 
@@ -1672,7 +1673,7 @@ pub fn f_globpath(argvars: &[typval_T], rettv: &mut typval_T) {
         }
     } else {
         rettv.v_type = VAR_STRING;
-        rettv.vval = v_string(matches.join("\n"));
+        rettv.vval = v_string(matches.join("\n").into());
     }
 }
 
@@ -1752,7 +1753,7 @@ pub fn f_expand(argvars: &[typval_T], rettv: &mut typval_T) {
         }
     } else {
         rettv.v_type = VAR_STRING;
-        rettv.vval = v_string(results.join("\n"));
+        rettv.vval = v_string(results.join("\n").into());
     }
 }
 
@@ -1761,18 +1762,18 @@ pub fn f_expand(argvars: &[typval_T], rettv: &mut typval_T) {
 /// as-is standalone.)
 pub fn f_expandcmd(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(expand_env(&tv_get_string(&argvars[0])));
+    rettv.vval = v_string(expand_env(&tv_get_string(&argvars[0])).into());
 }
 
 /// Port of `f_browse()` (fs.c) — no GUI file dialog standalone → "".
 pub fn f_browse(_argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(String::new());
+    rettv.vval = v_string(VimStr::new());
 }
 /// Port of `f_browsedir()` (fs.c) — no GUI directory dialog standalone → "".
 pub fn f_browsedir(_argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(String::new());
+    rettv.vval = v_string(VimStr::new());
 }
 /// Port of `findfilendir()` from `vendor/eval/fs.c:536`.
 ///
@@ -1788,7 +1789,7 @@ fn findfilendir(argvars: &[typval_T], rettv: &mut typval_T, _find_what: i32) {
     let mut count = 1;
     let mut error = false;
 
-    rettv.vval = v_string(String::new()); // rettv->vval.v_string = NULL;
+    rettv.vval = v_string(VimStr::new()); // rettv->vval.v_string = NULL;
     rettv.v_type = VAR_STRING;
 
     let fname = tv_get_string(&argvars[0]);
@@ -1816,7 +1817,7 @@ fn findfilendir(argvars: &[typval_T], rettv: &mut typval_T, _find_what: i32) {
     }
 
     if rettv.v_type == VAR_STRING {
-        rettv.vval = v_string(fresult.unwrap_or_default());
+        rettv.vval = v_string(fresult.unwrap_or_default().into());
     }
 }
 

@@ -161,7 +161,7 @@ pub fn conv_error(
                 let key_tv = typval_T {
                     v_type: VAR_STRING,
                     v_lock: VAR_UNLOCKED,
-                    vval: v_string(hi_key),
+                    vval: v_string(hi_key.into()),
                 };
                 // c:139 char *const key = encode_tv2string(&key_tv, NULL);
                 let key = encode_tv2string(&key_tv);
@@ -287,7 +287,7 @@ pub fn encode_vim_list_to_buf(list: &crate::ported::eval::typval_defs_h::list_T)
             return None;
         }
         match &it.li_tv.vval {
-            v_string(s) => parts.push(s.replace('\n', "\0")),
+            v_string(s) => parts.push(s.to_string_lossy().replace('\n', "\0")),
             _ => parts.push(String::new()),
         }
     }
@@ -422,7 +422,7 @@ pub fn encode_tv2string(tv: &typval_T) -> String {
 pub fn encode_tv2echo(tv: &typval_T) -> String {
     // c: if (tv->v_type == VAR_STRING || tv->v_type == VAR_FUNC) { ga_concat(v_string) }
     match (tv.v_type, &tv.vval) {
-        (VAR_STRING | VAR_FUNC, v_string(s)) => s.clone(),
+        (VAR_STRING | VAR_FUNC, v_string(s)) => s.to_string(),
         // c: else encode_vim_to_echo(&ga, tv, ...)
         _ => encode_vim_to_echo(tv),
     }
@@ -457,9 +457,11 @@ pub fn encode_vim_to_string(tv: &typval_T) -> String {
             }
         }
         // TYPVAL_ENCODE_CONV_STRING — single-quoted, embedded quotes doubled.
-        (VAR_STRING, v_string(s)) => format!("'{}'", s.replace('\'', "''")),
+        (VAR_STRING, v_string(s)) => format!("'{}'", s.to_string_lossy().replace('\'', "''")),
         // TYPVAL_ENCODE_CONV_FUNC_START — function('name').
-        (VAR_FUNC, v_string(s)) => format!("function('{}')", s.replace('\'', "''")),
+        (VAR_FUNC, v_string(s)) => {
+            format!("function('{}')", s.to_string_lossy().replace('\'', "''"))
+        }
         // A Partial — function('name'[, [args]][, {self}]).
         //
         // c: TYPVAL_ENCODE_CONV_FUNC_BEFORE_ARGS writes ", " when there are
@@ -601,7 +603,7 @@ pub fn encode_vim_to_json(tv: &typval_T) -> String {
                 "null".to_string() // JSON has no NaN/Inf
             }
         }
-        (VAR_STRING, v_string(s)) => convert_to_json_string(s),
+        (VAR_STRING, v_string(s)) => convert_to_json_string(&s.to_string_lossy()),
         (VAR_BOOL, v_bool(b)) => if *b == kBoolVarTrue { "true" } else { "false" }.to_string(),
         (VAR_SPECIAL, _) => "null".to_string(),
         (VAR_LIST, v_list(l)) => match l {

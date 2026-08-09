@@ -135,7 +135,14 @@ pub enum typval_vval_union {
     /// `float_T v_float` — for VAR_FLOAT.
     v_float(float_T),
     /// `char *v_string` — for VAR_STRING and VAR_FUNC (can be NULL).
-    v_string(String),
+    ///
+    /// The C's `char_u *` is a byte array with no encoding invariant, and Vim
+    /// puts bytes in one that are not valid UTF-8 (`list2str([-1])` is the
+    /// single byte `0xff`). A Rust `String` cannot hold those, so the backing
+    /// store is [`crate::vimstr::VimStr`] — a `Vec<u8>` — exactly as the C has
+    /// it. See that module for the measurement and for the one remaining UTF-8
+    /// boundary (`fusevm::Value::Str`).
+    v_string(crate::vimstr::VimStr),
     /// `list_T *v_list` — for VAR_LIST (can be NULL).
     v_list(Option<Rc<RefCell<list_T>>>),
     /// `dict_T *v_dict` — for VAR_DICT (can be NULL).
@@ -212,7 +219,7 @@ impl From<String> for typval_T {
         typval_T {
             v_type: VarType::VAR_STRING,
             v_lock: VarLockStatus::VAR_UNLOCKED,
-            vval: typval_vval_union::v_string(s),
+            vval: typval_vval_union::v_string(s.into()),
         }
     }
 }

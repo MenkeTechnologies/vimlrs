@@ -111,7 +111,7 @@ fn tv_op_string(tv1: &mut typval_T, tv2: &typval_T, _op: char) -> i32 {
     let s = format!("{}{}", tv_get_string(tv1), tv_get_string(tv2));
     tv_clear(tv1);
     tv1.v_type = VAR_STRING;
-    tv1.vval = v_string(s);
+    tv1.vval = v_string(s.into());
     OK
 }
 
@@ -196,7 +196,7 @@ mod tests {
         typval_T {
             v_type: VAR_STRING,
             v_lock: VarLockStatus::VAR_UNLOCKED,
-            vval: v_string(t.to_string()),
+            vval: v_string(t.to_string().into()),
         }
     }
 

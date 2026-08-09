@@ -53,6 +53,7 @@ use crate::ported::profile::{
 };
 use crate::ported::sha256::sha256_bytes;
 use crate::viml_regex::regex_match;
+use crate::vimstr::VimStr;
 
 /// Port of `f_len()` from `Src/eval/funcs.c`.
 ///
@@ -193,7 +194,7 @@ fn type_name_of(tv: &typval_T) -> String {
             // c: `pt_name` for a partial, `v_string` for a plain Funcref.
             let (name, bound) = match (tv.v_type, &tv.vval) {
                 (VAR_PARTIAL, v_partial(Some(p))) => (p.pt_name.clone(), p.pt_argv.len()),
-                (VAR_FUNC, v_string(s)) => (s.clone(), 0),
+                (VAR_FUNC, v_string(s)) => (s.to_string(), 0),
                 _ => return "func(...): any".into(),
             };
             // c: `if (name != NULL) ufunc = find_func(name);` — a user function
@@ -350,7 +351,7 @@ pub fn f_nr2char(argvars: &[typval_T], rettv: &mut typval_T) {
     let bytes = &buf[..len];
     let bytes = &bytes[..bytes.iter().position(|&b| b == 0).unwrap_or(len)];
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(String::from_utf8_lossy(bytes).into_owned());
+    rettv.vval = v_string(String::from_utf8_lossy(bytes).into_owned().into());
 }
 
 /// Port of `repeat_list()` — `vendor/eval/funcs.c:5310`. Repeat list `l` `n` times
@@ -415,7 +416,7 @@ fn repeat_string(str_tv: &typval_T, n: varnumber_T, rettv: &mut typval_T) {
     rettv.v_type = VAR_STRING;
     // c: if (n <= 0) { rettv->vval.v_string = NULL; return; }
     if n <= 0 {
-        rettv.vval = v_string(String::new());
+        rettv.vval = v_string(VimStr::new());
         return;
     }
     // c: const char *const p = tv_get_string(str_tv); const size_t slen = strlen(p);
@@ -424,12 +425,12 @@ fn repeat_string(str_tv: &typval_T, n: varnumber_T, rettv: &mut typval_T) {
     let slen = bytes.len();
     // c: if (slen == 0) return;  (NULL → empty here)
     if slen == 0 {
-        rettv.vval = v_string(String::new());
+        rettv.vval = v_string(VimStr::new());
         return;
     }
     // c: const size_t len = slen * n; if (len / n != slen) return;  (overflow)
     let Some(len) = slen.checked_mul(n as usize) else {
-        rettv.vval = v_string(String::new());
+        rettv.vval = v_string(VimStr::new());
         return;
     };
     // c: char *r = xmallocz(len); memmove(r, p, slen);  then the doubling copy:
@@ -444,7 +445,7 @@ fn repeat_string(str_tv: &typval_T, n: varnumber_T, rettv: &mut typval_T) {
         done += copy_len;
     }
     // The source is a valid VAR_STRING (UTF-8 here), so the repeat is valid too.
-    rettv.vval = v_string(String::from_utf8_lossy(&r).into_owned());
+    rettv.vval = v_string(String::from_utf8_lossy(&r).into_owned().into());
 }
 
 /// Port of `f_repeat()` — `vendor/eval/funcs.c:5393`. Repeat a List, Blob, or
@@ -499,11 +500,11 @@ pub fn f_matchstr(argvars: &[typval_T], rettv: &mut typval_T) {
         Some(m) if m.list_idx.is_some() => *rettv = m.item,
         Some(m) => {
             rettv.v_type = VAR_STRING;
-            rettv.vval = v_string(m.groups.into_iter().next().unwrap_or_default());
+            rettv.vval = v_string(m.groups.into_iter().next().unwrap_or_default().into());
         }
         None => {
             rettv.v_type = VAR_STRING;
-            rettv.vval = v_string(String::new());
+            rettv.vval = v_string(VimStr::new());
         }
     }
 }
@@ -624,7 +625,7 @@ pub fn call_internal_method(
     let callee = typval_T {
         v_type: VAR_FUNC,
         v_lock: VarLockStatus::VAR_UNLOCKED,
-        vval: v_string(fname.to_string()),
+        vval: v_string(fname.to_string().into()),
     };
     match CALL_FUNC_HOOK
         .with(|h| *h.borrow())
@@ -664,7 +665,7 @@ pub fn call_internal_func(fname: &str, argvars: &[typval_T], rettv: &mut typval_
     let callee = typval_T {
         v_type: VAR_FUNC,
         v_lock: VarLockStatus::VAR_UNLOCKED,
-        vval: v_string(fname.to_string()),
+        vval: v_string(fname.to_string().into()),
     };
     match CALL_FUNC_HOOK
         .with(|h| *h.borrow())
@@ -685,9 +686,9 @@ pub fn call_internal_func(fname: &str, argvars: &[typval_T], rettv: &mut typval_
 pub fn return_register(regname: u8, rettv: &mut typval_T) {
     rettv.v_type = VAR_STRING;
     rettv.vval = v_string(if regname == 0 {
-        String::new()
+        VimStr::new()
     } else {
-        (regname as char).to_string()
+        (regname as char).to_string().into()
     });
 }
 
@@ -773,7 +774,12 @@ pub fn tv_get_buf(
 
     // c:497 buf = buflist_findnr(buflist_findpat(name, name + strlen(name),
     // c:498                                       true, false, curtab_only));
-    let mut buf = buflist_findnr(buflist_findpat(name, true, false, curtab_only));
+    let mut buf = buflist_findnr(buflist_findpat(
+        &name.to_string_lossy(),
+        true,
+        false,
+        curtab_only,
+    ));
 
     // c:503 if (buf == NULL) buf = find_buffer(tv);
     if buf.is_none() {
@@ -993,7 +999,7 @@ pub fn f_substitute(argvars: &[typval_T], rettv: &mut typval_T) {
     let sub = tv_get_string(&argvars[2]);
     let flags = argvars.get(3).map(tv_get_string).unwrap_or_default();
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(crate::viml_regex::regex_substitute(&s, &pat, &sub, &flags));
+    rettv.vval = v_string(crate::viml_regex::regex_substitute(&s, &pat, &sub, &flags).into());
 }
 
 // Port of `f_join()` from `Src/eval/funcs.c` — join a List with a separator
@@ -1105,7 +1111,7 @@ pub fn f_reverse(argvars: &[typval_T], rettv: &mut typval_T) {
         // c: VAR_STRING — a new String from reverse_text() (by character).
         (VAR_STRING, v_string(s)) => {
             rettv.v_type = VAR_STRING;
-            rettv.vval = v_string(reverse_text(s));
+            rettv.vval = v_string(reverse_text(&s.to_string_lossy()).into());
         }
         _ => {}
     }
@@ -1177,7 +1183,7 @@ pub fn f_get(argvars: &[typval_T], rettv: &mut typval_T) {
             Vec<typval_T>,
             Option<std::rc::Rc<std::cell::RefCell<crate::ported::eval::typval_defs_h::dict_T>>>,
         ) = match (argvars[0].v_type, &argvars[0].vval) {
-            (VAR_FUNC, v_string(s)) => (s.clone(), Vec::new(), None),
+            (VAR_FUNC, v_string(s)) => (s.to_string(), Vec::new(), None),
             (VAR_PARTIAL, v_partial(Some(p))) => (
                 crate::ported::eval::partial_name(p).to_string(),
                 p.pt_argv.clone(),
@@ -1200,11 +1206,11 @@ pub fn f_get(argvars: &[typval_T], rettv: &mut typval_T) {
             // the Rc model; the pt_func/<SNR> rename is unmodeled (pt_func absent).
             "func" => {
                 rettv.v_type = VAR_FUNC;
-                rettv.vval = v_string(name);
+                rettv.vval = v_string(name.into());
             }
             "name" => {
                 rettv.v_type = VAR_STRING;
-                rettv.vval = v_string(name);
+                rettv.vval = v_string(name.into());
             }
             // c: strcmp(what,"dict")==0 — the bound self dict, if any.
             "dict" => {
@@ -1508,7 +1514,7 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
     if crate::ported::strings::parse_fmt_types(&fmt, argvars.len() - 1)
         == crate::ported::eval_h::FAIL
     {
-        rettv.vval = v_string(String::new());
+        rettv.vval = v_string(VimStr::new());
         return;
     }
     let bytes: Vec<char> = fmt.chars().collect();
@@ -1675,13 +1681,13 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
         const PRINTF_MAX: usize = 1024 * 1024;
         if width > PRINTF_MAX {
             emsg(&format!("E1510: Value too large: {width}"));
-            rettv.vval = v_string(String::new());
+            rettv.vval = v_string(VimStr::new());
             return;
         }
         if let Some(p) = prec {
             if p > PRINTF_MAX {
                 emsg(&format!("E1510: Value too large: {p}"));
-                rettv.vval = v_string(String::new());
+                rettv.vval = v_string(VimStr::new());
                 return;
             }
         }
@@ -1755,7 +1761,7 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
             && cur.is_some_and(|t| !matches!(t.v_type, VAR_NUMBER | VAR_FLOAT))
         {
             emsg("E807: Expected Float argument for printf()");
-            rettv.vval = v_string(String::new());
+            rettv.vval = v_string(VimStr::new());
             return;
         }
         if cur.is_some() {
@@ -1969,15 +1975,15 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
     // value is the empty string, not the half-formatted text.
     if missing {
         emsg("E766: Insufficient arguments for printf()");
-        rettv.vval = v_string(String::new());
+        rettv.vval = v_string(VimStr::new());
         return;
     }
     if used_max + 1 < argvars.len() {
         emsg("E767: Too many arguments to printf()");
-        rettv.vval = v_string(String::new());
+        rettv.vval = v_string(VimStr::new());
         return;
     }
-    rettv.vval = v_string(out);
+    rettv.vval = v_string(out.into());
 }
 
 // ── float math (Src/eval/funcs.c — one `f_*` per libm call) ──
@@ -2206,7 +2212,7 @@ pub fn f_escape(argvars: &[typval_T], rettv: &mut typval_T) {
         i += 1;
     }
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(out);
+    rettv.vval = v_string(out.into());
 }
 
 /// Port of `f_list2str()` from `Src/eval/funcs.c` — a String from a List of code
@@ -2232,7 +2238,7 @@ pub fn f_list2str(argvars: &[typval_T], rettv: &mut typval_T) {
             }
         }
     }
-    rettv.vval = v_string(out);
+    rettv.vval = v_string(out.into());
 }
 
 /// Port of `flatten_common()` from `Src/eval/funcs.c:1529`.
@@ -2372,7 +2378,7 @@ pub fn f_atan2(argvars: &[typval_T], rettv: &mut typval_T) {
 /// Port of `f_json_encode()` from `Src/eval/funcs.c` — the JSON text of `{expr}`.
 pub fn f_json_encode(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(crate::ported::eval::encode::encode_tv2json(&argvars[0]));
+    rettv.vval = v_string(crate::ported::eval::encode::encode_tv2json(&argvars[0]).into());
 }
 
 /// Port of `f_json_decode()` from `Src/eval/funcs.c` — the value of JSON text.
@@ -2421,7 +2427,7 @@ pub fn f_getenv(argvars: &[typval_T], rettv: &mut typval_T) {
     match std::env::var(&name) {
         Ok(p) => {
             rettv.v_type = VAR_STRING;
-            rettv.vval = v_string(p);
+            rettv.vval = v_string(p.into());
         }
         Err(_) => {
             rettv.v_type = VAR_SPECIAL;
@@ -2470,7 +2476,7 @@ pub fn f_shellescape(argvars: &[typval_T], rettv: &mut typval_T) {
     }
     out.push('\'');
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(out);
+    rettv.vval = v_string(out.into());
 }
 
 // ── batch 7: float predicates + pid (Src/eval/funcs.c) ──
@@ -2515,7 +2521,7 @@ pub fn f_localtime(_argvars: &[typval_T], rettv: &mut typval_T) {
 /// returns the word as-is, matching Vim without `:set spell`.
 pub fn f_soundfold(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(tv_get_string(&argvars[0]));
+    rettv.vval = v_string(tv_get_string(&argvars[0]).into());
 }
 
 /// Port of `list2proftime()` from `Src/eval/funcs.c:5229`.
@@ -2585,9 +2591,9 @@ pub fn f_reltime(argvars: &[typval_T], rettv: &mut typval_T) {
 pub fn f_reltimestr(argvars: &[typval_T], rettv: &mut typval_T) {
     let mut tm: proftime_T = 0;
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(String::new());
+    rettv.vval = v_string(VimStr::new());
     if list2proftime(&argvars[0], &mut tm) == OK {
-        rettv.vval = v_string(profile_msg(tm));
+        rettv.vval = v_string(profile_msg(tm).into());
     }
 }
 
@@ -2657,7 +2663,7 @@ fn reduce_string(argvars: &[typval_T], expr: &typval_T, rettv: &mut typval_T) {
         *rettv = typval_T {
             v_type: VAR_STRING,
             v_lock: crate::ported::eval::typval_defs_h::VarLockStatus::VAR_UNLOCKED,
-            vval: v_string(chars[0].to_string()),
+            vval: v_string(chars[0].to_string().into()),
         };
         1
     } else {
@@ -2671,7 +2677,7 @@ fn reduce_string(argvars: &[typval_T], expr: &typval_T, rettv: &mut typval_T) {
         let item = typval_T {
             v_type: VAR_STRING,
             v_lock: crate::ported::eval::typval_defs_h::VarLockStatus::VAR_UNLOCKED,
-            vval: v_string(ch.to_string()),
+            vval: v_string(ch.to_string().into()),
         };
         match call(rettv, &item) {
             Some(r) => *rettv = r,
@@ -2823,7 +2829,7 @@ pub fn f_strftime(argvars: &[typval_T], rettv: &mut typval_T) {
         Some(t) => t,
         None => {
             // c: MSVC returns NULL for an invalid value of seconds.
-            rettv.vval = v_string("(Invalid)".to_string());
+            rettv.vval = v_string("(Invalid)".to_string().into());
             return;
         }
     };
@@ -2831,7 +2837,7 @@ pub fn f_strftime(argvars: &[typval_T], rettv: &mut typval_T) {
     let fmt = match std::ffi::CString::new(p) {
         Ok(c) => c,
         Err(_) => {
-            rettv.vval = v_string(String::new());
+            rettv.vval = v_string(VimStr::new());
             return;
         }
     };
@@ -2850,7 +2856,7 @@ pub fn f_strftime(argvars: &[typval_T], rettv: &mut typval_T) {
     } else {
         String::from_utf8_lossy(&buf[..n]).into_owned()
     };
-    rettv.vval = v_string(s);
+    rettv.vval = v_string(s.into());
 }
 
 /// Port of `f_strptime()` from `Src/eval/funcs.c:7270`.
@@ -2885,11 +2891,11 @@ pub fn f_sha256(argvars: &[typval_T], rettv: &mut typval_T) {
             v_blob(Some(b)) => b.borrow().bv_ga.clone(),
             _ => Vec::new(),
         };
-        rettv.vval = v_string(sha256_bytes(&bytes, None));
+        rettv.vval = v_string(sha256_bytes(&bytes, None).into());
     } else {
         // c: p = tv_get_string(&argvars[0]); sha256_bytes(p, strlen(p), NULL, 0);
         let p = tv_get_string(&argvars[0]);
-        rettv.vval = v_string(sha256_bytes(p.as_bytes(), None));
+        rettv.vval = v_string(sha256_bytes(p.as_bytes(), None).into());
     }
 }
 
@@ -7136,7 +7142,7 @@ pub fn f_histget(argvars: &[typval_T], rettv: &mut typval_T) {
     let t = match get_histtype(&name) {
         Some(t) => t,
         None => {
-            rettv.vval = v_string(String::new());
+            rettv.vval = v_string(VimStr::new());
             return;
         }
     };
@@ -7167,7 +7173,7 @@ pub fn f_histget(argvars: &[typval_T], rettv: &mut typval_T) {
         };
         pos.map(|i| v[i].clone()).unwrap_or_default()
     });
-    rettv.vval = v_string(s);
+    rettv.vval = v_string(s.into());
 }
 
 /// Port of `f_histnr()` (Neovim cmdhist.c) — the number of the newest entry in
@@ -7261,10 +7267,10 @@ pub fn f_digraph_get(argvars: &[typval_T], rettv: &mut typval_T) {
         crate::ported::message::semsg(&format!(
             "E1214: Digraph must be just two characters: {chars}"
         ));
-        rettv.vval = v_string(String::new());
+        rettv.vval = v_string(VimStr::new());
         return;
     }
-    rettv.vval = v_string(getexactdigraph(cc[0], cc[1]).unwrap_or_default());
+    rettv.vval = v_string(getexactdigraph(cc[0], cc[1]).unwrap_or_default().into());
 }
 
 /// Port of `f_digraph_set()` (Neovim digraph.c) — register the digraph
@@ -7373,7 +7379,7 @@ pub fn f_hostname(_argvars: &[typval_T], rettv: &mut typval_T) {
             String::new()
         }
     };
-    rettv.vval = v_string(name);
+    rettv.vval = v_string(name.into());
 }
 
 /// Port of `f_iconv()` (Neovim eval/funcs.c → mbyte.c `string_convert`) —
@@ -7408,7 +7414,7 @@ pub fn f_iconv(argvars: &[typval_T], rettv: &mut typval_T) {
     } else {
         s
     };
-    rettv.vval = v_string(out);
+    rettv.vval = v_string(out.into());
 }
 
 // ── argc()/argv()/argidx() — eval/funcs.c (full table). Standalone, vimlrs has
@@ -7461,7 +7467,7 @@ pub fn f_argv(argvars: &[typval_T], rettv: &mut typval_T) {
                 String::new()
             }
         });
-        rettv.vval = v_string(s);
+        rettv.vval = v_string(s.into());
         return;
     }
     // No index (or -1): the whole list.
@@ -7962,7 +7968,7 @@ fn getmaparg(name: &str, mode: i32, want_dict: bool, rettv: &mut typval_T) {
         }
     } else {
         rettv.v_type = VAR_STRING;
-        rettv.vval = v_string(found.map(|m| m.rhs).unwrap_or_default());
+        rettv.vval = v_string(found.map(|m| m.rhs).unwrap_or_default().into());
     }
 }
 
@@ -8000,7 +8006,7 @@ pub fn f_mapcheck(argvars: &[typval_T], rettv: &mut typval_T) {
             .find(|e| e.mode & mode != 0 && (e.lhs.starts_with(&name) || name.starts_with(&e.lhs)))
             .map(|e| e.rhs.clone())
     });
-    rettv.vval = v_string(rhs.unwrap_or_default());
+    rettv.vval = v_string(rhs.unwrap_or_default().into());
 }
 
 /// Port of `f_maplist()` (Neovim mapping.c) — every mapping as a List of Dicts.
@@ -9408,7 +9414,7 @@ pub fn f_setcmdline(argvars: &[typval_T], rettv: &mut typval_T) {
 /// contents ("" when no command line is active).
 pub fn f_getcmdline(_argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(CMDLINE.with(|c| c.borrow().0.clone()));
+    rettv.vval = v_string(CMDLINE.with(|c| c.borrow().0.clone()).into());
 }
 
 /// Port of `f_setcmdpos()` (Neovim ex_getln.c) — set the cursor to byte
@@ -9429,7 +9435,7 @@ pub fn f_getcmdpos(_argvars: &[typval_T], rettv: &mut typval_T) {
 /// (`:`/`/`/`?`/…), "" when no command line is active.
 pub fn f_getcmdtype(_argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(CMDLINE.with(|c| c.borrow().2.clone()));
+    rettv.vval = v_string(CMDLINE.with(|c| c.borrow().2.clone()).into());
 }
 
 // ── sign_place()/sign_getplaced()/sign_unplace()/sign_placelist()/
@@ -9714,14 +9720,14 @@ pub fn f_indent(argvars: &[typval_T], rettv: &mut typval_T) {
 /// on the current line. No folds standalone → "".
 pub fn f_foldtext(_argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(String::new());
+    rettv.vval = v_string(VimStr::new());
 }
 
 /// Port of `f_foldtextresult()` (Neovim fold.c) — the `'foldtext'` text for the
 /// fold at `{lnum}`. No folds standalone → "".
 pub fn f_foldtextresult(_argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(String::new());
+    rettv.vval = v_string(VimStr::new());
 }
 
 /// Port of `f_highlight_exists()` (Neovim highlight_group.c) — whether highlight
@@ -10081,7 +10087,7 @@ pub fn f_getchar(_argvars: &[typval_T], rettv: &mut typval_T) {
 /// no input standalone → "".
 pub fn f_getcharstr(_argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(String::new());
+    rettv.vval = v_string(VimStr::new());
 }
 
 /// Port of `f_getcharmod()` (Neovim getchar.c) — the modifier bitmask of the
@@ -10094,7 +10100,7 @@ pub fn f_getcharmod(_argvars: &[typval_T], rettv: &mut typval_T) {
 /// text. None active standalone → "".
 pub fn f_getcmdprompt(_argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(String::new());
+    rettv.vval = v_string(VimStr::new());
 }
 
 /// Port of `f_getcmdscreenpos()` (Neovim ex_getln.c) — the screen position of
@@ -10107,14 +10113,14 @@ pub fn f_getcmdscreenpos(_argvars: &[typval_T], rettv: &mut typval_T) {
 /// the current command line. None active standalone → "".
 pub fn f_getcmdcompltype(_argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(String::new());
+    rettv.vval = v_string(VimStr::new());
 }
 
 /// Port of `f_getcmdcomplpat()` (Neovim cmdexpand.c) — the completion pattern of
 /// the current command line. None active standalone → "".
 pub fn f_getcmdcomplpat(_argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(String::new());
+    rettv.vval = v_string(VimStr::new());
 }
 
 /// Port of `f_cindent()` (Neovim indent.c) — the C-indent for line `{lnum}`. No
@@ -10189,7 +10195,7 @@ pub fn f_undofile(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.v_type = VAR_STRING;
     let name = tv_get_string(&argvars[0]);
     if name.is_empty() {
-        rettv.vval = v_string(String::new());
+        rettv.vval = v_string(VimStr::new());
         return;
     }
     let p = std::path::Path::new(&name);
@@ -10204,7 +10210,7 @@ pub fn f_undofile(argvars: &[typval_T], rettv: &mut typval_T) {
         }
         _ => undoname,
     };
-    rettv.vval = v_string(result);
+    rettv.vval = v_string(result.into());
 }
 
 /// Port of `f_undotree()` (Neovim undo.c) — the undo-tree state. No undo history
@@ -10264,7 +10270,7 @@ pub fn f_screenpos(_argvars: &[typval_T], rettv: &mut typval_T) {
 /// that would apply to command-line `{pat}`. No active command line → "".
 pub fn f_getcompletiontype(_argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(String::new());
+    rettv.vval = v_string(VimStr::new());
 }
 
 /// Port of `f_mapset()` (Neovim mapping.c) — create/restore a mapping from a
@@ -10332,7 +10338,7 @@ pub fn f_complete(_argvars: &[typval_T], _rettv: &mut typval_T) {}
 /// completion. None standalone → "".
 pub fn f_preinserted(_argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(String::new());
+    rettv.vval = v_string(VimStr::new());
 }
 
 /// Port of `f_getscriptinfo()` (Neovim runtime.c) — info about sourced scripts.
@@ -10405,7 +10411,7 @@ pub fn f_fullcommand(argvars: &[typval_T], rettv: &mut typval_T) {
             .map(|(_, full)| full.to_string())
             .unwrap_or_default()
     };
-    rettv.vval = v_string(result);
+    rettv.vval = v_string(result.into());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -10464,7 +10470,7 @@ pub fn f_call(argvars: &[typval_T], rettv: &mut typval_T) {
     let mut partial: Option<std::rc::Rc<crate::ported::eval::typval_defs_h::partial_T>> = None;
     let mut func: String = match (&argvars[0].v_type, &argvars[0].vval) {
         // c:560 VAR_FUNC → argvars[0].vval.v_string
-        (VAR_FUNC, v_string(s)) => s.clone(),
+        (VAR_FUNC, v_string(s)) => s.to_string(),
         // c:562 VAR_PARTIAL → partial_name(partial)
         (VAR_PARTIAL, v_partial(Some(pt))) => {
             partial = Some(pt.clone());
@@ -10587,7 +10593,7 @@ pub fn common_function(argvars: &[typval_T], rettv: &mut typval_T, is_funcref: b
 
     // c:1662 resolve the source name / partial.
     let mut s: Option<String> = match (&argvars[0].v_type, &argvars[0].vval) {
-        (VAR_FUNC, v_string(name)) => Some(name.clone()), // c:1664
+        (VAR_FUNC, v_string(name)) => Some(name.to_string()), // c:1664
         (VAR_PARTIAL, v_partial(Some(pt))) => {
             arg_pt = Some(pt.clone()); // c:1668
             Some(crate::ported::eval::partial_name(pt).to_string())
@@ -10796,7 +10802,7 @@ pub fn common_function(argvars: &[typval_T], rettv: &mut typval_T, is_funcref: b
         crate::ported::eval::userfunc::func_ref();
         rettv.v_type = VAR_FUNC;
         rettv.v_lock = VarLockStatus::VAR_UNLOCKED;
-        rettv.vval = v_string(name);
+        rettv.vval = v_string(name.into());
     }
 }
 
@@ -11230,7 +11236,7 @@ pub fn libcall_common(
     // c:3942 rettv->v_type = out_type; if (out_type != VAR_NUMBER) rettv->vval.v_string = NULL;
     rettv.v_type = out_type;
     if out_type != VAR_NUMBER {
-        rettv.vval = v_string(String::new());
+        rettv.vval = v_string(VimStr::new());
     }
 
     // c:3951 both libname and funcname must be strings.
@@ -11282,7 +11288,7 @@ pub fn libcall_common(
     if out_type == VAR_NUMBER {
         rettv.vval = v_number(int_out as varnumber_T); // c:3978
     } else {
-        rettv.vval = v_string(str_out.unwrap_or_default());
+        rettv.vval = v_string(str_out.unwrap_or_default().into());
     }
 }
 
@@ -11904,7 +11910,7 @@ pub fn execute_common(argvars: &[typval_T], rettv: &mut typval_T, arg_off: usize
         .with(|v| v.borrow_mut().take())
         .unwrap_or_default();
     rettv.v_type = VAR_STRING; // c:1349
-    rettv.vval = v_string(captured); // c:1350
+    rettv.vval = v_string(captured.into()); // c:1350
 
     // c:1352 capture_ga = save_capture_ga;
     capture_ga.with(|v| *v.borrow_mut() = save_capture_ga);

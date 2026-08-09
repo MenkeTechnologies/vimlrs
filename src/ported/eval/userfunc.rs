@@ -547,7 +547,7 @@ pub fn call_user_func(
     let callee = typval_T {
         v_type: VAR_FUNC,
         v_lock: VarLockStatus::VAR_UNLOCKED,
-        vval: v_string(fp.uf_name.clone()),
+        vval: v_string(fp.uf_name.clone().into()),
     };
     if let Some(result) = crate::ported::eval::typval::CALL_FUNC_HOOK
         .with(|h| *h.borrow())
@@ -906,7 +906,7 @@ pub fn call_func(
     let callee = typval_T {
         v_type: VAR_FUNC,
         v_lock: VarLockStatus::VAR_UNLOCKED,
-        vval: v_string(funcname.to_string()),
+        vval: v_string(funcname.to_string().into()),
     };
     match crate::ported::eval::typval::CALL_FUNC_HOOK
         .with(|h| *h.borrow())
@@ -956,7 +956,7 @@ pub fn func_call(
         None => typval_T {
             v_type: VAR_FUNC,
             v_lock: VarLockStatus::VAR_UNLOCKED,
-            vval: v_string(name.to_string()),
+            vval: v_string(name.to_string().into()),
         },
     };
     match crate::ported::eval::typval::CALL_FUNC_HOOK
@@ -1205,7 +1205,7 @@ pub fn deref_func_name(name: &str, _no_autoload: bool) -> DerefedFunc {
         },
         Some(tv) => match (tv.v_type, tv.vval) {
             (VAR_FUNC, v_string(s)) => DerefedFunc {
-                name: s,
+                name: s.to_string(),
                 partial: None,
                 found_var: true,
             },
@@ -1562,7 +1562,7 @@ pub fn trans_function_name(
         match tv.map(|t| (t.v_type, t.vval)) {
             // c:2038 VAR_FUNC && v_string != NULL
             Some((VAR_FUNC, v_string(s))) if !s.is_empty() => {
-                name = Some(s);
+                name = Some(s.to_string());
                 *pp = &start[end..];
             }
             // c:2041 VAR_PARTIAL && v_partial != NULL

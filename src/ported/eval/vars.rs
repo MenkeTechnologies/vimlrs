@@ -6,6 +6,7 @@
 //! `b:`/`w:`/`t:`, autoload, locking) land later; the reduced surface is noted.
 #![allow(non_snake_case, non_upper_case_globals)]
 
+use crate::vimstr::VimStr;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -431,7 +432,7 @@ thread_local! {
                 let vval = match t {
                     VAR_NUMBER => v_number(0),
                     VAR_FLOAT => v_float(0.0),
-                    VAR_STRING => v_string(String::new()),
+                    VAR_STRING => v_string(VimStr::new()),
                     VAR_BOOL => v_bool(BoolVarValue::kBoolVarFalse),
                     VAR_SPECIAL => v_special(SpecialVarValue::kSpecialVarNull),
                     VAR_LIST => v_list(None),
@@ -483,7 +484,7 @@ pub fn evalvars_init() {
             let vval = match t {
                 VAR_NUMBER => v_number(0),
                 VAR_FLOAT => v_float(0.0),
-                VAR_STRING => v_string(String::new()),
+                VAR_STRING => v_string(VimStr::new()),
                 VAR_BOOL => v_bool(BoolVarValue::kBoolVarFalse),
                 VAR_SPECIAL => v_special(SpecialVarValue::kSpecialVarNull),
                 VAR_LIST => v_list(None),
@@ -762,7 +763,7 @@ pub fn set_internal_string_var(name: &str, value: &str) {
         typval_T {
             v_type: VAR_STRING,
             v_lock: VarLockStatus::VAR_UNLOCKED,
-            vval: v_string(value.to_string()),
+            vval: v_string(value.to_string().into()),
         },
         true,
     );

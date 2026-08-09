@@ -19,12 +19,13 @@ use crate::ported::eval::typval_defs_h::{typval_T, typval_vval_union::*, varnumb
 use crate::ported::eval_h::{FAIL, OK};
 use crate::ported::message::{emsg, semsg};
 use crate::ported::option::get_option_value;
+use crate::vimstr::VimStr;
 
 /// "string(expr)" function — the `string()` rendering of `expr`.
 pub fn f_string(argvars: &[typval_T], rettv: &mut typval_T) {
     // c: rettv->v_type = VAR_STRING; rettv->vval.v_string = encode_tv2string(...);
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(encode_tv2string(&argvars[0]));
+    rettv.vval = v_string(encode_tv2string(&argvars[0]).into());
 }
 
 /// "str2nr()" function — parse the leading number in a string in the given
@@ -78,13 +79,13 @@ pub fn f_strlen(argvars: &[typval_T], rettv: &mut typval_T) {
 /// Port of `f_tolower()` from `Src/strings.c`.
 pub fn f_tolower(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(tv_get_string(&argvars[0]).to_lowercase());
+    rettv.vval = v_string(tv_get_string(&argvars[0]).to_lowercase().into());
 }
 
 /// Port of `f_toupper()` from `Src/strings.c`.
 pub fn f_toupper(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(tv_get_string(&argvars[0]).to_uppercase());
+    rettv.vval = v_string(tv_get_string(&argvars[0]).to_uppercase().into());
 }
 
 /// Port of `f_strchars()` from `Src/strings.c` — character count. The optional
@@ -151,7 +152,11 @@ pub fn f_strpart(argvars: &[typval_T], rettv: &mut typval_T) {
     let start = nbyte as usize;
     let end = start + len as usize;
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(String::from_utf8_lossy(&bytes[start..end]).into_owned());
+    rettv.vval = v_string(
+        String::from_utf8_lossy(&bytes[start..end])
+            .into_owned()
+            .into(),
+    );
 }
 
 /// Port of `f_stridx()` from `Src/strings.c` — byte index of `{needle}` in
@@ -194,7 +199,7 @@ pub fn f_stridx(argvars: &[typval_T], rettv: &mut typval_T) {
 pub fn f_trim(argvars: &[typval_T], rettv: &mut typval_T) {
     let s = tv_get_string(&argvars[0]);
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(String::new());
+    rettv.vval = v_string(VimStr::new());
     // c: `if (tv_check_for_opt_string_arg(argvars, 1) == FAIL) return;` — a
     // present, non-String {mask} is E1174.
     let has_mask = argvars.len() >= 2 && argvars[1].v_type != VAR_UNKNOWN;
@@ -268,7 +273,7 @@ pub fn f_trim(argvars: &[typval_T], rettv: &mut typval_T) {
             tail = prev;
         }
     }
-    rettv.vval = v_string(s[head..tail].to_string());
+    rettv.vval = v_string(s[head..tail].to_string().into());
 }
 
 /// Port of `f_strridx()` from `Src/strings.c` — byte index of the LAST
@@ -341,7 +346,7 @@ pub fn f_tr(argvars: &[typval_T], rettv: &mut typval_T) {
                 // c: `if (*p == NUL) { goto error; }  // tostr is shorter than fromstr.`
                 None => {
                     semsg(&format!("E475: Invalid argument: {fromstr}"));
-                    rettv.vval = v_string(String::new());
+                    rettv.vval = v_string(VimStr::new());
                     return;
                 }
             },
@@ -357,7 +362,7 @@ pub fn f_tr(argvars: &[typval_T], rettv: &mut typval_T) {
                     first = false;
                     if from.len() != to.len() {
                         semsg(&format!("E475: Invalid argument: {fromstr}"));
-                        rettv.vval = v_string(String::new());
+                        rettv.vval = v_string(VimStr::new());
                         return;
                     }
                 }
@@ -365,7 +370,7 @@ pub fn f_tr(argvars: &[typval_T], rettv: &mut typval_T) {
             }
         }
     }
-    rettv.vval = v_string(out);
+    rettv.vval = v_string(out.into());
 }
 
 /// Port of `f_str2list()` from `Src/strings.c` — a List of the code points of
@@ -465,7 +470,7 @@ pub fn f_strcharpart(argvars: &[typval_T], rettv: &mut typval_T) {
     }
     rettv.v_type = VAR_STRING;
     let (a, b) = (nbyte as usize, (nbyte + len) as usize);
-    rettv.vval = v_string(String::from_utf8_lossy(&bytes[a..b]).into_owned());
+    rettv.vval = v_string(String::from_utf8_lossy(&bytes[a..b]).into_owned().into());
 }
 
 /// Port of `f_byteidx()` from `Src/strings.c` — the byte index of the `{nr}`'th
@@ -631,7 +636,7 @@ pub fn f_strtrans(argvars: &[typval_T], rettv: &mut typval_T) {
         }
     }
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(out);
+    rettv.vval = v_string(out.into());
 }
 
 /// Port of `f_slice()` from `Src/strings.c` — `slice({expr}, {start} [, {end}])`,
@@ -666,8 +671,11 @@ pub fn f_slice(argvars: &[typval_T], rettv: &mut typval_T) {
             crate::ported::eval::typval_defs_h::VARNUMBER_MAX
         };
         rettv.v_type = VAR_STRING;
-        rettv.vval =
-            v_string(crate::ported::eval::string_slice(&s, n1, n2, true).unwrap_or_default());
+        rettv.vval = v_string(
+            crate::ported::eval::string_slice(&s, n1, n2, true)
+                .unwrap_or_default()
+                .into(),
+        );
         return;
     }
 

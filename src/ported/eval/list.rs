@@ -112,7 +112,7 @@ pub fn f_count(argvars: &[typval_T], rettv: &mut typval_T) {
         match (argvars[0].v_type, &argvars[0].vval) {
             (VAR_STRING, v_string(s)) => {
                 let needle = tv_get_string_chk(&argvars[1]).unwrap_or_default();
-                n = count_string(s, &needle, ic != 0);
+                n = count_string(&s.to_string_lossy(), &needle, ic != 0);
             }
             (VAR_LIST, v_list(Some(l))) => {
                 // c: idx defaults 0; set from argvars[3] only when [2] and [3] are present.
@@ -425,7 +425,7 @@ fn filter_map_dict(
     let str_tv = |s: String| typval_T {
         v_type: VAR_STRING,
         v_lock: VarLockStatus::VAR_UNLOCKED,
-        vval: v_string(s),
+        vval: v_string(s.into()),
     };
     let d_ret = if filtermap == FILTERMAP_MAPNEW {
         Some(tv_dict_alloc_ret(rettv))
@@ -546,7 +546,7 @@ fn filter_map_string(str: &str, filtermap: filtermap_T, expr: &typval_T, rettv: 
     let str_tv = |s: String| typval_T {
         v_type: VAR_STRING,
         v_lock: VarLockStatus::VAR_UNLOCKED,
-        vval: v_string(s),
+        vval: v_string(s.into()),
     };
     let mut ga = String::new();
     for (idx, ch) in str.chars().enumerate() {
@@ -568,7 +568,7 @@ fn filter_map_string(str: &str, filtermap: filtermap_T, expr: &typval_T, rettv: 
         }
     }
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(ga);
+    rettv.vval = v_string(ga.into());
 }
 
 /// Port of `filter_map()` from `Src/eval/list.c:336` — the shared dispatcher.

@@ -12,6 +12,9 @@
 // The `eval/` subtree (ports of `vendor/eval/*.c` + the header).
 /// Port of `eval/buffer.c` (the buffer-introspection eval builtins).
 pub mod buffer;
+/// Generated builtin `typename()` signature table (recorded from real vim); see
+/// `scripts/gen_builtin_signatures.sh`.
+pub mod builtin_signatures;
 /// Port of `eval/decode.c`.
 pub mod decode;
 /// Port of `eval/encode.c`.
@@ -25,9 +28,6 @@ pub mod funcs;
 /// Generated builtin arg-count table (from `vendor/eval.lua`); see
 /// `scripts/gen_builtin_argc.sh`.
 pub mod funcs_argc;
-/// Generated builtin `typename()` signature table (recorded from real vim); see
-/// `scripts/gen_builtin_signatures.sh`.
-pub mod builtin_signatures;
 /// Port of `eval/list.c` (the `count()` family; callback ops stay bridge-side).
 pub mod list;
 /// Port of `eval/typval.c`.
@@ -43,6 +43,7 @@ pub mod vars;
 /// Port of `eval/window.c` (window-lookup helper layer).
 pub mod window;
 
+use crate::vimstr::VimStr;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -479,7 +480,7 @@ pub fn typval_tostring(arg: Option<&typval_T>, quotes: bool) -> String {
         Some(tv) => {
             if !quotes && tv.v_type == VAR_STRING {
                 match &tv.vval {
-                    v_string(s) => s.clone(),
+                    v_string(s) => s.to_string(),
                     _ => String::new(),
                 }
             } else {
@@ -526,7 +527,7 @@ pub fn func_equal(tv1: &typval_T, tv2: &typval_T, ic: bool) -> bool {
     // c: empty and NULL function name considered the same.
     let name = |tv: &typval_T| -> String {
         match (tv.v_type, &tv.vval) {
-            (VAR_FUNC, v_string(s)) => s.clone(),
+            (VAR_FUNC, v_string(s)) => s.to_string(),
             (VAR_PARTIAL, v_partial(Some(p))) => partial_name(p).to_string(),
             _ => String::new(),
         }
@@ -1912,7 +1913,7 @@ pub fn get_system_output_as_rettv(argvars: &[typval_T], rettv: &mut typval_T, re
     use crate::ported::eval::vars::{set_vim_var_nr, vv::VV_SHELL_ERROR};
 
     rettv.v_type = VAR_STRING; // c:4719
-    rettv.vval = v_string(String::new()); // c:4720 v_string = NULL
+    rettv.vval = v_string(VimStr::new()); // c:4720 v_string = NULL
 
     // c:4726 get input to the shell command (if any).
     let has_input = argvars.len() > 1 && argvars[1].v_type != VAR_UNKNOWN;
@@ -1950,7 +1951,7 @@ pub fn get_system_output_as_rettv(argvars: &[typval_T], rettv: &mut typval_T, re
             if retlist {
                 crate::ported::eval::typval::tv_list_alloc_ret(rettv, 0); // c:4774
             } else {
-                rettv.vval = v_string(String::new()); // c:4776 xstrdup("")
+                rettv.vval = v_string(VimStr::new()); // c:4776 xstrdup("")
             }
             return;
         }
@@ -1969,7 +1970,7 @@ pub fn get_system_output_as_rettv(argvars: &[typval_T], rettv: &mut typval_T, re
     } else {
         // c:4792 res may contain several NULs; replace with SOH (1) to avoid
         // truncation, like get_cmd_output().
-        rettv.vval = v_string(res.replace('\0', "\u{1}")); // c:4794 memchrsub
+        rettv.vval = v_string(res.replace('\0', "\u{1}").into()); // c:4794 memchrsub
     }
 }
 
@@ -2639,7 +2640,7 @@ pub fn eval_expr_partial(expr: &typval_T, argv: &[typval_T], rettv: &mut typval_
 pub fn eval_expr_func(expr: &typval_T, argv: &[typval_T], rettv: &mut typval_T) -> i32 {
     let name = match (expr.v_type, &expr.vval) {
         (VAR_FUNC, v_string(s)) => s.clone(),
-        _ => tv_get_string(expr),
+        _ => tv_get_string(expr).into(),
     };
     if name.is_empty() {
         return FAIL;
@@ -2666,7 +2667,7 @@ pub fn call_vim_function(func: &str, argv: &[typval_T], rettv: &mut typval_T) ->
     let callee = typval_T {
         v_type: VAR_FUNC,
         v_lock: VarLockStatus::VAR_UNLOCKED,
-        vval: v_string(func.to_string()),
+        vval: v_string(func.to_string().into()),
     };
     match crate::ported::eval::typval::CALL_FUNC_HOOK
         .with(|h| *h.borrow())
@@ -2729,7 +2730,7 @@ pub fn callback_call(
             let callee = typval_T {
                 v_type: VAR_FUNC,
                 v_lock: VarLockStatus::VAR_UNLOCKED,
-                vval: v_string(name.clone()),
+                vval: v_string(name.clone().into()),
             };
             match crate::ported::eval::typval::CALL_FUNC_HOOK
                 .with(|h| *h.borrow())
@@ -5436,7 +5437,7 @@ pub fn eval_for_line(arg: &str, errp: &mut bool, evalarg: &mut evalarg_T) -> for
                     // c:1486
                     fi.fi_byte_idx = 0; // c:1487
                     let s = if let v_string(s) = &tv.vval {
-                        Some(s.clone())
+                        Some(s.to_string())
                     } else {
                         None
                     };
@@ -6149,7 +6150,7 @@ mod tests {
                 .lv_items
                 .iter()
                 .map(|it| match &it.li_tv.vval {
-                    v_string(s) => s.clone(),
+                    v_string(s) => s.to_string(),
                     _ => String::new(),
                 })
                 .collect()
@@ -6257,7 +6258,7 @@ mod tests {
         let mut s = typval_T {
             v_type: VAR_STRING,
             v_lock: VarLockStatus::VAR_UNLOCKED,
-            vval: v_string("foo".to_string()),
+            vval: v_string("foo".to_string().into()),
         };
         assert_eq!(grow_string_tv(&mut s, "bar"), OK);
         assert!(matches!(&s.vval, v_string(t) if t == "foobar"));
@@ -6276,7 +6277,7 @@ mod tests {
         let s = typval_T {
             v_type: VAR_STRING,
             v_lock: VarLockStatus::VAR_UNLOCKED,
-            vval: v_string("hi".to_string()),
+            vval: v_string("hi".to_string().into()),
         };
         // unquoted string → raw; quoted → string()-encoded with quotes
         assert_eq!(typval_tostring(Some(&s), false), "hi");
@@ -6339,7 +6340,7 @@ mod tests {
         let empty = typval_T {
             v_type: VAR_FUNC,
             v_lock: VarLockStatus::VAR_UNLOCKED,
-            vval: v_string(String::new()),
+            vval: v_string(crate::vimstr::VimStr::new()),
         };
         assert_eq!(eval_expr_func(&empty, &[], &mut rv), FAIL);
         // Partial.
@@ -6418,7 +6419,7 @@ mod tests {
         let s = typval_T {
             v_type: VAR_STRING,
             v_lock: VarLockStatus::VAR_UNLOCKED,
-            vval: v_string("x".to_string()),
+            vval: v_string("x".to_string().into()),
         };
         assert!(!tv_is_luafunc(&s));
         // A freshly-built, unrelated partial is not the v:lua identity.
@@ -6561,7 +6562,7 @@ mod tests {
             let mut tv = typval_T::default();
             eval_string(&mut a, &mut tv, true, false);
             match tv.vval {
-                v_string(x) => x,
+                v_string(x) => x.to_string(),
                 _ => String::new(),
             }
         };

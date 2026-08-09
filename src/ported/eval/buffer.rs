@@ -15,6 +15,7 @@
 //! alongside it, so `#[allow(dead_code)]` applies.
 #![allow(non_snake_case, dead_code, clippy::all)]
 
+use crate::vimstr::VimStr;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -128,7 +129,7 @@ pub fn find_buffer(avar: &typval_T) -> Option<Rc<RefCell<buf_T>>> {
         if let typval_vval_union::v_string(s) = &avar.vval {
             if !s.is_empty() {
                 // c:54 buf = buflist_findname_exp(avar->vval.v_string);
-                buf = buflist_findname_exp(s);
+                buf = buflist_findname_exp(&s.to_string_lossy());
                 // c:55 if (buf == NULL) — try a URL / "nofile" buffer name match.
                 if buf.is_none() {
                     // c:58 FOR_ALL_BUFFERS(bp) — walk firstbuf via b_next.
@@ -176,7 +177,7 @@ pub fn get_buffer_lines(
     } else {
         VarType::VAR_STRING
     };
-    rettv.vval = typval_vval_union::v_string(String::new());
+    rettv.vval = typval_vval_union::v_string(VimStr::new());
 
     // c:684 if (buf == NULL || buf->b_ml.ml_mfp == NULL || start < 0 || end < start)
     let loaded = buf.map_or(false, |b| b.borrow().b_ml.ml_mfp);
@@ -219,9 +220,9 @@ pub fn get_buffer_lines(
             let _ = ml_get_buf_len(&mut b, start);
             let line = ml_get_buf(&mut b, start);
             drop(b);
-            rettv.vval = typval_vval_union::v_string(line);
+            rettv.vval = typval_vval_union::v_string(line.into());
         } else {
-            rettv.vval = typval_vval_union::v_string(String::new());
+            rettv.vval = typval_vval_union::v_string(VimStr::new());
         }
     }
 }

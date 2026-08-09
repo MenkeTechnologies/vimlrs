@@ -37,6 +37,7 @@
     clippy::needless_range_loop
 )]
 
+use crate::vimstr::VimStr;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -253,7 +254,7 @@ fn json_decoder_pop(
                 // c: dictitem_T *obj_di = tv_dict_item_alloc(key.val.vval.v_string);
                 let keystr = match &key.val.vval {
                     v_string(s) => s.clone(),
-                    _ => String::new(),
+                    _ => VimStr::new(),
                 };
                 tv_clear(&mut key.val); // c: tv_clear(&key.val);
                 let dict_rc = match &last_container.container.vval {
@@ -261,7 +262,12 @@ fn json_decoder_pop(
                     _ => unreachable!(),
                 };
                 // c: if (tv_dict_add(dict, obj_di) == FAIL) abort(); obj_di->di_tv = obj.val;
-                if tv_dict_add(&mut dict_rc.borrow_mut(), &keystr, obj.val) == FAIL {
+                if tv_dict_add(
+                    &mut dict_rc.borrow_mut(),
+                    &keystr.to_string_lossy(),
+                    obj.val,
+                ) == FAIL
+                {
                     std::process::abort();
                 }
             }
@@ -305,7 +311,7 @@ fn json_decoder_pop(
             obj.is_special_string
                 || match &last_container.container.vval {
                     v_dict(Some(d)) => match &obj.val.vval {
-                        v_string(s) => tv_dict_find(&d.borrow(), s).is_some(),
+                        v_string(s) => tv_dict_find(&d.borrow(), &s.to_string_lossy()).is_some(),
                         _ => false,
                     },
                     _ => false,
@@ -382,7 +388,7 @@ pub fn decode_string(s: &[u8], len: usize, force_blob: bool, _s_allocated: bool)
     typval_T {
         v_type: VAR_STRING,
         v_lock: VAR_UNLOCKED,
-        vval: v_string(String::from_utf8_lossy(&s[..len]).into_owned()),
+        vval: v_string(String::from_utf8_lossy(&s[..len]).into_owned().into()),
     }
 }
 
@@ -1559,7 +1565,7 @@ fn typval_parse_exit(parser: &mut mpack_parser_t<TypvalNodeData>, node: usize) {
                 for i in 0..length {
                     let key = &items[i][0];
                     match (&key.v_type, &key.vval) {
-                        (VAR_STRING, v_string(s)) if !s.is_empty() => keys.push(s.clone()),
+                        (VAR_STRING, v_string(s)) if !s.is_empty() => keys.push(s.to_string()),
                         _ => {
                             generic = true;
                             break;
@@ -1586,10 +1592,10 @@ fn typval_parse_exit(parser: &mut mpack_parser_t<TypvalNodeData>, node: usize) {
                     // c: char *key = items[i][0].vval.v_string; di->di_tv = items[i][1];
                     let key = match &items[i][0].vval {
                         v_string(s) => s.clone(),
-                        _ => String::new(),
+                        _ => VimStr::new(),
                     };
                     let val = std::mem::take(&mut items[i][1]);
-                    tv_dict_add(&mut dict.borrow_mut(), &key, val);
+                    tv_dict_add(&mut dict.borrow_mut(), &key.to_string_lossy(), val);
                 }
                 drop(items);
                 set_result(
