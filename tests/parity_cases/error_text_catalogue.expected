@@ -1,0 +1,9 @@
+0
+Vim(let):E979: Blob index out of range: 7
+0z0011
+Vim(let):E709: [:] requires a List or Blob value
+[1, 2, 3]
+Vim(echo):E799: Invalid ID: -3 (must be greater than or equal to 1)
+Vim(echo):E799: Invalid ID: 0 (must be greater than or equal to 1)
+Vim(echo):E1211: List required for argument 1
+Vim(echo):E1211: List required for argument 1

@@ -2475,7 +2475,11 @@ fn b_setindex(vm: &mut VM, _: u8) -> Value {
                     tv_get_number_chk(&value, None) as u8,
                 );
             } else {
-                message::emsg("E979: Blob index out of range");
+                // `e_blobidx` (Neovim errors.h:98) carries the index:
+                // `E979: Blob index out of range: %` PRId64. It is the ORIGINAL
+                // subscript that is reported, not the negative-adjusted one.
+                let orig = tv_get_number_chk(&index, None);
+                message::semsg(&format!("E979: Blob index out of range: {orig}"));
             }
         }
         _ => message::emsg("E689: Can only index a List, Dictionary or Blob"),
@@ -2495,19 +2499,23 @@ fn b_setrange(vm: &mut VM, _: u8) -> Value {
     let idx1_tv = pop_tv(vm);
     let base = pop_tv(vm);
     let value = pop_tv(vm);
+    // `vendor/eval.c:1035` — the BASE being indexed must be a List, Dict or
+    // Blob, and that is E689. E709 belongs to the *assigned value* (c:1096), not
+    // to the base; reporting it here answered `let x = 5 | let x[0:1] = [1,2]`
+    // with E709 where both engines say E689.
     let dest = match (base.v_type, &base.vval) {
         (VAR_LIST, v_list(Some(l))) => l.clone(),
         _ => {
-            message::emsg("E709: [:] requires a List value");
+            message::emsg("E689: Can only index a List, Dictionary or Blob"); // c:1039
             return Value::Undef;
         }
     };
-    // c: the source must be a List (E709 otherwise). NULL list → empty.
+    // c:1096 the assigned value must be a non-NULL List or Blob, else E709.
     let src = match (value.v_type, &value.vval) {
         (VAR_LIST, v_list(Some(l))) => tv_list_copy(l, false),
         (VAR_LIST, v_list(None)) => crate::ported::eval::typval::tv_list_alloc(0),
         _ => {
-            message::emsg("E709: [:] requires a List value");
+            message::emsg("E709: [:] requires a List or Blob value"); // c:1100
             return Value::Undef;
         }
     };

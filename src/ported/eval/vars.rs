@@ -2268,8 +2268,10 @@ pub fn ex_let_vars(
                 pos = newpos;
             }
             _ => {
-                // c:1088 internal_error("ex_let_vars()");
-                crate::ported::message::emsg("E473: Internal error: ex_let_vars()");
+                // c:1088 internal_error("ex_let_vars()") → `vendor/message.c:999`
+                // siemsg(_(e_intern2), where), and Neovim's `e_intern2` is
+                // `E685: Internal error: %s` (errors.h:30), not vim's E473.
+                crate::ported::message::emsg("E685: Internal error: ex_let_vars()");
                 return FAIL;
             }
         }

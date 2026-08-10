@@ -27,7 +27,7 @@ use crate::ported::os::fileio::{
 use crate::ported::path::shorten_dir_len;
 
 /// `static const char e_error_while_writing_str[]` (`vendor/eval/fs.c:53`).
-const e_error_while_writing_str: &str = "E80: Error while writing: ";
+const e_error_while_writing_str: &str = "E80: Error while writing: %s";
 
 /// `kListLenUnknown = -1` (`eval/typval_defs.h:28`).
 const kListLenUnknown: isize = -1;
@@ -999,11 +999,7 @@ fn write_list(fp: &mut FileDescriptor, list: &list_T, binary: bool) -> bool {
         return true;
     }
     // write_list_error:
-    semsg(&format!(
-        "{}{}",
-        e_error_while_writing_str,
-        os_strerror(error)
-    ));
+    semsg(&e_error_while_writing_str.replace("%s", &os_strerror(error)));
     false
 }
 
@@ -1029,11 +1025,7 @@ fn write_data(fp: &mut FileDescriptor, data: &[u8], len: usize) -> bool {
         return true;
     }
     // write_blob_error:
-    semsg(&format!(
-        "{}{}",
-        e_error_while_writing_str,
-        os_strerror(error)
-    ));
+    semsg(&e_error_while_writing_str.replace("%s", &os_strerror(error)));
     false
 }
 

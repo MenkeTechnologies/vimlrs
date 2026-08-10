@@ -1,0 +1,15 @@
+0
+1 []
+2 [[9728, 9983, 2]]
+1 []
+[[9728, 9728, 2], [9984, 9984, 2]]
+Vim(call):E1114: Only values of 0x80 and higher supported
+Vim(call):E1109: List item 0 is not a List
+Vim(call):E1110: List item 0 does not contain 3 numbers
+Vim(call):E1110: List item 0 does not contain 3 numbers
+Vim(call):E1111: List item 0 range invalid
+Vim(call):E1112: List item 0 cell width invalid
+Vim(call):E1112: List item 0 cell width invalid
+Vim(call):E1113: Overlapping ranges for 0x2640
+[[9728, 9728, 2], [9984, 9984, 2]]
+[]

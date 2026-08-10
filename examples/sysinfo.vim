@@ -13,19 +13,45 @@ call assert_equal('héllo', iconv('héllo', 'latin1', 'latin1'))
 call assert_equal('hello', iconv('hello', 'latin1', 'utf-8'))
 
 " --- setcellwidths() overrides display width; getcellwidths() returns the table
-call assert_equal(1, strwidth('A'))
-call setcellwidths([[0x41, 0x41, 2]])
-call assert_equal(2, strwidth('A'))
-call assert_equal([[65, 65, 2]], getcellwidths())
+call assert_equal(1, strwidth('☀'))
+call assert_equal([], getcellwidths())
+call setcellwidths([[0x2600, 0x26ff, 2]])
+call assert_equal(2, strwidth('☀'))
+call assert_equal([[9728, 9983, 2]], getcellwidths())
 " clear the override so it does not leak to other width checks
 call setcellwidths([])
+call assert_equal(1, strwidth('☀'))
+call assert_equal([], getcellwidths())
+
+" --- ASCII cannot be overridden at all: an entry below 0x80 is rejected with
+"     E1114 and the table is left exactly as it was.
+let s:err = ''
+call assert_equal(1, strwidth('A'))
+try
+  call setcellwidths([[0x41, 0x41, 2]])
+catch
+  let s:err = v:exception
+endtry
+call assert_equal('Vim(call):E1114: Only values of 0x80 and higher supported', s:err)
 call assert_equal(1, strwidth('A'))
 call assert_equal([], getcellwidths())
 
-" --- a cell-width override can also widen a range of codepoints
-call setcellwidths([[0x2600, 0x26ff, 2]])
-call assert_equal(2, strwidth('☀'))
+" --- the table is reported sorted on the first codepoint, NOT in input order
+call setcellwidths([[0x2700, 0x2700, 2], [0x2600, 0x2600, 2]])
+call assert_equal([[9728, 9728, 2], [9984, 9984, 2]], getcellwidths())
+
+" --- a rejected update leaves the PREVIOUS table installed (E1113 here: the
+"     two ranges overlap at 0x2640 once sorted on their first codepoint)
+let s:err = ''
+try
+  call setcellwidths([[0x2600, 0x2650, 2], [0x2640, 0x2700, 1]])
+catch
+  let s:err = v:exception
+endtry
+call assert_equal('Vim(call):E1113: Overlapping ranges for 0x2640', s:err)
+call assert_equal([[9728, 9728, 2], [9984, 9984, 2]], getcellwidths())
 call setcellwidths([])
+call assert_equal([], getcellwidths())
 
 " --- the argument list is the script file(s) on the command line; this script
 "     is the sole argument (see arglist.vim for the full behaviour)

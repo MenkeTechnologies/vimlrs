@@ -785,85 +785,164 @@ fn utf_char2cells(c: char) -> usize {
     }
 }
 
-// ── setcellwidths()/getcellwidths() — Neovim mbyte.c (home file not vendored).
+// ── setcellwidths()/getcellwidths() — `vendor/mbyte.c:2847`.
 // The user-defined cell-width override table installed by `setcellwidths()`.
-// Each tuple is `(low, high, width)`: codepoints in `low..=high` display in
+// Each tuple is `(first, last, width)`: codepoints in `first..=last` display in
 // `width` (1 or 2) cells. Consulted by `cw_value()` from `utf_char2cells()`.
+// The table is kept SORTED on `first` and non-overlapping, which is what the C
+// binary search in `cw_value()` requires and what `getcellwidths()` reports.
 thread_local! {
-    static CW_TABLE: std::cell::RefCell<Vec<(u32, u32, u8)>> =
+    static CW_TABLE: std::cell::RefCell<Vec<(varnumber_T, varnumber_T, i8)>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Port of `cw_value()` (Neovim mbyte.c) — the display width override for
-/// codepoint `c` from the `setcellwidths()` table, or `None` when no range
+/// `static const char e_list_item_nr_is_not_list[]` (`vendor/mbyte.c:89`).
+const e_list_item_nr_is_not_list: &str = "E1109: List item %d is not a List";
+/// `static const char e_list_item_nr_does_not_contain_3_numbers[]` (`vendor/mbyte.c:91`).
+const e_list_item_nr_does_not_contain_3_numbers: &str =
+    "E1110: List item %d does not contain 3 numbers";
+/// `static const char e_list_item_nr_range_invalid[]` (`vendor/mbyte.c:93`).
+const e_list_item_nr_range_invalid: &str = "E1111: List item %d range invalid";
+/// `static const char e_list_item_nr_cell_width_invalid[]` (`vendor/mbyte.c:95`).
+const e_list_item_nr_cell_width_invalid: &str = "E1112: List item %d cell width invalid";
+/// `static const char e_overlapping_ranges_for_nr[]` (`vendor/mbyte.c:97`).
+const e_overlapping_ranges_for_nr: &str = "E1113: Overlapping ranges for 0x%lx";
+/// `static const char e_only_values_of_0x80_and_higher_supported[]` (`vendor/mbyte.c:99`).
+const e_only_values_of_0x80_and_higher_supported: &str =
+    "E1114: Only values of 0x80 and higher supported";
+
+/// Port of `cw_value()` from `vendor/mbyte.c:2861` — the display width override
+/// for codepoint `c` from the `setcellwidths()` table, or `None` when no range
 /// covers it (so the built-in width tables apply).
+///
+/// RUST-PORT NOTE: the C binary-searches a sorted array; this scans the same
+/// sorted `Vec` linearly. Both answer identically because `f_setcellwidths`
+/// rejects overlapping ranges, so at most one entry can match.
 fn cw_value(c: u32) -> Option<usize> {
+    let c = c as varnumber_T;
     CW_TABLE.with(|t| {
         t.borrow()
             .iter()
-            .find(|(lo, hi, _)| c >= *lo && c <= *hi)
+            .find(|(first, last, _)| c >= *first && c <= *last)
             .map(|(_, _, w)| *w as usize)
     })
 }
 
-/// Port of `f_setcellwidths()` (Neovim mbyte.c) — install a list of
-/// `[low, high, width]` triples as the character cell-width override table.
-/// Each entry must be a 3-Number List with `width` 1 or 2 and `low <= high`.
+/// Port of `f_setcellwidths()` from `vendor/mbyte.c:2899` — install a list of
+/// `[first, last, width]` triples as the character cell-width override table.
+///
+/// Every check, its order, and its message is the C's: the argument must be a
+/// non-NULL List (`e_listreq`), each entry a List (`E1109`) of exactly three
+/// Numbers (`E1110`) whose `first` is `>= 0x80` (`E1114`), whose `last` is not
+/// below `first` (`E1111`), and whose width is 1 or 2 (`E1112`); the entries are
+/// then sorted on `first` and rejected if two ranges overlap (`E1113`). An empty
+/// List clears the table (`c:2909`).
 pub fn f_setcellwidths(argvars: &[typval_T], _rettv: &mut typval_T) {
+    // c:2901 if (argvars[0].v_type != VAR_LIST || argvars[0].vval.v_list == NULL)
     let l = match (argvars[0].v_type, &argvars[0].vval) {
         (VAR_LIST, v_list(Some(l))) => l.clone(),
-        // c: emsg(_(e_listreq)) — the argument must be a List.
         _ => {
-            crate::ported::message::emsg("E1109: List required");
+            emsg("E714: List required"); // c:2902 emsg(_(e_listreq))
             return;
         }
     };
-    let mut table: Vec<(u32, u32, u8)> = Vec::new();
-    for item in l.borrow().lv_items.iter() {
-        // c: each entry is itself a List of exactly three Numbers.
-        let triple: Vec<varnumber_T> = match (item.li_tv.v_type, &item.li_tv.vval) {
-            (VAR_LIST, v_list(Some(inner))) => inner
-                .borrow()
-                .lv_items
-                .iter()
-                .map(|e| crate::ported::eval::typval::tv_get_number(&e.li_tv))
-                .collect(),
+
+    // c:2906 the entries, in input order, before the sort.
+    let mut ptrs: Vec<(varnumber_T, varnumber_T, i8)> = Vec::new();
+
+    // c:2917 "Check that all entries are a list with three numbers, the range is
+    // valid and the cell width is valid."
+    for (item, li) in l.borrow().lv_items.iter().enumerate() {
+        // c:2923 the entry itself must be a non-NULL List.
+        let inner = match (li.li_tv.v_type, &li.li_tv.vval) {
+            (VAR_LIST, v_list(Some(inner))) => inner.clone(),
             _ => {
-                crate::ported::message::emsg("E1110: List item is not a List");
+                semsg(&e_list_item_nr_is_not_list.replace("%d", &item.to_string())); // c:2924
                 return;
             }
         };
-        if triple.len() != 3 {
-            crate::ported::message::emsg("E1111: List with three Numbers required");
+
+        // c:2934 walk the entry, stopping at the first non-Number, so `i` ends up
+        // as the count of LEADING Numbers — that is what the `i != 3` test reads.
+        let mut n1: varnumber_T = 0;
+        let mut n2: varnumber_T = 0;
+        let mut n3: varnumber_T = 0;
+        let mut i = 0usize;
+        for e in inner.borrow().lv_items.iter() {
+            if e.li_tv.v_type != VAR_NUMBER {
+                break; // c:2937
+            }
+            let n = crate::ported::eval::typval::tv_get_number(&e.li_tv);
+            match i {
+                0 => {
+                    n1 = n; // c:2940
+                    if n1 < 0x80 {
+                        emsg(e_only_values_of_0x80_and_higher_supported); // c:2942
+                        return;
+                    }
+                }
+                1 => {
+                    n2 = n;
+                    if n2 < n1 {
+                        semsg(&e_list_item_nr_range_invalid.replace("%d", &item.to_string())); // c:2947
+                        return;
+                    }
+                }
+                2 => {
+                    n3 = n;
+                    if !(1..=2).contains(&n3) {
+                        semsg(&e_list_item_nr_cell_width_invalid.replace("%d", &item.to_string())); // c:2951
+                        return;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+
+        // c:2957 if (i != 3)
+        if i != 3 {
+            semsg(&e_list_item_nr_does_not_contain_3_numbers.replace("%d", &item.to_string()));
             return;
         }
-        let (lo, hi, w) = (triple[0], triple[1], triple[2]);
-        if w != 1 && w != 2 {
-            crate::ported::message::emsg("E1112: List item width must be 1 or 2");
-            return;
-        }
-        if lo < 0 || hi < lo {
-            crate::ported::message::emsg("E1113: Overlapping ranges for 0x...");
-            return;
-        }
-        table.push((lo as u32, hi as u32, w as u8));
+        ptrs.push((n1, n2, n3 as i8));
     }
+
+    // c:2967 "Sort the list on the first number." The C's `qsort` is not stable;
+    // a stable sort is a superset of its guarantee and two entries with equal
+    // `first` are rejected by the overlap check on the next line either way.
+    ptrs.sort_by_key(|(first, _, _)| *first);
+
+    // c:2972 store the items in the new table, rejecting overlap as we go.
+    let mut table: Vec<(varnumber_T, varnumber_T, i8)> = Vec::with_capacity(ptrs.len());
+    for (item, &(first, last, width)) in ptrs.iter().enumerate() {
+        if item > 0 && first <= table[item - 1].1 {
+            // c:2977 semsg(_(e_overlapping_ranges_for_nr), (size_t)n1) — `%lx`, so hex.
+            semsg(&e_overlapping_ranges_for_nr.replace("%lx", &format!("{first:x}")));
+            return;
+        }
+        table.push((first, last, width));
+    }
+
+    // c:2991 `update:` — swap the new table in.
     CW_TABLE.with(|t| *t.borrow_mut() = table);
 }
 
-/// Port of `f_getcellwidths()` (Neovim mbyte.c) — return the cell-width
-/// override table as a List of `[low, high, width]` triples (insertion order).
+/// Port of `f_getcellwidths()` from `vendor/mbyte.c:3015` — return the
+/// cell-width override table as a List of `[first, last, width]` triples. The
+/// order is the table's, which `f_setcellwidths` sorted on `first`; it is NOT
+/// the order the caller passed in.
 pub fn f_getcellwidths(_argvars: &[typval_T], rettv: &mut typval_T) {
     let table = CW_TABLE.with(|t| t.borrow().clone());
     let out = tv_list_alloc_ret(rettv, table.len() as isize);
     let mut ob = out.borrow_mut();
-    for (lo, hi, w) in table {
+    for (first, last, width) in table {
         let inner = crate::ported::eval::typval::tv_list_alloc(3);
         {
             let mut ib = inner.borrow_mut();
-            tv_list_append_number(&mut ib, lo as varnumber_T);
-            tv_list_append_number(&mut ib, hi as varnumber_T);
-            tv_list_append_number(&mut ib, w as varnumber_T);
+            tv_list_append_number(&mut ib, first);
+            tv_list_append_number(&mut ib, last);
+            tv_list_append_number(&mut ib, width as varnumber_T);
         }
         tv_list_append_tv(
             &mut ob,

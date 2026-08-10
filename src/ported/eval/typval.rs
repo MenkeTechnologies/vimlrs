@@ -18,21 +18,24 @@ use crate::ported::eval::typval_defs_h::{
 use crate::ported::eval_h::{FAIL, OK};
 use crate::ported::message::{emsg, semsg};
 
-/// `static const char *const num_errors[]` from `Src/eval/typval.c` — the
-/// "using a <type> as a Number" message for each non-numeric `VarType`, indexed
-/// by `v_type`. (Indices follow the `VarType` declaration order, matching C.)
+/// `static const char *const num_errors[]` from `vendor/eval/typval.c:4090` —
+/// the "using a <type> as a Number" message for each non-numeric `VarType`,
+/// indexed by `v_type`. (Indices follow the `VarType` declaration order,
+/// matching C.) The `VAR_UNKNOWN` row is `c:4097` verbatim, lowercase `using`
+/// and all — it is not the `e_intern2` "Internal error" text.
 static num_errors: [&str; 11] = [
-    "E685: Internal error",                 // VAR_UNKNOWN
-    "",                                     // VAR_NUMBER (no error)
-    "",                                     // VAR_STRING (no error)
-    "E703: Using a Funcref as a Number",    // VAR_FUNC
-    "E745: Using a List as a Number",       // VAR_LIST
-    "E728: Using a Dictionary as a Number", // VAR_DICT
-    "E805: Using a Float as a Number",      // VAR_FLOAT
-    "",                                     // VAR_BOOL (no error)
-    "",                                     // VAR_SPECIAL (no error)
-    "E703: Using a Funcref as a Number",    // VAR_PARTIAL
-    "E974: Using a Blob as a Number",       // VAR_BLOB
+    // c:4097 [VAR_UNKNOWN] = N_("E685: using an invalid value as a Number")
+    "E685: using an invalid value as a Number", // VAR_UNKNOWN
+    "",                                         // VAR_NUMBER (no error)
+    "",                                         // VAR_STRING (no error)
+    "E703: Using a Funcref as a Number",        // VAR_FUNC
+    "E745: Using a List as a Number",           // VAR_LIST
+    "E728: Using a Dictionary as a Number",     // VAR_DICT
+    "E805: Using a Float as a Number",          // VAR_FLOAT
+    "",                                         // VAR_BOOL (no error)
+    "",                                         // VAR_SPECIAL (no error)
+    "E703: Using a Funcref as a Number",        // VAR_PARTIAL
+    "E974: Using a Blob as a Number",           // VAR_BLOB
 ];
 
 /// Port of `tv_get_number_chk()` from `Src/eval/typval.c`.

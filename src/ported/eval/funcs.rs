@@ -2456,12 +2456,44 @@ pub fn f_json_encode(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.vval = v_string(crate::ported::eval::encode::encode_tv2json(&argvars[0]).into());
 }
 
-/// Port of `f_json_decode()` from `Src/eval/funcs.c` — the value of JSON text.
+/// Port of `f_json_decode()` from `vendor/eval/funcs.c:3858` — the value of JSON
+/// text. A List argument is joined the way `readfile()` splits one (`c:3864`);
+/// anything else is read as a String.
+///
+/// On a parse failure the decoder has already reported the SPECIFIC `E474:`
+/// (`E474: Unexpected end of input: …`), and this reports `E474: Failed to parse
+/// %.*s` on top of it and answers Number 0 (`c:3882`). It is not vim's
+/// `E491: JSON decode error at '%s'`: Neovim replaced that code, and this port
+/// follows the vendored C.
 pub fn f_json_decode(argvars: &[typval_T], rettv: &mut typval_T) {
-    let s = tv_get_string(&argvars[0]);
+    let s = if argvars[0].v_type == VAR_LIST {
+        // c:3865 if (!encode_vim_list_to_buf(...)) emsg(_("E474: Failed to convert list to string"))
+        let joined = match &argvars[0].vval {
+            v_list(Some(l)) => crate::ported::eval::encode::encode_vim_list_to_buf(&l.borrow()),
+            _ => Some(String::new()),
+        };
+        match joined {
+            Some(v) => v,
+            None => {
+                emsg("E474: Failed to convert list to string");
+                return;
+            }
+        }
+    } else {
+        // c:3875 s = tv_get_string_buf_chk(&argvars[0], numbuf); if (!s) return;
+        match tv_get_string_buf_chk(&argvars[0]) {
+            Some(v) => v.to_string(),
+            None => return,
+        }
+    };
     match crate::ported::eval::decode::json_decode_string(&s) {
         Some(v) => *rettv = v,
-        None => emsg("E491: JSON decode error"),
+        None => {
+            // c:3883 semsg(_("E474: Failed to parse %.*s"), (int)len, s);
+            crate::ported::message::semsg(&format!("E474: Failed to parse {s}"));
+            rettv.v_type = VAR_NUMBER;
+            rettv.vval = v_number(0);
+        }
     }
 }
 
@@ -3634,7 +3666,7 @@ pub fn f_matchstrlist(argvars: &[typval_T], rettv: &mut typval_T) {
         (VAR_LIST, v_list(Some(l))) => l.clone(),
         (VAR_LIST, v_list(None)) => return,
         _ => {
-            emsg("E1211: List required");
+            emsg("E1211: List required for argument 1"); // c: e_list_req_nr, arg 1
             return;
         }
     };
@@ -7723,8 +7755,10 @@ pub fn f_matchadd(argvars: &[typval_T], rettv: &mut typval_T) {
         -1
     };
     if id == 0 || id < -1 {
-        // c: emsg(_("E799: Invalid ID: %" PRId64)) — ids are >= 1, or -1 (auto).
-        crate::ported::message::semsg(&format!("E799: Invalid ID: {id}"));
+        // c: `match.c:65` semsg(_("E799: Invalid ID: %" PRId64 " (must be greater than or equal to 1)"))
+        crate::ported::message::semsg(&format!(
+            "E799: Invalid ID: {id} (must be greater than or equal to 1)"
+        ));
         rettv.vval = v_number(-1);
         return;
     }
@@ -7780,7 +7814,10 @@ pub fn f_matchaddpos(argvars: &[typval_T], rettv: &mut typval_T) {
         -1
     };
     if id == 0 || id < -1 {
-        crate::ported::message::semsg(&format!("E799: Invalid ID: {id}"));
+        // c: `match.c:65` semsg(_("E799: Invalid ID: %" PRId64 " (must be greater than or equal to 1)"))
+        crate::ported::message::semsg(&format!(
+            "E799: Invalid ID: {id} (must be greater than or equal to 1)"
+        ));
         rettv.vval = v_number(-1);
         return;
     }
@@ -7913,14 +7950,46 @@ thread_local! {
         const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
 }
 
-/// Port of `f_sign_define()` (Neovim sign.c) — define sign `{name}` with the
-/// optional attribute Dict. Returns 0 on success, -1 on error.
+/// Port of `f_sign_define()` (Neovim `sign.c:1266`) — define sign `{name}` with
+/// the optional attribute Dict. Returns 0 on success, -1 on error; the LIST form
+/// `sign_define([{dict}, …])` returns one such Number per entry, in a List.
 pub fn f_sign_define(argvars: &[typval_T], rettv: &mut typval_T) {
-    // c: the list form (sign_define([{dict}, …])) returns a List; here we port
-    // the scalar form sign_define({name} [, {dict}]).
-    if argvars[0].v_type == VAR_LIST {
-        emsg("E1206: Dictionary required");
-        rettv.vval = v_number(-1);
+    // c:1268 if (argvars[0].v_type == VAR_LIST && argvars[1].v_type == VAR_UNKNOWN)
+    //        → sign_define_multiple(), which appends -1 and reports `e_dictreq`
+    //          (E715, NOT E1206) for every entry that is not a Dict.
+    if argvars[0].v_type == VAR_LIST && argvars.len() < 2 {
+        let out = tv_list_alloc_ret(rettv, 0);
+        let items: Vec<typval_T> = match &argvars[0].vval {
+            v_list(Some(l)) => l
+                .borrow()
+                .lv_items
+                .iter()
+                .map(|i| i.li_tv.clone())
+                .collect(),
+            _ => Vec::new(),
+        };
+        let mut ob = out.borrow_mut();
+        for tv in items {
+            // c:1256 each entry must be a Dict; a non-Dict yields -1 and E715.
+            if tv.v_type != VAR_DICT {
+                emsg("E715: Dictionary required"); // c:1259 emsg(_(e_dictreq))
+                tv_list_append_number(&mut ob, -1);
+                continue;
+            }
+            let name = match &tv.vval {
+                v_dict(Some(d)) => {
+                    crate::ported::eval::typval::tv_dict_get_string(&d.borrow(), "name")
+                        .unwrap_or_default()
+                }
+                _ => String::new(),
+            };
+            if name.is_empty() {
+                tv_list_append_number(&mut ob, -1);
+                continue;
+            }
+            SIGNS.with(|s| s.borrow_mut().insert(name, tv.clone()));
+            tv_list_append_number(&mut ob, 0);
+        }
         return;
     }
     let name = tv_get_string(&argvars[0]);
@@ -11469,7 +11538,7 @@ pub fn libcall_common(
 
     if !success {
         // c:3973 semsg(_(e_libcall), funcname);
-        crate::ported::message::semsg(&format!("E364: Library call failed for \"{funcname}\""));
+        crate::ported::message::semsg(&format!("E364: Library call failed for \"{funcname}()\""));
         return;
     }
 
