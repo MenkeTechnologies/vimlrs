@@ -257,20 +257,147 @@ static options: LazyLock<Vec<vimoption_T>> = LazyLock::new(|| {
         // side effects upstream (not modeled here — value is stored only).
         s("filetype", "ft", ""),
         s("syntax", "syn", ""),
-        // These five carry their real default. Each was read back identical from
-        // every startup entry point the harnesses use — `vim -es -u NONE -i NONE`
-        // (compatible), `vim -N -es -u NONE -i NONE`, `vim --clean -es`, and
-        // `nvim --clean --headless` — so no startup state is baked into the value.
-        // 'compatible'/'cpoptions'/'backspace'/'history'/'formatoptions' and the
-        // rest of the compatible-mode-sensitive set are deliberately absent: their
-        // value depends on which of those commands you ask (see `option.rs`).
+        // 'runtimepath' is editor-less here, so its stored value starts empty
+        // (`&rtp` reads ""); it is in this table so `exists('&rtp')` answers 1,
+        // as it does in both engines. See `option.rs` for the read path.
+        s("runtimepath", "rtp", ""),
+        // The rows below carry their real default. Membership bar: `vim -N -es
+        // -u NONE -i NONE` and `nvim --clean --headless` report the SAME value,
+        // so nothing engine- or startup-specific is baked in. `scripts/parity.sh`
+        // pins the oracle to `-N` (Vim defaults), which is the state these were
+        // measured in. The 27 options where the engines genuinely disagree
+        // ('cpoptions', 'formatoptions', 'history', 'shortmess', 'path' …) and
+        // the locale-derived ones ('helplang', 'fileencodings') are deliberately
+        // absent — `option.rs` carries the full reasoning and the measurements.
+        //
+        // This table and `option::OPTIONS` must stay membership-identical: they
+        // are consulted by different callers (`exists('&opt')` and `:let &opt`
+        // here, `&opt` reads and `:set` there), so a name in one but not the
+        // other makes the two answers contradict. `option_tables_agree` in
+        // `option.rs` fails the build's test run if they drift.
         s("encoding", "enc", "utf-8"),
         s("fileformat", "ff", "unix"),
         s("iskeyword", "isk", "@,48-57,_,192-255"),
         s("isprint", "isp", "@,161-255"),
         s("isfname", "isf", "@,48-57,/,.,-,_,+,,,#,$,%,~,="),
+        b("autowrite", "aw", TriState::kFalse),
+        b("backup", "bk", TriState::kFalse),
+        b("binary", "bin", TriState::kFalse),
+        b("bomb", "bomb", TriState::kFalse),
+        b("cindent", "cin", TriState::kFalse),
+        b("compatible", "cp", TriState::kFalse),
+        b("confirm", "cf", TriState::kFalse),
+        b("copyindent", "ci", TriState::kFalse),
+        b("cursorline", "cul", TriState::kFalse),
+        b("digraph", "dg", TriState::kFalse),
+        b("endofline", "eol", TriState::kTrue),
+        b("equalalways", "ea", TriState::kTrue),
+        b("errorbells", "eb", TriState::kFalse),
+        b("gdefault", "gd", TriState::kFalse),
+        b("infercase", "inf", TriState::kFalse),
+        b("insertmode", "im", TriState::kFalse),
+        b("lisp", "lisp", TriState::kFalse),
+        b("list", "list", TriState::kFalse),
+        b("modeline", "ml", TriState::kTrue),
+        b("modifiable", "ma", TriState::kTrue),
+        b("more", "more", TriState::kTrue),
+        b("paste", "paste", TriState::kFalse),
+        b("preserveindent", "pi", TriState::kFalse),
+        b("readonly", "ro", TriState::kFalse),
+        b("ruler", "ru", TriState::kTrue),
+        b("shiftround", "sr", TriState::kFalse),
+        b("showcmd", "sc", TriState::kTrue),
+        b("showmatch", "sm", TriState::kFalse),
+        b("smartindent", "si", TriState::kFalse),
+        b("splitbelow", "sb", TriState::kFalse),
+        b("splitright", "spr", TriState::kFalse),
+        b("swapfile", "swf", TriState::kTrue),
+        b("tildeop", "top", TriState::kFalse),
+        b("title", "title", TriState::kFalse),
+        b("visualbell", "vb", TriState::kFalse),
+        b("warn", "warn", TriState::kTrue),
+        b("wrapscan", "ws", TriState::kTrue),
+        b("writebackup", "wb", TriState::kTrue),
+        n("maxfuncdepth", "mfd", 100),
+        n("maxmapdepth", "mmd", 1000),
+        n("redrawtime", "rdt", 2000),
+        n("regexpengine", "re", 0),
+        n("report", "report", 2),
+        n("timeoutlen", "tm", 1000),
+        n("undolevels", "ul", 1000),
+        n("updatetime", "ut", 4000),
+        n("wildchar", "wc", 9),
+        s("ambiwidth", "ambw", "single"),
+        s("backspace", "bs", "indent,eol,start"),
+        s("breakat", "brk", " \t!@*-+;:,./?"),
+        s("fileformats", "ffs", "unix,dos"),
+        s("isident", "isi", "@,48-57,_,192-255"),
+        s("matchpairs", "mps", "(:),{:},[:]"),
+        s("selection", "sel", "inclusive"),
+        s("suffixes", "su", ".bak,~,.o,.h,.info,.swp,.obj"),
+        s("whichwrap", "ww", "b,s"),
+        s("wildmode", "wim", "full"),
+        b("emoji", "emo", TriState::kTrue),
+        b("exrc", "ex", TriState::kFalse),
+        b("icon", "icon", TriState::kFalse),
+        b("linebreak", "lbr", TriState::kFalse),
+        b("termguicolors", "tgc", TriState::kFalse),
+        b("ttyfast", "tf", TriState::kTrue),
+        b("undofile", "udf", TriState::kFalse),
+        n("cmdheight", "ch", 1),
+        n("cmdwinheight", "cwh", 7),
+        n("conceallevel", "cole", 0),
+        n("foldlevel", "fdl", 0),
+        n("helpheight", "hh", 20),
+        n("iminsert", "imi", 0),
+        n("imsearch", "ims", -1),
+        n("matchtime", "mat", 5),
+        n("numberwidth", "nuw", 4),
+        n("pumheight", "ph", 0),
+        n("pumwidth", "pw", 15),
+        n("scrolljump", "sj", 1),
+        n("showtabline", "stal", 1),
+        n("sidescrolloff", "siso", 0),
+        n("synmaxcol", "smc", 3000),
+        n("updatecount", "uc", 200),
+        n("winheight", "wh", 1),
+        n("winminheight", "wmh", 1),
+        n("winwidth", "wiw", 20),
+        n("wrapmargin", "wm", 0),
+        n("writedelay", "wd", 0),
+        s("clipboard", "cb", ""),
+        s("keymodel", "km", ""),
+        s("langmap", "lmap", ""),
+        s("spellfile", "spf", ""),
+        s("spelllang", "spl", "en"),
+        s("virtualedit", "ve", ""),
     ]
 });
+
+/// Row count and the `(fullname, shortname, type-tag, rendered default)` of each
+/// row, for the cross-table consistency check in `option.rs`. EXTENSION — no
+/// `vendor/` counterpart; the C has one `options[]` array, so it needs no such
+/// check.
+pub fn table_rows() -> Vec<(&'static str, &'static str, &'static str, String)> {
+    options
+        .iter()
+        .map(|o| {
+            let (tag, def) = match (&o.r#type, &o.def_val.data) {
+                (OptValType::kOptValTypeBoolean, OptValData::boolean(b)) => (
+                    "bool",
+                    match b {
+                        TriState::kTrue => "1".to_string(),
+                        _ => "0".to_string(),
+                    },
+                ),
+                (OptValType::kOptValTypeNumber, OptValData::number(n)) => ("number", n.to_string()),
+                (OptValType::kOptValTypeString, OptValData::string(s)) => ("string", s.clone()),
+                _ => ("nil", String::new()),
+            };
+            (o.fullname, o.shortname, tag, def)
+        })
+        .collect()
+}
 
 thread_local! {
     /// The option value store. RUST-PORT NOTE: stands in for the global option

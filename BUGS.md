@@ -3525,3 +3525,88 @@ before this round and are the two already tracked here: `ported_fn_names_match_c
 reports the three standing R22-O3 names (`f_typename`, `type_name_of`,
 `member_of`), and `fusevm_bridge::tests::vim_vars` is R26-O6. Both were re-checked
 against a clean `197578457f` worktree and fail identically there.
+
+---
+
+# Round 30
+
+## R30-0. The parity oracle ran in COMPATIBLE mode — ✅ FIXED (harness only, isolated commit)
+
+`scripts/parity.sh` drove vim as `-es -u NONE -i NONE`. `-u NONE` alone leaves
+vim in **compatible** mode, which is not the dialect this crate ports: the engine
+is Neovim-derived and Neovim has no compatible mode at all. Every
+nocompatible-only behaviour was therefore invisible to the harness *by
+construction* — not unreported, unreportable. This was measured and recommended
+in R29-O2 and deliberately deferred there; it landed this round as its own
+commit touching only the script, with no parity work bundled into it.
+
+Re-verified against vim 9.2.0900 before landing. All 35 then-committed
+expectations are byte-identical when re-recorded under each of:
+
+| entry point | identical | differ |
+|---|---|---|
+| `-es -u NONE -i NONE` (the old baseline) | 35 | 0 |
+| `-es -u NONE -i NONE -N` | 35 | 0 |
+| `-es -u NONE -i NONE --cmd 'set cpo&vim'` | 35 | 0 |
+| `--clean -es` | 35 | 0 |
+
+so no expectation was accepted or rewritten by the change. `-i NONE` is retained:
+a nocompatible vim without it reads *and writes* `~/.viminfo`, so the developer's
+registers and histories would leak into the oracle and one probe would mutate
+what the next reads.
+
+## R30-1. 91 options read "" and did not exist — ✅ FIXED
+
+Two DIFFERENT tables answered the two questions anyone asks about an option:
+
+* `&opt` reads and `:set` resolve through `option::findoption` (`option.rs`).
+* `exists('&opt')` and `:let &opt` resolve through `option_optval::find_option`
+  (`option_optval.rs`).
+
+They had different membership, so the two answers contradicted each other.
+'runtimepath' was in the first only:
+
+```
+$ vim -es -u NONE -i NONE -N -c "verbose source probe.vim" -c 'qa!'
+runtimepath exists=1 val='/…/vim92,…'
+$ viml probe.vim
+runtimepath exists=0 val=''            # exists() says no, the read resolves
+```
+
+and 90 more options were in neither, so they read `""` where both engines have a
+value (R29-O1). Probing 133 option observables through
+`vim -N -es -u NONE -i NONE` and `target/debug/viml`:
+
+| | diverging from vim |
+|---|---|
+| before (`ad2bf3e16a`, clean worktree) | 96 / 133 |
+| after | 29 / 133 |
+
+Both tables now carry the same 112 rows, and two new unit tests keep them that
+way: `option::tests::option_tables_agree` compares names, abbreviations, kinds
+AND defaults across the two modules, and `option::tests::option_names_are_unique`
+rejects a duplicate name or abbreviation (`findoption` is a linear scan, so a
+duplicate silently shadows a later row — the same failure mode the builtin-id
+guard in `tests/opcodes.rs` exists for).
+
+The membership bar for a seeded default is that `vim -N -es -u NONE -i NONE` and
+`nvim --clean --headless` report the **same** value. `scripts/parity.sh` pins the
+oracle to `-N` as of R30-0, which is the state these were measured in; six of
+them ('compatible', 'backspace', 'whichwrap', 'more', 'ruler', 'showcmd') read
+differently under the old compatible-mode oracle, so this fix could not have been
+verified before that commit landed.
+
+`tests/parity_cases/option_defaults.vim` records the result. Re-recording the
+whole corpus after adding it rewrote only the new file — the other 35
+`.expected` files are byte-identical, which is the proof that no existing
+expectation was moved to accommodate this change.
+
+The 29 that still diverge are all deliberate exclusions, and each is named in the
+table comment: 27 where the engines genuinely disagree ('cpoptions'
+`aABceFsz`/`aABceFs_`, 'formatoptions' `tcq`/`tcqj`, 'history' 200/10000,
+'shortmess', 'path', 'complete', 'listchars', 'fillchars', 'laststatus',
+'startofline', 'joinspaces', 'hidden', 'autoread', 'background', 'mouse',
+'display', 'switchbuf', 'sidescroll', 'ttimeoutlen', 'diffopt', 'sessionoptions',
+'viewoptions', 'nrformats', 'commentstring', 'define', 'include', 'esckeys',
+'foldcolumn', 'shellslash', 'maxcombine', 'tabpagemax'), and two that are
+LOCALE-derived — see R30-3.

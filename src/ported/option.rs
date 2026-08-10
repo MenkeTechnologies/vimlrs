@@ -2,11 +2,13 @@
 //! the `:set` command parser (`do_set`).
 //!
 //! Neovim's option machinery is large (hundreds of options, per-buffer/window
-//! scopes, side effects). This ports the common global boolean/number options
-//! plus the `do_set` argument grammar (`set opt`, `set noopt`, `set opt!`,
-//! `set inv opt`, `set opt=val`, `set opt?`); the value store is a thread-local
-//! map seeded with Vim's defaults. String options and per-buffer scopes follow
-//! with the editor integration.
+//! scopes, side effects). This ports the boolean, number and string options
+//! whose default both reference engines agree on, plus the `do_set` argument
+//! grammar (`set opt`, `set noopt`, `set opt!`, `set inv opt`, `set opt=val`,
+//! `set opt?`); the value store is a thread-local map seeded with Vim's
+//! defaults. Per-buffer and per-window scopes follow with the editor
+//! integration — a buffer-local option's row here carries its default and is
+//! read globally.
 #![allow(non_snake_case, non_upper_case_globals)]
 
 use std::cell::RefCell;
@@ -51,26 +53,49 @@ const OPTIONS: &[(&str, &str, Kind, varnumber_T, &str)] = &[
     // `:runtime` searches on top of the discovered system runtime dirs (see
     // `crate::fusevm_bridge::runtime_dirs`).
     ("runtimepath", "rtp", Kind::String, 0, ""),
-    // ── Startup-invariant string defaults ────────────────────────────────────
+    // 'filetype'/'syntax' fire autocommand side effects upstream (not modeled —
+    // the value is stored only). They are here so this table and
+    // `option_optval::options` have the SAME membership: the two are consulted by
+    // different callers (`&opt` reads and `:set` come here, `exists('&opt')` and
+    // `:let &opt` go there), and a name present in one but not the other makes
+    // the two answers contradict each other.
+    ("filetype", "ft", Kind::String, 0, ""),
+    ("syntax", "syn", Kind::String, 0, ""),
+    // ── Engine-invariant defaults ────────────────────────────────────────────
     //
-    // These five carry a real default rather than "" because their value is the
-    // same in BOTH reference engines AND under every startup entry point the
-    // harnesses use, so nothing about how the oracle was launched is baked in:
+    // Each row below carries its real default rather than "". The bar for
+    // membership is that `vim -N -es -u NONE -i NONE` and `nvim --clean
+    // --headless` report the SAME value, so no engine-specific or startup-
+    // specific state is baked in. `scripts/parity.sh` pins the oracle to `-N`
+    // (Vim defaults), which is the state these were measured in and the state
+    // the Neovim-derived engine ports.
     //
-    //   $ vim -es -u NONE -i NONE -c 'verbose source probe.vim' -c 'qa!'
-    //   $ vim -N  -es -u NONE -i NONE …      # nocompatible
-    //   $ vim --clean -es …                  # defaults.vim loaded
-    //   $ nvim --clean --headless …
+    // Deliberately EXCLUDED, and why:
     //
-    // all report encoding=utf-8, fileformat=unix, iskeyword=@,48-57,_,192-255,
-    // isprint=@,161-255, isfname=@,48-57,/,.,-,_,+,,,#,$,%,~,= .
+    //   * The 27 options where the two engines genuinely disagree —
+    //     'cpoptions' (vim `aABceFsz` / nvim `aABceFs_`), 'formatoptions'
+    //     (`tcq`/`tcqj`), 'history' (200/10000), 'shortmess', 'path', 'complete',
+    //     'listchars', 'fillchars', 'laststatus', 'startofline', 'joinspaces',
+    //     'hidden', 'autoread', 'background', 'mouse', 'display', 'switchbuf',
+    //     'sidescroll', 'ttimeoutlen', 'diffopt', 'sessionoptions',
+    //     'viewoptions', 'nrformats', 'commentstring', 'define', 'include',
+    //     'esckeys'. There is no single value to seed.
     //
-    // Contrast 'compatible', 'cpoptions', 'fileformats', 'backspace', 'history',
-    // 'formatoptions', 'shortmess' and friends, which are all DIFFERENT between
-    // those entry points ('cpoptions' is the full compatible set under `-u NONE`
-    // and `aABceFs` under `-N`). Seeding those from a measurement would pin the
-    // engine to a startup artifact of whichever command recorded it, so they are
-    // deliberately left out of this table.
+    //   * LOCALE-DERIVED values, which are not a property of the language at
+    //     all. Measured on vim 9.2.0900:
+    //       'helplang'      '' under LC_ALL=C, 'en' under en_US.UTF-8,
+    //                       'de' under de_DE.UTF-8, 'ja' under ja_JP.UTF-8
+    //                       — locale-derived in BOTH engines, so no constant is
+    //                       ever right.
+    //       'fileencodings' 'ucs-bom' under LC_ALL=C, 'ucs-bom,utf-8,default,
+    //                       latin1' otherwise — locale-derived in vim, a
+    //                       constant in nvim, so the two engines only "agree"
+    //                       in a UTF-8 locale.
+    //     'encoding' is the same shape: vim answers 'latin1' under LC_ALL=C and
+    //     'utf-8' otherwise, while nvim answers 'utf-8' unconditionally. It
+    //     stays seeded 'utf-8' because this crate ports the NEOVIM engine, where
+    //     the value is locale-independent by construction; that makes the
+    //     LC_ALL=C reading a vim/nvim split, not a gap here.
     ("encoding", "enc", Kind::String, 0, "utf-8"),
     ("fileformat", "ff", Kind::String, 0, "unix"),
     ("iskeyword", "isk", Kind::String, 0, "@,48-57,_,192-255"),
@@ -82,6 +107,105 @@ const OPTIONS: &[(&str, &str, Kind, varnumber_T, &str)] = &[
         0,
         "@,48-57,/,.,-,_,+,,,#,$,%,~,=",
     ),
+    ("autowrite", "aw", Kind::Bool, 0, ""),
+    ("backup", "bk", Kind::Bool, 0, ""),
+    ("binary", "bin", Kind::Bool, 0, ""),
+    ("bomb", "bomb", Kind::Bool, 0, ""),
+    ("cindent", "cin", Kind::Bool, 0, ""),
+    ("compatible", "cp", Kind::Bool, 0, ""),
+    ("confirm", "cf", Kind::Bool, 0, ""),
+    ("copyindent", "ci", Kind::Bool, 0, ""),
+    ("cursorline", "cul", Kind::Bool, 0, ""),
+    ("digraph", "dg", Kind::Bool, 0, ""),
+    ("endofline", "eol", Kind::Bool, 1, ""),
+    ("equalalways", "ea", Kind::Bool, 1, ""),
+    ("errorbells", "eb", Kind::Bool, 0, ""),
+    ("gdefault", "gd", Kind::Bool, 0, ""),
+    ("infercase", "inf", Kind::Bool, 0, ""),
+    ("insertmode", "im", Kind::Bool, 0, ""),
+    ("lisp", "lisp", Kind::Bool, 0, ""),
+    ("list", "list", Kind::Bool, 0, ""),
+    ("modeline", "ml", Kind::Bool, 1, ""),
+    ("modifiable", "ma", Kind::Bool, 1, ""),
+    ("more", "more", Kind::Bool, 1, ""),
+    ("paste", "paste", Kind::Bool, 0, ""),
+    ("preserveindent", "pi", Kind::Bool, 0, ""),
+    ("readonly", "ro", Kind::Bool, 0, ""),
+    ("ruler", "ru", Kind::Bool, 1, ""),
+    ("shiftround", "sr", Kind::Bool, 0, ""),
+    ("showcmd", "sc", Kind::Bool, 1, ""),
+    ("showmatch", "sm", Kind::Bool, 0, ""),
+    ("smartindent", "si", Kind::Bool, 0, ""),
+    ("splitbelow", "sb", Kind::Bool, 0, ""),
+    ("splitright", "spr", Kind::Bool, 0, ""),
+    ("swapfile", "swf", Kind::Bool, 1, ""),
+    ("tildeop", "top", Kind::Bool, 0, ""),
+    ("title", "title", Kind::Bool, 0, ""),
+    ("visualbell", "vb", Kind::Bool, 0, ""),
+    ("warn", "warn", Kind::Bool, 1, ""),
+    ("wrapscan", "ws", Kind::Bool, 1, ""),
+    ("writebackup", "wb", Kind::Bool, 1, ""),
+    ("maxfuncdepth", "mfd", Kind::Number, 100, ""),
+    ("maxmapdepth", "mmd", Kind::Number, 1000, ""),
+    ("redrawtime", "rdt", Kind::Number, 2000, ""),
+    ("regexpengine", "re", Kind::Number, 0, ""),
+    ("report", "report", Kind::Number, 2, ""),
+    ("timeoutlen", "tm", Kind::Number, 1000, ""),
+    ("undolevels", "ul", Kind::Number, 1000, ""),
+    ("updatetime", "ut", Kind::Number, 4000, ""),
+    ("wildchar", "wc", Kind::Number, 9, ""),
+    ("ambiwidth", "ambw", Kind::String, 0, "single"),
+    ("backspace", "bs", Kind::String, 0, "indent,eol,start"),
+    ("breakat", "brk", Kind::String, 0, " \t!@*-+;:,./?"),
+    ("fileformats", "ffs", Kind::String, 0, "unix,dos"),
+    ("isident", "isi", Kind::String, 0, "@,48-57,_,192-255"),
+    ("matchpairs", "mps", Kind::String, 0, "(:),{:},[:]"),
+    ("selection", "sel", Kind::String, 0, "inclusive"),
+    (
+        "suffixes",
+        "su",
+        Kind::String,
+        0,
+        ".bak,~,.o,.h,.info,.swp,.obj",
+    ),
+    ("whichwrap", "ww", Kind::String, 0, "b,s"),
+    ("wildmode", "wim", Kind::String, 0, "full"),
+    ("emoji", "emo", Kind::Bool, 1, ""),
+    ("exrc", "ex", Kind::Bool, 0, ""),
+    ("icon", "icon", Kind::Bool, 0, ""),
+    ("linebreak", "lbr", Kind::Bool, 0, ""),
+    ("termguicolors", "tgc", Kind::Bool, 0, ""),
+    ("ttyfast", "tf", Kind::Bool, 1, ""),
+    ("undofile", "udf", Kind::Bool, 0, ""),
+    ("cmdheight", "ch", Kind::Number, 1, ""),
+    ("cmdwinheight", "cwh", Kind::Number, 7, ""),
+    ("conceallevel", "cole", Kind::Number, 0, ""),
+    ("foldlevel", "fdl", Kind::Number, 0, ""),
+    ("helpheight", "hh", Kind::Number, 20, ""),
+    ("iminsert", "imi", Kind::Number, 0, ""),
+    ("imsearch", "ims", Kind::Number, -1, ""),
+    ("matchtime", "mat", Kind::Number, 5, ""),
+    ("numberwidth", "nuw", Kind::Number, 4, ""),
+    ("pumheight", "ph", Kind::Number, 0, ""),
+    ("pumwidth", "pw", Kind::Number, 15, ""),
+    ("scrolljump", "sj", Kind::Number, 1, ""),
+    ("showtabline", "stal", Kind::Number, 1, ""),
+    ("sidescrolloff", "siso", Kind::Number, 0, ""),
+    ("synmaxcol", "smc", Kind::Number, 3000, ""),
+    ("updatecount", "uc", Kind::Number, 200, ""),
+    ("winheight", "wh", Kind::Number, 1, ""),
+    ("winminheight", "wmh", Kind::Number, 1, ""),
+    ("winwidth", "wiw", Kind::Number, 20, ""),
+    ("wrapmargin", "wm", Kind::Number, 0, ""),
+    ("writedelay", "wd", Kind::Number, 0, ""),
+    ("clipboard", "cb", Kind::String, 0, ""),
+    ("keymodel", "km", Kind::String, 0, ""),
+    ("langmap", "lmap", Kind::String, 0, ""),
+    ("spellfile", "spf", Kind::String, 0, ""),
+    // 'spelllang' is 'en' under LC_ALL=C, de_DE.UTF-8 and ja_JP.UTF-8 alike —
+    // unlike 'helplang', it is not derived from the locale.
+    ("spelllang", "spl", Kind::String, 0, "en"),
+    ("virtualedit", "ve", Kind::String, 0, ""),
 ];
 
 thread_local! {
@@ -245,6 +369,66 @@ mod tests {
         SEEN.with(|s| assert_eq!(s.borrow().as_slice(), &["number tw=80".to_string()]));
         // and vimlrs' own option table still tracks it (dual-write):
         assert!(super::findoption("tw").is_some());
+    }
+
+    /// No option name or abbreviation may appear twice in `OPTIONS`.
+    ///
+    /// `findoption` is a linear scan that returns the FIRST row whose full name
+    /// or abbreviation matches, so a duplicate would silently shadow a later row
+    /// and make one option unreachable — the same failure mode the builtin-id
+    /// collision guard in `tests/opcodes.rs` exists for. An abbreviation that
+    /// collides with another option's FULL name is the dangerous shape (`&list`
+    /// vs a hypothetical `li` abbreviation), so both namespaces are checked in
+    /// one pass rather than separately.
+    #[test]
+    fn option_names_are_unique() {
+        let mut seen: HashMap<&str, &str> = HashMap::new();
+        for (full, abbr, ..) in OPTIONS {
+            for key in [full, abbr] {
+                if let Some(prev) = seen.insert(key, full) {
+                    if prev != *full {
+                        panic!("option key {key:?} is claimed by both {prev:?} and {full:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// `OPTIONS` and `option_optval::options` must describe the same options.
+    ///
+    /// The two tables are consulted by DIFFERENT callers: `&opt` reads and
+    /// `:set` resolve through this file's `findoption`, while `exists('&opt')`
+    /// and `:let &opt` resolve through `option_optval::find_option`. A name in
+    /// one table but not the other therefore makes the two answers contradict —
+    /// which is exactly what shipped before this test existed: `exists('&rtp')`
+    /// answered 0 while `&rtp` resolved, because 'runtimepath' was in this table
+    /// only. Real vim answers 1 and a value for every option in either list.
+    ///
+    /// Names, abbreviations, kinds AND defaults are all compared, so a row added
+    /// to one side with a different default cannot pass either.
+    #[test]
+    fn option_tables_agree() {
+        let mine: Vec<(&str, &str, &str, String)> = OPTIONS
+            .iter()
+            .map(|(full, abbr, kind, num, s)| {
+                let (tag, def) = match kind {
+                    Kind::Bool => ("bool", num.to_string()),
+                    Kind::Number => ("number", num.to_string()),
+                    Kind::String => ("string", (*s).to_string()),
+                };
+                (*full, *abbr, tag, def)
+            })
+            .collect();
+        let mut mine = mine;
+        let mut theirs = crate::ported::option_optval::table_rows();
+        mine.sort();
+        theirs.sort();
+        assert_eq!(
+            mine, theirs,
+            "src/ported/option.rs OPTIONS and src/ported/option_optval.rs options \
+             have drifted — every option must be in both, with the same \
+             abbreviation, kind and default"
+        );
     }
 
     #[test]
