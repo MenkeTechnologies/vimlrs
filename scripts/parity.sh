@@ -24,13 +24,24 @@
 #
 # How vim is driven, and why:
 #
-#   vim -es -u NONE -i NONE -c 'verbose source FILE' -c 'qa!'
+#   vim -es -u NONE -i NONE -N -c 'verbose source FILE' -c 'qa!'
 #
 # `-es` is silent Ex mode (no terminal escapes, no alternate screen). In that
 # mode `:echo` output is suppressed *unless* the sourcing command is `verbose`,
 # and `-S FILE` is not equivalent to `-c 'verbose source FILE'` — it prints
 # nothing at all. Both were verified before this harness was written; changing
 # either flag silently turns every case into "both printed nothing".
+#
+# `-N` is `nocompatible`. Without it, `-u NONE` leaves vim in COMPATIBLE mode,
+# which is not the dialect this crate ports: the engine is Neovim-derived and
+# Neovim has no compatible mode at all. Fourteen observables move between the
+# two states (`&compatible`, `&cpoptions`, `&fileformats`, `&backspace`,
+# `&whichwrap`, `&history`, `&viminfo`, `&formatoptions`, `&modeline`,
+# `&shortmess`, `&more`, `&esckeys`, `&ruler`, `&showcmd`), and every one of
+# them was invisible to this harness by construction while the flag was absent.
+# `-i NONE` stays: a nocompatible vim without it reads AND WRITES `~/.viminfo`,
+# so registers and histories would leak in from the developer's disk and one
+# probe would mutate what the next one sees.
 #
 # Two normalisations are applied to vim's stream, and only these two:
 #
@@ -92,7 +103,7 @@ norm() { perl -ne 's/\r//g; next if /^Error detected while processing /; next if
 run_vim() {
   local abs raw st
   abs=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
-  raw=$("$VIM" -es -u NONE -i NONE -c "verbose source $abs" -c 'qa!' 2>&1); st=$?
+  raw=$("$VIM" -es -u NONE -i NONE -N -c "verbose source $abs" -c 'qa!' 2>&1); st=$?
   printf '%s\n' "$st"
   printf '%s' "$raw" | norm
 }
