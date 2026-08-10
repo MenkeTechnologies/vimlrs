@@ -6,7 +6,9 @@
 //! shared breakpoint state and condvar-waits to pause. While paused, the
 //! executor thread also services `variables` / `evaluate` requests (so they read
 //! the executor's own `globvardict`), then resumes when the client sends
-//! `continue` / `next`.
+//! `continue` / `next` / `stepIn` / `stepOut`. The three step verbs are told
+//! apart by CALL DEPTH, and each pause snapshots the whole `funccal_stack` as
+//! the `stackTrace` backtrace.
 //!
 //! DAP messages are Content-Length-framed JSON. Program `:echo` output is
 //! captured and streamed as `output` events at each pause / at termination, so
@@ -21,12 +23,25 @@ use std::sync::{Condvar, Mutex, OnceLock};
 use serde_json::{json, Value};
 
 /// What the client asked a paused executor to do.
+///
+/// The three step verbs are distinguished by CALL DEPTH, ported from awkrs's
+/// `Debugger::should_stop` (`awkrs/src/debugger.rs:141-186`) — the one frontend
+/// where the depth predicates are wired to the live line hook. They were all
+/// aliased to "stop at the next statement" here, which made `stepOut` of a
+/// three-deep recursion land one line further into it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Resume {
     /// Run until the next breakpoint.
     Continue,
-    /// Stop again at the next statement.
-    Next,
+    /// Stop at the very next statement, whatever its depth — so a statement
+    /// containing a call stops on the callee's first line. c: vim's `step`.
+    StepIn,
+    /// Stop at the next statement at the SAME depth or shallower, stepping over
+    /// any call the current statement makes. c: vim's `next`.
+    StepOver,
+    /// Stop at the next statement STRICTLY shallower than here — i.e. back in
+    /// the caller. c: vim's `finish`.
+    StepOut,
 }
 
 /// A request that must be answered on the executor thread while paused
@@ -46,16 +61,37 @@ struct DapState {
     /// user function called with one of these names.
     function_breakpoints: HashSet<String>,
     resume: Option<Resume>,
-    stepping: bool,
-    /// A function breakpoint just armed [`Self::stepping`], so the stop it
+    /// Step-into armed: stop at the next statement at any depth.
+    /// c: awkrs `Debugger::step_mode` (`awkrs/src/debugger.rs:29`).
+    step_mode: bool,
+    /// Step-over armed at this depth: stop once the depth is `<=` it.
+    /// c: awkrs `Debugger::step_over_depth` (`awkrs/src/debugger.rs:31`).
+    step_over_depth: Option<usize>,
+    /// Step-out armed at this depth: stop once the depth is `<` it.
+    /// c: awkrs `Debugger::step_out_depth` (`awkrs/src/debugger.rs:33`).
+    step_out_depth: Option<usize>,
+    /// A function breakpoint just armed [`Self::step_mode`], so the stop it
     /// produces is reported as `"function breakpoint"` rather than `"step"`.
     func_bp_armed: bool,
     pause_requested: bool,
     terminated: bool,
-    current_line: u32,
-    /// Name of the user function whose body is executing, for the stack frame.
-    /// Empty at script level.
-    current_func: String,
+    /// The absolute source line most recently reached at each call depth —
+    /// index 0 is script level, index N is the Nth nested function body. The
+    /// entry BELOW the innermost one is the line of the statement that made the
+    /// call, which is exactly the line a caller's stack frame shows.
+    ///
+    /// A DAP-side vector rather than the runtime's `CALL_SITE_LNUM`: that stack
+    /// records `SOURCING_LNUM`, which inside a body is relative to its
+    /// `:function` (vim reports `function Foo, line 3`), while a debug client
+    /// resolves every frame against FILE lines. `SET_LINENO` already carries the
+    /// absolute line, so recording it per depth needs no second numbering.
+    lines: Vec<u32>,
+    /// The frames as of the current pause, INNERMOST FIRST — `(name, absolute
+    /// line)`. Snapshotted on the executor thread (which alone may read
+    /// `funccal_stack`) so the request thread can answer `stackTrace` without
+    /// touching the runtime. c: awkrs's `PauseSnapshot::frames`
+    /// (`awkrs/src/dap.rs:72`), built the same way at `awkrs/src/vm.rs:2341-2365`.
+    frames: Vec<(String, u32)>,
     pending: VecDeque<Pending>,
 }
 
@@ -139,24 +175,82 @@ pub fn check_line(line: u32) {
         return; // not running under --dap
     };
     flush_output();
-    let mut st = sh.state.lock().unwrap();
-    st.current_line = line;
     // Read on the executor thread: `funccal_stack` is thread-local, so the
     // request-reader thread would only ever see it empty.
-    st.current_func = crate::fusevm_bridge::dap_current_func();
-    let stop = st.breakpoints.contains(&line) || st.stepping || st.pause_requested;
+    let depth = crate::fusevm_bridge::dap_call_depth();
+    let mut st = sh.state.lock().unwrap();
+
+    // Record this depth's line and drop the entries of any call that returned:
+    // truncating to `depth + 1` is the whole of the "frame popped" bookkeeping,
+    // so there is no exit hook to keep balanced. That matters — strykelang's
+    // hand-paired `enter_sub`/`leave_sub` leaks a depth on one error path
+    // (`strykelang/vm.rs:3259` returns via `?` with no `leave_sub`).
+    if st.lines.len() <= depth {
+        st.lines.resize(depth + 1, line);
+    } else {
+        st.lines.truncate(depth + 1);
+    }
+    st.lines[depth] = line;
+
+    // Stop predicate, in awkrs's precedence order (`awkrs/src/debugger.rs:142-186`):
+    // an async pause first, then breakpoints, then the armed step. Breakpoints
+    // outrank stepping, so a breakpoint inside a stepped-over call still fires.
+    //
+    // Deliberately NOT ported: awkrs's same-line guard, which suppresses a
+    // second stop on a line already stopped at. Its debugger is line-oriented;
+    // vim's is COMMAND-oriented, and `viml` emits one marker per statement to
+    // match. Measured on `VIM - Vi IMproved 9.2 (2026 Feb 14, compiled Aug 02
+    // 2026 19:00:41)`, stepping over `let a = 1 | let b = 2`:
+    //
+    //   >step
+    //   line 1: let a = 1 | let b = 2
+    //   >step
+    //   line 1: let b = 2
+    //
+    // Two stops on one line. awkrs's guard would have swallowed the second.
+    let paused = st.pause_requested;
+    let hit_bp = st.breakpoints.contains(&line);
+    let stop = paused
+        || hit_bp
+        || st.step_mode
+        || st.step_over_depth.is_some_and(|d| depth <= d)
+        || st.step_out_depth.is_some_and(|d| depth < d);
     if !stop {
         return;
     }
     st.pause_requested = false;
-    st.stepping = false;
-    let reason = if st.breakpoints.contains(&line) {
+    // Every arm is disarmed by the stop that answers it. awkrs clears only the
+    // one that fired (`awkrs/src/debugger.rs:175`, `:182`), which leaves a
+    // step-over armed when a breakpoint pre-empts it — the next `continue` then
+    // stops anyway. One request, one stop.
+    st.step_mode = false;
+    st.step_over_depth = None;
+    st.step_out_depth = None;
+    let reason = if hit_bp {
         "breakpoint"
     } else if std::mem::take(&mut st.func_bp_armed) {
         "function breakpoint"
+    } else if paused {
+        "pause"
     } else {
         "step"
     };
+
+    // Snapshot the backtrace while we can still read `funccal_stack`: names come
+    // from the scope stack (outermost first), each frame's line from `lines` at
+    // its own depth, and depth 0 is the script itself.
+    let names = crate::fusevm_bridge::dap_frame_names();
+    let frames: Vec<(String, u32)> = (0..=depth)
+        .rev()
+        .map(|i| {
+            let name = match i.checked_sub(1).and_then(|f| names.get(f)) {
+                Some(n) => n.clone(),
+                None => "script".to_string(),
+            };
+            (name, st.lines.get(i).copied().unwrap_or(line))
+        })
+        .collect();
+    st.frames = frames;
     drop(st);
     send_event(
         "stopped",
@@ -178,8 +272,17 @@ pub fn check_line(line: u32) {
             return;
         }
         if let Some(r) = st.resume.take() {
-            if r == Resume::Next {
-                st.stepping = true;
+            // Arm from the depth AT THE STOP, as awkrs does
+            // (`awkrs/src/debugger.rs:222-224`) — not from the depth at the call.
+            match r {
+                Resume::Continue => {}
+                Resume::StepIn => st.step_mode = true,
+                Resume::StepOver => st.step_over_depth = Some(depth),
+                // At script level (`depth == 0`) no line is ever shallower, so
+                // this runs to the next breakpoint or to the end — which is what
+                // "finish the current script" means. Same as awkrs, where
+                // `call_depth < 0` is unsatisfiable for a `usize`.
+                Resume::StepOut => st.step_out_depth = Some(depth),
             }
             return;
         }
@@ -206,7 +309,7 @@ pub fn check_func_entry(name: &str) {
     };
     let mut st = sh.state.lock().unwrap();
     if st.function_breakpoints.contains(name) {
-        st.stepping = true;
+        st.step_mode = true;
         st.func_bp_armed = true;
     }
 }
@@ -343,24 +446,39 @@ pub fn run_stdio() -> Result<(), String> {
                 "threads",
                 json!({ "threads": [{ "id": 1, "name": "main" }] }),
             ),
+            // The FULL backtrace, innermost first — one frame per active
+            // `funccal_stack` entry plus the script itself, which is what vim's
+            // own `backtrace` shows (`->0 Bar` / `1 function Foo[2]` /
+            // `2 script …[11]`). It used to report a single frame however deep
+            // execution was, so a client could see where it stopped but never
+            // how it got there.
             "stackTrace" => {
-                let (line, func) = {
-                    let st = shared().state.lock().unwrap();
-                    (st.current_line, st.current_func.clone())
+                let frames = shared().state.lock().unwrap().frames.clone();
+                let total = frames.len();
+                // `startFrame`/`levels` are the client's paging window; VS Code
+                // sends them on every request. `levels` of 0 means "all".
+                let start = args
+                    .get("startFrame")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+                    .min(total as u64) as usize;
+                let levels = match args.get("levels").and_then(Value::as_u64) {
+                    Some(0) | None => total - start,
+                    Some(n) => (n as usize).min(total - start),
                 };
-                // Name the frame after the function whose body is stopped in —
-                // a function breakpoint that reports `script` tells the client
-                // nothing about where it landed.
-                let name = if func.is_empty() { "script" } else { &func };
+                let out: Vec<Value> = frames[start..start + levels]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (name, line))| {
+                        json!({ "id": start + i + 1, "name": name, "line": line, "column": 1 })
+                    })
+                    .collect();
                 send_response(
                     seq,
                     "stackTrace",
-                    json!({
-                        "stackFrames": [{
-                            "id": 1, "name": name, "line": line, "column": 1,
-                        }],
-                        "totalFrames": 1,
-                    }),
+                    // `totalFrames` is the whole stack, not the page — that is
+                    // how the client knows to ask for more.
+                    json!({ "stackFrames": out, "totalFrames": total }),
                 );
             }
             "scopes" => send_response(
@@ -394,10 +512,25 @@ pub fn run_stdio() -> Result<(), String> {
                 shared().cv.notify_all();
                 send_response(seq, "continue", json!({ "allThreadsContinued": true }));
             }
+            // c: vim's `next` / `step` / `finish` debug commands, measured on
+            // `VIM - Vi IMproved 9.2 (2026 Feb 14, compiled Aug 02 2026
+            // 19:00:41)` against `Foo` calling `Bar`, stopped on `call Bar()`:
+            //   `step` → `…function Foo[2]..Bar / line 1: let y = 2`  (deeper)
+            //   `next` → `…function Foo    / line 3: return x`        (same)
+            // and from inside `Bar`, `finish` returns to the caller.
+            //
+            // Deviation, deliberate: vim's `finish` makes one extra stop on the
+            // callee's synthetic `line 2: End of function` before leaving. There
+            // is no end-of-body statement to mark here, and DAP's `stepOut` is
+            // specified to land in the caller — so `viml` goes straight there.
             "next" | "stepIn" | "stepOut" => {
                 {
                     let mut st = shared().state.lock().unwrap();
-                    st.resume = Some(Resume::Next);
+                    st.resume = Some(match command.as_str() {
+                        "stepIn" => Resume::StepIn,
+                        "stepOut" => Resume::StepOut,
+                        _ => Resume::StepOver,
+                    });
                 }
                 shared().cv.notify_all();
                 send_response(seq, &command, json!({}));

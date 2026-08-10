@@ -1422,6 +1422,27 @@ impl Compiler {
             Stmt::LineGroup(stmts) => {
                 let mut to_end = Vec::new();
                 for (i, inner) in stmts.iter().enumerate() {
+                    // Debug (`--dap`) build only: each bar-separated command is a
+                    // separate stop, because vim's debugger is command-oriented
+                    // rather than line-oriented. Measured on `VIM - Vi IMproved
+                    // 9.2 (2026 Feb 14, compiled Aug 02 2026 19:00:41)`:
+                    //
+                    //   >step
+                    //   line 1: let a = 1 | let b = 2
+                    //   >step
+                    //   line 1: let b = 2
+                    //
+                    // Two stops, one line. The group is a single statement to
+                    // `compile_stmts`, which therefore marks only its first
+                    // command — so `i > 0` picks up exactly the ones it missed,
+                    // on the same (absolute) line. `cur_line` is body-relative,
+                    // so `line_base` goes back on.
+                    if self.dbg && i > 0 {
+                        let abs = (self.cur_line + self.line_base) as i64;
+                        self.emit(Op::LoadInt(abs));
+                        self.emit(Op::CallBuiltin(h::VIML_SET_LINENO, 1));
+                        self.emit(Op::Pop);
+                    }
                     self.emit(Op::CallBuiltin(h::VIML_ERR_MARK, 0));
                     self.emit(Op::Pop);
                     // Each bar-separated command on the line is its own

@@ -5937,17 +5937,43 @@ pub fn dap_globals() -> Vec<(String, String)> {
     })
 }
 
-/// Name of the user function whose body is currently executing, for the
-/// debugger's stack frame — the innermost `funccal_stack` frame's `fc_name`, or
-/// `""` at script level. Must be read on the executor thread (`funccal_stack` is
-/// thread-local).
-pub fn dap_current_func() -> String {
-    crate::ported::eval::vars::funccal_stack.with(|s| {
-        s.borrow()
-            .last()
-            .map(|f| f.fc_name.clone())
-            .unwrap_or_default()
-    })
+/// Names of the user functions on the call stack, OUTERMOST first — one per
+/// `funccal_stack` frame, so `[Foo, Bar]` means `Foo` called `Bar` and `Bar`'s
+/// body is running. Empty at script level. Must be read on the executor thread
+/// (`funccal_stack` is thread-local).
+///
+/// This is what turns the debugger's `stackTrace` into a real backtrace instead
+/// of one synthetic frame. Verified against `VIM - Vi IMproved 9.2 (2026 Feb 14,
+/// compiled Aug 02 2026 19:00:41)`, stopped on the second line of `Bar` called
+/// from `Foo` called from the script:
+///
+/// ```text
+/// >backtrace
+///   3 command line
+///   2 script …/bt.vim[11]
+///   1 function Foo[2]
+/// ->0 Bar
+/// ```
+pub fn dap_frame_names() -> Vec<String> {
+    crate::ported::eval::vars::funccal_stack
+        .with(|s| s.borrow().iter().map(|f| f.fc_name.clone()).collect())
+}
+
+/// Live call depth for the debugger: 0 at script level, 1 inside a function
+/// body, 2 one call deeper. This is `funccal_stack`'s own length — the same
+/// value [`call_user_function_raw`] compares against `maxfuncdepth` — not a
+/// counter the debugger keeps in parallel.
+///
+/// awkrs's debugger owns a `call_depth: usize` bumped by `enter_sub` /
+/// `leave_sub` (`awkrs/src/debugger.rs:193-201`), balanced by hand across every
+/// exit arm of the call. strykelang copies that shape and *leaks*: its
+/// `debugger_enter_sub` at `strykelang/vm.rs:3259` is followed by a `?` early
+/// return with no matching `leave_sub`, so one signature-mismatch error inflates
+/// the depth for the rest of the session and wedges step-over/step-out. Reading
+/// the scope stack that already exists cannot drift from the thing it measures,
+/// because it *is* that thing.
+pub fn dap_call_depth() -> usize {
+    crate::ported::eval::vars::funccal_stack.with(|s| s.borrow().len())
 }
 
 /// Evaluate a bare variable name for the debugger's `evaluate` request (reads

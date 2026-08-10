@@ -35,6 +35,9 @@ pub mod builtin_docs;
 pub mod cli;
 pub mod compile_viml;
 pub mod dap;
+/// A DAP *client* for driving `viml --dap` — shared by `tests/dap.rs` and the
+/// fuzzer's `--dap` mode. Development tooling, not part of the runtime.
+pub mod dap_client;
 pub mod fusevm_bridge;
 pub mod fusevm_disasm;
 /// Rust map API over the ported `hashtab_T` (see the module docs: the C has no

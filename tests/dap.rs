@@ -7,167 +7,14 @@
 //! the normal one and so can drift from it silently — as it had:
 //! `:function` definitions were dropped from the debug program entirely, so no
 //! user function existed under `--dap`.
+//!
+//! The client itself is [`vimlrs::dap_client`], shared with the `--dap` mode of
+//! `fuzz-parity`; its module docs explain why every wait has a deadline and why
+//! the child is killed on drop (a stuck adapter must fail these tests, not hang
+//! them).
 
-use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::time::{Duration, Instant};
-
-use serde_json::{json, Value};
-
-/// How long any single `wait_*` will block before declaring the adapter stuck.
-const WAIT: Duration = Duration::from_secs(20);
-
-fn viml_binary() -> PathBuf {
-    if let Ok(p) = std::env::var("CARGO_BIN_EXE_viml") {
-        return PathBuf::from(p);
-    }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("target")
-        .join("debug")
-        .join("viml")
-}
-
-/// A live `viml --dap` process plus its framed-message channels.
-///
-/// Reading runs on its own thread feeding an `mpsc` channel: a blocking
-/// `read_line` on the child's stdout pipe cannot be given a timeout, so an
-/// adapter that simply goes quiet (the failure mode every one of these tests is
-/// looking for) would hang the test binary instead of failing it.
-struct Dap {
-    child: Child,
-    rx: Receiver<Value>,
-    seq: i64,
-    /// Messages received while waiting for something else, so a later `wait_*`
-    /// can still find them.
-    seen: Vec<Value>,
-}
-
-impl Dap {
-    fn spawn() -> Self {
-        let mut child = Command::new(viml_binary())
-            .arg("--dap")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn viml --dap");
-        let mut reader = BufReader::new(child.stdout.take().expect("stdout"));
-        let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            while let Some(v) = read_message(&mut reader) {
-                if tx.send(v).is_err() {
-                    break;
-                }
-            }
-        });
-        Self {
-            child,
-            rx,
-            seq: 1,
-            seen: Vec::new(),
-        }
-    }
-
-    fn request(&mut self, command: &str, arguments: Value) {
-        let seq = self.seq;
-        self.seq += 1;
-        let msg =
-            json!({ "seq": seq, "type": "request", "command": command, "arguments": arguments });
-        let body = serde_json::to_vec(&msg).expect("encode request");
-        let stdin = self.child.stdin.as_mut().expect("stdin");
-        write!(stdin, "Content-Length: {}\r\n\r\n", body.len()).expect("write header");
-        stdin.write_all(&body).expect("write body");
-        stdin.flush().expect("flush");
-    }
-
-    /// Take the next message from the reader thread, recording it in `seen`.
-    /// `None` once the deadline passes or the adapter's stdout closes.
-    fn next_message(&mut self, deadline: Instant) -> Option<Value> {
-        let left = deadline.saturating_duration_since(Instant::now());
-        match self.rx.recv_timeout(left) {
-            Ok(v) => {
-                self.seen.push(v.clone());
-                Some(v)
-            }
-            Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => None,
-        }
-    }
-
-    /// Read until `pred` matches a message, or the adapter exits / [`WAIT`] passes.
-    fn wait_for(&mut self, what: &str, pred: impl Fn(&Value) -> bool) -> Value {
-        if let Some(v) = self.seen.iter().find(|v| pred(v)) {
-            return v.clone();
-        }
-        let deadline = Instant::now() + WAIT;
-        while let Some(v) = self.next_message(deadline) {
-            if pred(&v) {
-                return v;
-            }
-        }
-        panic!("never saw {what}; messages so far: {:#?}", self.seen);
-    }
-
-    fn wait_event(&mut self, event: &str) -> Value {
-        self.wait_for(&format!("event {event}"), |v| {
-            v["type"] == "event" && v["event"] == event
-        })
-    }
-
-    fn wait_response(&mut self, command: &str) -> Value {
-        self.wait_for(&format!("response to {command}"), |v| {
-            v["type"] == "response" && v["command"] == command
-        })
-    }
-
-    /// Every `output` event body seen so far, concatenated.
-    fn output(&self) -> String {
-        self.seen
-            .iter()
-            .filter(|v| v["event"] == "output")
-            .filter_map(|v| v["body"]["output"].as_str())
-            .collect()
-    }
-
-    fn shutdown(&mut self) {
-        self.request("disconnect", json!({}));
-        // Drain whatever is left so the child sees EOF and exits.
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while self.next_message(deadline).is_some() {}
-    }
-}
-
-/// Read one Content-Length-framed message from `r`. `None` at EOF.
-fn read_message(r: &mut impl BufRead) -> Option<Value> {
-    let mut len = 0usize;
-    loop {
-        let mut line = String::new();
-        if r.read_line(&mut line).ok()? == 0 {
-            return None;
-        }
-        let trimmed = line.trim_end();
-        if trimmed.is_empty() {
-            break;
-        }
-        if let Some(v) = trimmed.strip_prefix("Content-Length:") {
-            len = v.trim().parse().ok()?;
-        }
-    }
-    let mut buf = vec![0u8; len];
-    r.read_exact(&mut buf).ok()?;
-    serde_json::from_slice(&buf).ok()
-}
-
-impl Drop for Dap {
-    /// Reap the adapter however the test ended. A failing assertion unwinds past
-    /// [`Dap::shutdown`], and an adapter left holding a live stdin pipe never
-    /// exits — the test binary then hangs instead of reporting the failure.
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
+use serde_json::json;
+use vimlrs::dap_client::Dap;
 
 /// Write `src` to a temp `.vim` file and return its path (kept alive by `dir`).
 fn script(dir: &tempfile::TempDir, src: &str) -> String {
@@ -300,8 +147,8 @@ fn dap_function_breakpoint_fires_through_funcref() {
     dap.request("continue", json!({ "threadId": 1 }));
 
     // `call Greet('b')` — reached by name. Two `stopped` events in all.
-    let deadline = Instant::now() + WAIT;
-    while dap.seen.iter().filter(|v| v["event"] == "stopped").count() < 2 {
+    let deadline = std::time::Instant::now() + vimlrs::dap_client::WAIT;
+    while dap.stops() < 2 {
         assert!(
             dap.next_message(deadline).is_some(),
             "only one function-breakpoint stop; the Funcref and by-name calls \
@@ -312,5 +159,272 @@ fn dap_function_breakpoint_fires_through_funcref() {
     dap.request("continue", json!({ "threadId": 1 }));
     dap.wait_event("terminated");
     assert_eq!(dap.output(), "hi a\nhi b\nend\n");
+    dap.shutdown();
+}
+
+/// Two calls deep: `Bar` (line 2) ← `Foo` (line 6) ← script (line 9).
+///
+/// The layout matters — every frame sits on a DIFFERENT line, so a stack that
+/// reported the same line three times, or the innermost line three times, fails
+/// on the value and not merely on the count.
+const NESTED_SCRIPT: &str = "\
+function! Bar()
+  echo \"in bar\"
+  return 2
+endfunction
+function! Foo()
+  return Bar() + 1
+endfunction
+echo \"start\"
+echo Foo()
+echo \"end\"
+";
+
+/// `stackTrace` must report the WHOLE backtrace, innermost first, each frame on
+/// its own line — not one synthetic frame however deep execution is.
+///
+/// Measured on `VIM - Vi IMproved 9.2 (2026 Feb 14, compiled Aug 02 2026
+/// 19:00:41)`, stopped two calls deep, vim's own `backtrace` prints the same
+/// shape (its indices count down to `->0` at the innermost, and its in-function
+/// line numbers are body-relative where DAP frames are file-absolute):
+///
+/// ```text
+/// >backtrace
+///   3 command line
+///   2 script …/bt.vim[11]
+///   1 function Foo[2]
+/// ->0 Bar
+/// ```
+#[test]
+fn dap_stack_trace_reports_every_frame() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = script(&dir, NESTED_SCRIPT);
+    let mut dap = Dap::spawn();
+    dap.request("initialize", json!({}));
+    dap.wait_event("initialized");
+    // Line 2 is `echo "in bar"`, the first statement of the innermost body.
+    dap.request(
+        "setBreakpoints",
+        json!({ "source": { "path": path }, "breakpoints": [{ "line": 2 }] }),
+    );
+    dap.wait_response("setBreakpoints");
+    dap.request("configurationDone", json!({}));
+    dap.request("launch", json!({ "program": path }));
+    dap.wait_event("stopped");
+
+    dap.request("stackTrace", json!({ "threadId": 1 }));
+    let st = dap.wait_response("stackTrace");
+    let frames = st["body"]["stackFrames"]
+        .as_array()
+        .expect("stackFrames array")
+        .clone();
+    let got: Vec<(String, i64)> = frames
+        .iter()
+        .map(|f| {
+            (
+                f["name"].as_str().unwrap_or_default().to_string(),
+                f["line"].as_i64().unwrap_or(-1),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            ("Bar".to_string(), 2),    // stopped here
+            ("Foo".to_string(), 6),    // `return Bar() + 1`
+            ("script".to_string(), 9), // `echo Foo()`
+        ],
+        "backtrace should be innermost-first with each frame on its own line"
+    );
+    assert_eq!(st["body"]["totalFrames"], 3);
+    // Ids are 1-based positions, so a client can ask for `scopes` of a frame.
+    assert_eq!(frames[0]["id"], 1);
+    assert_eq!(frames[2]["id"], 3);
+
+    // The client's paging window must be honoured, with `totalFrames` still the
+    // whole stack — that is how the client knows more frames exist.
+    dap.request(
+        "stackTrace",
+        json!({ "threadId": 1, "startFrame": 1, "levels": 1 }),
+    );
+    let page = dap.wait_for("paged stackTrace", |v| {
+        v["command"] == "stackTrace"
+            && v["body"]["stackFrames"]
+                .as_array()
+                .is_some_and(|a| a.len() == 1)
+    });
+    assert_eq!(page["body"]["stackFrames"][0]["name"], "Foo");
+    assert_eq!(page["body"]["stackFrames"][0]["id"], 2);
+    assert_eq!(page["body"]["totalFrames"], 3);
+
+    dap.request("continue", json!({ "threadId": 1 }));
+    dap.wait_event("terminated");
+    assert_eq!(dap.output(), "start\nin bar\n3\nend\n");
+    dap.shutdown();
+}
+
+/// Drive to the first stop on `line`, then send `verb` and report where the next
+/// stop landed as `(frame name, line, depth)`.
+fn step_from(src: &str, bp_line: u32, verb: &str) -> (String, i64, usize) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = script(&dir, src);
+    let mut dap = Dap::spawn();
+    dap.request("initialize", json!({}));
+    dap.wait_event("initialized");
+    dap.request(
+        "setBreakpoints",
+        json!({ "source": { "path": path }, "breakpoints": [{ "line": bp_line }] }),
+    );
+    dap.wait_response("setBreakpoints");
+    dap.request("configurationDone", json!({}));
+    dap.request("launch", json!({ "program": path }));
+    dap.wait_event("stopped");
+
+    dap.request(verb, json!({ "threadId": 1 }));
+    // The stop we want is the SECOND one; `terminated` instead means the verb
+    // ran off the end of the program, which is a wrong answer, not a hang.
+    let deadline = std::time::Instant::now() + vimlrs::dap_client::WAIT;
+    while dap.stops() < 2 {
+        let msg = dap.next_message(deadline);
+        assert!(
+            msg.is_some(),
+            "`{verb}` from line {bp_line} produced no second stop: {:#?}",
+            dap.seen
+        );
+        if msg.is_some_and(|m| m["event"] == "terminated") {
+            panic!("`{verb}` from line {bp_line} ran to termination instead of stopping");
+        }
+    }
+    dap.request("stackTrace", json!({ "threadId": 1 }));
+    let st = dap.wait_response("stackTrace");
+    let frames = st["body"]["stackFrames"]
+        .as_array()
+        .expect("frames")
+        .clone();
+    let out = (
+        frames[0]["name"].as_str().unwrap_or_default().to_string(),
+        frames[0]["line"].as_i64().unwrap_or(-1),
+        frames.len() - 1, // depth: script level is 0
+    );
+    dap.shutdown();
+    out
+}
+
+/// `stepIn` on a statement that CALLS must land inside the callee.
+///
+/// Measured on `VIM - Vi IMproved 9.2 …`, stopped on `Foo`'s `call Bar()`:
+///
+/// ```text
+/// >step
+/// command line..script BT[11]..function Foo
+/// [2]..Bar
+/// line 1: let y = 2
+/// ```
+#[test]
+fn dap_step_in_enters_the_callee() {
+    // Stop on line 6 (`return Bar() + 1`) inside `Foo`, then step in.
+    let (name, line, depth) = step_from(NESTED_SCRIPT, 6, "stepIn");
+    assert_eq!(
+        (name.as_str(), line, depth),
+        ("Bar", 2, 2),
+        "stepIn should reach `Bar`'s first statement, one frame deeper"
+    );
+}
+
+/// `next` on a statement that CALLS must step OVER it, staying at the same depth.
+///
+/// Measured on `VIM - Vi IMproved 9.2 …`, stopped on `Foo`'s `call Bar()`:
+///
+/// ```text
+/// >next
+/// command line..script BT[11]..function Foo
+/// line 3: return x
+/// ```
+///
+/// This is the target that was aliased to `stepIn`: `next` used to land on
+/// `Bar`'s body exactly like `stepIn` did.
+#[test]
+fn dap_next_steps_over_the_call() {
+    // Stop on line 9 (`echo Foo()`) at script level, then step over the call.
+    let (name, line, depth) = step_from(NESTED_SCRIPT, 9, "next");
+    assert_eq!(
+        (name.as_str(), line, depth),
+        ("script", 10, 0),
+        "next should reach the following script line without entering `Foo`"
+    );
+}
+
+/// `stepOut` must return to the CALLER, skipping the rest of the callee.
+///
+/// vim's `finish` makes one extra stop on the callee's synthetic `line 2: End of
+/// function` first; there is no end-of-body statement to mark here and DAP
+/// specifies the caller, so `viml` goes straight there — the deviation is stated
+/// on the handler in `src/dap.rs`.
+///
+/// This is the target that was aliased to `next`: `stepOut` from two frames deep
+/// used to land on the *next line of the same function*.
+#[test]
+fn dap_step_out_returns_to_the_caller() {
+    // Stop on line 2, inside `Bar`, two frames deep. Line 3 (`return 2`) is the
+    // rest of `Bar` — stepping out must not stop there.
+    let (name, line, depth) = step_from(NESTED_SCRIPT, 2, "stepOut");
+    assert_eq!(
+        (name.as_str(), line, depth),
+        ("script", 10, 0),
+        "stepOut of `Bar` should skip the rest of it AND the rest of `Foo`, \
+         which has nothing left to run, landing back at script level"
+    );
+}
+
+/// A `|`-joined line holds two commands, and vim's debugger is command-oriented:
+/// it stops on each. Measured on `VIM - Vi IMproved 9.2 …`:
+///
+/// ```text
+/// >step
+/// line 1: let a = 1 | let b = 2
+/// >step
+/// line 1: let b = 2
+/// ```
+///
+/// awkrs's `should_stop` suppresses the second stop with a same-line guard
+/// (`awkrs/src/debugger.rs:159`) because its debugger is line-oriented. Porting
+/// that guard here would have made `viml` skip a command vim stops on, so it is
+/// deliberately absent — this test is what keeps it absent.
+#[test]
+fn dap_steps_once_per_command_not_once_per_line() {
+    const BAR_SCRIPT: &str = "let a = 1 | let b = 2\necho a + b\n";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = script(&dir, BAR_SCRIPT);
+    let mut dap = Dap::spawn();
+    dap.request("initialize", json!({}));
+    dap.wait_event("initialized");
+    dap.request(
+        "setBreakpoints",
+        json!({ "source": { "path": path }, "breakpoints": [{ "line": 1 }] }),
+    );
+    dap.wait_response("setBreakpoints");
+    dap.request("configurationDone", json!({}));
+    dap.request("launch", json!({ "program": path }));
+    dap.wait_event("stopped");
+
+    // Second command of line 1 — still line 1.
+    dap.request("next", json!({ "threadId": 1 }));
+    let deadline = std::time::Instant::now() + vimlrs::dap_client::WAIT;
+    while dap.stops() < 2 {
+        assert!(
+            dap.next_message(deadline).is_some(),
+            "`next` on a `|`-joined line must stop on its second command: {:#?}",
+            dap.seen
+        );
+    }
+    dap.request("stackTrace", json!({ "threadId": 1 }));
+    let st = dap.wait_response("stackTrace");
+    assert_eq!(
+        st["body"]["stackFrames"][0]["line"], 1,
+        "the second stop is the second command of line 1"
+    );
+    dap.request("continue", json!({ "threadId": 1 }));
+    dap.wait_event("terminated");
+    assert_eq!(dap.output(), "3\n");
     dap.shutdown();
 }
