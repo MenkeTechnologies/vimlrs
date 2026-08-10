@@ -4019,7 +4019,11 @@ reference format string (`%s`/`%d` already filled in at the call site).
 | agree with the Neovim spec only (vim words it differently) | 74 |
 | agree with vim only | 11 |
 | **matched NEITHER** | **51** |
-| fixed this round | 34 |
+
+Re-running the same audit after this round: 340 literals, 20 matching neither —
+so 31 of the 51 were closed. Of the 20 left, four are the `:Intercept` codes
+below (a deliberate extension), one is a `#[test]` fixture string and one is the
+unreachable default arm of `e_unmatched_block`, and the rest are R31-O1/O3.
 
 The reachable ones, each re-measured against both engines after the fix:
 
