@@ -3082,3 +3082,143 @@ sites rather than factored into a helper, because a helper would need a name the
 gate has no C origin for.
 
 ### R23-O1, R25-O1..O7 — unchanged
+
+---
+
+# Round 27 — setreg()'s FAIL default, and a Funcref that had a string value
+
+One item closed (R26-O3) and two new ones opened out of it. Oracles, verbatim
+from commands run this round:
+
+```
+$ vim --version | head -1
+VIM - Vi IMproved 9.2 (2026 Feb 14, compiled Aug 02 2026 19:00:41)
+$ vim --version | grep 'Included patches'
+Included patches: 1-900
+$ nvim --version | head -1
+NVIM v0.12.4
+```
+
+vim and nvim agreed on every row measured this round, so no engine had to be
+preferred anywhere below.
+
+## R27-1. `setreg()` ignored three of the C's early returns — ✅ FIXED (closes R26-O3)
+
+`f_setreg` opens with `rettv->vval.v_number = 1;  // FAIL is default`
+(`vendor/eval/funcs.c:6617`) and clears it to 0 only at `c:6742`, after the
+write. Every early return therefore answers **1**, which reads backwards next to
+the usual "0 is success" and is what made these easy to miss. Three returns were
+absent here, and a fourth NULL check was being stringified instead:
+
+| # | C | before | after |
+|---|---|---|---|
+| 1 | `c:6633` empty Dict clears the register and `c:6637` returns | `E908: Using an invalid value as a String` | `1`, register emptied |
+| 2 | `c:6645`–`c:6652` a present `regtype` must parse completely, else `semsg(_(e_invargval), "value")` and return | accepted silently, wrote with the default type | `E475: Invalid value for argument value`, register untouched, `1` |
+| 3 | `c:6628`/`c:6695`/`c:6731` absent `regcontents` leaves the pointer NULL, so NEITHER write branch runs | stringified a default typval → `E908` | writes nothing, `0` |
+| 4 | `c:6709`–`c:6711` a bad list item `goto free_lstval`s past the write but still falls into `c:6742` | wrote the item's coerced text | register untouched, still `0` |
+
+Row 2 needs the whole of `get_yank_type` (`c:6580`), not just its first
+character: a blockwise type may carry a width (`b10` → `block_len =
+getdigits(...) - 1`), and the cursor is left on the last digit so `c:6649`'s
+`*(++stropt)` lands exactly one past it. So `b1` parses, while `zz` (bad char),
+`vv` (trailing junk) and `''` (present but unparseable) all fail. Measured, all
+three engines identical:
+
+| expression | vim | nvim | vimlrs before | vimlrs after |
+|---|---|---|---|---|
+| `setreg('a', {})` | `1`, `getreg` `''` | same | `E908` | `1`, `''` |
+| `setreg('c', {'regcontents':['ab','cd'],'regtype':'b1'})` | `0`, `'^V1'` | same | `0`, `'^V1'` | unchanged |
+| `setreg('e', {'regcontents':'x','regtype':'zz'})` | `E475`, `1`, `'seed'` | same | `0`, `'x'` | `E475`, `1`, `'seed'` |
+| `setreg('f', {'regcontents':'x','regtype':'vv'})` | `E475`, `1`, `'seed'` | same | `0`, `'x'` | `E475`, `1`, `'seed'` |
+| `setreg('g', {'regcontents':'x','regtype':''})` | `E475`, `1`, `'seed'` | same | `0`, `'x'` | `E475`, `1`, `'seed'` |
+| `setreg('h', {'regtype':'v'})` | `0`, `''` | same | `E908`, `0` | `0`, `''` |
+
+Pinned in `tests/parity_cases/setreg_dict.vim`; the corpus is 34/34
+byte-identical. The regtype parse is written out at its call site rather than
+factored into a helper — `src/ported/` may only define names the Neovim C has,
+and the C's own `get_yank_type` name is already taken by the reduced form in
+`src/ported/ops.rs` that the option-string loop uses.
+
+## Still open
+
+### R27-O1. A Funcref has a string value here, and callback resolution depends on it
+
+The remaining half of R26-O3, carved out because the fix is not local. `c:4604`
+groups `VAR_FUNC` with `VAR_PARTIAL`/`VAR_LIST`/`VAR_DICT`/`VAR_BLOB`/
+`VAR_UNKNOWN` in `tv_get_string_buf_chk` and `c:4610` errors:
+
+```c
+case VAR_PARTIAL:
+case VAR_FUNC:
+...
+  emsg(_(str_errors[tv->v_type]));
+  return NULL;
+```
+
+`src/ported/eval/typval.rs:163` instead had `(VAR_FUNC, v_string(s)) =>
+Some(s.clone())`, returning the function NAME. Measured with
+`let F = function('strlen')`:
+
+| expression | vim | nvim | vimlrs |
+|---|---|---|---|
+| `'x' . F` | `E729: Using a Funcref as a String` | same | `'xstrlen'` |
+| `strlen(F)` | `E729` | same | `6` |
+| `setreg('b', F)` | `E729`, returns `1`, register unchanged | same | `0`, register set to `'strlen'` |
+| `setreg('c', [F])` | `E729`, returns `0`, register unchanged | same | `0`, register set to `"strlen\n"` |
+| `join([F], ',')` | `'strlen'` | same | `'strlen'` ✓ |
+
+The last row is the one that is already right, and it shows the fix is safe in
+principle: `join` does not use this function at all, it uses `encode_tv2echo`
+(`vendor/eval/typval.c:1005`), which is why vim renders the name there without
+an error.
+
+**Deleting the `VAR_FUNC` arm was tried this round and reverted.** It builds
+clean and then fails nine lib tests:
+
+```
+fusevm_bridge::tests::call_resolves_builtins, callback_builtins, batch4_builtins,
+dictwatcher, index_assignment, map_filter_foreach_mapnew, reduce_builtin
+ported::eval::typval::tests::callback_family
+```
+
+(plus `vim_vars`, which was already red — see R26-O6). So the arm is not a
+stringification convenience; callback resolution reads a Funcref's name through
+`tv_get_string`. Closing this means routing those paths at their own call sites
+— the C reads `v_string` directly for `VAR_FUNC` when it wants a callback name
+— and only then restoring the error. That is a cross-cutting change to the
+callback layer and belongs in its own round; a local Funcref check inside
+`f_setreg` was deliberately NOT added, because it would make the one measured
+symptom disappear while leaving `'x' . F` and `strlen(F)` wrong and the shared
+primitive still lying.
+
+### R27-O2. `getregtype()` on an unset or cleared register is `'v'`, not `''`
+
+Found while fixing R27-1, pre-existing and untouched by it. The C's `kMTUnknown`
+has no representation in this port's register model, so a register that has
+never held anything reports charwise:
+
+```vim
+echo 'fresh' string(getreg('z')) string(getregtype('z'))
+call setreg('y', 'seed') | call setreg('y', [])
+echo 'emptylist' string(getreg('y')) string(getregtype('y'))
+```
+
+| | vim | vimlrs |
+|---|---|---|
+| `fresh` | `'' ''` | `'' 'v'` |
+| `emptylist` | `'' ''` | `'' 'v'` |
+
+`getreg()` and the `setreg()` return value agree in both rows, which is why
+`tests/parity_cases/setreg_dict.vim` can pin the clear path without tripping on
+this: the case reads `getregtype` only for registers it has actually written.
+Closing it means carrying `kMTUnknown` as a real state through `yankreg_T`
+rather than defaulting to charwise, which touches `src/ported/ops.rs` broadly.
+
+### R26-O1, R26-O2, R26-O4, R26-O5, R26-O6, R24-O5, R22-O3, R23-O1, R25-O1..O7 — unchanged
+
+R26-O2 is visible in this round's own measurements: every erroring row of the
+`setreg` table had to be written as `try`/`catch` around a `:let` rather than as
+a bare `:echo`, because `:echo` here still discards the whole line once an error
+is reported. That is a statement-model change, not a builtin one, and stays its
+own round. `tests/data/fake_fn_allowlist.txt` was not touched; the detector
+still reports exactly the three standing R22-O3 names.

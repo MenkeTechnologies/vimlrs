@@ -3193,23 +3193,71 @@ pub fn f_setreg(argvars: &[typval_T], rettv: &mut typval_T) {
         regname = '"';
     }
 
-    // Resolve the contents typval and an optional dict-supplied type.
+    // Resolve the contents typval and an optional dict-supplied type. `None` is
+    // the C's `const typval_T *regcontents = NULL` (c:6628): a Dict that carries
+    // no `regcontents` key leaves it NULL, and c:6695/c:6731 both test it, so
+    // NEITHER write branch runs and the register is left untouched.
     let mut yank_type: Option<MotionType> = None;
-    let contents: typval_T = if argvars[1].v_type == VAR_DICT {
+    let contents: Option<typval_T> = if argvars[1].v_type == VAR_DICT {
         if let v_dict(Some(dd)) = &argvars[1].vval {
             let d = dd.borrow();
+            // c:6633 An EMPTY dict clears the register, "like setreg(0, [])",
+            // and c:6637 returns straight away — so rettv keeps the FAIL default
+            // and `setreg('a', {})` answers 1, not 0.
+            if tv_dict_len(&d) == 0 {
+                drop(d);
+                write_reg_contents_lst(regname, Vec::new(), MotionType::LineWise, false);
+                return;
+            }
+            // c:6645 tv_dict_get_string(d, "regtype", false) — absent is NULL and
+            // simply leaves the type unset, but a PRESENT one must parse
+            // completely: c:6649 `ret == FAIL || *(++stropt) != NUL`. An empty
+            // string is present-but-unparseable, hence also an error.
             if let Some(rt) = d.dv_hashtab.get("regtype") {
-                let rt = tv_get_string(rt);
-                if let Some(c) = rt.bytes().next() {
-                    yank_type = get_yank_type(c, 0);
+                // Written out rather than factored into a helper: `src/ported/`
+                // may only define names the Neovim C has
+                // (`tests/ported_fn_names_match_c.rs`), and the C's own
+                // `get_yank_type` is already spoken for by the reduced form in
+                // `ops.rs` that the option-string loop below uses.
+                let rt = tv_get_string(rt).into_bytes();
+                // c:6596 a blockwise type may carry a width: `b10` is
+                // `block_len = getdigits(...) - 1`, and the cursor is left on the
+                // last digit so c:6649's `*(++stropt)` lands just past it.
+                let ndigits = match rt.first() {
+                    Some(b'b') | Some(0x16) => {
+                        rt[1..].iter().take_while(|c| c.is_ascii_digit()).count()
+                    }
+                    _ => 0,
+                };
+                let width = if ndigits == 0 {
+                    0
+                } else {
+                    String::from_utf8_lossy(&rt[1..=ndigits])
+                        .parse::<i32>()
+                        .unwrap_or(1)
+                        - 1
+                };
+                match rt.first().and_then(|c| get_yank_type(*c, width)) {
+                    // c:6649 the type must consume the WHOLE string — one char,
+                    // plus any blockwise digits. `vv` and `zz` both fail here,
+                    // and so does `''` (present but unparseable).
+                    Some(t) if rt.len() == 1 + ndigits => yank_type = Some(t),
+                    _ => {
+                        // c:6650 semsg(_(e_invargval), "value");
+                        crate::ported::message::semsg("E475: Invalid value for argument value");
+                        return;
+                    }
                 }
             }
-            d.dv_hashtab.get("regcontents").cloned().unwrap_or_default()
+            // c:6640 dictitem_T *di = tv_dict_find(d, "regcontents", -1);
+            // c:6641 if (di != NULL) regcontents = &di->di_tv;  — else it stays NULL.
+            d.dv_hashtab.get("regcontents").cloned()
         } else {
-            typval_T::default()
+            None
         }
     } else {
-        argvars[1].clone()
+        // c:6665 regcontents = &argvars[1];
+        Some(argvars[1].clone())
     };
 
     let mut append = false;
@@ -3232,23 +3280,41 @@ pub fn f_setreg(argvars: &[typval_T], rettv: &mut typval_T) {
     // path (each element a line, no last-line append); a String value goes
     // through the str path (str_to_reg splits on '\n' AND continues the last
     // line when appending to a charwise register), so `setreg(r,x,'a')` joins.
-    match (contents.v_type, &contents.vval) {
-        (VAR_LIST, v_list(Some(l))) => {
-            let lines: Vec<String> = l
-                .borrow()
-                .lv_items
-                .iter()
-                .map(|it| tv_get_string(&it.li_tv))
-                .collect();
-            write_reg_contents_lst(
-                regname,
-                lines,
-                yank_type.unwrap_or(MotionType::LineWise),
-                append,
-            );
+    match contents {
+        // c:6695 regcontents == NULL — neither write branch runs, and c:6742
+        // still answers 0. A Dict carrying only a `regtype` lands here.
+        None => {}
+        // c:6695 tests only `v_type == VAR_LIST`, so a NULL list takes this
+        // branch too and `tv_list_len(NULL)` makes it an empty write.
+        Some(ref c) if c.v_type == VAR_LIST => {
+            // c:6709 each item goes through tv_get_string_buf_chk, and c:6711 a
+            // NULL `goto free_lstval`s — which jumps PAST
+            // write_reg_contents_lst but still falls into c:6742, so a bad item
+            // leaves the register untouched and yet still answers 0.
+            let lines: Option<Vec<String>> = match &c.vval {
+                v_list(Some(l)) => l
+                    .borrow()
+                    .lv_items
+                    .iter()
+                    .map(|it| tv_get_string_chk(&it.li_tv))
+                    .collect(),
+                _ => Some(Vec::new()),
+            };
+            if let Some(lines) = lines {
+                write_reg_contents_lst(
+                    regname,
+                    lines,
+                    yank_type.unwrap_or(MotionType::LineWise),
+                    append,
+                );
+            }
         }
-        _ => {
-            let sval = tv_get_string(&contents);
+        Some(ref c) => {
+            // c:6732 tv_get_string_chk, and c:6734 a NULL returns outright — so
+            // rettv keeps the FAIL default and the register is left alone.
+            let Some(sval) = tv_get_string_chk(c) else {
+                return;
+            };
             // C passes kMTUnknown when no type option; str_to_reg then auto-detects
             // (trailing '\n' -> linewise, else charwise). Mirror that default.
             let mtype = yank_type.unwrap_or_else(|| {

@@ -1,0 +1,16 @@
+0
+A 1 ''
+B 0 'x'
+C 0 'ab
+cd' '^V1'
+D 0 'x
+' 'V'
+E threw Vim(let):E475: Invalid value for argument value 'seed'
+F threw Vim(let):E475: Invalid value for argument value 'seed'
+G threw Vim(let):E475: Invalid value for argument value 'seed'
+H 0 ''
+I 0 'ab
+cd
+'
+J 0 '42'
+K 0 ''
