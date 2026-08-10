@@ -63,9 +63,14 @@ pub fn vim_str2nr(
         (maxlen as usize).min(bytes.len())
     };
 
-    // c: leading sign
-    if ptr < cap && (bytes[ptr] == b'-' || bytes[ptr] == b'+') {
-        negative = bytes[ptr] == b'-';
+    // c:1228 `const bool negative = (ptr[0] == '-');` then `c:1235 if (negative)
+    // ptr++;` — a leading MINUS and nothing else. `+` is NOT a sign here, and
+    // that is load-bearing rather than an oversight: this function is what
+    // `tv_get_number` uses to coerce a String, so `'+7' + 0` is 0 in both
+    // engines. `str2nr()` accepts `+` because `f_str2nr` strips the sign itself
+    // (`vendor/.../strings.c`) before calling in — see `strings.rs:f_str2nr`.
+    if ptr < cap && bytes[ptr] == b'-' {
+        negative = true;
         ptr += 1;
     }
 
