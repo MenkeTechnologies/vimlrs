@@ -1,0 +1,17 @@
+0
+Vim(let):E46: Cannot change read-only variable "v:version"
+unchanged: 1
+Vim(let):E46: Cannot change read-only variable "v:t_number"
+unchanged: 1
+Vim(let):E46: Cannot change read-only variable "v:t_string"
+Vim(let):E46: Cannot change read-only variable "v:t_list"
+Vim(let):E46: Cannot change read-only variable "v:count"
+Vim(let):E46: Cannot change read-only variable "v:count1"
+Vim(let):E46: Cannot change read-only variable "v:shell_error"
+Vim(let):E46: Cannot change read-only variable "v:numbermax"
+Vim(let):E46: Cannot change read-only variable "v:numbersize"
+Vim(let):E46: Cannot change read-only variable "v:true"
+0 1 3 0 0 64 v:true
+7
+boom
+Vim(let):E461: Illegal variable name: v:no_such_vimvar_xyz

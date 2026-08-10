@@ -7850,9 +7850,41 @@ mod tests {
         assert_eq!(run("echo type(v:msgpack_types)"), "4\n");
         assert_eq!(run("echo type(v:errors)"), "3\n");
         assert_eq!(run("echo v:register"), "\"\n");
-        // Mutable v: var round-trips; read-only v: var declines assignment.
+        // Mutable v: var round-trips, and KEEPS its value into the next script:
+        // `v:` lives in the session, not in the sourced file.
+        //
+        // EXPECTATION CORRECTED (round 6). This line used to read
+        // `assert_eq!(run("echo v:errmsg"), "\n")` — it asserted that a second
+        // `run()` sees a cleared `v:errmsg`, and it had been red since round 26
+        // (BUGS.md R26-O6). Neither engine does that. Measured, sourcing two
+        // files in ONE session:
+        //
+        //   $ cat a.vim              $ vim -es -u NONE -i NONE -N \
+        //   let v:errmsg = 'boom'        -c 'verbose source a.vim' \
+        //   echo v:errmsg                -c 'verbose source b.vim' -c 'qa!'
+        //   $ cat b.vim              boom
+        //   echo "second:" v:errmsg  second: boom
+        //
+        // and nvim 0.12.4 prints the same two lines. The test was wrong, not the
+        // store, so the assertion is now the behaviour both engines have.
         assert_eq!(run("let v:errmsg = 'boom'\necho v:errmsg"), "boom\n");
-        assert_eq!(run("echo v:errmsg"), "\n");
+        assert_eq!(run("echo v:errmsg"), "boom\n");
+        assert_eq!(run("let v:errmsg = ''\necho v:errmsg"), "\n");
+
+        // The read-only half the comment above always claimed but never checked:
+        // a `VV_RO` slot reports E46 and keeps its value, while a slot that is
+        // read-only only IN THE SANDBOX is writable outside one. Both measured
+        // against vim 9.2.0900 and nvim 0.12.4.
+        assert_eq!(
+            run("try | let v:version = 1 | catch | echo v:exception | endtry\necho v:version"),
+            "Vim(let):E46: Cannot change read-only variable \"v:version\"\n801\n"
+        );
+        assert_eq!(
+            run("try | let v:t_number = 9 | catch | echo v:exception | endtry\necho v:t_number"),
+            "Vim(let):E46: Cannot change read-only variable \"v:t_number\"\n0\n"
+        );
+        // v:lnum is VV_RO_SBX only, so this assignment must be accepted.
+        assert_eq!(run("let v:lnum = 7\necho v:lnum"), "7\n");
     }
 
     #[test]

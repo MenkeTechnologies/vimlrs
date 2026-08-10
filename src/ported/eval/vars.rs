@@ -109,7 +109,21 @@ pub fn set_var(name: &str, name_len: usize, tv: typval_T, _copy: bool) {
             // c: existing v: var — decline read-only slots (var_check_ro, E46);
             //    an unknown v: name would be a "new v: variable" → E461 (c:2882).
             if let Some(idx) = VIMVARS_DEF.iter().position(|&(n, _, _)| n == varname) {
-                if VIMVARS_DEF[idx].2 & (VV_RO | VV_RO_SBX) == 0 {
+                // c: `var_check_ro()` (`vendor/eval/vars.c:2947`) — a `VV_RO`
+                // slot REPORTS `E46: Cannot change read-only variable "%.*s"`
+                // and only then declines. Declining in silence, which is what
+                // this did, is not the same thing: `let v:version = 1` printed
+                // nothing here and E46 in both engines.
+                //
+                // `VV_RO_SBX` is deliberately NOT part of this test: the C only
+                // rejects it `&& sandbox` (c:2953), so outside the sandbox those
+                // slots are writable. Treating it as read-only here refused
+                // assignments both engines accept.
+                if VIMVARS_DEF[idx].2 & VV_RO != 0 {
+                    crate::ported::message::semsg(&format!(
+                        "E46: Cannot change read-only variable \"{name}\""
+                    ));
+                } else {
                     set_vim_var_tv(idx, tv);
                 }
             } else {
