@@ -3719,3 +3719,229 @@ $ viml -c "silent! source rec.vim" …                            → viml depth
 
 Now `depth + 1 >= 200`, and both reach 199. The doc comment above the constant
 already stated vim's number correctly; the code did not implement it.
+
+## R30-5. Harness blind-spot census
+
+What each harness is *structurally incapable* of reporting — not "has not
+reported yet", but cannot, because the generator never emits it, the comparison
+discards it, or an axis is pinned to a constant. Every row was checked against
+the code, and the ones with a measurement carry it.
+
+### `scripts/parity.sh` + `tests/parity_cases.rs`
+
+| axis | status | evidence |
+|---|---|---|
+| **compatible vs nocompatible** | CLOSED this round | was `-u NONE` (compatible); 14 observables were invisible. R30-0. |
+| **which stream a message went to** | blind | `2>&1` (`parity.sh` `run_vim`/`run_viml`) and one dup'd fd (`parity_cases.rs`). viml really does split them — `viml ln.vim 2>/dev/null` prints `a b c d f`, `2>&1 1>/dev/null` prints `E121: …` — and the harness compares only the merge. A message moved from stderr to stdout compares EQUAL. |
+| **the line number an error is reported at** | blind | the normaliser drops `/^line\s+\d+:$/`, and viml emits no locator at all. vim prints `line    5:` for an error on line 5; viml prints nothing there. A wrong line number cannot fail a case. |
+| **the `Error detected while processing …` preamble** | blind, by design | dropped because it embeds the case's absolute path. Its absence is therefore also unobservable. |
+| **a carriage return inside a message** | blind | CR is stripped from vim's stream. Already tracked as R24-O5. |
+| **trailing newlines** | blind | `$(...)` strips them on both sides in `parity.sh`; `parity_cases.rs` trims explicitly (documented at its line 96). |
+| **locale / `TZ`** | PINNED TO THE DEVELOPER'S MACHINE | `grep -cE 'LC_ALL\|LANG=\|LC_[A-Z]+\|TZ=' scripts/parity.sh tests/parity_cases.rs src/bin/fuzz_parity.rs` → `0 0 0`. Both engines inherit the ambient locale, and 17 of the 38 committed records contain a value that moves with it. R30-O4. |
+| **screen state** | blind | `-es` is silent Ex mode: no grid, no highlighting, no `:redraw`, no `:messages` history, no modes other than Ex. Every buffer/window/mapping behaviour is out of reach of this harness by construction. |
+| **timing** | blind | nothing is timed. |
+| **stdin** | blind | never fed; scripts cannot be interactive. |
+| **what is generated** | nothing is | there is no generator. Coverage is exactly the 38 hand-written cases. |
+
+### `fuzz_parity.rs` — expression mode
+
+| axis | status | evidence |
+|---|---|---|
+| **error message prose** | blind, by design | compared by E-number only (`enumber`, c. line 1085). Documented and correct — the number is the contract. |
+| **an exception with no E-number** | blind, and NOT by design | `enumber` returns the literal `"E?"` when no `E<digits>:` is found, so `:throw 'a'` and `:throw 'b'` produce the same outcome and compare EQUAL. Every user `:throw` in the corpus is one bucket. |
+| **which value an errored expression still returns** | blind | an expression that both raises and yields a value reports the error only. That is exactly the class R30-O5 lives in. |
+| **anything printed** | blind | the oracles run with `stdout`/`stderr` at `Stdio::null()`; results arrive only through `writefile()`. |
+| **exit status** | blind | never compared. |
+| **cross-expression state** | blind, by design | the `PRELUDE` is re-established before every expression. |
+| **impure builtins** | never generated, by design | `FUNCS` admits only pure, deterministic, non-blocking names — no clock, filesystem, process table, RNG or buffer. That whole surface is unfuzzable here. |
+| **top-level statement semantics** | mostly blind | statements ride the expression pipeline wrapped in `execute('…')`, and the oracle additionally wraps every expression in `try`/`catch`. Abort-the-rest-of-the-script behaviour cannot be observed through either wrapper. |
+| **scopes other than `g:`** | never generated | the `PRELUDE` defines `g:` variables only. |
+
+### `fuzz_parity.rs` — `--dap` mode
+
+| axis | status | evidence |
+|---|---|---|
+| **error output** | discarded from BOTH sides | `out_lines` filters any line matching `E<digits>:`, the `line N:` locator, and the preamble. Documented, and the reason (redir folds messages into the output stream, viml writes them to stderr) is sound — but it means no DAP-mode finding can ever be about an error. |
+| **blank lines** | discarded | `out_lines` drops empty lines, so the `:echo ''` column model is invisible in this mode. |
+| **stderr of the plain run** | discarded | `run_program_plain` uses `Stdio::null()` for stderr. |
+| **exit status** | blind | never compared in this mode. |
+| **what is generated** | narrow, by design | "literals and arithmetic on them, nothing that raises" — so no DAP session ever steps through an error, a `try`, a dict, a string builtin, or a lambda. |
+| **DAP surface beyond stepping** | never generated | one breakpoint at the first line, then `stepIn`/`next`/`stepOut`/`continue`. No conditional breakpoints, no `evaluate`, no variable inspection, no `setVariable`, no exception filters. |
+
+### `tests/examples.rs`
+
+Two criteria only: exit code zero, and no `E<num>:` on stderr. So it cannot see a
+wrong ANSWER unless the script asserts on it — a script that prints garbage and
+asserts nothing passes. It also cannot see stream identity, ordering, or the
+specific exit code. Its module doc block was corrected this round to say so.
+
+### What was closed
+
+The `-N` gap (R30-0) and, downstream of it, 67 of the 96 diverging option
+observables (R30-1) — which is the point of the census: the axis had to become
+visible before the divergence on it could be found at all. `locale_strftime` and
+`cmd_abbreviations` add two more cases. The remaining rows above are recorded
+rather than closed, and the reason is given in each.
+
+## Still open
+
+### R30-O1. `source_tolerant()` discards every parse error
+
+A script with a syntax error prints nothing about it and exits 0, where vim
+reports it and exits 1:
+
+```
+$ printf 'echo "before"\necho ((1)\necho "after"\n' > probe.vim
+$ viml probe.vim ; echo rc=$?
+before
+after
+rc=0
+$ vim -es -u NONE -i NONE -N -c 'verbose source probe.vim' -c 'qa!' ; echo rc=$?
+before
+Error detected while processing …probe.vim:
+line    2:
+E110: Missing ')'
+after
+rc=1
+```
+
+Implemented and REVERTED this round. The fallback fires for two different
+reasons and nothing distinguishes them: (1) a real syntax error, which vim also
+reports; (2) a construct vim accepts and this parser cannot read yet — a
+curly-brace function name (`open_{pos}`), for instance, which vim parses lazily
+inside a legacy function body and never complains about. Emitting the collected
+list made `examples/tolerant_block_no_leak.vim` and `examples/registers.vim`
+print an `E15:` that vim does not print for them. Trading a missed real error for
+a spurious error on valid vim source is the worse of the two, and this fallback
+exists precisely to source a real `~/.vimrc` full of case 2.
+
+Two things must exist first: a "this line is invalid VimL" vs "this parser cannot
+read it yet" signal out of the tolerant parser, and E-numbers that match vim's
+(R30-O5). A third, independent cause of the exit status is recorded in the
+function's doc comment: each statement runs as its own chunk and `run_chunk`
+opens with `reset_run()`, which zeroes `did_emsg`, so even a reported error is
+erased by the next statement starting.
+
+### R30-O2. A byte slice that splits a character renders as U+FFFD, not `<c3>`
+
+```
+$ printf "echo 'héllo'[1]\n" > b8.vim
+$ viml b8.vim | xxd      → 00000000: efbf bd0a   ....
+$ vim … b8.vim | xxd     → 00000000: 3c63 333e   <c3>
+```
+
+vim routes the raw byte through `transchar_byte_buf`, which renders it as the
+four ASCII characters `<c3>`; this port substitutes U+FFFD. `message.rs`'s
+`msg_outtrans_len` port already documents that distinction — the index path does
+not use it. The old `#8` entry claimed the two "render identically"; corrected in
+place above.
+
+### R30-O3. `:bre` (`:brewind`) and the rest of the unmodelled ex-commands
+
+`try | bre | catch | echo v:exception | endtry` answers
+`Vim(try):E121: Undefined variable: bre` here and prints nothing in vim, which
+rewinds its (empty) buffer list. Any ex-command with no model reaches the
+expression path and is reported as an undefined variable rather than as an
+unknown command. Same root cause as R29-O3 (`exists(':cmd')` needs an ex-command
+name table). Deliberately excluded from
+`tests/parity_cases/cmd_abbreviations.vim`, which says so.
+
+### R30-O4. 17 of the 38 committed parity records hold a locale-dependent value
+
+Neither harness pins a locale (`grep` above: zero matches). Replaying the corpus
+through vim under `LC_ALL=C`, `de_DE.UTF-8` and `tr_TR.UTF-8` and applying
+`scripts/parity.sh`'s own normaliser:
+
+* **`LC_CTYPE`-dependent — 7 files.** `LC_ALL=C` flips vim to `encoding=latin1`,
+  which changes every byte-level answer: `option_exists` (lines 20, 25),
+  `list2str_bytes`, `list2str_nul`, `match_start_bytes`,
+  `regex_composing_start`, `echo_transchar`, `string_builtins`.
+* **`LC_MESSAGES`-dependent — 11 files.** vim ships de/tr translations of its
+  diagnostics; this port never translates. `dict_key_e716`, `exception_tags`,
+  `function_forward`, `list_index_e684`, `reverse_argcheck`, `setreg_dict`,
+  `string_builtins`, `ternary_e109`, `throwpoint`, `unlet_bar_try`,
+  `unlet_e108`. Secondary effect: the normaliser drops only the ENGLISH preamble,
+  so under `de_DE` the untranslated-match adds two more lines per file.
+
+Control: at the ambient `en_US.UTF-8`, 0 of 38 differ, which is what confirms the
+records were taken there. Nothing is wrong today — the exposure is entirely on
+the RE-RECORDING side, on a contributor whose machine is set differently. The fix
+is to pin `LC_ALL` (and `TZ`) in `run_vim`/`run_viml`, which is a
+measurement-tool edit and therefore deliberately not bundled here; it is the
+direct analogue of the `-N` recommendation, and should land the same way.
+
+No committed record's *viml* side moves: running all 163 `examples/*.vim` and all
+38 `tests/parity_cases/*.vim` through `target/debug/viml` under `LC_ALL=C`,
+`en_US.UTF-8`, `tr_TR.UTF-8` and `de_DE.UTF-8` (with `TZ=UTC`, stdin from
+`tests/fixtures/*.in` where one exists) gives 201 files per locale and
+`diff -rq` reports 0 differences against `en_US.UTF-8` for each of the other
+three. That is not because viml ignores the locale — after R30-2 it tracks it,
+which is the point — but because no committed script reads a locale-derived
+observable. `locale_strftime.vim` is written to keep it that way: it pins the
+invariant, never the string.
+
+### R30-O5. Parse-error text is Rust internals, and the E-number is wrong
+
+`E15` is emitted with a `Debug`-formatted token where vim quotes the offending
+source text, and the E-number is `E15` where vim picks a specific one:
+
+| input | vim 9.2.0900 | viml |
+|---|---|---|
+| `echo ((1)` | `E110: Missing ')'` | `E15: expected RParen, found Eof` |
+| `echo eval("1 +")` | `E15: Invalid expression: "1 +"` | `E15: Invalid expression: unexpected Eof` |
+| `echo eval("]")` | `E15: Invalid expression: "]"` | `E15: Invalid expression: unexpected RBracket` |
+| `echo 'a' .. 1.0e300` | `E15: Invalid expression: "0e300"` | `E15: Invalid expression: 0e300` (no quotes) |
+
+The correctly-quoted form already exists at `ex_eval.rs:48`, `eval.rs:801/870`
+and elsewhere; the parser and lexer paths do not use it. Blocks R30-O1: reporting
+parse errors is only worth doing once the reported text is vim's.
+
+### R30-O6. `getbufvar('%', '&opt')` reads empty
+
+```
+set tabstop=7
+echo &tabstop                   " vim 7   viml 7
+echo getbufvar('%', '&tabstop') " vim 7   viml (empty)
+```
+
+The buffer-scoped read does not reach either option store. Found while checking
+R30-1; not fixed there because it is a buffer-variable path, not a table gap.
+
+### R30-O7. `toupper`/`tolower` use FULL Unicode case mapping where vim uses simple
+
+Locale-independent (identical at `C`, `en_US`, `tr_TR`, `de_DE` in both engines),
+so it is not a locale bug:
+
+| input | vim 9.2.0900 | viml |
+|---|---|---|
+| `toupper('ß')` | `ß` | `SS` |
+| `toupper('ﬁ')` | `ﬁ` | `FI` |
+| `tolower('İ')` | `i` | `i̇` (`i` + U+0307) |
+| `substitute('straße','\(.*\)','\U\1','')` | `STRAßE` | `STRASSE` |
+
+`mbyte.rs`'s `utf_toupper`/`utf_tolower` ports already take only `.next()` (the
+1:1 mapping vim uses); `strings.rs`'s `f_toupper`/`f_tolower` do not, so the
+crate is inconsistent with itself. Neither engine implements the Turkish dotted-I
+rule, so `tr_TR.UTF-8` needs nothing special.
+
+### R30-O8. `v:lang`, `v:lc_time`, `v:ctype`, `v:collate` are always empty
+
+vim returns the live locale string at every locale (`C`, `en_US.UTF-8`,
+`de_DE.UTF-8`, `tr_TR.UTF-8`); this port returns `""` at all four. The C sets
+them from `set_lang_var()` in `os/lang.c`, which is NOT in `vendor/` — the same
+situation as R29-O3's `cmd_exists`. Not portable faithfully without a spec to
+port from, and inventing one is the wrong answer.
+
+### R29-O1, R29-O3, R28-O1, R27-O1, R27-O2, R26-O1, R26-O2, R26-O4, R26-O5, R26-O6, R24-O5, R22-O3, R23-O1, R25-O1..O7 — unchanged
+
+R29-O1 is substantially narrowed by R30-1 (96 → 29 diverging option observables,
+every remainder named and justified) but stays open: E113 for an unknown option
+is still deferred, and the 27 engine-split options still read `""`.
+
+`tests/data/fake_fn_allowlist.txt` was not touched this round
+(`git diff --exit-code` clean, checked before every commit). The two suites red
+on `main` were red before this round: `ported_fn_names_match_c` reports the three
+standing R22-O3 names, and `fusevm_bridge::tests::vim_vars` is R26-O6. Neither
+was weakened, and neither was cheap to close this round — R22-O3 needs vim's C
+vendored (already CALLED against in round 26) and R26-O6 needs the `v:` table
+audit its own entry describes.
