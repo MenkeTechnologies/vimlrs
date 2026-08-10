@@ -1206,7 +1206,10 @@ pub fn eval_one_expr_in_str(p: &str, gap: &mut String, evaluate: bool) -> Option
         bs += 1;
     }
     if bs >= b.len() {
-        crate::ported::message::semsg(&format!("E1278: Missing '}}': {p}"));
+        // c: the two codes are not interchangeable — `E1278` is the STRAY
+        // closing brace and `E1279` is the missing one (Neovim `errors.h:204`
+        // and `:206`). Both of these sites are the missing one.
+        crate::ported::message::semsg(&format!("E1279: Missing '}}': {p}"));
         return None;
     }
     // Find the matching '}' from bs.
@@ -1246,7 +1249,10 @@ pub fn eval_one_expr_in_str(p: &str, gap: &mut String, evaluate: bool) -> Option
     let block_end = match close {
         Some(i) => i,
         None => {
-            crate::ported::message::semsg(&format!("E1278: Missing '}}': {p}"));
+            // c: the two codes are not interchangeable — `E1278` is the STRAY
+            // closing brace and `E1279` is the missing one (Neovim `errors.h:204`
+            // and `:206`). Both of these sites are the missing one.
+            crate::ported::message::semsg(&format!("E1279: Missing '}}': {p}"));
             return None;
         }
     };
@@ -1278,7 +1284,11 @@ pub fn eval_all_expr_in_str(s: &str) -> Option<String> {
             p += 1;
             escaped_brace = true;
         } else if p < b.len() && b[p] == b'}' {
-            crate::ported::message::semsg(&format!("E1279: Missing '{{': {s}"));
+            // c: a `}` with no `{` open is `E1278: Stray '}' without a matching '{':
+            // %s` (Neovim `errors.h:204`).
+            crate::ported::message::semsg(&format!(
+                "E1278: Stray '}}' without a matching '{{': {s}"
+            ));
             return None;
         }
         ga.push_str(&s[lit_start..p]);

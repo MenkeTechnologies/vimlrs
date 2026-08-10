@@ -614,6 +614,49 @@ fn cmd_word(line: &str) -> (&str, &str) {
 
 /// Whether `cmd` closes or continues a block (so it must be handled by the
 /// block parser, never as a leaf statement).
+/// The `E5xx/E6xx: :<kw> without :<opener>: <line>` message a block terminator
+/// gets when there is no block for it to close.
+///
+/// Each keyword has its OWN code, and they are not consecutive — measured, one
+/// probe per keyword, identically in vim 9.2.0900 and nvim 0.12.4:
+///
+/// ```text
+/// endif      E580: :endif without :if: endif
+/// else       E581: :else without :if: else
+/// elseif 1   E582: :elseif without :if: elseif 1
+/// endwhile   E588: :endwhile without :while: endwhile
+/// endfor     E588: :endfor without :for: endfor
+/// endtry     E602: :endtry without :try: endtry
+/// catch      E603: :catch without :try: catch
+/// finally    E606: :finally without :try: finally
+/// ```
+///
+/// The argument is the whole command line, not just the keyword. A single E580
+/// for all of them — which is what this parser used to raise, with its own
+/// wording — is only ever right for `:endif`.
+fn e_unmatched_block(cmd: &str, line: &str) -> VimlError {
+    let (code, opener) = match canon_block_kw(cmd) {
+        "endif" => ("E580", ":if"),
+        "else" => ("E581", ":if"),
+        "elseif" => ("E582", ":if"),
+        "endwhile" => ("E588", ":while"),
+        "endfor" => ("E588", ":for"),
+        "endtry" => ("E602", ":try"),
+        "catch" => ("E603", ":try"),
+        "finally" => ("E606", ":try"),
+        "endfunction" => ("E193", ":function"),
+        "enddef" => ("E193", ":def"),
+        _ => ("E580", ":if"),
+    };
+    let kw = canon_block_kw(cmd);
+    if kw == "endfunction" || kw == "enddef" {
+        // c: `E193: %s not inside a function` (`errors.h`), which names the
+        // KEYWORD rather than the opener and takes no command line.
+        return VimlError::msg(format!("{code}: {kw} not inside a function"));
+    }
+    VimlError::msg(format!("{code}: :{kw} without {opener}: {}", line.trim()))
+}
+
 fn is_block_terminator(cmd: &str) -> bool {
     matches!(
         canon_block_kw(cmd),
@@ -729,9 +772,7 @@ pub fn parse_program(src: &str) -> Result<Block, VimlError> {
         let Some(line) = cur.peek() else { break };
         let (cmd, _) = cmd_word(&line);
         if is_block_terminator(cmd) {
-            return Err(VimlError::msg(format!(
-                "E580: `:{cmd}` without matching block opener"
-            )));
+            return Err(e_unmatched_block(cmd, &line));
         }
         let lineno = cur.line_no();
         for s in parse_one(&mut cur)? {
@@ -1347,7 +1388,7 @@ fn parse_block(cur: &mut Lines, terms: &[&str]) -> ParseBlockResult {
             ));
         }
         if is_block_terminator(cmd) {
-            return Err(VimlError::msg(format!("E580: unexpected `:{cmd}`")));
+            return Err(e_unmatched_block(cmd, &line));
         }
         let lineno = cur.line_no();
         for s in parse_one(cur)? {
@@ -1443,7 +1484,7 @@ fn parse_if(cur: &mut Lines, cond_str: &str) -> Result<Stmt, VimlError> {
             }
             Some((ref c, _)) if c == "endif" => break,
             None => return Err(VimlError::msg("E171: Missing :endif")),
-            Some((c, _)) => return Err(VimlError::msg(format!("E580: unexpected `:{c}` in :if"))),
+            Some((ref c, ref rest)) => return Err(e_unmatched_block(c, &format!("{c} {rest}"))),
         }
     }
     Ok(Stmt::If { arms, else_body })
@@ -1883,7 +1924,7 @@ fn parse_function(cur: &mut Lines, header: &str) -> Result<Stmt, VimlError> {
     };
     let lparen = header
         .find('(')
-        .ok_or_else(|| VimlError::msg("E124: Missing '(' in :function"))?;
+        .ok_or_else(|| VimlError::msg(format!("E124: Missing '(': {header}")))?;
     let name = header[..lparen].trim().to_string();
     // Find the `)` that matches the parameter-list `(` — not merely the first
     // one, since a default value may itself contain parens (`a = abs(-7)`) or
@@ -1913,7 +1954,9 @@ fn parse_function(cur: &mut Lines, header: &str) -> Result<Stmt, VimlError> {
                 },
             }
         }
-        found.ok_or_else(|| VimlError::msg("E125: Missing ')' in :function"))?
+        found.ok_or_else(|| {
+            VimlError::msg(format!("E125: Illegal argument: {}", &header[lparen + 1..]))
+        })?
     };
     // Split the parameter list, separating optional `name = default` params
     // (`:help optional-function-argument`) into the name list plus a parallel
@@ -1991,7 +2034,7 @@ fn parse_def(cur: &mut Lines, header: &str) -> Result<Stmt, VimlError> {
     let header = header.strip_prefix('!').map_or(header, str::trim_start);
     let lparen = header
         .find('(')
-        .ok_or_else(|| VimlError::msg("E1055: Missing '(' in :def"))?;
+        .ok_or_else(|| VimlError::msg(format!("E124: Missing '(': {header}")))?;
     let name = header[..lparen].trim().to_string();
     // Match the parameter-list `)` (tracking nesting, skipping quoted strings) —
     // a default value may contain its own parens/brackets.
@@ -2020,7 +2063,9 @@ fn parse_def(cur: &mut Lines, header: &str) -> Result<Stmt, VimlError> {
                 },
             }
         }
-        found.ok_or_else(|| VimlError::msg("E1055: Missing ')' in :def"))?
+        found.ok_or_else(|| {
+            VimlError::msg(format!("E125: Illegal argument: {}", &header[lparen + 1..]))
+        })?
     };
     // Text after `)` is `: rettype` (or nothing) — parsed and ignored.
     let mut args: Vec<String> = Vec::new();
@@ -2115,13 +2160,13 @@ fn parse_try(cur: &mut Lines) -> Result<Stmt, VimlError> {
                 let (b, t) = parse_block(cur, &["endtry"])?;
                 finally = Some(b);
                 if t.is_none() {
-                    return Err(VimlError::msg("E170: Missing :endtry"));
+                    return Err(VimlError::msg("E600: Missing :endtry"));
                 }
                 break;
             }
             Some((ref c, _)) if c == "endtry" => break,
-            None => return Err(VimlError::msg("E170: Missing :endtry")),
-            Some((c, _)) => return Err(VimlError::msg(format!("E580: unexpected `:{c}` in :try"))),
+            None => return Err(VimlError::msg("E600: Missing :endtry")),
+            Some((ref c, ref rest)) => return Err(e_unmatched_block(c, &format!("{c} {rest}"))),
         }
     }
     // `line_no()` now points just past `:endtry`; the construct was a one-liner if

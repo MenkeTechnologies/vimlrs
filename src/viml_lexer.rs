@@ -643,7 +643,10 @@ impl<'a> Lexer<'a> {
                         lit.push('}');
                         self.pos += 2;
                     } else {
-                        return Err(VimlError::msg("E1278: Stray '}' without a matching '{'"));
+                        return Err(VimlError::msg(format!(
+                            "E1278: Stray '}}' without a matching '{{': {}",
+                            self.s.get(self.pos..).unwrap_or("")
+                        )));
                     }
                 }
                 _ => lit.push(self.next_char()),
@@ -665,7 +668,14 @@ impl<'a> Lexer<'a> {
         let mut depth = 1u32;
         loop {
             match self.peek() {
-                0 => return Err(VimlError::msg("E1279: Missing '}'")),
+                // c: `E1279: Missing '}': %s`, the argument starting where the
+                // interpolation did.
+                0 => {
+                    return Err(VimlError::msg(format!(
+                        "E1279: Missing '}}': {}",
+                        self.s.get(start..).unwrap_or("")
+                    )))
+                }
                 b'\'' => self.skip_sq_in_expr(),
                 b'"' => self.skip_dq_in_expr(),
                 b'{' => {

@@ -1875,7 +1875,10 @@ fn b_defer(vm: &mut VM, argc: u8) -> Value {
     let name = tv_get_string(&pop_tv(vm));
     let in_function = crate::ported::eval::vars::funccal_stack.with(|s| !s.borrow().is_empty());
     if !in_function {
-        message::emsg("E1298: :defer can only be used inside a function");
+        // c: `e_str_not_inside_function` — `E193: %s not inside a function`
+        // (Neovim `errors.h:140`), measured on `defer Foo()` at script level in
+        // both engines. E1298 is "Non-NULL List required for argument %d".
+        message::emsg("E193: defer not inside a function");
         return Value::Undef;
     }
     DEFER_STACK.with(|d| {

@@ -1135,8 +1135,18 @@ impl Compiler {
         self.emit(Op::LoadConst(idx));
     }
 
+    /// The `u8` operand of a `CallBuiltin`/`Call` opcode.
+    ///
+    /// Overflowing it is a bytecode-encoding limit, but the CONDITION — a call
+    /// with more arguments than can be passed — is one both engines already
+    /// name: `E740: Too many arguments for function %s` (measured, a 300-argument
+    /// call to a `...` function). Reporting `E118` for it was wrong twice over:
+    /// E118 is "too many arguments for function: %s" (the arity check against a
+    /// declared signature, which this is not) and the text was this crate's own
+    /// phase numbering, which no vim ever printed.
     fn argc(n: usize) -> Result<u8, VimlError> {
-        u8::try_from(n).map_err(|_| VimlError::msg("E118: Too many arguments (Phase 3 limit 255)"))
+        u8::try_from(n)
+            .map_err(|_| VimlError::msg("E740: Too many arguments for function".to_string()))
     }
 
     fn stmt(&mut self, s: &Stmt) -> Result<(), VimlError> {
@@ -1157,8 +1167,9 @@ impl Compiler {
             Stmt::Defer(e) => {
                 let Expr::Call { name, args } = e else {
                     return Err(VimlError(
-                        "E1300: :defer requires a function call, e.g. `defer Func(arg)`"
-                            .to_string(),
+                        // c: `:defer` takes a call and nothing else; both engines answer
+                        // `E129: Function name required` (measured on `defer 5`).
+                        "E129: Function name required".to_string(),
                     ));
                 };
                 self.load_str(name);
