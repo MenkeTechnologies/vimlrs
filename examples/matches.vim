@@ -10,10 +10,26 @@ call assert_equal([], getmatches())
 call assert_equal(42, matchadd('Error', 'foo', 20, 42))
 call assert_equal([{'group': 'Error', 'pattern': 'foo', 'priority': 20, 'id': 42}], getmatches())
 
-" --- the default priority is 10; an auto id (-1, the default) is positive
+" --- the default priority is 10, and an auto id (-1, the default) comes from a
+"     RESERVED range starting at 1000, so it can never collide with a
+"     hand-picked id. `auto > 0` / `auto != 42` passed for any positive number,
+"     including the 1 a naive counter would hand out; these pin the range, the
+"     step, and the default priority. Measured against vim 9.2.0900 and nvim
+"     0.12.4: both answer 1000 then 1001.
 let auto = matchadd('Search', 'bar')
-call assert_true(auto > 0)
-call assert_notequal(42, auto)
+call assert_equal(1000, auto)
+" getmatches() is ordered by ascending priority, so the default-priority match
+" just added sorts BEFORE the priority-20 one from above (measured: both
+" engines answer the same two-element list in that order).
+call assert_equal(10, getmatches()[0].priority)
+call assert_equal(1000, getmatches()[0].id)
+call assert_equal(20, getmatches()[1].priority)
+call assert_equal(1001, matchadd('Search', 'baz'))
+call assert_equal(3, len(getmatches()))
+" the counter does not rewind when a match is removed
+call assert_equal(0, matchdelete(1001))
+call assert_equal(1002, matchadd('Search', 'qux'))
+call assert_equal(0, matchdelete(1002))
 call assert_equal(2, len(getmatches()))
 
 " --- matchdelete() removes by id and returns 0; a missing id returns -1 quietly

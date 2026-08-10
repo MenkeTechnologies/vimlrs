@@ -15,7 +15,12 @@ call assert_equal([], getcompletion('zz_definitely_no_such_prefix_zz', 'environm
 call assert_equal([], getcompletion('x', 'this_is_not_a_real_type'))
 
 " --- getcompletion('', 'file') lists the current directory (non-empty repo)
-call assert_true(len(getcompletion('', 'file')) > 0)
+" A bare count passed for one bogus entry; these pin what the list is: the
+" repo's own directory, sorted, with directories suffixed by '/'.
+let s:files = getcompletion('', 'file')
+call assert_true(index(s:files, 'README.md') >= 0)
+call assert_true(index(s:files, 'examples/') >= 0)
+call assert_equal(sort(copy(s:files)), s:files)
 
 " --- no input available standalone
 call assert_equal(0, getchar(0))

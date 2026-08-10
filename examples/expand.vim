@@ -13,7 +13,14 @@ call assert_equal($HOME . '/x', expand('~/x'))
 call assert_equal('', expand('%'))
 call assert_equal('', expand('<cword>'))
 " Wildcards expand to matching files (List form).
-call assert_true(len(expand('examples/*.vim', 0, 1)) >= 10)
+let s:globbed = expand('examples/*.vim', 0, 1)
+call assert_true(len(s:globbed) >= 10)
+" a bare count passed for a list of ten wrong names: pin the contents, the
+" order, and that the String form is the same set joined by newlines.
+call assert_true(index(s:globbed, 'examples/expand.vim') >= 0)
+call assert_equal(sort(copy(s:globbed)), s:globbed)
+call assert_equal(join(s:globbed, "
+"), expand('examples/*.vim'))
 " expandcmd() expands $VAR inside a command string.
 call assert_equal('cat ' . $HOME . '/.vimrc', expandcmd('cat $HOME/.vimrc'))
 

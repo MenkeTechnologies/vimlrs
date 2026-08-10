@@ -153,3 +153,47 @@ fn parity_cases_match_vim() {
         failures.join("\n\n")
     );
 }
+
+/// A record has to be able to FAIL. Two ways one silently cannot:
+///
+/// 1. it holds nothing but the exit-status line, so the case pins no output at
+///    all and would keep passing if the feature it names were deleted;
+/// 2. it is byte-identical to another case's record, which means one of the two
+///    is a copy that never exercised what its name claims.
+///
+/// Neither is hypothetical — (1) is what a case recorded before its feature
+/// produced any output looks like, and `scripts/parity.sh -r` will happily write
+/// it. This check costs one read per case and closes both.
+#[test]
+fn every_record_can_fail() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/parity_cases");
+    let mut by_content: std::collections::HashMap<Vec<u8>, Vec<String>> = Default::default();
+    let mut empty: Vec<String> = Vec::new();
+
+    for case in cases(&dir) {
+        let name = case.file_stem().unwrap().to_string_lossy().into_owned();
+        let expected = fs::read(case.with_extension("expected"))
+            .unwrap_or_else(|e| panic!("{}: {e}", case.display()));
+        // Line 1 is vim's exit status; everything after it is the output.
+        let body = match expected.iter().position(|&b| b == b'\n') {
+            Some(i) => &expected[i + 1..],
+            None => &[][..],
+        };
+        if body.iter().all(|b| b.is_ascii_whitespace()) {
+            empty.push(name.clone());
+        }
+        by_content.entry(body.to_vec()).or_default().push(name);
+    }
+
+    assert!(
+        empty.is_empty(),
+        "these parity records hold only an exit status, so the case pins no \
+         output and cannot fail: {empty:?}"
+    );
+    let dupes: Vec<&Vec<String>> = by_content.values().filter(|v| v.len() > 1).collect();
+    assert!(
+        dupes.is_empty(),
+        "these parity cases recorded byte-identical output, so at least one is \
+         not testing what its name claims: {dupes:?}"
+    );
+}

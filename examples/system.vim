@@ -24,7 +24,7 @@ call assert_equal(['one', 'two', 'three'], lines)
 call assert_equal('QUIET', shout)
 call assert_equal(7, code)
 call assert_true(has_key(env, 'PATH'))
-call assert_true(len(env['PATH']) > 0)
+call assert_equal(, env['PATH'])
 call assert_equal(type({}), type(env))
 
 " ── demo ──

@@ -21,7 +21,7 @@ endfunction
 " ── happy path ──
 call assert_equal(['name', 'ada'], ParseKV('name=ada'))
 call assert_equal(['x', ''], ParseKV('x='))
-call assert_true(len(ParseKV('a=b')) == 2)
+call assert_equal(['a', 'b'], ParseKV('a=b'))
 
 " ── error path via :try/:catch + assert_exception ──
 try

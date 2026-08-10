@@ -3,8 +3,13 @@
 " fold introspection that is empty when run outside an editor.
 " Self-test: asserts into v:errors, throws at the end if anything failed.
 
-" --- hostname() returns the (non-empty) system host name
+" --- hostname() returns the (non-empty) system host name. The name itself is
+"     the machine's, so it cannot be pinned; what CAN be pinned is that it is
+"     stable across calls and hostname-SHAPED — `!= ''` alone passed for a
+"     single space or for an error string.
 call assert_true(hostname() != '')
+call assert_equal(hostname(), hostname())
+call assert_match('^[A-Za-z0-9._-]\+$', hostname())
 call assert_equal(type(''), type(hostname()))
 
 " --- iconv() is identity for the same (or UTF-8) encoding
