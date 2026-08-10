@@ -1512,19 +1512,55 @@ pub fn f_has(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.vval = v_number(n as varnumber_T);
 }
 
-/// Port of `f_exists()` from `Src/eval/funcs.c` (subset) — whether a variable
-/// exists (the `*func`/`:cmd`/option forms arrive with their ports).
+/// Port of `f_exists()` from `vendor/eval/funcs.c:1363` (subset) — whether the
+/// thing `name` designates exists.
+///
+/// RUST-PORT NOTE: the `:cmd` branch (`cmd_exists`, c:1388) and the `##event`
+/// branch (`autocmd_supported`, c:1391) are deferred — neither function body is
+/// in `vendor/`, and both need an ex-command name table this crate does not model
+/// yet. Both fall through to the internal-variable branch, which answers 0.
 pub fn f_exists(argvars: &[typval_T], rettv: &mut typval_T) {
     let name = tv_get_string(&argvars[0]);
-    // c: a leading '#' queries autocommands — `#{event}` or `#{event}#{pat}`.
-    let present = if let Some(au) = name.strip_prefix('#') {
-        au_exists(au)
+    let present = if let Some(env) = name.strip_prefix('$') {
+        // c:1368 Environment variable. RUST-PORT NOTE: `os_env_exists` is
+        // `std::env::var`; the `expand_env_save` fallback for `$VIM`/`${HOME}`
+        // (the runtime-path expansion subsystem) is deferred, as in
+        // `eval_env_var`.
+        std::env::var(env).is_ok()
+    } else if name.starts_with('&') || name.starts_with('+') {
+        // c:1380 Option: `n = (eval_option(&p, NULL, true) == OK);`
+        //
+        // `rettv == NULL` in that call is what makes this a QUERY: `eval_option`
+        // takes its `kOptInvalid` branch without emitting E113 and simply returns
+        // FAIL. That reduces to "the name resolves, or it is a TTY option".
+        let (opt_name, opt_idx, _) = crate::ported::option_optval::find_option_var_end(&name);
+        match opt_name {
+            None => false, // c:3381 option_end == NULL → FAIL (E112 is suppressed too)
+            Some(opt) => {
+                // c:3399 `opt_idx == kOptInvalid && !is_tty_opt` → FAIL.
+                let ok = opt_idx != crate::ported::option_optval::kOptInvalid
+                    || crate::ported::option_optval::is_tty_option(&opt);
+                // c:1382 `if (*skipwhite(p) != NUL) { n = false; }`. `p` is where
+                // `eval_option` left it — past the sigil (c:6302), past a `g:`/`l:`
+                // scope prefix (c:6303/6306), then past the name. So trailing
+                // whitespace alone is fine and anything else disqualifies.
+                let scope =
+                    usize::from(name[1..].starts_with("g:") || name[1..].starts_with("l:")) * 2;
+                let consumed = 1 + scope + opt.len();
+                ok && name[consumed..].trim_start().is_empty()
+            }
+        }
     } else if let Some(func) = name.strip_prefix('*') {
-        // c: '*' queries a callable — a builtin or user function by name.
+        // c:1385 '*' queries a callable — a builtin or user function by name.
         crate::ported::eval::typval::FUNC_EXISTS_HOOK
             .with(|h| *h.borrow())
             .is_some_and(|f| f(func))
+    } else if let Some(au) = name.strip_prefix('#') {
+        // c:1389 a leading '#' queries autocommands — `#{event}` or
+        // `#{event}#{pat}`.
+        au_exists(au)
     } else {
+        // c:1396 Internal variable.
         crate::ported::eval::vars::eval_variable(&name).is_some()
     };
     rettv.vval = v_number(present as varnumber_T);

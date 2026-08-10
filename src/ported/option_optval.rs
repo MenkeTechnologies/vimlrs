@@ -257,6 +257,18 @@ static options: LazyLock<Vec<vimoption_T>> = LazyLock::new(|| {
         // side effects upstream (not modeled here — value is stored only).
         s("filetype", "ft", ""),
         s("syntax", "syn", ""),
+        // These five carry their real default. Each was read back identical from
+        // every startup entry point the harnesses use — `vim -es -u NONE -i NONE`
+        // (compatible), `vim -N -es -u NONE -i NONE`, `vim --clean -es`, and
+        // `nvim --clean --headless` — so no startup state is baked into the value.
+        // 'compatible'/'cpoptions'/'backspace'/'history'/'formatoptions' and the
+        // rest of the compatible-mode-sensitive set are deliberately absent: their
+        // value depends on which of those commands you ask (see `option.rs`).
+        s("encoding", "enc", "utf-8"),
+        s("fileformat", "ff", "unix"),
+        s("iskeyword", "isk", "@,48-57,_,192-255"),
+        s("isprint", "isp", "@,161-255"),
+        s("isfname", "isf", "@,48-57,/,.,-,_,+,,,#,$,%,~,="),
     ]
 });
 
@@ -291,13 +303,53 @@ pub fn find_option(name: &str) -> OptIndex {
     find_option_len(name, name.len())
 }
 
-/// Port of `find_option_end()` from `vendor/option.c` (upstream `option.c:1303`).
-/// RUST-PORT NOTE: TTY/keycode handling (`find_tty_option_end`) is dropped (no
-/// terminal); returns the byte length of the isolated option name (the C `end`
-/// offset) and writes the resolved index to `opt_idxp`, or `None` if `arg` does
-/// not start with an alphabetic character.
+/// Port of `find_tty_option_end()` from `option.c` — the length of the TTY or
+/// keycode option name at the head of `arg`, or `None`.
+///
+/// RUST-PORT NOTE: the C body is not in `vendor/` (only its call sites at
+/// `vendor/option.c:92` and `:189` are), so the accepted shapes were measured
+/// rather than transcribed. `nvim --clean --headless` answers `exists('&t_ZZ')`
+/// 1, `exists('&t_z')` 0, `exists('&t_ZZZ')` 0, `exists('&t_')` 0,
+/// `exists('&term')` 1, `exists('&ttytype')` 1 — i.e. `t_` plus exactly two
+/// characters, or `term`, or `ttytype`. This mirrors the reduction already made
+/// by [`is_tty_option`].
+///
+/// Vim differs here: it accepts only its own termcap entries, so `&t_ZZ` is
+/// `E113` there while Neovim takes it. This crate ports the Neovim engine, so it
+/// follows Neovim. Both agree on every real termcap name (`t_Co`, `t_ve`, …).
+fn find_tty_option_end(arg: &str) -> Option<usize> {
+    // c: `strequal(p, "term")` / `strequal(p, "ttytype")` — a WHOLE-string match,
+    // not a prefix one. `&termguicolors` must not be clipped to `term` here; it
+    // reaches the alphabetic scan below and resolves as an ordinary option.
+    // `&term` written mid-expression (`&term . "x"`) likewise falls through to the
+    // scan, and `eval_option` then recognises it by calling [`is_tty_option`] on
+    // the ISOLATED name (`vendor/eval.c:3397`, after the c:3394 NUL-termination).
+    if arg == "term" {
+        return Some(4);
+    }
+    if arg == "ttytype" {
+        return Some(7);
+    }
+    let p = arg.as_bytes();
+    if p.len() >= 4 && p[0] == b't' && p[1] == b'_' {
+        return Some(4);
+    }
+    None
+}
+
+/// Port of `find_option_end()` from `vendor/option.c:87` (upstream
+/// `option.c:1303`). Returns the byte length of the isolated option name (the C
+/// `end` offset) and writes the resolved index to `opt_idxp`, or `None` if `arg`
+/// holds neither a TTY option nor a name starting with an alphabetic character.
 pub fn find_option_end(arg: &str, opt_idxp: &mut OptIndex) -> Option<usize> {
     let p = arg.as_bytes();
+
+    // c:92 if ((p = find_tty_option_end(arg)) != NULL) { *opt_idxp = kOptInvalid;
+    //      return p; }  — a TTY option never has an index.
+    if let Some(end) = find_tty_option_end(arg) {
+        *opt_idxp = kOptInvalid;
+        return Some(end);
+    }
 
     // c:1315 if (!ASCII_ISALPHA(*p)) { *opt_idxp = kOptInvalid; return NULL; }
     if p.is_empty() || !p[0].is_ascii_alphabetic() {
@@ -760,6 +812,74 @@ mod tests {
 
         // Unknown option name resolves to kOptInvalid.
         assert_eq!(find_option("definitelynotanoption"), kOptInvalid);
+    }
+
+    /// `find_option_end`'s TTY branch runs BEFORE the alphabetic scan, so it must
+    /// match `term`/`ttytype` as whole strings and never as prefixes.
+    ///
+    /// A prefix match is the tempting bug: it turns every `term*` option into the
+    /// 4-byte TTY name `term` plus trailing garbage, which `exists()` then
+    /// rejects. `nvim --clean --headless` answers `exists('&termguicolors')` 1
+    /// and `exists('&term')` 1 — both have to keep working.
+    #[test]
+    fn find_option_end_isolates_tty_names_without_clipping() {
+        let mut idx = kOptInvalid;
+
+        // Whole-string TTY names: consumed entirely, and never indexed.
+        assert_eq!(find_option_end("term", &mut idx), Some(4));
+        assert_eq!(idx, kOptInvalid);
+        assert_eq!(find_option_end("ttytype", &mut idx), Some(7));
+        assert_eq!(idx, kOptInvalid);
+
+        // `t_` plus exactly two characters; `t_` alone is not a name.
+        assert_eq!(find_option_end("t_Co", &mut idx), Some(4));
+        assert_eq!(find_option_end("t_", &mut idx), Some(1)); // the alpha run "t"
+        assert!(is_tty_option("t_Co"));
+
+        // Not clipped to `term`: the alphabetic scan takes the whole name, so a
+        // real `term*` option would resolve by index rather than as a TTY name.
+        assert_eq!(find_option_end("termguicolors", &mut idx), Some(13));
+        assert!(!is_tty_option("termguicolors"));
+
+        // `&term` mid-expression falls through to the scan and is recognised by
+        // `is_tty_option` on the isolated name (`vendor/eval.c:3397`).
+        assert_eq!(find_option_end("term . \"x\"", &mut idx), Some(4));
+        assert!(is_tty_option("term"));
+    }
+
+    /// The five string options seeded with a real default read that default back.
+    ///
+    /// Each value is identical in `vim -es -u NONE -i NONE`, `vim -N -es -u NONE
+    /// -i NONE`, `vim --clean -es` and `nvim --clean --headless`, which is why
+    /// they are safe to hard-code where 'cpoptions' and friends are not.
+    #[test]
+    fn startup_invariant_string_defaults() {
+        reset_store();
+        for (name, want) in [
+            ("encoding", "utf-8"),
+            ("fileformat", "unix"),
+            ("iskeyword", "@,48-57,_,192-255"),
+            ("isprint", "@,161-255"),
+            ("isfname", "@,48-57,/,.,-,_,+,,,#,$,%,~,="),
+        ] {
+            let idx = find_option(name);
+            assert_ne!(idx, kOptInvalid, "{name} missing from options[]");
+            assert_eq!(
+                get_option_value(idx, 0).data,
+                OptValData::string(want.to_string()),
+                "{name} default"
+            );
+        }
+        // Abbreviations resolve to the same rows.
+        for (abbr, full) in [
+            ("enc", "encoding"),
+            ("ff", "fileformat"),
+            ("isk", "iskeyword"),
+            ("isp", "isprint"),
+            ("isf", "isfname"),
+        ] {
+            assert_eq!(find_option(abbr), find_option(full), "{abbr} vs {full}");
+        }
     }
 
     #[test]

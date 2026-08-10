@@ -111,11 +111,20 @@ fn dap_function_breakpoint_stops_at_body() {
 /// `VIM - Vi IMproved 9.2 (2026 Feb 14, compiled Aug 02 2026 19:00:41)`:
 ///
 /// ```text
-/// $ vim -N -u NONE -es -c 'redir! > out' -c 'source fr.vim' -c 'redir END' -c 'qa!'
-/// hi a
-/// hi b
-/// end
+/// $ vim -es -u NONE -i NONE -c 'redir! > out' -c 'source fr.vim' \
+///     -c 'redir END' -c 'qa!'
+/// $ xxd out
+/// 00000000: 0a68 6920 610a 6869 2062 0a65 6e64       .hi a.hi b.end
 /// ```
+///
+/// `-i NONE` is load-bearing, not decoration. Without it — and this command was
+/// written without it — vim reads `~/.viminfo` whenever it is nocompatible, so
+/// the editor starts with the developer's own registers, search pattern and
+/// command history. On this machine `vim -N -u NONE -es` reports
+/// `strlen(getreg('"'))` 18, `histnr('cmd')` 100 and `len(v:oldfiles)` 100 where
+/// `-i NONE` gives 0, -1 and 0. The script below reads none of those, so its
+/// output was unaffected, but any reference recorded that way is recording the
+/// machine it ran on.
 const FUNCREF_SCRIPT: &str = "function! Greet(who)\n  echo \"hi \" . a:who\nendfunction\nlet F = function('Greet')\ncall F('a')\ncall Greet('b')\necho \"end\"\n";
 
 /// A function breakpoint fires however the function is reached — through a
@@ -183,16 +192,23 @@ echo \"end\"
 /// `stackTrace` must report the WHOLE backtrace, innermost first, each frame on
 /// its own line — not one synthetic frame however deep execution is.
 ///
-/// Measured on `VIM - Vi IMproved 9.2 (2026 Feb 14, compiled Aug 02 2026
-/// 19:00:41)`, stopped two calls deep, vim's own `backtrace` prints the same
-/// shape (its indices count down to `->0` at the innermost, and its in-function
-/// line numbers are body-relative where DAP frames are file-absolute):
+/// Reference, from [`NESTED_SCRIPT`] written to `bt.vim` and stopped two calls
+/// deep in real vim. Its indices count down to `->0` at the innermost, and its
+/// in-function line numbers are body-relative where DAP frames are file-absolute
+/// — `Foo[1]` is `return Bar() + 1`, file line 6:
 ///
 /// ```text
+/// $ printf 'backtrace\ncont\n' | vim -es -u NONE -i NONE \
+///     -c 'breakadd func Bar' -c 'verbose source bt.vim' -c 'qa!'
+/// start
+/// Breakpoint in "Bar" line 1
+/// Entering Debug mode.  Type "cont" to continue.
+/// command line..script bt.vim[9]..function Foo[1]..Bar
+/// line 1: echo "in bar"
 /// >backtrace
 ///   3 command line
-///   2 script …/bt.vim[11]
-///   1 function Foo[2]
+///   2 script bt.vim[9]
+///   1 function Foo[1]
 /// ->0 Bar
 /// ```
 #[test]
@@ -312,13 +328,17 @@ fn step_from(src: &str, bp_line: u32, verb: &str) -> (String, i64, usize) {
 
 /// `stepIn` on a statement that CALLS must land inside the callee.
 ///
-/// Measured on `VIM - Vi IMproved 9.2 …`, stopped on `Foo`'s `call Bar()`:
+/// Reference, from [`NESTED_SCRIPT`] as `bt.vim`, stopped on `Foo`'s
+/// `return Bar() + 1` (file line 6, body line 1) — `step` descends into `Bar`:
 ///
 /// ```text
+/// $ printf 'step\ncont\n' | vim -es -u NONE -i NONE \
+///     -c 'breakadd func 1 Foo' -c 'verbose source bt.vim' -c 'qa!'
+/// command line..script bt.vim[9]..function Foo
+/// line 1: return Bar() + 1
 /// >step
-/// command line..script BT[11]..function Foo
-/// [2]..Bar
-/// line 1: let y = 2
+/// command line..script bt.vim[9]..function Foo[1]..Bar
+/// line 1: echo "in bar"
 /// ```
 #[test]
 fn dap_step_in_enters_the_callee() {
@@ -333,12 +353,20 @@ fn dap_step_in_enters_the_callee() {
 
 /// `next` on a statement that CALLS must step OVER it, staying at the same depth.
 ///
-/// Measured on `VIM - Vi IMproved 9.2 …`, stopped on `Foo`'s `call Bar()`:
+/// Reference, from [`NESTED_SCRIPT`] as `bt.vim`, stopped at script level on
+/// `echo Foo()` (line 9) — `next` runs the whole call and lands on line 10,
+/// still at script level. `in bar` / `3` are what the stepped-over call printed:
 ///
 /// ```text
+/// $ printf 'next\ncont\n' | vim -es -u NONE -i NONE \
+///     -c 'breakadd file 9 bt.vim' -c 'verbose source bt.vim' -c 'qa!'
+/// command line..script bt.vim
+/// line 9: echo Foo()
 /// >next
-/// command line..script BT[11]..function Foo
-/// line 3: return x
+/// in bar
+/// 3
+/// command line..script bt.vim
+/// line 10: echo "end"
 /// ```
 ///
 /// This is the target that was aliased to `stepIn`: `next` used to land on
@@ -359,7 +387,19 @@ fn dap_next_steps_over_the_call() {
 /// vim's `finish` makes one extra stop on the callee's synthetic `line 2: End of
 /// function` first; there is no end-of-body statement to mark here and DAP
 /// specifies the caller, so `viml` goes straight there — the deviation is stated
-/// on the handler in `src/dap.rs`.
+/// on the handler in `src/dap.rs`. That extra stop, from [`NESTED_SCRIPT`] as
+/// `bt.vim`, is the only difference:
+///
+/// ```text
+/// $ printf 'finish\ncont\n' | vim -es -u NONE -i NONE \
+///     -c 'breakadd func 1 Bar' -c 'verbose source bt.vim' -c 'qa!'
+/// command line..script bt.vim[9]..function Foo[1]..Bar
+/// line 1: echo "in bar"
+/// >finish
+/// in bar
+/// command line..script bt.vim[9]..function Foo[1]..Bar
+/// line 2: End of function
+/// ```
 ///
 /// This is the target that was aliased to `next`: `stepOut` from two frames deep
 /// used to land on the *next line of the same function*.

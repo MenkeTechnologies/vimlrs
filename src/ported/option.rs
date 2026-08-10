@@ -26,29 +26,62 @@ enum Kind {
     String,
 }
 
-/// `(canonical name, abbreviation, kind, default)` rows of the supported option
-/// table — the subset of `options[]` (`option.c`) ported so far.
-const OPTIONS: &[(&str, &str, Kind, varnumber_T)] = &[
-    ("ignorecase", "ic", Kind::Bool, 0),
-    ("smartcase", "scs", Kind::Bool, 0),
-    ("magic", "magic", Kind::Bool, 1),
-    ("expandtab", "et", Kind::Bool, 0),
-    ("number", "nu", Kind::Bool, 0),
-    ("relativenumber", "rnu", Kind::Bool, 0),
-    ("wrap", "wrap", Kind::Bool, 1),
-    ("hlsearch", "hls", Kind::Bool, 0),
-    ("incsearch", "is", Kind::Bool, 0),
-    ("autoindent", "ai", Kind::Bool, 0),
-    ("tabstop", "ts", Kind::Number, 8),
-    ("shiftwidth", "sw", Kind::Number, 8),
-    ("softtabstop", "sts", Kind::Number, 0),
-    ("textwidth", "tw", Kind::Number, 0),
-    ("scrolloff", "so", Kind::Number, 0),
+/// `(canonical name, abbreviation, kind, number default, string default)` rows of
+/// the supported option table — the subset of `options[]` (`option.c`) ported so
+/// far. `Kind::Bool`/`Kind::Number` rows read the number default and ignore the
+/// string one; `Kind::String` rows the reverse.
+const OPTIONS: &[(&str, &str, Kind, varnumber_T, &str)] = &[
+    ("ignorecase", "ic", Kind::Bool, 0, ""),
+    ("smartcase", "scs", Kind::Bool, 0, ""),
+    ("magic", "magic", Kind::Bool, 1, ""),
+    ("expandtab", "et", Kind::Bool, 0, ""),
+    ("number", "nu", Kind::Bool, 0, ""),
+    ("relativenumber", "rnu", Kind::Bool, 0, ""),
+    ("wrap", "wrap", Kind::Bool, 1, ""),
+    ("hlsearch", "hls", Kind::Bool, 0, ""),
+    ("incsearch", "is", Kind::Bool, 0, ""),
+    ("autoindent", "ai", Kind::Bool, 0, ""),
+    ("tabstop", "ts", Kind::Number, 8, ""),
+    ("shiftwidth", "sw", Kind::Number, 8, ""),
+    ("softtabstop", "sts", Kind::Number, 0, ""),
+    ("textwidth", "tw", Kind::Number, 0, ""),
+    ("scrolloff", "so", Kind::Number, 0, ""),
     // Comma-separated runtime search path. Editor-less, its stored value starts
     // empty (`&rtp` reads ""); `set rtp+=DIR` records the user's additions, which
     // `:runtime` searches on top of the discovered system runtime dirs (see
     // `crate::fusevm_bridge::runtime_dirs`).
-    ("runtimepath", "rtp", Kind::String, 0),
+    ("runtimepath", "rtp", Kind::String, 0, ""),
+    // ── Startup-invariant string defaults ────────────────────────────────────
+    //
+    // These five carry a real default rather than "" because their value is the
+    // same in BOTH reference engines AND under every startup entry point the
+    // harnesses use, so nothing about how the oracle was launched is baked in:
+    //
+    //   $ vim -es -u NONE -i NONE -c 'verbose source probe.vim' -c 'qa!'
+    //   $ vim -N  -es -u NONE -i NONE …      # nocompatible
+    //   $ vim --clean -es …                  # defaults.vim loaded
+    //   $ nvim --clean --headless …
+    //
+    // all report encoding=utf-8, fileformat=unix, iskeyword=@,48-57,_,192-255,
+    // isprint=@,161-255, isfname=@,48-57,/,.,-,_,+,,,#,$,%,~,= .
+    //
+    // Contrast 'compatible', 'cpoptions', 'fileformats', 'backspace', 'history',
+    // 'formatoptions', 'shortmess' and friends, which are all DIFFERENT between
+    // those entry points ('cpoptions' is the full compatible set under `-u NONE`
+    // and `aABceFs` under `-N`). Seeding those from a measurement would pin the
+    // engine to a startup artifact of whichever command recorded it, so they are
+    // deliberately left out of this table.
+    ("encoding", "enc", Kind::String, 0, "utf-8"),
+    ("fileformat", "ff", Kind::String, 0, "unix"),
+    ("iskeyword", "isk", Kind::String, 0, "@,48-57,_,192-255"),
+    ("isprint", "isp", Kind::String, 0, "@,161-255"),
+    (
+        "isfname",
+        "isf",
+        Kind::String,
+        0,
+        "@,48-57,/,.,-,_,+,,,#,$,%,~,=",
+    ),
 ];
 
 thread_local! {
@@ -59,10 +92,12 @@ thread_local! {
 
 /// Port of `findoption()` (`option.c`) — resolve an option name or abbreviation
 /// to its `OPTIONS` row.
-fn findoption(name: &str) -> Option<&'static (&'static str, &'static str, Kind, varnumber_T)> {
+fn findoption(
+    name: &str,
+) -> Option<&'static (&'static str, &'static str, Kind, varnumber_T, &'static str)> {
     OPTIONS
         .iter()
-        .find(|(n, abbr, _, _)| *n == name || *abbr == name)
+        .find(|(n, abbr, _, _, _)| *n == name || *abbr == name)
 }
 
 /// Port of `set_option_value()` (`option.c`) reduced — store option `canon`'s
@@ -76,7 +111,7 @@ fn set_option_value(canon: &str, tv: typval_T) {
 /// Port of `get_option_value()` (`option.c`) reduced — the value of `&name` (or
 /// its abbreviation). Unknown options yield "" (the empty string).
 pub fn get_option_value(name: &str) -> typval_T {
-    let Some((canon, _, kind, default)) = findoption(name) else {
+    let Some((canon, _, kind, default, sdefault)) = findoption(name) else {
         return typval_T::from(String::new());
     };
     option_values.with(|m| {
@@ -84,7 +119,7 @@ pub fn get_option_value(name: &str) -> typval_T {
             .get(*canon)
             .cloned()
             .unwrap_or_else(|| match kind {
-                Kind::String => typval_T::from(String::new()),
+                Kind::String => typval_T::from(sdefault.to_string()),
                 _ => typval_T::from(*default),
             })
     })
@@ -125,7 +160,7 @@ pub fn do_set(args: &str) {
                 Some(base) => (base, lhs.as_bytes()[lhs.len() - 1]),
                 None => (lhs, b'='),
             };
-            if let Some((canon, _, kind, _)) = findoption(name) {
+            if let Some((canon, _, kind, _, _)) = findoption(name) {
                 let tv = match (kind, op) {
                     (Kind::String, b'+') => {
                         let cur = tv_get_string(&get_option_value(canon));
@@ -163,7 +198,7 @@ pub fn do_set(args: &str) {
         }
         // `opt!` (toggle a bool) / `opt?` (query — no-op here).
         if let Some(name) = part.strip_suffix('!') {
-            if let Some((canon, _, Kind::Bool, _)) = findoption(name) {
+            if let Some((canon, _, Kind::Bool, _, _)) = findoption(name) {
                 let cur = tv_get_bool(&get_option_value(canon)) != 0;
                 set_option_value(canon, typval_T::from(varnumber_T::from(!cur)));
             }
@@ -174,20 +209,20 @@ pub fn do_set(args: &str) {
         }
         // `noopt` / `invopt` (bool off / invert).
         if let Some(name) = part.strip_prefix("no") {
-            if let Some((canon, _, Kind::Bool, _)) = findoption(name) {
+            if let Some((canon, _, Kind::Bool, _, _)) = findoption(name) {
                 set_option_value(canon, typval_T::from(0));
                 continue;
             }
         }
         if let Some(name) = part.strip_prefix("inv") {
-            if let Some((canon, _, Kind::Bool, _)) = findoption(name) {
+            if let Some((canon, _, Kind::Bool, _, _)) = findoption(name) {
                 let cur = tv_get_bool(&get_option_value(canon)) != 0;
                 set_option_value(canon, typval_T::from(varnumber_T::from(!cur)));
                 continue;
             }
         }
         // Bare `opt` — turn a boolean on (number/string forms are queries).
-        if let Some((canon, _, Kind::Bool, _)) = findoption(part) {
+        if let Some((canon, _, Kind::Bool, _, _)) = findoption(part) {
             set_option_value(canon, typval_T::from(1));
         }
     }

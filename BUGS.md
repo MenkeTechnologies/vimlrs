@@ -3331,3 +3331,197 @@ Closing it is the R26-O2 statement-model change, not a separate fix.
 ### R27-O1, R27-O2, R26-O1, R26-O2, R26-O4, R26-O5, R26-O6, R24-O5, R22-O3, R23-O1, R25-O1..O7 — unchanged
 
 `tests/data/fake_fn_allowlist.txt` was not touched this round: still 241 entries.
+
+---
+
+## R29-1. `exists()` answered 0 for every option and every environment variable — ✅ FIXED
+
+`f_exists` handled `#autocmd`, `*callable` and plain variables. The `$env` branch
+(`vendor/eval/funcs.c:1368`) and the `&opt` / `+opt` branch (c:1380) were both
+absent, so every spelling below answered 0 against vim's 1.
+
+```
+$ vim -es -u NONE -i NONE -c 'verbose source ex.vim' -c 'qa!'
+$ ./target/debug/viml ex.vim
+```
+
+| expression | vim 9.2.0900 | vimlrs (before) | vimlrs (after) |
+|---|---|---|---|
+| `exists('&ignorecase')` | 1 | 0 | 1 |
+| `exists('&ic')` | 1 | 0 | 1 |
+| `exists('+ts')` | 1 | 0 | 1 |
+| `exists('&t_Co')` | 1 | 0 | 1 |
+| `exists('&term')` | 1 | 0 | 1 |
+| `exists('&ic ')` | 1 | 0 | 1 |
+| `exists('$HOME')` | 1 | 0 | 1 |
+| `exists('&nosuchoptionxyz')` | 0 | 0 | 0 |
+| `exists('&ic x')` | 0 | 0 | 0 |
+
+The C calls `eval_option(&p, NULL, true)` with a NULL `rettv`, which is what makes
+it a *query*: `eval_option` still takes its `kOptInvalid` branch but emits no
+E113, so the result reduces to "the name resolves, or it is a TTY option", then
+`*skipwhite(p) != NUL` rejects trailing garbage (but not trailing blanks).
+
+`find_option_end` also gained the TTY branch it had dropped (`vendor/option.c:92`),
+so `&t_Co` is isolated as a whole 4-byte name instead of the 1-byte alphabetic run
+`t`. `find_tty_option_end`'s body is not in `vendor/`, so its accepted shapes were
+measured rather than transcribed: `nvim --clean --headless` gives
+`exists('&t_ZZ')` 1, `exists('&t_z')` 0, `exists('&t_ZZZ')` 0, `exists('&t_')` 0,
+`exists('&term')` 1, `exists('&ttytype')` 1. `term`/`ttytype` are matched as whole
+strings, never as prefixes, so `&termguicolors` is not clipped to `&term`.
+
+Covered by `tests/parity_cases/option_exists.vim` (recorded from vim) and
+`option_optval::tests::find_option_end_isolates_tty_names_without_clipping`.
+
+## R29-2. Five option reads returned "" where both engines have a value — ✅ FIXED
+
+`&encoding`, `&fileformat`, `&iskeyword`, `&isprint` and `&isfname` were not in
+the option table, so `get_option_value` returned the empty string for all five.
+
+| option | vim / nvim | vimlrs (before) |
+|---|---|---|
+| `&encoding` | `utf-8` | `` |
+| `&fileformat` | `unix` | `` |
+| `&iskeyword` | `@,48-57,_,192-255` | `` |
+| `&isprint` | `@,161-255` | `` |
+| `&isfname` | `@,48-57,/,.,-,_,+,,,#,$,%,~,=` | `` |
+
+These five and no others, because these five are **startup-invariant**: each reads
+back identical under `vim -es -u NONE -i NONE`, `vim -N -es -u NONE -i NONE`,
+`vim --clean -es` and `nvim --clean --headless`. See R29-O1 for the ones that are
+not, and why hard-coding those would pin the engine to a startup artifact.
+
+## R29-3. Three `tests/dap.rs` reference blocks quoted a script that is not the one under test — ✅ FIXED (docs only)
+
+The round-28 DAP work documented its vim reference output as measured, but the
+transcripts attached to `dap_stack_trace_reports_every_frame`, `dap_step_in_…`
+and `dap_next_…` came from a different probe script — one with `let y = 2` in
+`Bar` and `return x` on `Foo`'s line 3 — while all three tests run
+[`NESTED_SCRIPT`], whose `Bar` body is `echo "in bar"` and whose `Foo` body is one
+line. So the blocks claimed `script bt.vim[11]` and `function Foo[2]` for a
+9-line-deep call in a 10-line script.
+
+Re-measured on the script the tests actually use:
+
+```
+$ printf 'backtrace\ncont\n' | vim -es -u NONE -i NONE \
+    -c 'breakadd func Bar' -c 'verbose source bt.vim' -c 'qa!'
+  3 command line
+  2 script bt.vim[9]
+  1 function Foo[1]
+->0 Bar
+```
+
+`[9]` (`echo Foo()`), not `[11]`; `Foo[1]` (`return Bar() + 1`, file line 6), not
+`Foo[2]`. **The assertions were right all along** — `("Bar",2)`, `("Foo",6)`,
+`("script",9)` is exactly this backtrace mapped from body-relative to
+file-absolute lines — so no expectation changed and no coverage moved; only the
+transcripts did. `dap_step_out_…`'s stated deviation (vim's `finish` makes one
+extra stop on `line 2: End of function`) was re-measured and confirmed verbatim.
+
+The `FUNCREF_SCRIPT` block cited `vim -N -u NONE -es …` with no `-i NONE`. That
+command reads `~/.viminfo`, because a nocompatible vim has a non-empty `'viminfo'`
+where a compatible one does not:
+
+```
+$ vim -N -u NONE -es -c 'redir! > o' \
+    -c 'echo strlen(getreg(34)) histnr("cmd") len(v:oldfiles)' -c 'redir END' -c 'qa!'
+18 100 100
+$ vim -N -u NONE -i NONE -es …          # same command, -i NONE added
+0 -1 0
+```
+
+`FUNCREF_SCRIPT` reads no register, so its recorded output was unaffected — it is
+byte-identical under the pinned command (`xxd`: `0a68 6920 610a 6869 2062 0a65 6e64`).
+The command in the doc block is now the pinned one and the hazard is stated on it.
+
+## Still open
+
+### R29-O1. Every option outside the ported table reads "" instead of its value, and E113 is still deferred
+
+`eval_option` returns the empty string for an unknown name where vim raises
+`E113: Unknown option: …` and exits 1:
+
+```
+$ printf 'echo &nosuchoptionxyz\necho "after"\n' > unk.vim
+$ bash scripts/parity.sh unk.vim
+--- vim      1 / E113: Unknown option: nosuchoptionxyz / after
++++ viml     0 /                                       / after
+```
+
+E113 is *not* being turned on yet, and that is the finding rather than an
+omission. The option table holds 22 rows; vim's namespace is 922 names and
+Neovim's 767 (measured by running `exists('&'.n)` over every `'name'` tag in both
+runtimes' `doc/tags` plus both `getcompletion('','option')` lists — 952 in union).
+Raising E113 against a 22-row table would convert a silent wrong *value* on ~930
+real options into a spurious wrong *error*, which is the worse trade.
+
+Closing this needs `options[]` filled out, and the defaults are the hard part —
+they are not machine-readable from `doc/options.txt` (the "(default …)" column is
+prose), and recording them from a live editor bakes in that editor's startup
+state. `'cpoptions'` is the sharp case: `aAbBcCdDeEfFgHiIjJkKlLmMnoOpPqrRsStuvwWxXyZz$!%*-+<>;`
+under `-u NONE` and `aABceFs` under `-N`.
+
+### R29-O2. Startup-state dependence of the reference editor, and what the harnesses pin
+
+`scripts/parity.sh` runs `vim -es -u NONE -i NONE`, i.e. **compatible mode** — no
+`-N`. Probing 159 observables under eight entry points, against that one:
+
+| entry point | used by | observables differing |
+|---|---|---|
+| `-es -u NONE -i NONE -c 'verbose source F'` | `parity.sh`, `gen_builtin_signatures.sh`, `BUGS.md` `vimref()` | — (baseline) |
+| `-es -u NONE -i NONE -S F` | `fuzz_parity.rs` expression oracle | 1 (`&verbose`) |
+| `-es -u NONE -c …` (no `-i NONE`) | `src/vimstr.rs` doc | 0 |
+| `-e -s --not-a-term -u NONE -i NONE` | — | 0 |
+| `-es -u NONE -i NONE -N` | `fuzz_parity.rs` DAP oracle (`run_program_vim`) | 14 |
+| `-N -u NONE -es` (no `-i NONE`) | `tests/dap.rs` doc block (now fixed) | 21 |
+| `-es -u NORC -i NONE` | — | 3 |
+| `-es -i NONE` (this machine's real vimrc) | — | 3 |
+| `--clean -es` | — | 29 |
+
+(`-N` and `--cmd 'set nocp'` were both measured and give byte-identical output.)
+
+The 14 that move on `-N` alone: `compatible`, `cpoptions`, `fileformats`,
+`backspace`, `whichwrap`, `history`, `viminfo`, `formatoptions`, `modeline`,
+`shortmess`, `more`, `esckeys`, `ruler`, `showcmd`. Dropping `-i NONE` from a
+nocompatible vim adds seven more read straight off the developer's disk:
+`&verbose`, `v:oldfiles`, `getreg('0')`, `getreg('"')`, `getreg('/')`,
+`histnr('cmd')`, `histnr('search')`.
+
+That last row is not only a read. A nocompatible vim with no `-i NONE` also
+*writes* `~/.viminfo` on exit, so probing through that entry point mutates the
+state the next probe will read — the `getreg('"')` length measured through it
+changed between two runs of this audit for exactly that reason. Every command
+recorded in this file that is meant to be reproducible therefore carries
+`-i NONE`.
+
+Nothing pinned today is contaminated: no harness inherits the user's vimrc, and
+re-recording all 34 round-28 parity cases under `-N`, under `--cmd 'set cpo&vim'`
+and under `--clean` produces files byte-identical to the committed ones. The
+corpus simply does not read a compat-sensitive observable yet.
+
+The latent problem is `fuzz_parity.rs` running three different `cpoptions` states
+across its own call sites — `set cpo&vim` in the expression driver, `-N` in
+`run_program_vim`, neither in `parity.sh`. A recommendation, deliberately NOT
+applied here because it edits the measuring tool and fixes nothing currently
+broken: add `-N` to `parity.sh`'s `run_vim`, so the oracle is Vim-defaults rather
+than compatible-mode, matching the Neovim engine this crate ports. Proven safe —
+all 34 expectations are unchanged by it — but it should land as its own reviewed
+commit touching only the script.
+
+### R29-O3. `exists(':cmd')` and `exists('##event')`
+
+`exists(':echo')` is **2** in vim (`cmd_exists` returns 2 on an exact match, so the
+result is not a boolean), and 0 here. Neither `cmd_exists` (c:1388) nor
+`autocmd_supported` (c:1391) has a body in `vendor/`, and both need an ex-command
+name table this crate does not model, so both branches fall through to the
+variable lookup. Not portable faithfully until that table exists.
+
+### R28-O1, R27-O1, R27-O2, R26-O1, R26-O2, R26-O4, R26-O5, R26-O6, R24-O5, R22-O3, R23-O1, R25-O1..O7 — unchanged
+
+`tests/data/fake_fn_allowlist.txt` was not touched this round
+(`git diff --exit-code` clean). The two suites that are red on `main` were red
+before this round and are the two already tracked here: `ported_fn_names_match_c`
+reports the three standing R22-O3 names (`f_typename`, `type_name_of`,
+`member_of`), and `fusevm_bridge::tests::vim_vars` is R26-O6. Both were re-checked
+against a clean `197578457f` worktree and fail identically there.
