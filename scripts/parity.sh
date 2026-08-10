@@ -98,12 +98,56 @@ rm -rf "$OUT"; mkdir -p "$OUT"
 # without `use utf8` is byte-transparent and passes them through untouched.
 norm() { perl -ne 's/\r//g; next if /^Error detected while processing /; next if /^line\s+\d+:$/; print'; }
 
+# The environment both engines run in, pinned. Without this the record depends
+# on the shell of whoever re-records it. Measured on the 41-case corpus, by
+# replaying it through vim under different ambient settings and diffing against
+# the committed records:
+#
+#   LC_ALL=en_US.UTF-8   0/41 move   (what the records were taken at)
+#   LC_ALL=C             9/41 move
+#   LC_ALL=de_DE.UTF-8  13/41 move
+#   LC_ALL=tr_TR.UTF-8  13/41 move
+#
+# Each variable, and the specific thing it moves:
+#
+#   LC_CTYPE   decides `&encoding`. Any UTF-8 locale gives `utf-8`; `C`/`POSIX`
+#              gives `latin1`, which changes every byte-level answer in the
+#              corpus — `list2str_bytes`, `list2str_nul`, `echo_transchar`,
+#              `match_start_bytes`, `regex_composing_start`, `case_mapping`,
+#              `option_exists`, `string_builtins`, `cellwidths_table`. That is
+#              the 9.
+#   LC_MESSAGES vim ships translated diagnostics in `$VIMRUNTIME/lang`, and this
+#              port never translates. Under de_DE every `E<n>:` text becomes
+#              German. That is the 13.
+#   LANGUAGE   gettext reads LANGUAGE *first* and it is a colon-separated list
+#              rather than a locale name, so setting LC_ALL alone does NOT
+#              override it. Cleared, not set.
+#   TZ         `strftime()`/`localtime()` answers.
+#
+# `C.UTF-8` is the pinned locale rather than `en_US.UTF-8` because it is the one
+# UTF-8 locale present without having to be generated (glibc >= 2.35, musl, and
+# macOS all carry it), and it gives `&encoding=utf-8` with untranslated
+# messages. Verified: re-recording the whole corpus under it changes no record.
+#
+# `VIM` and `VIMRUNTIME` are UNSET for the child, which is not cosmetic: they are
+# how vim locates its runtime, and this script's own binary-selection variable is
+# also named `VIM`. A developer who exports `VIM` (a common habit) hands vim a
+# path that is not a runtime directory; vim then fails to find
+# `$VIMRUNTIME/lang` and silently stops translating — which looks exactly like a
+# correctly pinned locale while actually being a broken reference editor. That
+# was measured, not assumed: exporting `VIM=<path to the binary>` took the de_DE
+# figure above from 13/41 back down to 0/41.
+pinned() {
+  env -u VIM -u VIMRUNTIME -u LC_CTYPE -u LC_COLLATE -u LC_TIME \
+      LC_ALL=C.UTF-8 LANG=C.UTF-8 LC_MESSAGES=C.UTF-8 LANGUAGE= TZ=UTC "$@"
+}
+
 # run_vim FILE -> prints "status<NL>output"; the status is vim's, taken before
 # the normaliser runs (a pipeline would otherwise report perl's).
 run_vim() {
   local abs raw st
   abs=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
-  raw=$("$VIM" -es -u NONE -i NONE -N -c "verbose source $abs" -c 'qa!' 2>&1); st=$?
+  raw=$(pinned "$VIM" -es -u NONE -i NONE -N -c "verbose source $abs" -c 'qa!' 2>&1); st=$?
   printf '%s\n' "$st"
   printf '%s' "$raw" | norm
 }
@@ -111,10 +155,23 @@ run_vim() {
 run_viml() {
   local abs raw st
   abs=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
-  raw=$("$VIML" "$abs" 2>&1); st=$?
+  raw=$(pinned "$VIML" "$abs" 2>&1); st=$?
   printf '%s\n' "$st"
   printf '%s' "$raw"
 }
+
+# The pin is only worth anything if it took. A locale the C library does not
+# have falls back to "C" *silently*, which is the 9-record latin1 state — so
+# assert the one observable that distinguishes them before recording anything.
+enc=$(pinned "$VIM" -es -u NONE -i NONE -N \
+        -c 'verbose echo &encoding' -c 'qa!' 2>&1 | tr -d '\r\n')
+if [ "$enc" != "utf-8" ]; then
+  echo "the reference editor came up with encoding=$enc, not utf-8: this C library" >&2
+  echo "does not have the C.UTF-8 locale, and every byte-level record would be" >&2
+  echo "taken in latin1. Install/generate C.UTF-8 (or any UTF-8 locale and edit" >&2
+  echo "REF_ENV) before running this harness." >&2
+  exit 2
+fi
 
 # ── re-record ───────────────────────────────────────────────────────────────
 #

@@ -41,6 +41,27 @@ use std::process::Command;
 /// whole point of the staleness check.
 const KNOWN_OPEN: &[(&str, &str)] = &[];
 
+/// The same environment `scripts/parity.sh`'s `pinned()` gives both engines.
+///
+/// This replay is the CI half of the harness: it re-runs the scripts that
+/// produced the records. If it let the ambient environment through, a machine
+/// set to `LC_ALL=C` would run this port in latin1 against records taken in
+/// UTF-8 and fail nine cases for a reason that has nothing to do with the code.
+/// `LANGUAGE` is cleared rather than set because gettext reads it first and it
+/// is a colon-list, not a locale name; `LC_CTYPE`/`LC_COLLATE`/`LC_TIME` are
+/// removed so a stray one cannot outrank `LC_ALL` on libcs that let it.
+fn pinned_env(mut cmd: Command) -> Command {
+    for k in ["LC_CTYPE", "LC_COLLATE", "LC_TIME", "VIM", "VIMRUNTIME"] {
+        cmd.env_remove(k);
+    }
+    cmd.env("LC_ALL", "C.UTF-8")
+        .env("LANG", "C.UTF-8")
+        .env("LC_MESSAGES", "C.UTF-8")
+        .env("LANGUAGE", "")
+        .env("TZ", "UTC");
+    cmd
+}
+
 /// Sorted list of `tests/parity_cases/*.vim`.
 fn cases(dir: &Path) -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = fs::read_dir(dir)
@@ -82,7 +103,7 @@ fn parity_cases_match_vim() {
         // `try_clone` dups the descriptor, so both streams share one file offset.
         let sink = tempfile::NamedTempFile::new().expect("capture file");
         let f = sink.reopen().expect("capture handle");
-        let status = Command::new(viml)
+        let status = pinned_env(Command::new(viml))
             .arg(&case)
             .stdout(f.try_clone().expect("dup capture handle"))
             .stderr(f)
