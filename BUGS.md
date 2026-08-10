@@ -106,10 +106,24 @@ early-return dropped it. ✅ FIXED: `string(-0.0)` → `-0.0`.
 - `'héllo'[1]` → Vim `<c3>` (first byte of the 2-byte `é`), vimlrs `é` (whole char)
 - Vim indexes strings by byte. ASCII matches (`'hello'[1]` → both `e`); only multibyte diverges.
 - Fixed in round 17: `[i]` is one byte, `[a:b]` is an inclusive byte range
-  (`eval_index_inner`, eval.c) in both the bridge and the ported eval; a byte
-  slice that splits a character carries U+FFFD where Vim carries the raw byte
-  (both render identically). `slice()` stays character-indexed with composing
-  clusters, per its own C path (`string_slice`).
+  (`eval_index_inner`, eval.c) in both the bridge and the ported eval.
+  `slice()` stays character-indexed with composing clusters, per its own C path
+  (`string_slice`).
+- CORRECTION (round 30): this entry used to claim a byte slice that splits a
+  character "carries U+FFFD where Vim carries the raw byte (**both render
+  identically**)". They do not render identically, and the claim was never
+  checked with `xxd`:
+  ```
+  $ printf "echo 'héllo'[1]\n" > b8.vim
+  $ viml b8.vim | xxd                          → 00000000: efbf bd0a   ....
+  $ vim -es -u NONE -i NONE -N -c 'verbose source b8.vim' -c 'qa!' | xxd
+                                               → 00000000: 3c63 333e   <c3>
+  ```
+  vim writes the raw byte through `transchar_byte_buf`, which renders it as the
+  four ASCII characters `<c3>`; this port substitutes U+FFFD. Still open —
+  R30-O2. `tests/parity_cases.rs:20-25` warns about exactly this shape (two
+  different byte strings comparing EQUAL once both collapse to U+FFFD), which is
+  why that harness compares bytes and not `String`s.
 
 ---
 
@@ -3610,3 +3624,98 @@ table comment: 27 where the engines genuinely disagree ('cpoptions'
 'viewoptions', 'nrformats', 'commentstring', 'define', 'include', 'esckeys',
 'foldcolumn', 'shellslash', 'maxcombine', 'tabpagemax'), and two that are
 LOCALE-derived — see R30-3.
+
+## R30-2. `strftime()` answered in the "C" locale until a `sort(…,'l')` ran — ✅ FIXED
+
+`init_locale()` (`src/ported/os/lang.rs`) is a faithful port of the C's
+`setlocale(LC_ALL, "")` + `setlocale(LC_NUMERIC, "C")`, and its doc comment said
+it was "invoked lazily by the locale-dependent callers … so every entry point
+gets the same locale state". It had exactly ONE caller —
+`item_compare()`'s `strcoll` branch, i.e. `sort(…, 'l')`
+(`src/ported/eval/typval.rs:2441`) — so every OTHER locale-dependent libc call
+ran in the process's default `"C"` locale until a locale-collating sort happened
+to occur. The state was not merely wrong, it was *order-dependent*:
+
+```vim
+echo "before=[" . strftime('%x %A', 0) . "]"
+call sort(['b','a'], 'l')
+echo "after =[" . strftime('%x %A', 0) . "]"
+```
+
+`TZ=UTC LC_ALL=de_DE.UTF-8`, before the fix:
+
+```
+vim  : before=[01.01.1970 Donnerstag]   after =[01.01.1970 Donnerstag]
+viml : before=[01/01/70 Thursday]       after =[01.01.1970 Donnerstag]
+```
+
+The C calls `init_locale()` from `main()`, before anything is evaluated. It is
+now called from the once-per-thread startup block in `fusevm_bridge::install`,
+next to `eval_init()` — the same placement. After:
+
+| observable | LC_ALL=C | en_US.UTF-8 | de_DE.UTF-8 | fr_FR.UTF-8 |
+|---|---|---|---|---|
+| `strftime('%c %x %X %A %B %p', 0)` | match | match | match | match |
+| `strptime('%d %B %Y', '01 January 1970')` | match | match | match | match |
+| `printf('%f %g %e %.2f')`, `string(1.5)`, `str2float` | match | match | match | match |
+| `sort(…,'l')` collation | match | match | match | match |
+
+("match" = viml byte-identical to vim 9.2.0900 at that locale.) `%f` and friends
+are unmoved because `init_locale()` forces `LC_NUMERIC` back to `"C"`, which is
+the regression the C guards against with the same second call.
+
+`tests/parity_cases/locale_strftime.vim` pins the INVARIANT, not a locale-derived
+string: no harness sets `LC_ALL`/`LANG`/`LC_TIME`, so recording `Donnerstag` or
+`01/01/1970` would be recording the machine that ran the recorder. It records
+that the same call answers the same thing throughout one script — verified
+byte-identical against vim under `LC_ALL=C`, `en_US.UTF-8`, `de_DE.UTF-8` and
+`fr_FR.UTF-8`.
+
+## R30-3. `:retu`, `:th`, `:brea`, `:con` were not commands — ✅ FIXED
+
+`canon_block_kw` (`src/viml_parser.rs`) resolves the BLOCK keywords'
+abbreviations and its sets were re-verified this round against vim 9.2.0900's
+`fullcommand()` — all 60 spellings checked, all correct. The statement dispatcher
+beside it matched `:return`, `:throw`, `:break` and `:continue` by their FULL
+spelling only. The failure was silent and misattributed: `retu 42` parsed as a
+bare expression, which made the whole enclosing `:function` fail to parse, so the
+error the user saw was `E117: Unknown function: Foo` at the CALL site.
+
+```
+$ cat abbr.vim                     vim 9.2.0900        viml (before)
+function! R1()
+  retu 42                          retu -> 42          E117: Unknown function: R1
+endfunction
+...
+  if i == 2 | con | endif          i= 1 / i= 3         E121: Undefined variable: con
+  if i == 2 | brea | endif         b= 1                E121: Undefined variable: brea
+try | th 'x' | catch | …           caught x            (nothing)
+```
+
+Accepted sets, read out of `fullcommand()` and written as explicit sets rather
+than prefix tests, because the spelling one character shorter is a DIFFERENT
+command every time: `retu`/`retur`/`return` (`ret` is `:retab`),
+`th`/`thr`/`thro`/`throw`, `brea`/`break` (`bre` is `:brewind`),
+`con`/`cont`/`conti`/`continu`/`continue` (`co` is `:copy`),
+`fini`/`finis`/`finish` (`fin` is `:find`).
+
+`tests/parity_cases/cmd_abbreviations.vim` records every accepted spelling plus
+the negative case `:ret`.
+
+## R30-4. `:source` recursion allowed one level more than vim — ✅ FIXED
+
+`src/fusevm_bridge.rs`'s `run_source_nested` guard read `depth >= 200`. The C
+increments the counter inside `do_cmdline` itself, and the command line that
+started everything (`-c 'source F'`, `-S F`, `viml F`) is already one
+`do_cmdline` frame before the first `:source` nests. This port counts only the
+nested calls, so it permitted exactly one more level. Measured with a
+self-sourcing script:
+
+```
+$ vim -es -u NONE -i NONE -N -c "silent! source rec.vim" \
+      -c "call writefile(['vim depth=' . g:d], out)" -c 'qa!'   → vim depth=199
+$ viml -c "silent! source rec.vim" …                            → viml depth=200
+```
+
+Now `depth + 1 >= 200`, and both reach 199. The doc comment above the constant
+already stated vim's number correctly; the code did not implement it.

@@ -3512,7 +3512,13 @@ fn run_source_nested(src: &str) -> Result<(), VimlError> {
     // like Vim instead of overflowing the stack.
     const MAX_CMD_RECURSE: u32 = 200;
     let depth = CMD_RECURSE.with(|c| c.get());
-    if depth >= MAX_CMD_RECURSE {
+    // `depth + 1`, not `depth`: the C's counter is incremented by `do_cmdline`
+    // itself, and the command line the user ran (`-c 'source F'`, `-S F`,
+    // `viml F`) is already ONE `do_cmdline` frame before the first `:source`
+    // nests. This port only counts the nested calls, so without the `+ 1` it
+    // allows exactly one more level than vim does — measured on vim 9.2.0900
+    // with a self-sourcing script, `g:d` reaches 199 there and reached 200 here.
+    if depth + 1 >= MAX_CMD_RECURSE {
         message::emsg("E169: Command too recursive");
         return Ok(());
     }
@@ -5161,6 +5167,21 @@ pub fn install(vm: &mut VM) {
     EVAL_INITED.with(|done| {
         if !done.get() {
             done.set(true);
+            // c: main.c — `init_locale()` runs at startup, BEFORE anything is
+            // evaluated. It was only ever reached from `item_compare()`'s
+            // `strcoll` branch, i.e. from `sort(…, 'l')`, which left every other
+            // locale-dependent libc call running in the process's default "C"
+            // locale until a locale-collating sort happened to occur. That made
+            // `strftime()` answer differently depending on what ran BEFORE it
+            // in the same script (`TZ=UTC LC_ALL=de_DE.UTF-8`):
+            //
+            //     echo strftime('%x %A', 0)      " 01/01/70 Thursday
+            //     call sort(['b','a'], 'l')
+            //     echo strftime('%x %A', 0)      " 01.01.1970 Donnerstag
+            //
+            // where vim prints `01.01.1970 Donnerstag` both times. Calling it
+            // here, in the once-per-thread startup block, is the C's placement.
+            crate::ported::os::lang::init_locale();
             crate::ported::eval::eval_init();
         }
     });
@@ -6113,6 +6134,48 @@ fn eval_file_inner(path: &std::path::Path) -> Result<(), VimlError> {
 /// each top-level statement (or block) in its own chunk so a parse *or* run-time
 /// failure in one is contained and the rest of the file still takes effect.
 /// Returns the number of statements that ran and the number skipped.
+///
+/// KNOWN DIVERGENCE, measured — see BUGS.md R30-O1. Every parse error this
+/// collects is DISCARDED: the script prints nothing about it and exits 0, where
+/// vim reports the error and exits 1.
+///
+/// ```text
+/// $ cat probe.vim                      $ vim -es -u NONE -i NONE -N \
+/// echo "before"                            -c 'verbose source probe.vim' -c 'qa!'
+/// echo ((1)                            before
+/// echo "after"                         Error detected while processing …probe.vim:
+///                                      line    2:
+/// $ viml probe.vim ; echo rc=$?        E110: Missing ')'
+/// before                               after
+/// after                                $ echo $?
+/// rc=0                                 1
+/// ```
+///
+/// Reporting them was implemented and then REVERTED, because this fallback fires
+/// for two different reasons and only one of them is an error:
+///
+///   1. a real syntax error, which vim also reports (`if a` with no `:endif`
+///      → `E171: Missing :endif` in both engines once the message is emitted);
+///   2. a construct this parser does not support yet but vim accepts — a
+///      curly-brace function name (`open_{pos}`), for instance. vim parses a
+///      legacy function body lazily and reports nothing at all.
+///
+/// Nothing here distinguishes the two, so emitting the collected messages made
+/// `examples/tolerant_block_no_leak.vim` and `examples/registers.vim` print an
+/// `E15:` that vim does not print for them. Trading a missed real error for a
+/// spurious error on valid vim source is the worse of the two, and this
+/// fallback exists precisely to source a real `~/.vimrc` full of case 2.
+///
+/// Closing it needs a signal the tolerant parser does not produce today:
+/// "this line is invalid VimL" vs "this line is valid VimL this parser cannot
+/// read yet". Do not report the list until that exists.
+///
+/// The exit status has a second, independent cause worth recording here: every
+/// statement runs as its own chunk and `run_chunk` opens with `reset_run()`,
+/// which zeroes `did_emsg`. So even a REPORTED error is erased by the next
+/// statement starting, and only an error in the file's last statement can reach
+/// the CLI's `errored()`. The C keeps one `did_emsg` per sourced script, not per
+/// command.
 pub fn source_tolerant(src: &str) -> (usize, usize) {
     let (stmts, parse_errs) = crate::viml_parser::parse_program_lines_tolerant(src);
     let mut ran = 0usize;

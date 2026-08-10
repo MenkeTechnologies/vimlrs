@@ -24,7 +24,7 @@ eval engine out of the editor and runs `.vim` scripts as ordinary programs. The
 language semantics are ported faithfully from Neovim's C `eval/*` tree — the C
 source is the spec — rather than re-invented.
 
-It is the fourth language hosted on `fusevm`. vimlrs carries no VM or JIT of its
+It is one of several languages hosted on `fusevm`. vimlrs carries no VM or JIT of its
 own: it lexes and parses VimL to an AST, lowers that to fusevm bytecode, and lets
 the shared engine run it — the same way `zshrs` hosts zsh.
 
@@ -58,7 +58,7 @@ In active development.
 | Observable from the real CLI: `VIMLRS_JIT_STATS=1 viml script.vim` reports loop traces compiled; `VIMLRS_NO_JIT=1` forces the interpreter baseline | Working — a 20M-iteration loop runs **~15–100× faster** with the JIT |
 | Native `Op::ReturnValue` (whole function bodies block-compile) + per-loop (not per-chunk) slot scoping | In progress (next) |
 | Expression engine — arithmetic, comparison, logic, ternary, index/slice, lists/dicts | Working |
-| Builtin function surface | Partial (`len`/`type`/`string`/`empty`/`abs`/`str2nr`/`str2float`/`float2nr`; full `funcs.c` pending) |
+| Builtin function surface | Working for the ported set — every name in the `BUILTIN_ARGC` table (`src/ported/eval/funcs_argc.rs`) dispatches and answers `exists('*name')`; the remainder of `funcs.c` is pending. The count is that table's row count, never a literal quoted here. |
 | Standalone `viml` binary (`-e` / `-c` / file / `--repl`) | Working |
 | Interactive REPL (`viml --repl`, or bare `viml` in a terminal) — reedline line editor with a live ASCII stats banner, Tab completion (the LSP wordlist), `~/.vimlrs/history`, and emacs/vi edit mode (`~/.vimlrs/config.toml` `[repl] mode`, `VIMLRS_REPL_MODE` override). Piped/non-TTY stdin falls back to the line-oriented reader. | Working |
 | rkyv bytecode script cache (`~/.cache/vimlrs/scripts.rkyv`, mmap zero-copy) | Working |
@@ -76,7 +76,7 @@ In active development.
 | vim9script foundation — `:vim9script` marker, `def NAME(p: type, …): rettype … enddef` with **bare** (a:-less) parameters + optional defaults, and vim9 automatic line continuation (unclosed `[]`/`{}`/`()`, leading/trailing binary operators, `->`/`.`/`?`/`:`, `#` comments) — `examples/vim9_def.vim` self-tests vs vim 9.2 | Working — type checking, bare-key `{k: v}` dict literals, `:class`, `import`/`export` deferred |
 | Variable scopes — `g:`/`s:`/`b:`/`w:`/`t:`/`v:` + `:set`/`&opt` (`'ignorecase'` wired into regex) | Working |
 | `:try`/`:catch`/`:finally`/`:throw` exceptions, `v:exception` | Working |
-| `funcs.c` builtin table | In progress (~113 ported: string/list/dict, char-indexed string ops (`slice`/`strcharlen`/`strtrans`/`strwidth`/`strdisplaywidth`/`charclass`/`strutf16len`/`utf16idx`), `glob`/`globpath`, buffer/window introspection (`bufnr`/`winnr`/`tabpagenr`, editor-absent), float math + `isinf`/`isnan`, regex, `eval`/`execute`, `json_encode`/`json_decode`, env (`getenv`/`setenv`/`environ`), `system`/`systemlist` (shell out, sets `v:shell_error`), `shellescape`, `getpid`/`localtime`/`soundfold`, `reltime`/`reltimestr`/`reltimefloat`, `rand`/`srand` (xoshiro128**, bit-exact vs Neovim), `strftime`/`strptime`, `pathshorten`, `flattennew`, `sha256` (FIPS-180-2), `list2blob`/`blob2list` (+ blob index/slice), …) |
+| `funcs.c` builtin table | In progress (string/list/dict, char-indexed string ops (`slice`/`strcharlen`/`strtrans`/`strwidth`/`strdisplaywidth`/`charclass`/`strutf16len`/`utf16idx`), `glob`/`globpath`, buffer/window introspection (`bufnr`/`winnr`/`tabpagenr`, editor-absent), float math + `isinf`/`isnan`, regex, `eval`/`execute`, `json_encode`/`json_decode`, env (`getenv`/`setenv`/`environ`), `system`/`systemlist` (shell out, sets `v:shell_error`), `shellescape`, `getpid`/`localtime`/`soundfold`, `reltime`/`reltimestr`/`reltimefloat`, `rand`/`srand` (xoshiro128**, bit-exact vs Neovim), `strftime`/`strptime`, `pathshorten`, `flattennew`, `sha256` (FIPS-180-2), `list2blob`/`blob2list` (+ blob index/slice), …) |
 | `map`/`filter`/`sort`/`reduce`/`call` (lists **and** dicts; string-expr + funcref) | Working |
 | Unit-testing framework — `assert_equal`/`assert_notequal`/`assert_true`/`assert_false`/`assert_match`/`assert_notmatch`/`assert_report`/`assert_inrange`/`assert_exception` → `v:errors`, plus `assert_fails` (run a command, require it to error/match a code) — message wording per `eval.lua` | Working — every `examples/*.vim` is a self-test, run in CI via `tests/examples.rs` |
 | `eval()` / `execute()` (run-string metaprogramming) | Working |
@@ -130,7 +130,8 @@ cargo build
 cargo test
 ```
 
-`fusevm` is pulled from crates.io with the `jit` and `jit-disk-cache` features.
+`fusevm` is pulled from crates.io; the enabled feature list is in `Cargo.toml`'s
+dependency row for it, not restated here.
 The vendored Neovim C sources under `vendor/` are the porting spec and are
 excluded from the crate build. They are the eval tree plus the files the eval
 tree calls out to that have observable behaviour of their own — `mbyte.c`,

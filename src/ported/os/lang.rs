@@ -11,10 +11,20 @@ static INIT: Once = Once::new();
 /// of byte order.
 ///
 /// RUST-PORT NOTE: the C calls this once at startup (`main.c`); here it is
-/// `Once`-guarded and invoked lazily by the locale-dependent callers
-/// (`item_compare()` before `strcoll`), so every entry point — the CLI, the
-/// library, the test harnesses — gets the same locale state. The C's
-/// gettext/bindtextdomain setup is not mirrored (no message translation).
+/// `Once`-guarded and called from the once-per-thread startup block in
+/// [`crate::fusevm_bridge::install`], next to `eval_init()`, so every entry
+/// point — the CLI, the library, the test harnesses — reaches it before
+/// anything is evaluated. The C's gettext/bindtextdomain setup is not mirrored
+/// (no message translation), so vim's translated diagnostics under a non-English
+/// `LC_MESSAGES` have no counterpart here.
+///
+/// It was previously called ONLY from `item_compare()` before `strcoll`, i.e.
+/// only from `sort(…, 'l')`. Every other locale-dependent libc call — chiefly
+/// `strftime()` and `strptime()` — therefore ran in the process's default `"C"`
+/// locale until a locale-collating sort happened to occur, which made a
+/// `strftime()` result depend on what had run before it in the same script.
+/// The `Once` is what keeps the state stable once set; the call site is what
+/// decides when it is set, and lazily was the wrong answer.
 pub fn init_locale() {
     INIT.call_once(|| unsafe {
         libc::setlocale(libc::LC_ALL, c"".as_ptr());

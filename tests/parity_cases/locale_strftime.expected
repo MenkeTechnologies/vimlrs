@@ -1,0 +1,9 @@
+0
+strftime stable across sort(l): 1
+strptime stable across sort(l): 1
+strftime stable in both directions: 1
+1.500000 1234567.5 1.500000e+00 3.14
+1.5 1.5 1.0 12
+['a', 'b', 'c']
+['A', 'a', 'b', 'B']
+[9, 10, 100]

@@ -7,7 +7,20 @@
 //!   1. exit successfully, and
 //!   2. emit no Vim error (`E<num>: …`) on stderr.
 //!
-//! So an assertion that regresses fails the script, which fails this test.
+//! So an assertion that regresses fails the script, which fails this test —
+//! UNLESS the script is named in [`KNOWN_OPEN`] below, which exempts the scripts
+//! whose failure is a tracked open gap. That list is inverted as well as
+//! subtractive: an exempt script that starts PASSING also fails this test, so an
+//! entry cannot outlive the gap it names. Read [`KNOWN_OPEN`]'s own doc comment
+//! for the current entries and their reasons; the count is not restated here,
+//! because a number in prose goes stale the moment an entry is added or removed.
+//!
+//! What the two criteria CANNOT see, by construction: which stream a message
+//! went to beyond "stderr contained an `E<num>:`", the ORDER of stdout against
+//! stderr, the exit code beyond zero/non-zero, and anything the script prints
+//! that it does not itself assert on. A script that prints the wrong answer and
+//! asserts nothing about it passes here. `tests/parity_cases.rs` is the harness
+//! that compares output byte-for-byte against real vim.
 //!
 //! A `tests/fixtures/<name>.in` file, when present, is piped to stdin (used by
 //! the interactive example); otherwise stdin is empty (EOF).

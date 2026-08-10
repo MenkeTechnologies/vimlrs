@@ -205,17 +205,25 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
             rest,
         ))?)),
         "eval" => Ok(Stmt::Expr(parse_expr(strip_legacy_trailing_comment(rest))?)),
-        "break" => Ok(Stmt::Break),
-        "continue" | "cont" => Ok(Stmt::Continue),
-        "finish" | "finis" | "fini" => Ok(Stmt::Finish),
-        "return" => Ok(if rest.trim().is_empty() {
+        // Abbreviations, as explicit sets rather than prefix tests, because the
+        // shortest accepted prefix is not the shortest unique one and the
+        // one-shorter spelling usually resolves to a DIFFERENT command. Read out
+        // of vim 9.2.0900 with `fullcommand()`: `ret`→retab (not return),
+        // `bre`→brewind (not break), `fin`→find (not finish), `co`→copy (not
+        // continue). Getting this wrong is silent: `retu 42` parsed as an
+        // expression statement, which made the whole enclosing `:function`
+        // fail to parse and `E117: Unknown function` fire at the call site.
+        "brea" | "break" => Ok(Stmt::Break),
+        "con" | "cont" | "conti" | "continu" | "continue" => Ok(Stmt::Continue),
+        "fini" | "finis" | "finish" => Ok(Stmt::Finish),
+        "retu" | "retur" | "return" => Ok(if rest.trim().is_empty() {
             Stmt::Return(None)
         } else {
             Stmt::Return(Some(parse_expr(strip_legacy_trailing_comment(rest))?))
         }),
-        "throw" => Ok(Stmt::Throw(parse_expr(strip_legacy_trailing_comment(
-            rest,
-        ))?)),
+        "th" | "thr" | "thro" | "throw" => Ok(Stmt::Throw(parse_expr(
+            strip_legacy_trailing_comment(rest),
+        )?)),
         // `:command[!] …` defines a user command; `:delcommand` removes one.
         // (`command(`/`delcommand(` are not builtins, but guard anyway.)
         "command" | "comm" | "com" if !line[cmd.len()..].starts_with('(') => {

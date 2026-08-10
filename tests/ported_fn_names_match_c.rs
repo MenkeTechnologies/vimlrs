@@ -1,10 +1,17 @@
 //! Drift gate (ported from zshrs's `tests/ported_fn_names_match_c.rs`).
 //!
 //! Every `fn` defined under `src/ported/` must trace back to upstream Neovim C:
-//! its name must appear in `docs/nvim_c_functions.txt` (generated from the
-//! vendored `vendor/` by `scripts/gen_c_functions.sh`) OR be a sanctioned
-//! exception in `tests/data/fake_fn_allowlist.txt`. Trait-impl methods
-//! (`default`, `fmt`, …) and `#[cfg(test)]` functions are exempt.
+//! its name must appear in the vendored C itself, which the test scans directly
+//! (`c_names_from_vendor(vendor/)`), OR be a sanctioned exception in
+//! `tests/data/fake_fn_allowlist.txt`. Trait-impl methods (`default`, `fmt`, …)
+//! and `#[cfg(test)]` functions are exempt.
+//!
+//! `docs/nvim_c_functions.txt` (produced by `scripts/gen_c_functions.sh`) is a
+//! FALLBACK, consulted only when `vendor/` is missing — and it is not in the
+//! repository, because `docs/` is gitignored. On a normal checkout the scan of
+//! `vendor/` is the whole answer, which is what makes the gate work on a fresh
+//! clone and in CI with no generation step. This block used to name that file
+//! as the primary source, which inverted the two.
 //!
 //! This is the immune system against porting drift: an invented helper name
 //! (`make_helper`, `parse_v2`, a bag-of-globals accessor) that doesn't exist in
