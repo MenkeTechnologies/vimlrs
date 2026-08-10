@@ -3907,22 +3907,39 @@ echo getbufvar('%', '&tabstop') " vim 7   viml (empty)
 The buffer-scoped read does not reach either option store. Found while checking
 R30-1; not fixed there because it is a buffer-variable path, not a table gap.
 
-### R30-O7. `toupper`/`tolower` use FULL Unicode case mapping where vim uses simple
+### R30-O7 — ✅ FIXED before the round closed (kept here as the record)
 
-Locale-independent (identical at `C`, `en_US`, `tr_TR`, `de_DE` in both engines),
-so it is not a locale bug:
+`f_toupper`/`f_tolower` (`src/ported/strings.rs`) used `str::to_uppercase()` /
+`str::to_lowercase()`, and the `\U`/`\L`/`\u`/`\l` substitute escapes
+(`src/viml_regex.rs`, `SubCase::push`) used the `char` equivalents. Those are
+Unicode's FULL mappings and can turn one character into several; Vim's tables
+hold only the SIMPLE (1:1) entries.
 
-| input | vim 9.2.0900 | viml |
+| input | vim 9.2.0900 | before |
 |---|---|---|
 | `toupper('ß')` | `ß` | `SS` |
 | `toupper('ﬁ')` | `ﬁ` | `FI` |
-| `tolower('İ')` | `i` | `i̇` (`i` + U+0307) |
+| `tolower('İ')` | `i` | `i` + U+0307 |
 | `substitute('straße','\(.*\)','\U\1','')` | `STRAßE` | `STRASSE` |
 
-`mbyte.rs`'s `utf_toupper`/`utf_tolower` ports already take only `.next()` (the
-1:1 mapping vim uses); `strings.rs`'s `f_toupper`/`f_tolower` do not, so the
-crate is inconsistent with itself. Neither engine implements the Turkish dotted-I
-rule, so `tr_TR.UTF-8` needs nothing special.
+`mb_toupper`/`mb_tolower` were already taking the first codepoint of the full
+mapping, which is why they were described as "identical over the simple
+mappings". That is true for lowercase and FALSE for uppercase: the first
+codepoint of `ß`'s full uppercase is `S`, which is not a case conversion of
+anything. Where the full UPPERCASE mapping expands there is no simple mapping and
+Vim leaves the character alone; lowercase keeps the first-codepoint rule
+(`U+0130` really does lowercase to `i` in Vim, while its full mapping is
+`i` + U+0307).
+
+Both rules were checked by sweep rather than by argument: 2321 codepoints
+(U+0020..U+05FF, Latin Extended Additional, Letterlike, Alphabetic Presentation
+Forms, Fullwidth, Deseret, Cyrillic Extended-C, Latin Extended-C) through
+`toupper()` and `tolower()` in both engines — byte-identical.
+`tests/parity_cases/case_mapping.vim` records the hand-picked characters plus a
+smaller in-script sweep so a future table change fails the case.
+
+Locale-independent throughout: identical at `C`, `en_US.UTF-8`, `tr_TR.UTF-8`
+and `de_DE.UTF-8`, in both engines. Neither implements the Turkish dotted-I rule.
 
 ### R30-O8. `v:lang`, `v:lc_time`, `v:ctype`, `v:collate` are always empty
 

@@ -82,16 +82,41 @@ pub fn f_strlen(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.vval = v_number(n as varnumber_T);
 }
 
-/// Port of `f_tolower()` from `Src/strings.c`.
+/// Port of `f_tolower()` from `Src/strings.c` — `strlow_save()`, which walks the
+/// string a character at a time through `mb_tolower`.
+///
+/// Per CHARACTER through [`mb_tolower`], never `str::to_lowercase()`. Rust's is
+/// the FULL Unicode mapping, which can change a string's length; Vim's tables
+/// hold only the simple 1:1 mappings, so the two disagree wherever the full
+/// mapping expands. Measured against vim 9.2.0900:
+///
+/// | input | vim | `to_lowercase()`/`to_uppercase()` |
+/// |---|---|---|
+/// | `toupper('ß')` | `ß` | `SS` |
+/// | `toupper('ﬁ')` | `ﬁ` | `FI` |
+/// | `tolower('İ')` | `i` | `i` + U+0307 |
+///
+/// [`mb_tolower`]/[`mb_toupper`] already take only the first codepoint of the
+/// full mapping, which IS the simple mapping; these two functions were the only
+/// place in the crate still using the whole expansion.
 pub fn f_tolower(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(tv_get_string(&argvars[0]).to_lowercase().into());
+    let s: String = tv_get_string(&argvars[0])
+        .chars()
+        .map(crate::ported::mbyte::mb_tolower)
+        .collect();
+    rettv.vval = v_string(s.into());
 }
 
-/// Port of `f_toupper()` from `Src/strings.c`.
+/// Port of `f_toupper()` from `Src/strings.c` — `strup_save()`. Same
+/// simple-vs-full case-mapping note as [`f_tolower`].
 pub fn f_toupper(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(tv_get_string(&argvars[0]).to_uppercase().into());
+    let s: String = tv_get_string(&argvars[0])
+        .chars()
+        .map(crate::ported::mbyte::mb_toupper)
+        .collect();
+    rettv.vval = v_string(s.into());
 }
 
 /// Port of `f_strchars()` from `Src/strings.c` — character count. The optional

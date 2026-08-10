@@ -308,17 +308,28 @@ pub fn utf_char2bytes(c: i32, buf: &mut [u8]) -> i32 {
 /// Port of `mb_tolower()` from `Src/mbyte.c` — single-codepoint lowercase
 /// (`utf_tolower`).
 ///
-/// RUST-PORT NOTE: the C consults Vim's own case-folding tables; the
-/// first-codepoint of Rust's Unicode `to_lowercase` is the standalone
-/// approximation, identical over the simple (1:1) mappings Vim's tables hold.
+/// RUST-PORT NOTE: the C consults Vim's own case-folding tables, which hold
+/// only SIMPLE (1:1) mappings. Rust's `to_lowercase` is the FULL mapping and
+/// can expand one char into several; the simple lowercase mapping is its first
+/// codepoint (`U+0130` lowercases to `i` in Vim, while the full mapping is
+/// `i` + `U+0307`).
 pub fn mb_tolower(c: char) -> char {
     c.to_lowercase().next().unwrap_or(c)
 }
 
 /// Port of `mb_toupper()` from `Src/mbyte.c` — single-codepoint uppercase
-/// (`utf_toupper`). Same approximation note as [`mb_tolower`].
+/// (`utf_toupper`). Same simple-vs-full note as [`mb_tolower`], with the
+/// opposite resolution: where the FULL uppercase mapping expands to more than
+/// one codepoint there is no simple mapping at all, and Vim leaves the
+/// character alone. `toupper('ß')` is `ß` and `toupper('ﬁ')` is `ﬁ` in vim
+/// 9.2.0900; taking the first codepoint of the full mapping answered `S` and
+/// `F`, which is not a case conversion of anything.
 pub fn mb_toupper(c: char) -> char {
-    c.to_uppercase().next().unwrap_or(c)
+    let mut up = c.to_uppercase();
+    match (up.next(), up.next()) {
+        (Some(u), None) => u,
+        _ => c,
+    }
 }
 
 /// Port of `mb_charlen()` from `Src/mbyte.c:2236` — the number of characters

@@ -1766,11 +1766,17 @@ struct SubCase {
 
 impl SubCase {
     /// Push one logical char through the active case transform.
+    ///
+    /// `mb_toupper`/`mb_tolower` (the SIMPLE 1:1 mapping Vim's tables hold), not
+    /// `char::to_uppercase()` (the FULL Unicode mapping, which can expand one
+    /// char into several). Measured against vim 9.2.0900:
+    /// `substitute('straße', '\(.*\)', '\U\1', '')` is `STRAßE` there and was
+    /// `STRASSE` here. Same distinction as `strings.rs`'s `f_toupper`.
     fn push(&mut self, out: &mut String, c: char) {
         let upper = self.one_shot.take().or(self.sustained);
         match upper {
-            Some(true) => out.extend(c.to_uppercase()),
-            Some(false) => out.extend(c.to_lowercase()),
+            Some(true) => out.push(crate::ported::mbyte::mb_toupper(c)),
+            Some(false) => out.push(crate::ported::mbyte::mb_tolower(c)),
             None => out.push(c),
         }
     }
