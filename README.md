@@ -163,6 +163,15 @@ Only vim ever writes an expectation, so a case cannot be made to pass by changin
 vimlrs. The corpus is replayed against the recorded output by
 `tests/parity_cases.rs`, which needs no editor installed and therefore runs in CI.
 
+Both engines are run with a pinned environment — `LC_ALL=C.UTF-8`,
+`LANGUAGE=` cleared, `TZ=UTC`, and `VIM`/`VIMRUNTIME` unset — so a record is the
+language's answer rather than the shell of whoever re-recorded it. Without it,
+`LC_ALL=C` moves every byte-level record (vim falls back to `encoding=latin1`)
+and any locale vim ships a translation for moves every record containing an
+`E<number>`. The harness verifies the pin took (it refuses to run if vim comes up
+with anything but `encoding=utf-8`) because a locale the C library does not have
+falls back to `C` silently.
+
 On top of that, `fuzz-parity` is a **differential fuzzer**: it generates random
 VimL expressions and runs each through vimlrs *and* through `nvim` *and* `vim`.
 It reports a bug when both engines agree and vimlrs differs — so a Vim-vs-Neovim

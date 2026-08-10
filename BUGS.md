@@ -3962,3 +3962,217 @@ standing R22-O3 names, and `fusevm_bridge::tests::vim_vars` is R26-O6. Neither
 was weakened, and neither was cheap to close this round — R22-O3 needs vim's C
 vendored (already CALLED against in round 26) and R26-O6 needs the `v:` table
 audit its own entry describes.
+
+---
+
+## R31-0. The parity oracle inherited the developer's locale — ✅ FIXED (harness only, isolated commit)
+
+R30-O4, recommended and declined last round because only the `-N` change was in
+scope. Authorized this round and landed the same way, alone in one commit that
+touches nothing it measures. Replaying the corpus through vim under different
+ambient settings and diffing against the committed records:
+
+| ambient | before | after |
+|---|---|---|
+| `LC_ALL=en_US.UTF-8 TZ=America/New_York` | 0/41 move | 0/41 |
+| `LC_ALL=C TZ=UTC` | **9/41 move** | 0/41 |
+| `LC_ALL=de_DE.UTF-8 TZ=Europe/Berlin` | **13/41 move** | 0/41 |
+| `LC_ALL=tr_TR.UTF-8 TZ=Europe/Istanbul` | **13/41 move** | 0/41 |
+| `LC_ALL=C.UTF-8 TZ=UTC` | 0/41 move | 0/41 |
+
+The 9 are `LC_CTYPE`: `C`/`POSIX` gives vim `&encoding=latin1`, moving every
+byte-level record. The 13 are `LC_MESSAGES`: vim translates its diagnostics from
+`$VIMRUNTIME/lang` and this port never does, so under `de_DE` a record reads
+`E979: Blobindex außerhalb des Bereichs: 7`.
+
+Pinned to `LC_ALL=C.UTF-8 LANG=C.UTF-8 LC_MESSAGES=C.UTF-8 LANGUAGE= TZ=UTC`,
+with `LC_CTYPE`/`LC_COLLATE`/`LC_TIME` removed. `LANGUAGE` is CLEARED, not set:
+gettext reads it first and it is a colon-list, not a locale name. `C.UTF-8`
+rather than `en_US.UTF-8` because it needs no generating and still gives
+`utf-8` with untranslated messages. Re-recording all 41 under the pin changed no
+record — the pin removes the dependence without moving an expectation.
+
+**`$VIM` is now unset for the child too, and that is not cosmetic.**
+`scripts/parity.sh`'s own binary-selection variable is named `VIM`, which is
+also how vim locates its runtime. Exporting `VIM=<path to the binary>` makes vim
+fail to find `$VIMRUNTIME/lang` and silently stop translating — measured while
+taking the numbers above, it took the de_DE figure from 13/41 back to 0/41 and
+looked exactly like a correctly pinned locale.
+
+A pin that does not take is worse than none, because a missing locale falls back
+to `C` in silence. The harness now probes `&encoding` through the same `pinned()`
+before recording anything and refuses to run if it is not `utf-8`; verified to
+discriminate (`utf-8` under the pin, `latin1` under `LC_ALL=C`).
+
+## R31-1. Hardcoded-reference-string audit: 51 of 363 `E<number>` literals matched no engine — ✅ FIXED (34 of them)
+
+Round 6's theme, applied mechanically. Every `E<number>` string literal under
+`src/` (363) was matched against BOTH catalogues: vim 9.2.0900's own source,
+fetched at tag `v9.2.0900`, and the vendored Neovim C that README:135 names as
+the porting spec. A literal counts as agreeing if it is an INSTANTIATION of a
+reference format string (`%s`/`%d` already filled in at the call site).
+
+| | count |
+|---|---|
+| literals checked | 363 |
+| agree with both engines | 230 |
+| agree with the Neovim spec only (vim words it differently) | 74 |
+| agree with vim only | 11 |
+| **matched NEITHER** | **51** |
+| fixed this round | 34 |
+
+The reachable ones, each re-measured against both engines after the fix:
+
+| code | was | now |
+|---|---|---|
+| E1109/E1110/E1111/E1112/E1113/E1114 | invented text, no item index, no `0x80` floor, no sort, no overlap check | a port of `vendor/mbyte.c:2899` |
+| E714 | `E1109: List required` | `E714: List required` (`e_listreq`) |
+| E979 | no index | `Blob index out of range: <idx>` |
+| E689 / E709 | E709 for a bad BASE | E689 base (`vendor/eval.c:1035`), E709 value (`c:1096`) |
+| E799 | no constraint | `… (must be greater than or equal to 1)` |
+| E1211 | `List required` | `List required for argument 1` |
+| E715 | `E1206: Dictionary required` | `E715` per entry, and `sign_define([…])` answers a List |
+| E364 | no `()` | `Library call failed for "f()"` |
+| E685 | `Internal error` | `using an invalid value as a Number` (`typval.c:4097`) |
+| E685 | `E473: Internal error: …` | `E685:` — `e_intern2` is E685 in Neovim |
+| E474 | `E491: JSON decode error` | `E474: Failed to parse %.*s`, answering 0 |
+| E80 | constant lost its `%s` | restored |
+| E46 | read-only `v:` declined in SILENCE | `E46: Cannot change read-only variable "%s"` |
+
+The parse-time ones are R31-2. Still open as **R31-O1**: `E5004` (needs the
+encoder's `mpstack` path — Neovim says `Error while dumping msgpackdump()
+argument, index 0, key 'a': …` and this port has no path context), the three
+`E474`/one `E475` in `src/intercepts.rs` (vim codes borrowed for the vimlrs-only
+`:Intercept` command — a deliberate extension, recorded rather than changed),
+and `E116` from a call on a non-name callee, which cannot name the function.
+
+## R31-2. Parse-error text was Rust internals — ✅ FIXED (R30-O5)
+
+Thirty-two malformed expressions through `eval()`, measured against vim 9.2.0900
+and nvim 0.12.4 (which agree on all 32). Thirty lines disagreed with this port;
+eight still do, and none of the eight is a wording difference.
+
+```
+((1)  (1        E110: Missing ')'
+[1  [1,2        E696: Missing comma in List:            (empty argument)
+[1 2]           E696: Missing comma in List: 2]
+{'a' 1} #{a 1}  E720: Missing colon in Dictionary: 1}
+{'a': 1 #{a: 1  E722: Missing comma in Dictionary:
+{ x -> x        E451: Expected }:
+'abc  "abc      E115 / E114: Missing quote: 'abc
+f(  f(1  f(1,   E116: Invalid arguments for function f
+string(1e3)     E15: Invalid expression: …              (not E116)
+]  }  )         E15: Invalid expression: "]"
+1 +  1 .  1 ?   E15: Invalid expression: "1 +"          (the WHOLE input)
+```
+
+Three pieces of machinery, not a table of guesses: `Parser::rest()` (the source
+still unread, which is what every vim diagnostic quotes), `VimlError::silent()`
+(a FAIL with nothing to say — `vendor/eval.c:5604`, and the reason `eval('1 +')`
+prints one E15 while `eval(']')` prints two), and `lex_prefix` returning the
+error that stopped it instead of discarding it.
+
+Statement-level codes fixed in the same sweep, each measured one probe per
+keyword: the eight block terminators (`E580`/`E581`/`E582`/`E588`/`E602`/`E603`/
+`E606`, which this port collapsed into one invented E580), `E600: Missing
+:endtry` (was E170, which is the `:endwhile`/`:endfor` message), `E124`/`E125`
+on `:function` and `:def`, `E193: defer not inside a function` (was E1298),
+`E129: Function name required` for `defer 5` (was E1300), `E740` for a call with
+more arguments than the bytecode operand holds (was an `E118` naming this
+crate's own phase numbering), and the swapped `E1278`/`E1279` pair.
+
+## R31-3. `vim_str2nr()` accepted a leading `+` — ✅ FIXED
+
+The name-lookalike sweep's one find. `vendor/charset.c:1228` is
+`const bool negative = (ptr[0] == '-')` and nothing else; `str2nr('+42')` is 42
+only because `f_str2nr` strips the sign before calling in. Eleven observables
+moved to agree with both engines, `'+7' + 0` from 7 to 0 among them. Pinned by
+`tests/parity_cases/coerce_leading_sign.vim`.
+
+The rest of the sweep — `/` and `%` on negatives and zero, `float2nr` at
+1e18/1e30/inf/nan, `round`/`floor`/`ceil`/`trunc` value and type, `max`/`min` on
+empty/mixed/Dict, `sort()`'s default being STRING order, `str2nr` bases, every
+`printf` conversion, the case-mapping family, `strlen` vs `strchars` vs
+`strcharlen` vs `strwidth` vs `strdisplaywidth`, negative index/slice, the
+coercion edges, `stridx`/`match`/`count`, `repeat`/`join`/`split`/`reverse`,
+`trim`/`substitute`/`escape`, `has_key`/`get`/`extend`/`empty`, `type()`, the
+bitwise builtins on negatives, `index`/`insert`/`remove` — already agreed.
+
+## R31-4. Six assertions that could not fail — ✅ FIXED
+
+`assert_true(auto > 0)` on the auto-allocated match id (passes for the 1 a naive
+counter hands out; both engines answer 1000 then 1001 from a reserved range, and
+the counter does not rewind on delete), `len(getcompletion('', 'file')) > 0`,
+`len(expand('examples/*.vim', 0, 1)) >= 10`, `hostname() != ''`,
+`len(env['PATH']) > 0`, `len(ParseKV('a=b')) == 2`. All strengthened against
+measured behaviour; none deleted.
+
+`tests/parity_cases.rs` gains `every_record_can_fail`, which rejects a record
+holding only the exit-status line and rejects two cases with byte-identical
+records. Verified it catches one: a probe whose script was only `let x = 1` was
+recorded and the gate failed on it, then the probe was removed.
+
+## Still open
+
+### R31-O1. Four `E<number>` literals still match no engine, by choice or by depth
+
+`E5004` needs the msgpack encoder's `mpstack` path; the three `E474` and one
+`E475` in `src/intercepts.rs` are vim codes borrowed for the vimlrs-only
+`:Intercept` command and are recorded rather than changed; `E116` from a call on
+a non-name callee cannot name the function the way both engines do.
+
+### R31-O2. The corrected parse diagnostics are still unreachable from a script
+
+R30-O1 is unchanged: `source_tolerant()` discards every parse error, so
+`endif` on its own line still prints nothing where both engines print
+`E580: :endif without :if: endif`. The strings are now right; reporting them is
+the separate fix. `eval()` is the one path that reaches the parser at run time,
+which is why `tests/parity_cases/parse_error_text.vim` goes through it.
+
+### R31-O3. Five parse failures differ structurally, not in wording
+
+`{x y -> x}` (vim evaluates the dict KEY first and reports E121; this reports
+E720 at parse time), `&` and `$` alone (this port does not fail on them at all),
+`x->` (vim evaluates the base first), and `string(1e3)`, where the E15 argument
+starts at `e3` here and at `1e3` in vim.
+
+### R31-O4. `setcellwidths()` does not check 'listchars'/'fillchars'
+
+`check_chars_options()` (`optionstr.c:2574`) runs after the table is installed
+and reverts it when a listed character would no longer occupy one cell. Measured:
+`set listchars=eol:¬` then `setcellwidths([[0xac, 0xac, 2]])` is
+`E834: Conflicts with value of 'listchars'` with an EMPTY table afterwards in
+both engines, and is accepted here. Closing it needs `set_chars_option()`, i.e.
+the option-character parser, which this port does not have; a partial
+reimplementation would be an ad-hoc replacement, not a port.
+
+### R31-N1. Engine splits this port resolves in Neovim's favour, deliberately
+
+Recorded so a future reader does not "fix" them toward vim. Each was measured in
+both engines this round.
+
+| observable | vim 9.2.0900 | Neovim (followed here) |
+|---|---|---|
+| `toupper('ß')` | `ß` | `ẞ` — vim uses its own 1:1 table, Neovim delegates to utf8proc (`vendor/mbyte.c:1414`). **This port follows VIM here**, per round 5's 2321-codepoint measurement and `case_mapping.vim`. |
+| `setcellwidths(1)` | `E1211: List required for argument 1` | `E714: List required` |
+| `let n[0:1] = …` on a Number | `E689: Index not allowed after a number: …` | `E689: Can only index a List, Dictionary or Blob` |
+| unterminated quote | `Missing single/double quote` | `Missing quote` |
+| `f(` | `E116: … for function f(` | `E116: … for function f` |
+| `printf` arity | `E767: … for printf()` | `E767: … to printf()` |
+| `json_decode('[')` | `E491: JSON decode error at '['` | `E474: Failed to parse [` |
+| `str2float('inf')` | `inf` | `str2float('inf')` |
+| `v:version` | 902 | 801 |
+| `v:count1` under `-es` | 0 | 1 |
+
+### R30-O1, R30-O2, R30-O3, R30-O5 (superseded by R31-2), R30-O6, R30-O8, R29-O1, R29-O3, R28-O1, R27-O1, R27-O2, R26-O1, R26-O2, R26-O4, R26-O5, R24-O5, R22-O3, R23-O1, R25-O1..O7 — unchanged
+
+R30-O4 is closed by R31-0 and R26-O6 by R31-1's E46 work.
+
+`tests/data/fake_fn_allowlist.txt` was not touched this round
+(`git diff --exit-code` clean, checked before every commit). `cargo test --lib`
+is fully green for the first time since round 26 (413 passed, 0 failed).
+`ported_fn_names_match_c` still reports the three standing R22-O3 names
+(`f_typename`, `type_name_of`, `member_of`) and was not weakened: `typename()`
+is a vim9 builtin with no Neovim counterpart, so its C name cannot appear in a
+list generated from `vendor/`, and closing it means either vendoring vim's C
+into a corpus defined as Neovim's or adding to the allowlist. Neither was done.
