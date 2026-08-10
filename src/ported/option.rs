@@ -419,8 +419,33 @@ mod tests {
                 (*full, *abbr, tag, def)
             })
             .collect();
+        // Read straight off `option_optval::options` — the C's `options[]`. A
+        // helper function on that side would have been an invented name under
+        // `src/ported/`, which `tests/ported_fn_names_match_c.rs` rejects (and
+        // correctly: the C has one option table, so it needs no such accessor).
+        // The comparison lives here, in a `#[cfg(test)]` fn the gate exempts.
+        use crate::ported::option_optval::{OptValData, OptValType, TriState};
         let mut mine = mine;
-        let mut theirs = crate::ported::option_optval::table_rows();
+        let mut theirs: Vec<(&str, &str, &str, String)> = crate::ported::option_optval::options
+            .iter()
+            .map(|o| {
+                let (tag, def) = match (&o.r#type, &o.def_val.data) {
+                    (OptValType::kOptValTypeBoolean, OptValData::boolean(b)) => (
+                        "bool",
+                        match b {
+                            TriState::kTrue => "1".to_string(),
+                            _ => "0".to_string(),
+                        },
+                    ),
+                    (OptValType::kOptValTypeNumber, OptValData::number(n)) => {
+                        ("number", n.to_string())
+                    }
+                    (OptValType::kOptValTypeString, OptValData::string(s)) => ("string", s.clone()),
+                    _ => ("nil", String::new()),
+                };
+                (o.fullname, o.shortname, tag, def)
+            })
+            .collect();
         mine.sort();
         theirs.sort();
         assert_eq!(

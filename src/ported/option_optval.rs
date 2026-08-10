@@ -193,18 +193,18 @@ pub const kOptInvalid: OptIndex = usize::MAX;
 /// `typedef struct { char *fullname; char *shortname; uint32_t flags;
 /// OptValType type; … OptVal def_val; } vimoption_T;` (`option_defs.h:167`),
 /// reduced to the fields eval's OptVal path touches.
-struct vimoption_T {
+pub(crate) struct vimoption_T {
     /// `char *fullname` — full option name.
-    fullname: &'static str,
+    pub(crate) fullname: &'static str,
     /// `char *shortname` — permissible abbreviation.
-    shortname: &'static str,
+    pub(crate) shortname: &'static str,
     /// `uint32_t flags` — option flags (reduced; `kOptFlagFunc`/`kOptFlagSecure`
     /// are the only bits eval's OptVal path reads).
-    flags: u32,
+    pub(crate) flags: u32,
     /// `OptValType type` — option type.
-    r#type: OptValType,
+    pub(crate) r#type: OptValType,
     /// `OptVal def_val` — default value.
-    def_val: OptVal,
+    pub(crate) def_val: OptVal,
 }
 
 /// The `options[]` array (`option.c`, generated from `options.lua`). RUST-PORT
@@ -213,7 +213,7 @@ struct vimoption_T {
 /// no side-effect flags. A `LazyLock` stands in for the C file-static array; the
 /// `b`/`n`/`s` row builders are local closures (not `fn` items) so they carry no
 /// invented C names.
-static options: LazyLock<Vec<vimoption_T>> = LazyLock::new(|| {
+pub(crate) static options: LazyLock<Vec<vimoption_T>> = LazyLock::new(|| {
     let b = |fullname: &'static str, shortname: &'static str, def: TriState| vimoption_T {
         fullname,
         shortname,
@@ -373,31 +373,6 @@ static options: LazyLock<Vec<vimoption_T>> = LazyLock::new(|| {
         s("virtualedit", "ve", ""),
     ]
 });
-
-/// Row count and the `(fullname, shortname, type-tag, rendered default)` of each
-/// row, for the cross-table consistency check in `option.rs`. EXTENSION — no
-/// `vendor/` counterpart; the C has one `options[]` array, so it needs no such
-/// check.
-pub fn table_rows() -> Vec<(&'static str, &'static str, &'static str, String)> {
-    options
-        .iter()
-        .map(|o| {
-            let (tag, def) = match (&o.r#type, &o.def_val.data) {
-                (OptValType::kOptValTypeBoolean, OptValData::boolean(b)) => (
-                    "bool",
-                    match b {
-                        TriState::kTrue => "1".to_string(),
-                        _ => "0".to_string(),
-                    },
-                ),
-                (OptValType::kOptValTypeNumber, OptValData::number(n)) => ("number", n.to_string()),
-                (OptValType::kOptValTypeString, OptValData::string(s)) => ("string", s.clone()),
-                _ => ("nil", String::new()),
-            };
-            (o.fullname, o.shortname, tag, def)
-        })
-        .collect()
-}
 
 thread_local! {
     /// The option value store. RUST-PORT NOTE: stands in for the global option
