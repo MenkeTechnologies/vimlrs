@@ -3579,10 +3579,15 @@ fn b_eval(vm: &mut VM, _: u8) -> Value {
     // `nl`) in Vim, and was E15 here.
     let (expr, rest_at) = match crate::viml_parser::parse_expr_prefix(&src) {
         Ok(v) => v,
-        Err(e) => {
-            message::semsg(&format!("{e}"));
-            return Value::Undef;
-        }
+        // c: `eval1()` returned FAIL during the PARSE. That is the same FAIL the
+        // run-time branch below handles, and it gets the same treatment: report
+        // whatever specific diagnostic the parse raised on the way down (E110,
+        // E114/E115, E696, E720, E722, E451 …), then `E15: Invalid expression:
+        // "<whole expression>"` unless aborting() — and answer Number 0, never
+        // Undef. A FAIL with nothing to say (`VimlError::silent`) skips only the
+        // first of those, which is why `eval('1 +')` prints one E15 and
+        // `eval(']')` prints two.
+        Err(e) => return eval_failed(&src, &e),
     };
     let chunk = match crate::compile_viml::compile_program(&[(1, Stmt::Expr(expr))]) {
         // A lambda in the expression compiles to a SEPARATE `<lambda>N` chunk,
@@ -3596,10 +3601,7 @@ fn b_eval(vm: &mut VM, _: u8) -> Value {
             stage_deferred_funcs(p.deferred_funcs);
             p.main
         }
-        Err(e) => {
-            message::semsg(&format!("{e}"));
-            return Value::Undef;
-        }
+        Err(e) => return eval_failed(&src, &e),
     };
     // c: the FAIL branch (`eval1() == FAIL`) reports E15 with the whole
     // expression — unless aborting(), which is why inside `:try` the error
@@ -3614,14 +3616,28 @@ fn b_eval(vm: &mut VM, _: u8) -> Value {
             }
             tv_to_value(tv)
         }
-        None => {
-            if !crate::ported::ex_eval::aborting() {
-                message::semsg(&format!("E15: Invalid expression: \"{src}\""));
-            }
-            // c: `rettv->v_type = VAR_NUMBER; rettv->vval.v_number = 0;`
-            Value::Int(0)
-        }
+        None => eval_failed(&src, &crate::viml_lexer::VimlError::silent()),
     }
+}
+
+/// The `eval1() == FAIL` branch of `f_eval` (`vendor/eval/funcs.c:1240`), shared
+/// by the parse-time and run-time failures because the C does not distinguish
+/// them: both are one `eval1()` call returning FAIL.
+///
+/// `err` is whatever that failure had to say for itself. A
+/// [`VimlError::silent`] one had nothing, matching a C `return FAIL` with no
+/// `semsg` before it. Then `E15: Invalid expression: "%s"` over the WHOLE
+/// expression, suppressed while `aborting()` so that inside `:try` the specific
+/// error is the exception. The result is always Number 0.
+fn eval_failed(src: &str, err: &crate::viml_lexer::VimlError) -> Value {
+    if !err.is_silent() {
+        message::semsg(&format!("{err}"));
+    }
+    if !crate::ported::ex_eval::aborting() {
+        message::semsg(&format!("E15: Invalid expression: \"{src}\""));
+    }
+    // c: `rettv->v_type = VAR_NUMBER; rettv->vval.v_number = 0;`
+    Value::Int(0)
 }
 
 /// The `\=` substitute-expression evaluator (installed into the regex engine's

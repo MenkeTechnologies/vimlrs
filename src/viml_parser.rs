@@ -2587,8 +2587,9 @@ pub fn parse_expr_prefix(src: &str) -> Result<(Expr, usize), VimlError> {
     // `eval("a'quote")` is the variable `a` (E121 when undefined), and
     // `eval("tab\\there")` is the variable `tab`, exactly as the C `eval1()`
     // stops after one expression (verified against vim 9.2 / nvim 0.12).
-    let (toks, lex_stop) = crate::viml_lexer::lex_prefix(src);
+    let (toks, lex_stop, lex_err) = crate::viml_lexer::lex_prefix(src);
     let mut p = Parser::new(toks, src);
+    p.lex_err = lex_err;
     let e = p.eval1()?;
     let e = p.guard_deferred(e);
     // The next token's start is where the expression ended; `Eof` means it ran to
@@ -2603,9 +2604,9 @@ pub fn parse_expr(src: &str) -> Result<Expr, VimlError> {
     let e = p.eval1()?;
     let e = p.guard_deferred(e);
     if !matches!(p.peek(), Tok::Eof) {
-        return Err(VimlError::msg(
-            "E15: Invalid expression: trailing tokens".to_string(),
-        ));
+        // c: `E15: Invalid expression: "%s"` over the text still unread
+        // (`vendor/eval.c:383`), not a description of the parser's state.
+        return Err(p.invexpr());
     }
     Ok(e)
 }
@@ -2615,6 +2616,49 @@ impl Parser {
     fn peek_span(&self) -> Option<usize> {
         let t = self.toks.get(self.i)?;
         (!matches!(t.kind, Tok::Eof)).then_some(t.span)
+    }
+
+    /// The source text from the current token to the end.
+    ///
+    /// Every one of vim's parse diagnostics that takes an argument quotes
+    /// exactly this — the text still unread at the point the parser gave up.
+    /// `{'a' 1}` is `E720: Missing colon in Dictionary: 1}`, `[1 2]` is
+    /// `E696: Missing comma in List: 2]`, and running out of input gives the
+    /// same messages with an EMPTY argument (`E696: Missing comma in List: `),
+    /// trailing space and all. A `Debug`-formatted token is not a substitute:
+    /// it is Rust's name for the token, not vim's view of the source.
+    fn rest(&self) -> &str {
+        let at = self.peek_span().unwrap_or(self.src.len());
+        self.src.get(at..).unwrap_or("")
+    }
+
+    /// `E15: Invalid expression: "%s"` over [`Self::rest`] — `e_invexpr2`
+    /// (Neovim `errors.h:37`), quotes included.
+    ///
+    /// At end of input this is [`VimlError::silent`] instead, because the C only
+    /// reports when there is something left to point at (`vendor/eval.c:5604`)
+    /// and leaves the empty case to the caller's own E15 over the whole
+    /// expression. That is why `eval('1 +')` prints ONE E15 and `eval(']')`
+    /// prints two.
+    fn invexpr(&self) -> VimlError {
+        let rest = self.rest();
+        if rest.is_empty() {
+            // Out of tokens with an operand still expected: if the token stream
+            // ended because the LEXER gave up (an unterminated quote), that is
+            // the diagnostic vim reports here.
+            return self.lex_err.clone().unwrap_or_else(VimlError::silent);
+        }
+        VimlError::msg(format!("E15: Invalid expression: \"{rest}\""))
+    }
+
+    /// Consume `want`, or fail with vim's own message for that construct —
+    /// `msg` with a single `%s` receiving [`Self::rest`].
+    fn eat_or(&mut self, want: &Tok, msg: &str) -> Result<(), VimlError> {
+        if self.peek() == want {
+            self.advance();
+            return Ok(());
+        }
+        Err(VimlError::msg(msg.replace("%s", self.rest())))
     }
 }
 
@@ -2642,6 +2686,10 @@ struct Parser {
     /// operand (see `eval1`/`eval2`/`eval3`), and the expression roots wrap
     /// the tree in [`Expr::ScriptErrorGuard`] as a last resort.
     deferred_e15: Vec<String>,
+    /// The lex error that ended a `lex_prefix` scan, if any. Reported only when
+    /// the parser runs out of tokens with an operand still expected — see
+    /// `lex_prefix` and [`Self::invexpr`].
+    lex_err: Option<VimlError>,
 }
 
 impl Parser {
@@ -2656,6 +2704,7 @@ impl Parser {
             src: src.to_string(),
             depth: 0,
             deferred_e15: Vec::new(),
+            lex_err: None,
         }
     }
 
@@ -2755,7 +2804,8 @@ impl Parser {
         if spliced.len() > 2 {
             let frac_start = rem_start + 1; // just past the '.'
             let tail = self.src.get(frac_start..).unwrap_or("").to_string();
-            let msg = format!("E15: Invalid expression: {tail}");
+            // c: `e_invexpr2` is `E15: Invalid expression: "%s"` — with QUOTES.
+            let msg = format!("E15: Invalid expression: \"{tail}\"");
             // Record the parse-level failure for the enclosing ternary/`&&`/
             // `||` levels and the expression root: Vim's eval_number() FAIL
             // fails the whole eval1 even in a branch that is never evaluated
@@ -2784,10 +2834,7 @@ impl Parser {
             self.advance();
             Ok(())
         } else {
-            Err(VimlError::msg(format!(
-                "E15: expected {want:?}, found {:?}",
-                self.peek()
-            )))
+            Err(self.invexpr())
         }
     }
 
@@ -3048,7 +3095,8 @@ impl Parser {
                     return self.vim9_lambda();
                 }
                 let e = self.nested_eval1()?;
-                self.eat(&Tok::RParen)?;
+                // c: `E110: Missing ')'`, with no argument.
+                self.eat_or(&Tok::RParen, "E110: Missing ')'")?;
                 Ok(e)
             }
             Tok::LBracket => self.list_literal(),
@@ -3063,7 +3111,11 @@ impl Parser {
             Tok::Ident(name) => {
                 if matches!(self.peek(), Tok::LParen) {
                     self.advance();
-                    let args = self.arg_list(&Tok::RParen)?;
+                    let args = self.arg_list(
+                        &Tok::RParen,
+                        &format!("E116: Invalid arguments for function {name}"),
+                        "E15: Invalid expression: \"%s\"",
+                    )?;
                     Ok(Expr::Call { name, args })
                 } else if vim9_active() {
                     // vim9 keyword literals (`vim9.txt`): in a `:vim9script` script
@@ -3101,9 +3153,7 @@ impl Parser {
                     Ok(Expr::Var(name))
                 }
             }
-            other => Err(VimlError::msg(format!(
-                "E15: Invalid expression: unexpected {other:?}"
-            ))),
+            _ => Err(self.invexpr()),
         }
     }
 
@@ -3205,7 +3255,11 @@ impl Parser {
                 if let Tok::Ident(key) = self.advance() {
                     if is_call {
                         self.advance(); // consume '('
-                        let args = self.arg_list(&Tok::RParen)?;
+                        let args = self.arg_list(
+                            &Tok::RParen,
+                            &format!("E116: Invalid arguments for function {key}"),
+                            "E15: Invalid expression: \"%s\"",
+                        )?;
                         base = Expr::MemberCall {
                             base: Box::new(base),
                             key,
@@ -3232,7 +3286,11 @@ impl Parser {
             // `echo F (1)` stays two arguments.
             if matches!(self.peek(), Tok::LParen) && self.lparen_abuts_prev() {
                 self.advance(); // consume '('
-                let args = self.arg_list(&Tok::RParen)?;
+                let args = self.arg_list(
+                    &Tok::RParen,
+                    "E116: Invalid arguments for function",
+                    "E15: Invalid expression: \"%s\"",
+                )?;
                 base = Expr::CallExpr {
                     callee: Box::new(base),
                     args,
@@ -3249,14 +3307,14 @@ impl Parser {
                     self.advance();
                     let name = match self.advance() {
                         Tok::Ident(n) => n,
-                        other => {
-                            return Err(VimlError::msg(format!(
-                                "E15: expected method name after '->', found {other:?}"
-                            )))
-                        }
+                        _ => return Err(self.invexpr()),
                     };
                     self.eat(&Tok::LParen)?;
-                    let args = self.arg_list(&Tok::RParen)?;
+                    let args = self.arg_list(
+                        &Tok::RParen,
+                        &format!("E116: Invalid arguments for function {name}"),
+                        "E15: Invalid expression: \"%s\"",
+                    )?;
                     base = Expr::Method {
                         base: Box::new(base),
                         name,
@@ -3308,7 +3366,11 @@ impl Parser {
     }
 
     fn list_literal(&mut self) -> Result<Expr, VimlError> {
-        Ok(Expr::List(self.arg_list(&Tok::RBracket)?))
+        Ok(Expr::List(self.arg_list(
+            &Tok::RBracket,
+            "E696: Missing comma in List: %s",
+            "E696: Missing comma in List: %s",
+        )?))
     }
 
     /// Lookahead (just past the opening `{`) deciding lambda vs dict: a lambda
@@ -3499,9 +3561,10 @@ impl Parser {
                 }
             }
         }
-        self.eat(&Tok::Arrow)?;
+        self.eat_or(&Tok::Arrow, "E451: Expected }: %s")?;
         let body = self.eval1()?;
-        self.eat(&Tok::RBrace)?;
+        // c: `E451: Expected }: %s`.
+        self.eat_or(&Tok::RBrace, "E451: Expected }: %s")?;
         Ok(Expr::Lambda {
             params,
             body: Box::new(body),
@@ -3538,7 +3601,8 @@ impl Parser {
                 // and parse that fragment as the value.
                 (raw[..c].to_string(), parse_expr(&raw[c + 1..])?)
             } else {
-                self.eat(&Tok::Colon)?;
+                // c: `E720: Missing colon in Dictionary: %s`.
+                self.eat_or(&Tok::Colon, "E720: Missing colon in Dictionary: %s")?;
                 (raw, self.nested_eval1()?)
             };
             pairs.push((Expr::Str(key), val));
@@ -3550,9 +3614,10 @@ impl Parser {
                     }
                 }
                 Tok::RBrace => break,
-                other => {
+                _ => {
                     return Err(VimlError::msg(format!(
-                        "E15: expected ',' or '}}' in #{{}}, found {other:?}"
+                        "E722: Missing comma in Dictionary: {}",
+                        self.rest()
                     )))
                 }
             }
@@ -3582,7 +3647,8 @@ impl Parser {
                 self.vim9_dict_key()?
             } else {
                 let k = self.eval1()?;
-                self.eat(&Tok::Colon)?;
+                // c: `E720: Missing colon in Dictionary: %s`.
+                self.eat_or(&Tok::Colon, "E720: Missing colon in Dictionary: %s")?;
                 k
             };
             // c: eval.c:4502 semsg(e_duplicate_key_in_dictionary_str, key).
@@ -3603,9 +3669,10 @@ impl Parser {
                     }
                 }
                 Tok::RBrace => break,
-                other => {
+                _ => {
                     return Err(VimlError::msg(format!(
-                        "E15: expected ',' or '}}' in dict, found {other:?}"
+                        "E722: Missing comma in Dictionary: {}",
+                        self.rest()
                     )))
                 }
             }
@@ -3658,9 +3725,10 @@ impl Parser {
             colon += 1;
         }
         if colon >= bytes.len() || bytes[colon] != b':' {
-            return Err(VimlError::msg(
-                "E720: Missing colon in Dictionary".to_string(),
-            ));
+            return Err(VimlError::msg(format!(
+                "E720: Missing colon in Dictionary: {}",
+                self.rest()
+            )));
         }
         // Advance past every token up to and including the `:` at offset `colon`
         // (a standalone `Colon`, or one absorbed into a scope-letter `Ident`),
@@ -3671,14 +3739,41 @@ impl Parser {
         Ok(Expr::Str(key))
     }
 
-    fn arg_list(&mut self, close: &Tok) -> Result<Vec<Expr>, VimlError> {
+    /// Comma-separated operands up to `close`.
+    ///
+    /// The two failure messages are the CALLER's to choose, because vim uses
+    /// different ones for the same loop and even for the same caller:
+    ///
+    /// * `ran_out` — the input ended before `close`. `[1` and `[1,2` are
+    ///   `E696: Missing comma in List: ` (empty argument); `f(`, `f(1` and
+    ///   `f(1,` are `E116: Invalid arguments for function f`.
+    /// * `junk` — a token that is neither a separator nor `close`. `[1 2]` is
+    ///   `E696: Missing comma in List: 2]`, while `string(1e3)` — where `e3` is
+    ///   junk abutting a number — is `E15: Invalid expression: …`, NOT E116.
+    ///
+    /// A `%s` in either receives the source still unread.
+    fn arg_list(&mut self, close: &Tok, ran_out: &str, junk: &str) -> Result<Vec<Expr>, VimlError> {
         let mut args = Vec::new();
         if self.peek() == close {
             self.advance();
             return Ok(args);
         }
         loop {
-            args.push(self.nested_eval1()?);
+            // An operand that simply RAN OUT (`f(`, `f(1,`) is the same
+            // unterminated-list failure as a missing separator, and vim reports
+            // it with the same message — `E116: Invalid arguments for function
+            // f`, not a generic E15. An operand that failed with something to
+            // say keeps its own message.
+            match self.nested_eval1() {
+                Ok(e) => args.push(e),
+                Err(e) if e.is_silent() => {
+                    return Err(VimlError::msg(ran_out.replace("%s", self.rest())))
+                }
+                Err(e) => return Err(e),
+            }
+            // The rest is read BEFORE the separator is consumed: vim quotes the
+            // offending token itself (`[1 2]` is `…: 2]`, not `…: ]`).
+            let rest = self.rest().to_string();
             match self.advance() {
                 Tok::Comma => {
                     if self.peek() == close {
@@ -3687,11 +3782,8 @@ impl Parser {
                     }
                 }
                 ref t if t == close => break,
-                other => {
-                    return Err(VimlError::msg(format!(
-                        "E15: expected ',' or {close:?}, found {other:?}"
-                    )))
-                }
+                _ if rest.is_empty() => return Err(VimlError::msg(ran_out.replace("%s", ""))),
+                _ => return Err(VimlError::msg(junk.replace("%s", &rest))),
             }
         }
         Ok(args)

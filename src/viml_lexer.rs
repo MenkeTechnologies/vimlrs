@@ -23,6 +23,22 @@ impl VimlError {
     pub fn msg(m: impl Into<String>) -> Self {
         VimlError(m.into())
     }
+
+    /// A failure with NOTHING to say — the port of the C's `return FAIL` with no
+    /// `semsg` before it. The distinction is observable: `eval('1 +')` reports
+    /// one `E15: Invalid expression: "1 +"` (raised by the caller, over the
+    /// whole expression) while `eval('((1)')` reports `E110: Missing ')'` AND
+    /// then that E15. The C draws the line at `vendor/eval.c:5604` — "Only give
+    /// an error when there is something, otherwise it will be reported at a
+    /// higher level".
+    pub fn silent() -> Self {
+        VimlError(String::new())
+    }
+
+    /// Whether this failure carries a message to report (see [`Self::silent`]).
+    pub fn is_silent(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 /// A lexical token plus its byte offset in the source (for diagnostics).
@@ -184,7 +200,15 @@ pub fn lex(src: &str) -> Result<Vec<Token>, VimlError> {
 /// `eval("a'quote")` is the variable `a` with trailing text, not a lex error.
 /// Lexing the whole string up front turned such trailing text into E115/E15
 /// before the leading expression was ever evaluated.
-pub fn lex_prefix(src: &str) -> (Vec<Token>, usize) {
+///
+/// The error that stopped the scan is returned as the third element rather than
+/// discarded. Whether it is a diagnostic depends on where the parser ends up:
+/// `eval("a'quote")` stops at the quote with a complete expression already
+/// parsed and must stay silent, while `eval("'abc")` stops at the same kind of
+/// byte with an operand still expected and is `E115: Missing quote: 'abc` in
+/// both engines. The parser makes that call (see `Parser::invexpr`); throwing
+/// the error away here made the second case unreportable.
+pub fn lex_prefix(src: &str) -> (Vec<Token>, usize, Option<VimlError>) {
     let mut lx = Lexer::new(src);
     let mut out = Vec::new();
     loop {
@@ -196,7 +220,7 @@ pub fn lex_prefix(src: &str) -> (Vec<Token>, usize) {
                 span,
                 end: span,
             });
-            return (out, span);
+            return (out, span, None);
         }
         match lx.next_token() {
             Ok(kind) => out.push(Token {
@@ -204,13 +228,13 @@ pub fn lex_prefix(src: &str) -> (Vec<Token>, usize) {
                 span,
                 end: lx.pos,
             }),
-            Err(_) => {
+            Err(e) => {
                 out.push(Token {
                     kind: Tok::Eof,
                     span,
                     end: span,
                 });
-                return (out, span);
+                return (out, span, Some(e));
             }
         }
     }
@@ -435,11 +459,21 @@ impl<'a> Lexer<'a> {
     }
 
     fn lex_single_string(&mut self) -> Result<Tok, VimlError> {
+        let open = self.pos;
         self.pos += 1;
         let mut out = String::new();
         loop {
             match self.peek() {
-                0 => return Err(VimlError::msg("E115: Missing quote")),
+                // c: `E115: Missing quote: %s`, and the argument starts at the
+                // OPENING quote, not at the end of input — `eval("'abc")` is
+                // `E115: Missing quote: 'abc` in both engines. (vim words it
+                // "Missing single quote"; Neovim, the porting spec, does not.)
+                0 => {
+                    return Err(VimlError::msg(format!(
+                        "E115: Missing quote: {}",
+                        self.s.get(open..).unwrap_or("")
+                    )))
+                }
                 b'\'' => {
                     if self.peek2() == b'\'' {
                         out.push('\'');
@@ -455,11 +489,19 @@ impl<'a> Lexer<'a> {
     }
 
     fn lex_double_string(&mut self) -> Result<Tok, VimlError> {
+        let open = self.pos;
         self.pos += 1;
         let mut out = String::new();
         loop {
             match self.peek() {
-                0 => return Err(VimlError::msg("E114: Missing quote")),
+                // c: `E114: Missing quote: %s`, from the OPENING quote — see
+                // `lex_single_string` for why.
+                0 => {
+                    return Err(VimlError::msg(format!(
+                        "E114: Missing quote: {}",
+                        self.s.get(open..).unwrap_or("")
+                    )))
+                }
                 b'"' => {
                     self.pos += 1;
                     return Ok(Tok::Str(out));
