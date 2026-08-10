@@ -66,7 +66,7 @@ In active development.
 | Bytecode disassembler (`--disasm`) | Working |
 | Execution-tier report (`--tiers`) | Working |
 | LSP server (`--lsp`) — diagnostics, completion, hover, document symbols | Working |
-| DAP debugger (`--dap`) — line + function breakpoints, stepping, variables, evaluate | Working |
+| DAP debugger (`--dap`) — line + function breakpoints, full backtrace, step in/over/out, variables, evaluate | Working |
 | Control flow — `:if`/`:elseif`/`:else`, `:while`, `:for`, `:break`/`:continue` | Working |
 | `:execute`, `:let [a, b; rest] = …` & `:for [k, v] in …` destructuring | Working |
 | `:let` compound assignment (`+=`/`-=`/`*=`/`/=`/`%=`/`.=`) — desugars to `target = target op rhs`, so accumulator loops trace-JIT | Working |
@@ -173,7 +173,19 @@ vimlrs matches one of them" is advisory.
 
 ```sh
 cargo run --bin fuzz-parity -- --count 1500 --seed 11
+cargo run --bin fuzz-parity -- --dap --count 60 --seed 11
 ```
+
+`--dap` fuzzes the **debugger** rather than the language: it generates whole
+programs — nested user functions, branches, loops, `|` groups — and drives each
+through a live `viml --dap` session, stepping with a seed-driven mix of verbs.
+Two of its three findings need no editor at all, because the program is its own
+oracle: whatever it prints, it must print the same under the debugger
+(`DEBUG DRIFT`), and every stop must produce a backtrace whose outermost frame
+is the script and a step that honours the depth its verb promised
+(`INVARIANTS`). The third compares the plain run against vim as usual. A session
+that never stops is counted separately and never as a pass, so a run that
+reaches nothing cannot read as a clean one.
 
 It needs both editors on `PATH`, so it is a development tool and does not run in
 CI. Its findings are frozen into `tests/data/fuzz_corpus.txt` as

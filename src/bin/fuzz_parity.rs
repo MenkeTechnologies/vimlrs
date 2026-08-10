@@ -1441,6 +1441,499 @@ fn signature(expr: &str, v: &Outcome, o: &Outcome) -> String {
     format!("{name} [{} vs {}]", kind(v), kind(o))
 }
 
+// ─── --dap: whole PROGRAMS through a live debug session ─────────────────────
+//
+// Everything above generates one *expression* and compares one value. That left
+// `viml --dap` — a second compiler (`compile_program_debug`), a marker builtin,
+// a pause hook, and a call-depth step machine — with no generated coverage at
+// all, and it drifted: the debug compile skipped every `Stmt::Function` and
+// discarded `funcs`, so no user function existed under `--dap` and
+//
+//     function! Add(a, b) … endfunction
+//     echo Add(2, 3)
+//     echo "done"
+//
+// printed `done` where vim prints `5` / `done`. A hand-written test caught that
+// one, afterwards. The check below is the one that would have caught it first,
+// and it needs no oracle to do it: whatever a program prints, it must print the
+// same thing under the debugger.
+//
+// Three findings come out of a session, in descending order of severity:
+//
+//   | class       | condition                                | meaning                    |
+//   |-------------|------------------------------------------|----------------------------|
+//   | `DapDrift`  | `--dap` output != plain output           | the debug path diverged    |
+//   | `FrameBug`  | a backtrace / step-depth invariant broke | the debugger lied          |
+//   | `Gap`       | plain output != vim's                    | ordinary parity gap        |
+//
+// `DapDrift` and `FrameBug` are self-evidencing — the program is its own
+// oracle — so this mode is worth running with no editor installed at all.
+
+/// Stops to allow before a session stops stepping and just runs to the end.
+/// A `stepIn`-heavy walk through a nested loop is otherwise unbounded.
+const DAP_MAX_STOPS: usize = 150;
+
+/// Per-session ceiling: a debug session that stalls is a finding, not a hang.
+const DAP_SESSION_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// A generated program plus the line of its first top-level statement — where
+/// the session plants its one breakpoint to get an initial stop to step from.
+struct DapProgram {
+    src: String,
+    first_line: u32,
+    lines: u32,
+}
+
+/// Build a program whose shape is what a debugger actually traverses: nested
+/// user-function calls (so frames stack), branches and loops (so a line is
+/// reached more than once), and `echo` at every level (so the output is a
+/// fingerprint of the path taken).
+///
+/// The expression grammar here is deliberately narrow — literals and arithmetic
+/// on them, nothing that raises. Expression-level gaps are the other modes' job;
+/// mixing them in would bury a debug finding under a hundred known E-numbers.
+fn gen_dap_program(rng: &mut Rng) -> DapProgram {
+    fn atom(rng: &mut Rng) -> String {
+        match rng.below(4) {
+            0 => rng.below(50).to_string(),
+            1 => format!("'s{}'", rng.below(9)),
+            2 => format!("[{}, {}]", rng.below(9), rng.below(9)),
+            _ => format!("{} + {}", rng.below(20), rng.below(20)),
+        }
+    }
+    /// An expression over the argument `a:x` of the enclosing function.
+    fn over_arg(rng: &mut Rng) -> String {
+        match rng.below(4) {
+            0 => format!("a:x + {}", rng.below(9)),
+            1 => format!("a:x * {}", 1 + rng.below(4)),
+            2 => "a:x".to_string(),
+            _ => format!("a:x - {}", rng.below(5)),
+        }
+    }
+
+    let nfuncs = 1 + rng.below(3); // F0 … F2
+    let mut src = String::new();
+    for i in 0..nfuncs {
+        let _ = writeln!(src, "function! F{i}(x)");
+        // Every function but the innermost may call the next one down, which is
+        // what makes the backtrace more than two frames deep.
+        if i + 1 < nfuncs && rng.chance(2, 3) {
+            let _ = writeln!(src, "  let d = F{}({})", i + 1, over_arg(rng));
+            let _ = writeln!(src, "  echo 'f{i}' . d");
+        } else {
+            let _ = writeln!(src, "  echo 'f{i}'");
+        }
+        match rng.below(4) {
+            0 => {
+                let _ = writeln!(src, "  if a:x > {}", rng.below(10));
+                let _ = writeln!(src, "    return {}", atom(rng));
+                let _ = writeln!(src, "  endif");
+            }
+            1 => {
+                let _ = writeln!(src, "  let s = 0");
+                let _ = writeln!(src, "  for i in range({})", 1 + rng.below(3));
+                let _ = writeln!(src, "    let s += i");
+                let _ = writeln!(src, "  endfor");
+                let _ = writeln!(src, "  echo s");
+            }
+            2 => {
+                let _ = writeln!(src, "  let a = {} | let b = {}", rng.below(9), rng.below(9));
+                let _ = writeln!(src, "  echo a + b");
+            }
+            _ => {}
+        }
+        let _ = writeln!(src, "  return {}", over_arg(rng));
+        let _ = writeln!(src, "endfunction");
+    }
+
+    // The first statement that actually runs — the breakpoint anchor.
+    let first_line = src.lines().count() as u32 + 1;
+    let _ = writeln!(src, "echo 'start'");
+    for _ in 0..(1 + rng.below(3)) {
+        match rng.below(3) {
+            0 => {
+                let _ = writeln!(src, "echo F0({})", rng.below(20));
+            }
+            1 => {
+                let _ = writeln!(src, "let r = F0({}) | echo r", rng.below(20));
+            }
+            _ => {
+                let _ = writeln!(src, "echo {}", atom(rng));
+            }
+        }
+    }
+    let _ = writeln!(src, "echo 'end'");
+    let lines = src.lines().count() as u32;
+    DapProgram {
+        src,
+        first_line,
+        lines,
+    }
+}
+
+/// What one debug session produced.
+struct DapSession {
+    /// Everything the program printed, via `output` events.
+    output: String,
+    /// Broken invariants, one message each.
+    violations: Vec<String>,
+    /// How many times it stopped (0 means the breakpoint never fired).
+    stops: usize,
+}
+
+/// Run `path` under `viml --dap`, stepping with a seed-driven mix of verbs, and
+/// check the backtrace and the step-depth contract at every stop.
+fn run_dap_session(bin: &Path, path: &str, prog: &DapProgram, rng: &mut Rng) -> DapSession {
+    use serde_json::json;
+    use vimlrs::dap_client::Dap;
+
+    let mut v: Vec<String> = Vec::new();
+    let mut dap = Dap::spawn_binary(bin);
+    let deadline = Instant::now() + DAP_SESSION_TIMEOUT;
+
+    if dap.try_request("initialize", json!({})).is_err() {
+        return DapSession {
+            output: String::new(),
+            violations: vec!["adapter died before initialize".into()],
+            stops: 0,
+        };
+    }
+    let _ = dap.try_request(
+        "setBreakpoints",
+        json!({ "source": { "path": path },
+                "breakpoints": [{ "line": prog.first_line }] }),
+    );
+    let _ = dap.try_request("configurationDone", json!({}));
+    let _ = dap.try_request("launch", json!({ "program": path }));
+
+    // `(verb, depth)` of the step that produced the stop we are now examining.
+    let mut armed: Option<(&'static str, usize)> = None;
+    let mut stops = 0usize;
+    // Events are consumed in order: a search that starts from the beginning
+    // finds the FIRST `stopped` again on every pass and the loop never advances.
+    let mut cursor = 0usize;
+
+    loop {
+        let Some(msg) = dap.wait_next(&mut cursor, DAP_SESSION_TIMEOUT, |m| {
+            m["type"] == "event" && (m["event"] == "stopped" || m["event"] == "terminated")
+        }) else {
+            v.push("session stalled: neither `stopped` nor `terminated` arrived".into());
+            break;
+        };
+        if msg["event"] == "terminated" {
+            break;
+        }
+        stops += 1;
+        let reason = msg["body"]["reason"].as_str().unwrap_or("").to_string();
+
+        // The backtrace, checked against the program it belongs to. Correlated
+        // on the request seq: the session asks at EVERY stop, and a match on the
+        // command name alone would keep handing back the first stop's answer.
+        let Ok(seq) = dap.try_request("stackTrace", json!({ "threadId": 1 })) else {
+            v.push("adapter died on `stackTrace`".into());
+            break;
+        };
+        let Some(st) = dap.try_wait_response_seq(seq, DAP_SESSION_TIMEOUT) else {
+            v.push("no stackTrace response while stopped".into());
+            break;
+        };
+        let frames: Vec<(String, i64)> = st["body"]["stackFrames"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|f| {
+                        (
+                            f["name"].as_str().unwrap_or_default().to_string(),
+                            f["line"].as_i64().unwrap_or(-1),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if frames.is_empty() {
+            v.push("stopped with an EMPTY backtrace".into());
+            break;
+        }
+        if st["body"]["totalFrames"].as_i64() != Some(frames.len() as i64) {
+            v.push(format!(
+                "totalFrames {} != {} frames returned",
+                st["body"]["totalFrames"],
+                frames.len()
+            ));
+        }
+        // Depth 0 is the script itself, and it is the only frame that can be.
+        if frames[frames.len() - 1].0 != "script" {
+            v.push(format!(
+                "outermost frame is `{}`, not `script`",
+                frames[frames.len() - 1].0
+            ));
+        }
+        if frames[..frames.len() - 1]
+            .iter()
+            .any(|(n, _)| n == "script")
+        {
+            v.push("an inner frame is named `script`".into());
+        }
+        for (name, line) in &frames {
+            if *line < 1 || *line > prog.lines as i64 {
+                v.push(format!(
+                    "frame `{name}` on line {line}, outside the program's 1..={}",
+                    prog.lines
+                ));
+            }
+        }
+        let depth = frames.len() - 1;
+
+        // The step contract, exactly as `should_stop` states it. A breakpoint
+        // outranks a step, so a breakpoint stop is not the step's answer and is
+        // not judged as one.
+        if reason == "step" {
+            match armed {
+                Some(("next", d)) if depth > d => v.push(format!(
+                    "`next` from depth {d} stopped at depth {depth} — it stepped INTO the call"
+                )),
+                Some(("stepOut", d)) if depth >= d => v.push(format!(
+                    "`stepOut` from depth {d} stopped at depth {depth} — it never left the frame"
+                )),
+                _ => {}
+            }
+        }
+
+        if stops >= DAP_MAX_STOPS || Instant::now() >= deadline {
+            let _ = dap.try_request("continue", json!({ "threadId": 1 }));
+            armed = None;
+            continue;
+        }
+        // Bias towards stepIn: it is the verb that builds depth, and depth is
+        // what the other two are defined against.
+        let verb = match rng.below(8) {
+            0..=3 => "stepIn",
+            4..=5 => "next",
+            6 => "stepOut",
+            _ => "continue",
+        };
+        if dap.try_request(verb, json!({ "threadId": 1 })).is_err() {
+            v.push(format!("adapter died on `{verb}`"));
+            break;
+        }
+        armed = if verb == "continue" {
+            None
+        } else {
+            Some((verb, depth))
+        };
+    }
+
+    let output = dap.output();
+    dap.shutdown();
+    DapSession {
+        output,
+        violations: v,
+        stops,
+    }
+}
+
+/// Run a whole program through `viml` (no debugger) and return its stdout.
+fn run_program_plain(bin: &Path, path: &str) -> Option<String> {
+    let child = Command::new(bin)
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    // `wait_bounded` needs the pipe drained first or a chatty program deadlocks
+    // on a full buffer; these programs print a handful of lines.
+    let out = child.wait_with_output().ok()?;
+    Some(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// Source a whole program in real `vim` and return what it printed, captured
+/// through `:redir` (the form the DAP tests record their reference output with).
+fn run_program_vim(path: &str, tmp: &Path) -> Option<String> {
+    let out = tmp.join("dap_oracle.txt");
+    let _ = std::fs::remove_file(&out);
+    let mut child = Command::new("vim")
+        .args(["-es", "-u", "NONE", "-i", "NONE", "-N"])
+        .arg("-c")
+        .arg(format!("redir! > {}", out.display()))
+        .arg("-c")
+        .arg(format!("source {path}"))
+        .arg("-c")
+        .arg("redir END")
+        .arg("-c")
+        .arg("qa!")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    wait_bounded(&mut child, CHUNK_TIMEOUT);
+    std::fs::read_to_string(&out).ok()
+}
+
+/// `:echo` output compares by non-empty lines: `:redir` opens with a blank line
+/// and the DAP transport batches its chunks differently from a terminal write,
+/// so neither leading blanks nor chunk boundaries are part of the contract.
+///
+/// Error reports are dropped from both sides. `:redir` folds vim's messages into
+/// the same stream as its output, while `viml` writes them to stderr — so a
+/// comparison that kept them would flag every erroring program as a gap purely
+/// on where the two engines send a message. What is left is the PATH the program
+/// took, which is the question this mode asks; E-numbers are the expression
+/// modes' contract, compared there against both engines. (The generator never
+/// echoes a string of this shape, so nothing real is filtered.)
+fn out_lines(s: &str) -> Vec<&str> {
+    fn is_error_line(l: &str) -> bool {
+        l.starts_with("Error detected while processing")
+            // vim's `line    2:` locator, between the preamble and the E-number.
+            || l.strip_prefix("line")
+                .is_some_and(|r| r.trim_start().trim_end_matches(':').parse::<u32>().is_ok())
+            || l.strip_prefix('E')
+                .is_some_and(|r| r.split_once(':').is_some_and(|(n, _)| {
+                    !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())
+                }))
+    }
+    s.lines()
+        .map(str::trim_end)
+        .filter(|l| !l.is_empty() && !is_error_line(l))
+        .collect()
+}
+
+/// The `--dap` mode. Returns the number of findings.
+fn dap_mode(args: &Args) -> usize {
+    let bin = vimlrs::dap_client::viml_binary();
+    if !bin.exists() {
+        eprintln!(
+            "fuzz-parity: no `viml` binary at {} — run `cargo build` first",
+            bin.display()
+        );
+        std::process::exit(2);
+    }
+    let tmp = std::env::temp_dir().join("vimlrs-fuzz-dap");
+    std::fs::create_dir_all(&tmp).expect("tmp dir");
+    let prog_path = tmp.join("prog.vim");
+    let prog_str = prog_path.display().to_string();
+
+    let mut rng = Rng(args.seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+    eprintln!(
+        "fuzz-parity --dap: {} programs, seed {} (binary {})",
+        args.count,
+        args.seed,
+        bin.display()
+    );
+
+    let mut drift = 0usize;
+    let mut framebug = 0usize;
+    let mut gap = 0usize;
+    let mut oracle_fail = 0usize;
+    let mut never_stopped = 0usize;
+    let mut ok = 0usize;
+    // Deduplicated by the first line of the complaint, like the expression modes.
+    let mut buckets: BTreeMap<(u8, String), (usize, String)> = BTreeMap::new();
+    let note = |slot: u8, sig: String, prog: &str, buckets: &mut BTreeMap<_, _>| {
+        let e = buckets
+            .entry((slot, sig))
+            .or_insert_with(|| (0usize, prog.to_string()));
+        e.0 += 1;
+    };
+
+    for i in 0..args.count {
+        let prog = gen_dap_program(&mut rng);
+        std::fs::write(&prog_path, &prog.src).expect("write program");
+
+        let plain = run_program_plain(&bin, &prog_str).unwrap_or_default();
+        let session = run_dap_session(&bin, &prog_str, &prog, &mut rng);
+
+        let mut bad = false;
+        if out_lines(&session.output) != out_lines(&plain) {
+            drift += 1;
+            bad = true;
+            note(
+                0,
+                format!(
+                    "--dap printed {:?}, plain run printed {:?}",
+                    out_lines(&session.output),
+                    out_lines(&plain)
+                ),
+                &prog.src,
+                &mut buckets,
+            );
+        }
+        for msg in &session.violations {
+            framebug += 1;
+            bad = true;
+            note(1, msg.clone(), &prog.src, &mut buckets);
+        }
+        // A session that never stopped exercised nothing — that is a hole in the
+        // generator, not a pass, so it is counted separately and never as `ok`.
+        if session.stops == 0 {
+            never_stopped += 1;
+            bad = true;
+            note(
+                2,
+                format!("breakpoint on line {} never fired", prog.first_line),
+                &prog.src,
+                &mut buckets,
+            );
+        }
+
+        match run_program_vim(&prog_str, &tmp) {
+            Some(vo) if !out_lines(&vo).is_empty() => {
+                if out_lines(&vo) != out_lines(&plain) {
+                    gap += 1;
+                    bad = true;
+                    note(
+                        3,
+                        format!(
+                            "vim printed {:?}, viml printed {:?}",
+                            out_lines(&vo),
+                            out_lines(&plain)
+                        ),
+                        &prog.src,
+                        &mut buckets,
+                    );
+                }
+            }
+            _ => oracle_fail += 1,
+        }
+        if !bad {
+            ok += 1;
+        }
+        if args.verbose {
+            println!(
+                "[{i}] stops={} lines={} {}",
+                session.stops,
+                prog.lines,
+                if bad { "FINDING" } else { "ok" }
+            );
+        }
+    }
+
+    let heading = |slot: u8| match slot {
+        0 => "DEBUG DRIFT (`--dap` output != plain output)",
+        1 => "DEBUGGER INVARIANT BROKEN (backtrace / step depth)",
+        2 => "NEVER STOPPED (generator reached nothing)",
+        _ => "PARITY GAPS (vim != viml)",
+    };
+    let mut last = u8::MAX;
+    for ((slot, sig), (n, prog)) in &buckets {
+        if *slot != last {
+            println!("\n══ {} ══", heading(*slot));
+            last = *slot;
+        }
+        println!("\n  {sig}  ×{n}");
+        for l in prog.lines() {
+            println!("    | {l}");
+        }
+    }
+
+    println!(
+        "\n── summary (--dap) ──\n  ok:            {ok}\n  DEBUG DRIFT:   {drift}\n  INVARIANTS:    {framebug}\n  NEVER STOPPED: {never_stopped}\n  gaps vs vim:   {gap}\n  oracle-fail:   {oracle_fail}"
+    );
+    drift + framebug + never_stopped + gap
+}
+
 // ─── main ───────────────────────────────────────────────────────────────────
 
 struct Args {
@@ -1456,6 +1949,10 @@ struct Args {
     /// Generate *regex* cases: grammar-built patterns through match/matchstr/
     /// matchlist/substitute/split.
     regex: bool,
+    /// Generate whole PROGRAMS and run each through a live `viml --dap` debug
+    /// session, checking the debug output against the plain run, the backtrace
+    /// against the program, and each step verb against the depth it promised.
+    dap: bool,
 }
 
 fn parse_args() -> Args {
@@ -1468,6 +1965,7 @@ fn parse_args() -> Args {
         verbose: false,
         stmts: false,
         regex: false,
+        dap: false,
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -1496,6 +1994,7 @@ fn parse_args() -> Args {
             }
             "--stmts" => a.stmts = true,
             "--regex" => a.regex = true,
+            "--dap" => a.dap = true,
             "--verbose" | "-v" => a.verbose = true,
             "--help" | "-h" => {
                 println!(
@@ -1508,6 +2007,9 @@ fn parse_args() -> Args {
                      --only LIST   restrict generation to these builtins\n\
                      --stmts       fuzz STATEMENTS (:let/:if/:for/:try/`|` lines) via execute()\n\
                      --regex       fuzz REGEX: grammar-built patterns x subjects x APIs\n\
+                     --dap         fuzz the DEBUGGER: whole programs through a live\n\
+                     \x20              `viml --dap` session (debug output vs plain run,\n\
+                     \x20              backtrace shape, step-verb depth contract)\n\
                      --corpus FILE append confirmed gaps as `expr<TAB>expected` lines\n\
                      --verbose     list every case, not just divergences"
                 );
@@ -1531,6 +2033,15 @@ fn main() {
     }
 
     let args = parse_args();
+
+    // The debugger mode drives whole programs, not the expression pipeline.
+    if args.dap {
+        let findings = dap_mode(&args);
+        if findings > 0 {
+            std::process::exit(1);
+        }
+        return;
+    }
 
     let funcs: Vec<(&str, &[Shape])> = if args.only.is_empty() {
         FUNCS.to_vec()

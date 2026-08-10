@@ -84,8 +84,9 @@ impl Dap {
         }
     }
 
-    /// Send one request. Panics if the adapter's stdin has closed.
-    pub fn request(&mut self, command: &str, arguments: Value) {
+    /// Send one request; returns its `seq`, for [`Self::try_wait_response_seq`].
+    /// Panics if the adapter's stdin has closed.
+    pub fn request(&mut self, command: &str, arguments: Value) -> i64 {
         let seq = self.seq;
         self.seq += 1;
         let msg =
@@ -95,11 +96,12 @@ impl Dap {
         write!(stdin, "Content-Length: {}\r\n\r\n", body.len()).expect("write header");
         stdin.write_all(&body).expect("write body");
         stdin.flush().expect("flush");
+        seq
     }
 
     /// Send one request, reporting a closed pipe instead of panicking — the
     /// fuzzer drives adapters that may have died on the case under test.
-    pub fn try_request(&mut self, command: &str, arguments: Value) -> Result<(), String> {
+    pub fn try_request(&mut self, command: &str, arguments: Value) -> Result<i64, String> {
         let seq = self.seq;
         self.seq += 1;
         let msg =
@@ -108,7 +110,21 @@ impl Dap {
         let stdin = self.child.stdin.as_mut().ok_or("adapter stdin closed")?;
         write!(stdin, "Content-Length: {}\r\n\r\n", body.len()).map_err(|e| e.to_string())?;
         stdin.write_all(&body).map_err(|e| e.to_string())?;
-        stdin.flush().map_err(|e| e.to_string())
+        stdin.flush().map_err(|e| e.to_string())?;
+        Ok(seq)
+    }
+
+    /// Wait for the response to ONE specific request, matched on `request_seq`.
+    ///
+    /// [`Self::wait_response`] matches on the command name and searches
+    /// [`Self::seen`] first, so asking twice for the same command hands back the
+    /// FIRST answer — fine for a scripted test that asks once, wrong for a loop
+    /// that asks at every stop. Correlating on the seq is what makes a repeated
+    /// request answerable.
+    pub fn try_wait_response_seq(&mut self, seq: i64, timeout: Duration) -> Option<Value> {
+        self.try_wait_for(timeout, |v| {
+            v["type"] == "response" && v["request_seq"] == seq
+        })
     }
 
     /// Take the next message from the reader thread, recording it in
@@ -141,6 +157,29 @@ impl Dap {
             }
         }
         None
+    }
+
+    /// Read forward from `cursor` until `pred` matches, advancing `cursor` past
+    /// the match. Unlike [`Self::try_wait_for`], asking twice returns the second
+    /// occurrence — which is what a loop that waits for a `stopped` event at
+    /// every stop needs. `None` on timeout or EOF.
+    pub fn wait_next(
+        &mut self,
+        cursor: &mut usize,
+        timeout: Duration,
+        pred: impl Fn(&Value) -> bool,
+    ) -> Option<Value> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            while *cursor < self.seen.len() {
+                let v = self.seen[*cursor].clone();
+                *cursor += 1;
+                if pred(&v) {
+                    return Some(v);
+                }
+            }
+            self.next_message(deadline)?;
+        }
     }
 
     /// Read until `pred` matches a message, or the adapter exits / [`WAIT`]

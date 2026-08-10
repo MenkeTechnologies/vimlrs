@@ -3222,3 +3222,112 @@ a bare `:echo`, because `:echo` here still discards the whole line once an error
 is reported. That is a statement-model change, not a builtin one, and stays its
 own round. `tests/data/fake_fn_allowlist.txt` was not touched; the detector
 still reports exactly the three standing R22-O3 names.
+
+## R28-1. The debugger reported one stack frame, and its three step verbs were one verb — ✅ FIXED
+
+`--dap` answered every `stackTrace` with a single synthetic frame, and
+`next` / `stepIn` / `stepOut` all resumed to "the next statement". Both are now
+driven by call depth, read off `funccal_stack` (which is also what
+`call_user_function_raw` measures against `'maxfuncdepth'`) rather than a
+counter the debugger keeps in parallel — awkrs balances such a counter by hand
+across every exit arm, and strykelang leaks one on the `?` at its `vm.rs:3259`.
+
+Stepping ports awkrs's predicates (`awkrs/src/debugger.rs:141-186`), the one
+frontend where they are wired to the live line hook:
+
+| verb | armed state | stops when |
+|---|---|---|
+| `stepIn` | `step_mode` | the next statement, any depth |
+| `next` | `step_over_depth` | `depth <= armed` |
+| `stepOut` | `step_out_depth` | `depth < armed` |
+
+Measured against `VIM - Vi IMproved 9.2 (2026 Feb 14, compiled Aug 02 2026
+19:00:41)` driven through a pty in `:debug` mode. Stopped two calls deep, vim's
+`backtrace` is one frame per active call, each with its own call-site line:
+
+```text
+>backtrace
+  3 command line
+  2 script …/bt.vim[11]
+  1 function Foo[2]
+->0 Bar
+```
+
+Frames now match that shape (innermost first, absolute file lines rather than
+vim's body-relative display numbering, and `totalFrames` reporting the whole
+stack through a `startFrame`/`levels` window).
+
+## R28-2. vim's debugger stops per COMMAND; `viml --dap` stopped per line — ✅ FIXED
+
+Measured on the same vim, stepping `let a = 1 | let b = 2`:
+
+```text
+>step
+line 1: let a = 1 | let b = 2
+>step
+line 1: let b = 2
+```
+
+Two stops, one line. A `|` group is a single `Stmt::LineGroup` to
+`compile_stmts`, so only its first command carried a `SET_LINENO` marker and
+the debugger silently skipped every later command on the line. The group now
+marks each of its commands (debug builds only). This is also why awkrs's
+same-line guard (`awkrs/src/debugger.rs:159`), which suppresses a second stop on
+an already-stopped line, is deliberately NOT ported: awk's debugger is
+line-oriented, vim's is not.
+
+## R28-3. The fuzz generator could not produce a debug session — ✅ FIXED
+
+`fuzz-parity --dap` generates whole programs (nested user functions, branches,
+loops, `|` groups) and runs each through a live `viml --dap` session, stepping
+with a seed-driven mix of verbs. Three findings come out, the first two needing
+no editor at all because the program is its own oracle:
+
+| class | condition |
+|---|---|
+| `DEBUG DRIFT` | `--dap` output != the plain run's output |
+| `INVARIANTS` | a backtrace or step-depth contract broke |
+| `gaps vs vim` | the plain run != vim's output |
+
+It is verified to detect, on a deliberately broken binary, all three of the
+defects this round was about: re-introducing the discarded-`funcs` debug compile
+flags 5 of 6 programs as `DEBUG DRIFT`; re-aliasing the verbs reports
+``next` from depth 0 stopped at depth 1 — it stepped INTO the call`; truncating
+the backtrace reports `outermost frame is `F0`, not `script``. A session that
+never stops is counted separately and never as a pass, so a generator that
+reaches nothing cannot read as a clean run.
+
+## Still open
+
+### R28-O1. An error inside a called function abandons the caller's `|` line
+
+Found by `fuzz-parity --dap` on its first 60-program run — a new manifestation
+of R26-O2's root cause (the abort keys on "an error was reported" rather than on
+"the evaluator returned FAIL"), on the `|` line-group abort rather than on
+`:echo`.
+
+```vim
+function! F0(x)
+  let d = [3, 3]
+  echo 'f0' . d
+  return a:x - 2
+endfunction
+echo 'start'
+let r = F0(3) | echo r
+echo 'end'
+```
+
+| | vim | vimlrs |
+|---|---|---|
+| output | `start` / *E730* / `1` / `end` | `start` / *E730* / `end` |
+
+vim reports E730, carries on to the function's next line, returns `1`, and still
+runs the `| echo r`. Here the reported error trips `VIML_LINE_ABORT` and the
+rest of the line is abandoned, so `1` never prints. Without the `|` the two
+agree exactly — `echo r` on its own line prints `1` in both — which places the
+divergence in the line-group abort and not in the function's own error handling.
+Closing it is the R26-O2 statement-model change, not a separate fix.
+
+### R27-O1, R27-O2, R26-O1, R26-O2, R26-O4, R26-O5, R26-O6, R24-O5, R22-O3, R23-O1, R25-O1..O7 — unchanged
+
+`tests/data/fake_fn_allowlist.txt` was not touched this round: still 241 entries.
