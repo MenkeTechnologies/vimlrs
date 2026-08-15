@@ -25,13 +25,8 @@ exclude = [
     "/examples/",
     "/docs/",
     "/editors/",
-    "/bench/",
-    "/benches/",
-    "/parity/",
     "/scripts/",
     "/vendor/",
-    "/tools/",
-    "/fuzz/",
     "/BUGS.md",
 ]
 
