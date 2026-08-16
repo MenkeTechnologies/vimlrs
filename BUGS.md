@@ -4355,3 +4355,262 @@ which this crate does not model.
 R31-N1's `str2float('inf')` row was re-measured this round and is still a
 deliberate Neovim-favoured split: `echo string(1.0/0.0)` is `inf` in vim and
 `str2float('inf')` in both Neovim and this port. It was not "fixed".
+
+---
+
+# Round 33 — the builtin-error value model, `\=` typvals, and the exit-status latch
+
+Method unchanged: every probe runs through **both** reference engines (vim
+9.2.0321 and Neovim 0.12.4) and through `viml`, and a divergence counts only when
+the two engines AGREE and this port differs. Two of Round 32's four open items are
+closed here (R32-O2, R32-O3); R32-O1 and R32-O4 are untouched and still open.
+
+## R33-1. A builtin that reported an error lost its return value — ✅ FIXED (closes R32-O2)
+
+`call_func()` returns `FAIL` only for an `FCERR_*` — the name is unknown, or the
+argument count is wrong — and both are raised by the *dispatcher*, before the
+body runs. Nothing an `f_*` reports with `emsg()` changes that return value, so
+`eval1()` succeeds and the command around the call still performs its action.
+`ex_echo` is explicit about it (`vendor/eval.c:6146`): it breaks out of its
+argument loop on `eval1(…) == FAIL`, on nothing else.
+
+This port collapsed both into one counter — `message::err_count`, "every error
+ever raised" — so *any* error anywhere in an expression abandoned the statement.
+
+| probe (`silent!`, so the record is the value) | vim 9.2 | Neovim 0.12 | vimlrs, before | after |
+|---|---|---|---|---|
+| `let g:r = str2nr('0x1f', 0)` | `0` | `0` | `'UNSET'` | `0` |
+| `let g:r = strlen([1])` | `0` | `0` | `'UNSET'` | `0` |
+| `let g:r = toupper([1])` | `''` | `''` | `'UNSET'` | `''` |
+| `let g:r = str2float([1])` | `0.0` | `0.0` | `'UNSET'` | `0.0` |
+| `let g:r = insert([], 1, 99)` | `0` | `0` | `'UNSET'` | `0` |
+| `let g:r = F()` — `F()` errors internally, returns 42 | `42` | `42` | `'UNSET'` | `42` |
+| `let g:r = sort([2,1], 'nosuchcmp')` | `[2, 1]` | `[2, 1]` | `'UNSET'` | `[2, 1]` |
+| `let g:r = call('strlen', [[1]])` | `0` | `0` | `'UNSET'` | `0` |
+| `echo str2nr('0x1f', 0)` (unsilenced) | `E474: …` **then** `0` | same | `E474: …`, no `0` | matches |
+
+…while the other side of the line is unchanged, and was verified not to move:
+
+| probe | both engines | vimlrs (before = after) |
+|---|---|---|
+| `let g:r = [1] . 'x'` | `'UNSET'` (eval5 operand pre-check → FAIL) | `'UNSET'` |
+| `let g:r = nosuchfunction()` | `'UNSET'` (FCERR_UNKNOWN) | `'UNSET'` |
+| `let g:r = [][0]` | `'UNSET'` (`eval_index` FAIL) | `'UNSET'` |
+
+The fix is evaluator-level, as R32-O2 said it had to be — one new counter and one
+boundary, not a per-builtin patch:
+
+- `EVAL_FAIL` (`fusevm_bridge`) is the synthesis stand-in for `eval1() == FAIL`.
+  `message::emsg` bumps it alongside `err_count` (via `note_error`), so by default
+  the two agree.
+- `in_callee()` wraps the *one* place each kind of callee body runs — `call_func`
+  / `call_float_op` for a ported `f_*`, and `run_chunk_nested(func.chunk)` in
+  `call_user_function_raw` for a user function — and RESTORES `EVAL_FAIL` (and its
+  mark) afterwards. Restored, not frozen: the callee's own `:let`/`:echo`/`:return`
+  still see their own failures while the body runs.
+- `VIML_ERR_MARK` snapshots the new counter too, and `:echo`/`:echon`
+  (`echo_impl`), `:let` (`VIML_ERR_SINCE`) and `:throw` (`b_throw`) now compare
+  against it. `VIML_RAISE`'s "an error was already reported, do not report a
+  second" check deliberately still reads `err_count` — that is `did_emsg ==
+  did_emsg_before`, a different question.
+
+Two follow-on pieces were needed to keep the model whole:
+
+- **`:return`.** c: `ex_return` returns the evaluated value only when `eval0()`
+  succeeded; on FAIL it still returns, but through `do_return(…, NULL)` — the
+  value 0. `function F() | return [1] . 'x' | endfunction` is `0` in both engines;
+  without the gate the caller now saw the recovered `'0x'`. `Stmt::Return` emits
+  the mark and `VIML_SET_RETURN` reads it.
+- **`aborting()`.** c: `eval_func` (`Src/eval.c`) — "Stop the expression
+  evaluation when … an exception was thrown but not caught": `if (evaluate &&
+  aborting()) { … ret = FAIL; }`, where `aborting()` is `(did_emsg &&
+  force_abort) || got_int || did_throw` and `cause_errthrow` arms `force_abort`.
+  So inside a `:try` the callee's error DOES fail the caller's evaluation, and
+  `in_callee` skips the rollback while an exception is pending:
+
+  | probe | both engines |
+  |---|---|
+  | `echo matchadd('Search','x',10,-3)` | `E799: …` then `-1` |
+  | `try \| echo matchadd('Search','x',10,-3) \| catch \| … \| endtry` | caught; nothing echoed |
+
+  Without this, `tests/parity_cases/error_text_catalogue.vim` regressed (it prints
+  `-1`/`[]` after each caught error) — which is how it was found.
+
+Covered by `tests/parity_cases/builtin_error_value.vim`.
+
+## R33-2. `substitute()`'s `\=` result was read with `tv_get_string` — ✅ FIXED (closes R32-O3)
+
+R32-O3 declined to guess at the Dict half. The C answers both halves in one
+function: `vim_regsub_both()` renders the expression with `eval_to_string(source
++ 2, true, false)` (`Src/nvim/regexp.c:2205`) — **`join_list = true`** — and that
+reaches `typval2string()` (`vendor/eval.c:486`), whose three branches are
+
+```c
+  if (join_list && tv->v_type == VAR_LIST) {           // items joined with "\n",
+    tv_list_join(&ga, tv->vval.v_list, "\n");          //   plus a trailing NL
+    if (tv_list_len(tv->vval.v_list) > 0) ga_append(&ga, NL);
+  } else if (tv->v_type == VAR_LIST || tv->v_type == VAR_DICT) {
+    return encode_tv2string(tv, NULL);                 // i.e. the string() form
+  }
+  return xstrdup(tv_get_string(tv));
+```
+
+The Dict takes the middle branch — `join_list` only rewrites Lists — which is the
+`else` R32-O3 could not account for. `typval2string` was already ported
+(`src/ported/eval.rs:616`) and already used by `eval_to_string_eap`; only
+`subst_expr_eval` bypassed it.
+
+| probe | both engines | vimlrs, before |
+|---|---|---|
+| `str2list(substitute('x','x','\=[1,2]',''))` | `[49, 10, 50, 10]` | `E730: Using a List as a String` |
+| `string(substitute('x','x','\=[]',''))` | `''` (no trailing NL) | `E730: …` |
+| `string(substitute('x','x','\={"a":1}',''))` | `'{''a'': 1}'` | `E731: Using a Dictionary as a String` |
+| `string(substitute('x','x','\=[[1,2],[3]]',''))` | `'[1, 2]\n[3]\n'` | `E730: …` |
+| `string(substitute('axa','a','\=[9]','g'))` | `'9\nx9\n'` | `E730: …` |
+| `string(substitute('x','x','\=0z0102',''))` | `E976: …` then `''` | `E976: …`, no value |
+
+The separator is NL (0x0a), not CR: `do_string_sub()` runs with `rsm.sm_line_lbr`
+set, so the c:2216 NL→CAR rewrite does not apply. Covered by
+`tests/parity_cases/substitute_expr_typval.vim`.
+
+## R33-3. `map()`/`filter()` replaced items with the failed callback's `v:null` — ✅ FIXED
+
+Surfaced by R33-1: with the statement no longer abandoned, the containers became
+observable. c: `filter_map_one()` — `if (eval_expr_typval(expr, false, argv, 2,
+newtv) == FAIL) { goto theend; }` (`Src/nvim/eval/list.c:58`) — and every caller's
+loop `break`s on that FAIL (c:308 list, c:119 dict, c:188 blob, c:242 string),
+leaving that item and every later one untouched. The port's `filter_map_list`
+already implemented the break; the bridge hook `filter_map_eval` never reported
+the FAIL, because `eval_callback` always produces a typval (`v:null` after a
+failed call).
+
+| probe (`silent!`) | both engines | vimlrs, before |
+|---|---|---|
+| `map([1,2], 'nosuchfn()')` | `[1, 2]` | `[v:null, v:null]` |
+| `map([1,2,3], 'v:val == 2 ? [] . "" : v:val * 10')` | `[10, 2, 3]` | `[10, '0', 30]` |
+| `filter([1,2,3], 'nosuchfn()')` | `[1, 2, 3]` | `[]` |
+| `map({'a':1,'b':2}, 'nosuchfn()')` | `{'a': 1, 'b': 2}` | `{'a': v:null, 'b': v:null}` |
+| `mapnew([1,2], 'nosuchfn()')` | `[]` | `[v:null, v:null]` |
+| `map([1,2], 'strlen([1])')` | `[0, 0]` (reported, not FAIL) | `[0, 0]` — already right |
+
+Covered by `tests/parity_cases/filter_map_callback_fail.vim`.
+
+## R33-4. `f_strpart()` dropped `tv_get_number_chk`'s `error` out-param — ✅ FIXED
+
+Also surfaced by R33-1. c:2873 `bool error = false;` … c:2878
+`tv_get_number_chk(&argvars[1], &error)` … c:2880 `if (error) { len = 0; }` — a
+`{start}` that is not coercible to a Number reports E745 and yields the **empty**
+string. The port passed `None` for the out-param and fell through to `slen - 0`.
+
+| probe | vim 9.2 | Neovim 0.12 | vimlrs, before |
+|---|---|---|---|
+| `silent! let g:r = strpart('abc', [1])` | `''` | `''` | `'abc'` |
+
+## R33-5. The process exit status read `did_emsg`, which `:catch` resets — ✅ FIXED
+
+Found by the new `builtin_error_value` record: it was the only line of the case
+that still diverged, and only in the exit status. c: the status is `ex_exitval`
+(`vendor/message.c:855`), latched to 1 on `emsg()`'s **display** path — after the
+`cause_errthrow` return (c:798-803) and the `emsg_silent` return (c:817-846), so
+an error that became a catchable exception, or one `:silent!` swallowed, never
+sets it. It is a one-way latch; `did_emsg` is not, because `ex_catch` clears it
+(`ex_eval.c:1422`).
+
+| script | vim 9.2 | Neovim 0.12 | vimlrs, before |
+|---|---|---|---|
+| `echo strlen([1])` then `try \| echo [][0] \| catch \| endtry` | `1` | `1` | `0` |
+| `try \| echo [][0] \| catch \| endtry` alone | `0` | `0` | `0` |
+| `echo strlen([1])` then `try \| echo 1 \| catch \| endtry` | `1` | `1` | `1` |
+| `silent! echo strlen([1])` then a caught `try` | `0` | `0` | `0` |
+| `try \| echo [][0] \| catch \| endtry` then `echo strlen([1])` | `1` | `1` | `1` |
+
+`ex_exitval` is now a thread-local next to `did_emsg` in `src/ported/message.rs`,
+set at the C's placement, read by `cli::had_error` and `main.rs`'s AOT path, and
+cleared by `reset_run()` so an embedding host does not inherit a previous run's
+status.
+
+## Still open
+
+### R33-O1. `:if` / `:while` / `:for` do not skip on `did_emsg` (`CHECK_SKIP`)
+
+Measured this round, both engines identical, and verified **pre-existing** — the
+same probes give byte-identical `viml` output on `origin/main` (d29c6cf) and after
+this round's changes.
+
+| probe | vim 9.2 / Neovim 0.12 | vimlrs |
+|---|---|---|
+| `if strlen([1])` / `echo 'TRUE'` / `else` / `echo 'FALSE'` / `endif` | *neither branch* | `FALSE` |
+| the same under `silent!` | `FALSE` | *neither branch* |
+| `if str2nr('0x1f', 0)` / … | *neither branch* | `FALSE` |
+| `for x in [strlen([1]), 5]` / `let g:n += 1` / `endfor` | `n=0` | `n=2` |
+| `while strlen([1]) < 2 && g:i < 3` / `let g:i += 1` / `endwhile` | `i=0` | `i=3` |
+| `for x in [1,2]` / `let g:n += strlen([1])` / `endfor` | body runs **once** | body runs twice |
+
+The C is `CHECK_SKIP` (`vendor/ex_eval.c:80-85`): `did_emsg || got_int ||
+did_throw || <the enclosing conditional is not active>`, read by `ex_if` (c:865)
+and `ex_while` (c:1007), plus the same test spelled out again in `ex_else`
+(c:1590) — which is why the `:else` clause of an `:if` whose condition reported an
+error is skipped as well. Note the discriminator is `did_emsg`, **not** the
+FAIL model R33-1 ports: `silent!` clears it and the branch then runs, and the
+table's second row is that inversion.
+
+Closing it needs a `cstack`-equivalent: this port compiles `:if`/`:while`/`:for`
+to bytecode jumps with no per-conditional state to consult, so the skip has to be
+reconstructed rather than transcribed. Not guessed at.
+
+### R33-O2. `:echo` evaluates every argument before writing any of them
+
+Pre-existing, and made *visible* by R33-1 (before it, an erroring `:echo` printed
+nothing at all, so the ordering could not be observed).
+
+```vim
+echo '2 bare-echo  =' strlen([1])
+```
+
+| | |
+|---|---|
+| vim 9.2 / Neovim 0.12 | `2 bare-echo  =` NL `E730: Using a List as a String 0` |
+| vimlrs | `E730: Using a List as a String` NL `2 bare-echo  = 0` |
+
+c: `ex_echo`'s loop is eval-then-print **per argument** (`vendor/eval.c:6139-6186`)
+— `eval1()`, then `msg_multiline()`, then the next argument — so an error raised
+while evaluating argument *n* lands after argument *n-1* has already been written.
+This port pushes every argument and calls `VIML_ECHO` once, so the error text is
+emitted first. The content is now right; only the interleaving is not. Fixing it
+is a compiler change (emit one echo-write per argument plus the separator), not a
+bridge one.
+
+### R33-O3. A second, deferred diagnostic after an operand failure is not raised
+
+```vim
+echo type([1] . '')
+```
+
+| | |
+|---|---|
+| vim 9.2 | `E730: Using a List as a String` then `E116: Invalid arguments for function type([1] . '')` |
+| Neovim 0.12 | `E730: …` then `E116: Invalid arguments for function type` |
+| vimlrs | `E730: …` only |
+
+The engines disagree on the E116 *text* (vim echoes the argument source, Neovim
+does not), so that half is not countable — but both agree a second message is
+emitted, and this port emits none: `b_raise` suppresses the deferred diagnostic
+whenever `err_count` already advanced. Pre-existing (verified byte-identical
+against `origin/main`), and adjacent to R31-O3.
+
+### R32-O1, R32-O4, R31-O1..O4, R30-O1, R30-O2, R30-O3, R30-O6, R30-O8, R29-O1, R29-O3, R28-O1, R27-O1, R27-O2, R26-O1, R26-O2, R26-O4, R26-O5, R24-O5, R22-O3, R23-O1, R25-O1..O7 — unchanged
+
+R32-O1 (`str2list("\<BS>")` and the K_SPECIAL key names) and R32-O4
+(`exists(':echo')`) were not attempted: both are the substrate/table changes their
+records describe, not patches. `tests/ported_fn_names_match_c` is still red on the
+three standing R22-O3 names (`f_typename`, `type_name_of`, `member_of`) — the same
+three as on `origin/main`; the gate was not weakened and
+`tests/data/fake_fn_allowlist.txt` was not touched this round. Every ported name
+added here matches its C original (`typval2string`, `ex_exitval`); `note_error`,
+`in_callee` and `eval_failed_since_mark` are synthesis-zone helpers in
+`fusevm_bridge.rs`, which the gate does not scan.
+
+The differential fuzzer is unchanged by this round: `--count 1500 --seed 7` is
+`ok 1441 / GAPS 0 / PANICS 0`, and `--stmts --count 1200 --seed 11` is `ok 1141 /
+GAPS 11 (6 distinct) / PANICS 0` both before and after — the 11 were confirmed
+pre-existing by re-running them against a stashed `origin/main` build.

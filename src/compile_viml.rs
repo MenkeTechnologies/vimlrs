@@ -1358,6 +1358,14 @@ impl Compiler {
                 if !self.in_function {
                     return Err(VimlError::msg("E133: :return not inside a function"));
                 }
+                // c: `ex_return` returns the evaluated value only when `eval0()`
+                // succeeded; on FAIL it still returns, but through
+                // `do_return(…, NULL)` — i.e. with the value 0. Mark the
+                // evaluator's failure count so `VIML_SET_RETURN` can tell
+                // (`function F() | return [1] . 'x' | endfunction` yields 0 in both
+                // engines, not the recovered `'0x'`).
+                self.emit(Op::CallBuiltin(h::VIML_ERR_MARK, 0));
+                self.emit(Op::Pop);
                 match expr {
                     Some(e) => self.expr(e)?,
                     None => {

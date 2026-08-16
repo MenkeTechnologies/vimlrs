@@ -143,13 +143,22 @@ pub fn f_strpart(argvars: &[typval_T], rettv: &mut typval_T) {
     let bytes = s.as_bytes();
     let slen = bytes.len() as varnumber_T;
     // c: nbyte = start; len = {len} present ? that : slen - nbyte.
-    let mut nbyte = tv_get_number_chk(&argvars[1], None);
+    //
+    // c:2873 `bool error = false;` … c:2878 `tv_get_number_chk(&argvars[1], &error)`
+    // — a {start} that is not coercible to a Number (`strpart('abc', [1])`) reports
+    // E745 and takes the c:2880 `if (error) { len = 0; }` branch, so the result is
+    // the EMPTY string, not the whole of it. The port passed `None` for the
+    // out-param and fell through to `slen - 0`, answering `'abc'`.
+    let mut error = false;
+    let mut nbyte = tv_get_number_chk(&argvars[1], Some(&mut error));
     // The C does all of this in `varnumber_T` (int64) and *relies on the
     // two's-complement wrap* at the extremes: with `start` = INT64_MIN,
     // `slen - nbyte` and the later `len += nbyte` each wrap once and cancel, so
     // `strpart('abc', -9223372036854775808)` is `'abc'` in Vim. Rust's `-`/`+`
     // panic there instead (debug overflow check), so spell the wrap out.
-    let mut len = if argvars.len() >= 3 {
+    let mut len = if error {
+        0
+    } else if argvars.len() >= 3 {
         tv_get_number_chk(&argvars[2], None)
     } else {
         slen.wrapping_sub(nbyte)

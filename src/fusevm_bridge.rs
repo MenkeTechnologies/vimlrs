@@ -1346,6 +1346,30 @@ thread_local! {
     /// `did_emsg` snapshot taken by `VIML_ERR_MARK` at a statement's start, so
     /// `:echo`/`:echon` can skip output when evaluating its args raised an error.
     static ERR_MARK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Errors that made the *evaluator itself* fail — the synthesis stand-in for
+    /// C's `eval1()`/`eval0()` returning `FAIL`.
+    ///
+    /// `message::err_count` counts every error ever raised, which is a strictly
+    /// wider set: `emsg()` inside a called function does NOT make the caller's
+    /// evaluation fail. `call_func()` (`userfunc.c`) returns `FAIL` only for an
+    /// `FCERR_*` — the name is unknown, or the argument count is wrong — and both
+    /// of those are raised by the dispatcher, never by the callee's body. So a
+    /// builtin that reports an error and leaves its default `rettv` in place still
+    /// yields a value to the command around it:
+    ///
+    /// ```vim
+    /// echo str2nr('0x1f', 0)   " E474: Invalid argument   AND THEN   0
+    /// let g:r = toupper([1])   " E730: …                  AND THEN   g:r == ''
+    /// let g:r = [1] . 'x'      " E730: …                  g:r unchanged (eval5 FAIL)
+    /// ```
+    ///
+    /// [`in_callee`] is what draws that line: it restores this counter (and its
+    /// mark) across a callee's body, so the callee's errors are invisible to the
+    /// caller's statement while the callee's own statements still see them.
+    static EVAL_FAIL: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// [`EVAL_FAIL`] snapshot taken by `VIML_ERR_MARK`, the counterpart of
+    /// [`ERR_MARK`].
+    static FAIL_MARK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// Nesting depth of `execute()` calls. While > 0, `:echo` output uses Vim's
     /// execute()-capture convention (a newline *before* each `:echo`) instead of
     /// the trailing newline used for stdout / general captures.
@@ -1557,6 +1581,68 @@ fn set_hard_err() {
     HARD_ERR.with(|h| h.set(true));
 }
 
+/// Count one error against [`EVAL_FAIL`]. Called by `message::emsg` alongside its
+/// own `err_count` bump, so the two counters advance together *except* across a
+/// callee's body, which [`in_callee`] rolls back.
+pub fn note_error() {
+    EVAL_FAIL.with(|f| f.set(f.get() + 1));
+}
+
+/// Run a *called function's* body — a ported `f_*` ([`call_func`]) or a user
+/// function ([`call_user_function_raw`]) — with the caller's [`EVAL_FAIL`]
+/// bookkeeping restored on the way out.
+///
+/// c: `call_func()` returns `FAIL` only for an `FCERR_*` (unknown name, wrong
+/// argument count), which the dispatcher raises before the body runs. Nothing the
+/// body reports with `emsg()` changes that return value, so the caller's `eval1()`
+/// succeeds and the command around the call still performs its action — vim and
+/// Neovim agree on every row of:
+///
+/// | probe | both engines |
+/// |---|---|
+/// | `echo str2nr('0x1f', 0)` | `E474: Invalid argument` then `0` |
+/// | `let g:r = strlen([1])` | `E730: …` then `g:r == 0` |
+/// | `let g:r = insert([], 1, 99)` | `E684: …` then `g:r == 0` |
+/// | `let g:r = F()` where `F()` errors internally | `g:r == 42` (its `:return`) |
+/// | `let g:r = [1] . 'x'` | `E730: …`, `g:r` UNCHANGED (this is the FAIL) |
+///
+/// The counter is *restored*, not frozen: the callee's own `:let`/`:echo`/`:return`
+/// still see their own failures while the body runs. The mark is restored with it
+/// so a `VIML_ERR_MARK` inside the body does not leave the caller's statement
+/// comparing against the callee's snapshot.
+fn in_callee<T>(f: impl FnOnce() -> T) -> T {
+    let saved_fail = EVAL_FAIL.with(|c| c.get());
+    let saved_mark = FAIL_MARK.with(|m| m.get());
+    let out = f();
+    // c: `eval_func` (`Src/eval.c`) — "Stop the expression evaluation when
+    // immediately aborting on error, or when an interrupt occurred or an exception
+    // was thrown but not caught": `if (evaluate && aborting()) { … ret = FAIL; }`.
+    // `aborting()` is `(did_emsg && force_abort) || got_int || did_throw`, and
+    // `force_abort` is set by `cause_errthrow()` — i.e. precisely when the callee's
+    // error was CONVERTED INTO AN EXCEPTION (there is a live `:try`). Then the
+    // caller's evaluation *does* fail, so the rollback is skipped:
+    //
+    //     echo matchadd('Search', 'x', 10, -3)          " E799: …  and then  -1
+    //     try | echo matchadd('Search','x',10,-3) | catch | … | endtry
+    //                                                   " caught; nothing echoed
+    //
+    // `PENDING_EXC` is this VM's stand-in for both halves of `aborting()`:
+    // `errthrow()` fills it for a converted error (the `force_abort` case) and
+    // `b_throw` for an explicit `:throw` (the `did_throw` case).
+    if PENDING_EXC.with(|p| p.borrow().is_none()) {
+        EVAL_FAIL.with(|c| c.set(saved_fail));
+        FAIL_MARK.with(|m| m.set(saved_mark));
+    }
+    out
+}
+
+/// True when the evaluator failed since the last `VIML_ERR_MARK` — the synthesis
+/// reading of C's `eval0(…) == FAIL`, which is what makes `:let` skip its
+/// assignment, `:echo` skip its output and `:return` yield 0.
+fn eval_failed_since_mark() -> bool {
+    EVAL_FAIL.with(|c| c.get()) > FAIL_MARK.with(|m| m.get())
+}
+
 /// Run an *evaluator-level* operation and mark any error it raises as hard.
 ///
 /// This is the line Vim draws. The expression evaluator's own type checks —
@@ -1599,7 +1685,7 @@ fn b_line_abort(_vm: &mut VM, _: u8) -> Value {
 }
 
 fn b_err_since(_vm: &mut VM, _: u8) -> Value {
-    Value::Bool(message::err_count.with(|d| d.get()) > ERR_MARK.with(|m| m.get()))
+    Value::Bool(eval_failed_since_mark())
 }
 
 /// `:silent` raises `msg_silent` (output); `:silent!` also raises `emsg_silent`
@@ -1850,7 +1936,7 @@ fn b_throw(vm: &mut VM, _: u8) -> Value {
     // reported), and throwing the half-evaluated value on top of it would
     // replace `Vim(throw):E684: List index out of range: 0` with a thrown
     // `v:null` — which is what `throw [][0]` used to catch.
-    if message::err_count.with(|d| d.get()) > ERR_MARK.with(|m| m.get()) {
+    if eval_failed_since_mark() {
         return Value::Undef;
     }
     set_throw_point();
@@ -2574,12 +2660,14 @@ fn echo_impl(vm: &mut VM, argc: u8, newline: bool) {
         parts.push(pop_tv(vm));
     }
     parts.reverse();
-    // Vim aborts a command whose expression raised an error: if an error was raised
-    // since VIML_ERR_MARK (set just before the args were evaluated), print nothing —
-    // no spurious fallback value after the error. `err_count`, not `did_emsg`,
-    // because a `:silent!` error still aborts the command even though it is not
-    // reported (`silent! echo [1] . 'x'` prints nothing in Vim).
-    if message::err_count.with(|d| d.get()) > ERR_MARK.with(|m| m.get()) {
+    // c: `ex_echo` prints an argument only when `eval1()` returned OK for it
+    // (`vendor/eval.c:6146` — `if (eval1(…) == FAIL) { … break; }`). That is the
+    // *evaluator's* failure, not "an error was reported": a builtin that reports
+    // one and still yields a value keeps its `:echo` (`echo str2nr('0x1f', 0)`
+    // prints the E474 AND `0`). `EVAL_FAIL`, not `did_emsg`, because a `:silent!`
+    // error still fails the evaluator even though it is not reported
+    // (`silent! echo [1] . 'x'` prints nothing in Vim).
+    if eval_failed_since_mark() {
         return;
     }
     let sep = if newline { " " } else { "" };
@@ -2956,6 +3044,7 @@ fn unlet_index(base: typval_T, index: typval_T) -> Value {
 /// tell whether evaluating its arguments raised an error.
 fn b_err_mark(_vm: &mut VM, _: u8) -> Value {
     ERR_MARK.with(|m| m.set(message::err_count.with(|d| d.get())));
+    FAIL_MARK.with(|m| m.set(EVAL_FAIL.with(|f| f.get())));
     EMSG_MARK.with(|m| m.set(message::did_emsg.with(|d| d.get())));
     HARD_ERR.with(|h| h.set(false));
     Value::Undef
@@ -3126,7 +3215,13 @@ fn b_call_user(vm: &mut VM, argc: u8) -> Value {
 }
 
 fn b_set_return(vm: &mut VM, _: u8) -> Value {
-    let v = pop_tv(vm);
+    let mut v = pop_tv(vm);
+    // c: `ex_return` — `eval0(…) == FAIL` takes the `else` branch, which returns
+    // through `do_return(eap, false, true, NULL)`; a NULL rettv is the value 0. The
+    // function still returns, it just does not return the half-evaluated value.
+    if eval_failed_since_mark() {
+        v = tv_num(0);
+    }
     RETURN_STACK.with(|r| {
         if let Some(top) = r.borrow_mut().last_mut() {
             *top = Some(v);
@@ -3306,7 +3401,10 @@ fn call_user_function_raw(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
     // `Foo()`, `:call`, a Funcref, `intercept_proceed`'s re-run of the original
     // — reaches the body through here.
     crate::dap::check_func_entry(name);
-    run_chunk_nested(func.chunk.clone());
+    // c: an error inside the body sets `did_emsg`, but `call_func()` still returns
+    // OK with the function's `rettv` — the caller's `eval1()` does not fail. See
+    // [`in_callee`]; the body's own statements still see their own failures.
+    in_callee(|| run_chunk_nested(func.chunk.clone()));
     CUR_CMDNAME.with(|c| *c.borrow_mut() = caller_cmdname);
     // The body's lines are relative to its own `:function`; restore the caller's
     // so a later error in the caller reports the caller's line.
@@ -3666,10 +3764,16 @@ fn eval_failed(src: &str, err: &crate::viml_lexer::VimlError) -> Value {
 
 /// The `\=` substitute-expression evaluator (installed into the regex engine's
 /// `SUBST_EXPR_HOOK`): compile + run the expression, return its string value.
+///
+/// `vim_regsub_both()` (`Src/nvim/regexp.c:2205`) renders the result with
+/// `eval_to_string(source + 2, true, false)` — i.e. **`join_list = true`**, so a
+/// List becomes its items newline-joined plus a trailing newline and a Dict its
+/// `string()` form ([`typval2string`], `Src/eval.c:486`). Reading it with
+/// `tv_get_string` instead raised `E730`/`E731` on both.
 fn subst_expr_eval(expr: &str) -> String {
     match compile_expr_chunk(expr) {
         Ok(chunk) => run_chunk_capture(chunk)
-            .map(|tv| tv_get_string(&tv))
+            .map(|tv| crate::ported::eval::typval2string(&tv, true))
             .unwrap_or_default(),
         Err(_) => String::new(),
     }
@@ -3944,7 +4048,19 @@ fn filter_map_eval(expr: &typval_T, key: &typval_T, val: &typval_T) -> Option<ty
     } else {
         None
     };
-    Some(eval_callback(expr, &chunk, key, val))
+    // c: `filter_map_one` — `if (eval_expr_typval(expr, false, argv, 2, newtv)
+    // == FAIL) { goto theend; }` (`Src/eval/list.c:58`), and the caller's loop
+    // `break`s on that FAIL, leaving this item and every later one untouched.
+    // `eval_callback` always produces a typval (`v:null` after a failed call), so
+    // the FAIL has to be read off [`EVAL_FAIL`]: without it,
+    // `map([1,2], 'nosuchfn()')` answered `[v:null, v:null]` where both engines
+    // answer `[1, 2]`.
+    let before = EVAL_FAIL.with(|f| f.get());
+    let out = eval_callback(expr, &chunk, key, val);
+    if EVAL_FAIL.with(|f| f.get()) > before {
+        return None;
+    }
+    Some(out)
 }
 
 /// The foreach() command hook (`do_cmdline_cmd`): set v:key/v:val and run the
@@ -4487,7 +4603,9 @@ fn call_func(vm: &mut VM, argc: u8, f: fn(&[typval_T], &mut typval_T)) -> Value 
     args.reverse();
     // c: call_func pre-initializes rettv to VAR_NUMBER / 0.
     let mut rettv = tv_num(0);
-    f(&args, &mut rettv);
+    // c: whatever the `f_*` body reports with `emsg()`, `call_func()` still returns
+    // OK with that `rettv` — see [`in_callee`].
+    in_callee(|| f(&args, &mut rettv));
     tv_to_value(rettv)
 }
 
@@ -4515,7 +4633,7 @@ fn call_float_op(vm: &mut VM, argc: u8, op: fn(f64) -> f64) -> Value {
     }
     args.reverse();
     let mut rettv = tv_num(0);
-    float_op_wrapper(&args, &mut rettv, op);
+    in_callee(|| float_op_wrapper(&args, &mut rettv, op));
     tv_to_value(rettv)
 }
 
@@ -4847,13 +4965,16 @@ pub fn take_last_result() -> Option<typval_T> {
     LAST_RESULT.with(|r| r.borrow_mut().take())
 }
 
-/// Reset per-run state (refpool, last result, `did_emsg`).
+/// Reset per-run state (refpool, last result, `did_emsg`, `ex_exitval`).
 pub fn reset_run() {
     REFPOOL.with(|p| p.borrow_mut().clear());
     LAST_RESULT.with(|r| *r.borrow_mut() = None);
     PENDING_EXC.with(|p| *p.borrow_mut() = None);
     V_EXCEPTION.with(|e| e.borrow_mut().clear());
     message::did_emsg.with(|d| d.set(0));
+    // The exit-status latch is per *process* in the C; per run here, so an
+    // embedding host (or the REPL) does not inherit a previous script's status.
+    message::ex_exitval.with(|e| e.set(0));
 }
 
 /// Install a host callback invoked with the raw `:set` args (e.g. `"nu tw=80"`)

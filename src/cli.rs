@@ -15,7 +15,7 @@ use clap::{CommandFactory, FromArgMatches, Parser};
 use crate::aot;
 use crate::fusevm_bridge::{eval_expr, eval_file, eval_source};
 use crate::ported::eval::encode::encode_tv2echo;
-use crate::ported::message::did_emsg;
+use crate::ported::message::ex_exitval;
 use crate::script_cache;
 use crate::viml_lexer::VimlError;
 
@@ -168,9 +168,14 @@ pub struct Cli {
     files: Vec<PathBuf>,
 }
 
-/// Whether any error was raised in the last run (`did_emsg` set).
+/// Whether the last run must exit non-zero — c: `ex_exitval`, the latch `emsg()`
+/// sets at `vendor/message.c:855` when it displays a message.
+///
+/// NOT `did_emsg`: `ex_catch` resets that (`ex_eval.c:1422`), so a script that
+/// reported one error and later caught a *different* one exited 0 here while both
+/// engines exit 1. See [`crate::ported::message::ex_exitval`].
 fn had_error() -> bool {
-    did_emsg.with(|d| d.get()) != 0
+    ex_exitval.with(|e| e.get()) != 0
 }
 
 fn exit_for_errors() -> ExitCode {

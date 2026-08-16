@@ -6,7 +6,7 @@ use std::process::ExitCode;
 
 use vimlrs::aot;
 use vimlrs::fusevm_bridge::eval_source;
-use vimlrs::ported::message::did_emsg;
+use vimlrs::ported::message::ex_exitval;
 
 /// Worker-thread stack size. The parser, bytecode compiler and value `Drop` all
 /// walk the expression tree recursively, so a pathologically deep-but-valid
@@ -39,7 +39,9 @@ fn run_inner() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             }
-            let failed = did_emsg.with(|d| d.get()) != 0;
+            // c: `ex_exitval` (`vendor/message.c:855`), not `did_emsg` — `:catch`
+            // resets the latter but never the former. Same rule as `cli::had_error`.
+            let failed = ex_exitval.with(|e| e.get()) != 0;
             return if failed {
                 ExitCode::FAILURE
             } else {

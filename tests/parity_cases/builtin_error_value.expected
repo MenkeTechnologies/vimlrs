@@ -1,0 +1,16 @@
+1
+str2nr    = 0
+strlen    = 0
+toupper   = ''
+str2float = 0.0
+strpart   = ''
+insert    = 0
+user-fn   = 42
+return-fail = 0
+concat    = 'UNSET'
+unknown   = 'UNSET'
+index     = 'UNSET'
+E474: Invalid argument
+0
+caught Vim(let):E474: Invalid argument
+try-let   = 'UNSET'

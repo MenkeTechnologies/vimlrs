@@ -1,0 +1,10 @@
+0
+map-unknown   = [1, 2]
+map-reported  = [0, 0]
+map-mid       = [10, 2, 3]
+filter-unknown= [1, 2, 3]
+map-dict      = {'a': 1, 'b': 2}
+mapnew        = []
+map-string    = ''
+map-blob      = 0z0102
+sort-badcmp   = [2, 1]

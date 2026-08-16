@@ -43,6 +43,25 @@ thread_local! {
     /// counterpart that `:silent!` raises.)
     pub static msg_silent: Cell<i32> = const { Cell::new(0) };
 
+    /// C global `int ex_exitval` (`globals.h`) — the status the process exits
+    /// with. Latched to 1 by `emsg()` at `vendor/message.c:855`, which is on the
+    /// DISPLAY path only: the `cause_errthrow` return (c:798-803) and the
+    /// `emsg_silent` return (c:817-846) both come first, so an error that became
+    /// a catchable exception, or one `:silent!` swallowed, never sets it.
+    ///
+    /// It is a one-way latch. `did_emsg` is not — `ex_catch` clears it
+    /// (`ex_eval.c:1422`) — so the two disagree exactly when a script reports an
+    /// error and later catches a different one:
+    ///
+    /// ```vim
+    /// echo strlen([1])                    " E730 displayed → ex_exitval = 1
+    /// try | echo [][0] | catch | endtry   " caught → did_emsg reset to 0
+    /// ```
+    ///
+    /// vim 9.2 and Neovim 0.12 both exit 1 there; reading `did_emsg` for the exit
+    /// status answered 0.
+    pub static ex_exitval: Cell<i32> = const { Cell::new(0) };
+
     /// When `Some`, each `emsg` text is captured here instead of printed —
     /// modelling `emsg_silent` + the saved error list that `assert_fails()`
     /// inspects in `message.c`/`testing.c`. `None` is the normal (print) path.
@@ -70,6 +89,11 @@ pub fn capture_errors_take() -> Vec<String> {
 pub fn emsg(s: &str) {
     // Counted first: this one tracks *every* error, whatever happens to it next.
     err_count.with(|d| d.set(d.get() + 1));
+    // The narrower counter: the same bump, but rolled back across a called
+    // function's body, because the C's `call_func()` returns OK whatever the body
+    // reported. That is the difference between an error the evaluator recovers a
+    // value from and one that makes `eval1()` return FAIL.
+    crate::fusevm_bridge::note_error();
     // Observed second, before any of the paths that suppress or divert the message.
     // The observer lives in the synthesis zone (it has no C counterpart) and, unlike
     // a capture, changes nothing about what happens next.
@@ -105,6 +129,11 @@ pub fn emsg(s: &str) {
     // message, in which case nothing is printed here — the exception carries it.
     // Outside a `:try` it declines and the error prints as before.
     if !crate::fusevm_bridge::errthrow(s) {
+        // c:855 `ex_exitval = 1;` — the C reaches this only after the
+        // `cause_errthrow` and `emsg_silent` returns, i.e. exactly when the message
+        // is about to be displayed. Same placement here: an error the `:try` took
+        // ownership of does not latch it. See [`ex_exitval`].
+        ex_exitval.with(|e| e.set(1));
         // c: `msg_start()` — an error message begins on a fresh line, so a
         // half-written `:echon` line is terminated first rather than having the
         // error run onto the end of it.
