@@ -1,0 +1,9 @@
+0
+Expected {'b': 2} but got {'b': 3} - 1 equal item omitted
+Expected {'c': 3} but got {'c': 4} - 2 equal items omitted
+Expected {'a': 1} but got {'b': 1}
+Expected {'b': 2} but got {} - 1 equal item omitted
+Expected {} but got {'b': 2} - 1 equal item omitted
+Expected {'b': 1} but got {'b': 2} - 1 equal item omitted
+Expected not equal to {'a': 1, 'b': 2}
+Expected {'a': 1} but got [1]

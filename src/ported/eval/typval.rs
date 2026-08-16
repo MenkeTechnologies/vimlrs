@@ -2367,6 +2367,15 @@ type FuncExistsFn = fn(&str) -> bool;
 /// installed by the bridge. `None` on a parse/eval error.
 type EvalStringFn = fn(&str) -> Option<typval_T>;
 
+/// `estack_sfile(ESTACK_NONE)` — the `..`-joined chain of scripts being sourced
+/// and functions being called, or `None` outside any of them. The exestack lives
+/// in the bridge (it owns the call frames), so it is installed from there.
+type EstackSfileFn = fn() -> Option<String>;
+
+/// `SOURCING_LNUM` — the line of the command currently executing, within the
+/// innermost entry of the exestack. Installed by the bridge for the same reason.
+type SourcingLnumFn = fn() -> i64;
+
 thread_local! {
     /// Bridge-installed funcref comparator for `sort()`/`uniq()` with a `{func}`
     /// argument: `(name, a, b) -> Some(cmp)`, or `None` on a call/type error.
@@ -2389,6 +2398,15 @@ thread_local! {
     /// "Evaluate an expression string → result" hook, installed by the bridge.
     /// Backs the `eval_to_*`/`eval_expr_*` string-expression entry points.
     pub static EVAL_STRING_HOOK: std::cell::RefCell<Option<EvalStringFn>> =
+        const { std::cell::RefCell::new(None) };
+
+    /// `estack_sfile()` hook — backs `prepare_assert_error()`, which stamps every
+    /// `v:errors` entry with the script/function it was raised in.
+    pub static ESTACK_SFILE_HOOK: std::cell::RefCell<Option<EstackSfileFn>> =
+        const { std::cell::RefCell::new(None) };
+
+    /// `SOURCING_LNUM` hook — the other half of `prepare_assert_error()`'s prefix.
+    pub static SOURCING_LNUM_HOOK: std::cell::RefCell<Option<SourcingLnumFn>> =
         const { std::cell::RefCell::new(None) };
 }
 

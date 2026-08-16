@@ -4180,3 +4180,178 @@ is fully green for the first time since round 26 (413 passed, 0 failed).
 is a vim9 builtin with no Neovim counterpart, so its C name cannot appear in a
 list generated from `vendor/`, and closing it means either vendoring vim's C
 into a corpus defined as Neovim's or adding to the allowlist. Neither was done.
+
+---
+
+# Round 32 — the `assert_*()` message model, and `setreg()` block widths
+
+Method unchanged: probe scripts run through **both** reference engines (vim
+9.2.0321 and Neovim 0.12.4) and through `viml`, with a divergence counted only
+when the two engines AGREE and this port differs — or when they disagree and this
+port matches neither. Every finding below has both verbatim outputs behind it.
+
+## R32-1. Every `v:errors` entry was missing its location stamp — ✅ FIXED
+
+`prepare_assert_error()` (Neovim `testing.c`, not vendored) opens every assert
+failure with `estack_sfile()` + `line {SOURCING_LNUM}` + `": "`. It was never
+ported, so `v:errors` held the bare message and a failure could not be traced to
+the line that raised it.
+
+```
+call assert_equal(1, 2)   " at line 3 of the script
+```
+
+| | |
+|---|---|
+| vim 9.2 / Neovim 0.12 (identical) | `command line..script /…/probe.vim line 3: Expected 1 but got 2` |
+| vimlrs, before | `Expected 1 but got 2` |
+| vimlrs, after | `script /…/probe.vim line 3: Expected 1 but got 2` |
+
+The leading `command line..` entry is the pre-existing, documented structural
+difference `throwpoint.vim` records: vim is launched with `-c 'source …'` and so
+has that frame, while vimlrs is handed the script path directly. Everything from
+`script …` on is byte-identical, including the per-frame `[N]` call sites
+(`…/probe.vim[7]..function Outer[1]..Inner line 1: …`).
+
+Two supporting changes were needed:
+
+- `estack_sfile()` was split out of `fusevm_bridge::throw_point()`, which had it
+  inline with the `, line N` suffix `throw_exception` appends. Both callers now
+  share the chain; `v:throwpoint` is unchanged (`throwpoint.vim` still passes).
+- `SOURCING_LNUM` was only maintained by the per-statement `VIML_SET_CMDNAME`
+  marker, which the compiler emits **only for programs that use `:try`/`:throw`**
+  (`compile_viml::compile_stmts`, gated on `self.exc`). An assert in a plain
+  script therefore reported `line 0`. The asserts now read the chunk's own line
+  table at dispatch (`call_assert_func`), and `b_call_user` does the same for the
+  caller's line so the `[N]` markers are right. Neither costs a byte of bytecode
+  and neither is on a non-assert path.
+
+Covered by `tests/parity_cases/assert_location.vim`.
+
+## R32-2. Assert values were not escaped, and long runs were not shortened — ✅ FIXED
+
+`fill_assert_error()` renders values through `ga_concat_shorten_esc()`, a second
+pass over the `string()` form that escapes the C0 controls and the backslash and
+collapses a run of more than 20 identical characters. Both helpers were missing,
+so a backslash in a reported value came out single and a padded string dumped in
+full.
+
+| probe | both engines | vimlrs, before |
+|---|---|---|
+| `call assert_match('a\+', 'bbb')` | `Pattern 'a\\+' does not match 'bbb'` | `Pattern 'a\+' does not match 'bbb'` |
+| `call assert_equal("a\tb", 'c')` | `Expected 'a\tb' but got 'c'` | `Expected 'a` TAB `b' but got 'c'` |
+| `call assert_equal("a\x01b", 'c')` | `Expected 'a\x01b' but got 'c'` | (raw 0x01) |
+| `call assert_equal(repeat('x', 60), 'c')` | `Expected '\[x occurs 60 times]' but got 'c'` | the 60 x's |
+
+The user `{msg}` goes through plain `ga_concat` and is NOT escaped; multibyte
+characters pass through untouched, and the run length is counted in characters.
+Covered by `tests/parity_cases/assert_escape.vim`.
+
+## R32-3. `assert_equal()` on two Dicts dumped both whole — ✅ FIXED
+
+`fill_assert_error()` narrows a Dict/Dict comparison to the keys that differ and
+appends `- N equal item(s) omitted`.
+
+| probe | both engines | vimlrs, before |
+|---|---|---|
+| `assert_equal({'a':1,'b':2}, {'a':1,'b':3})` | `Expected {'b': 2} but got {'b': 3} - 1 equal item omitted` | `Expected {'a': 1, 'b': 2} but got {'a': 1, 'b': 3}` |
+| `assert_equal({'a':1,'b':2,'c':3}, {'a':1,'b':2,'c':4})` | `… - 2 equal items omitted` | both dumped whole |
+
+Written inline in `fill_assert_error`, as the C is: `src/ported/` may only define
+names the Neovim C has, and this block has none.
+Covered by `tests/parity_cases/assert_dict_diff.vim`.
+
+## R32-4. Every auto-sized blockwise register was 1 column wide — ✅ FIXED
+
+`get_yank_type()` (`vendor/eval/funcs.c:6580`) leaves `block_len` at the c:6614
+initialiser `-1` when no digits follow `b`/CTRL-V, and `str_to_reg` reads that as
+"size the block from the longest line" (`y_width = blocklen == -1 ? maxlen - 1 :
+blocklen`). `f_setreg` passed `0` instead, pinning the width to 1. Separately,
+the `{options}`-string loop stepped one byte at a time, so the digits in `'b3'`
+were never read at all — the C's `get_yank_type` advances the cursor over them
+before the loop's own `stropt++`.
+
+| probe (`getregtype` after) | both engines | vimlrs, before |
+|---|---|---|
+| `call setreg('a', 'z', 'b3')` | `^V3` | `^V1` |
+| `call setreg('b', 'z', "\<C-V>5")` | `^V5` | `^V1` |
+| `call setreg('c', 'abcd', 'b')` | `^V4` | `^V1` |
+| `call setreg('d', ['ab','cde'], 'b')` | `^V3` | `^V1` |
+| `call setreg('e', {'regcontents': ['ab','cde'], 'regtype': 'b'})` | `^V3` | `^V1` |
+
+Only the explicit-width Dict form (`{'regtype': 'b7'}`) was already right.
+Covered by `tests/parity_cases/setreg_blockwidth.vim`.
+
+## R32-5. `tests/data/fake_fn_allowlist.txt` — three names added, in an isolated commit
+
+The three testing.c helpers ported this round (`prepare_assert_error`,
+`ga_concat_esc`, `ga_concat_shorten_esc`) are **real Neovim C functions**, quoted
+verbatim from upstream `src/nvim/testing.c` in the allowlist comment; they cannot
+be found by a scan of `vendor/` only because testing.c is not part of the
+vendored eval tree, exactly like the nine `f_assert_*` names already listed above
+them. The addition went in its own commit, touching nothing else, and the gate
+was not otherwise changed. The three standing R22-O3 names (`f_typename`,
+`type_name_of`, `member_of`) are still reported and were **not** added.
+
+## Still open
+
+### R32-O1. `"\<BS>"`, `"\<Del>"` and the rest of the K_SPECIAL key names
+
+Measured this round, both engines identical:
+
+| probe | vim 9.2 / Neovim 0.12 | vimlrs |
+|---|---|---|
+| `echo str2list("\<BS>")` | `[128, 107, 98]` | `[60, 66, 83, 62]` |
+| `echo str2list("\<Del>")` | `[128, 107, 68]` | `[60, 68, 101, 108, 62]` |
+| `echo char2nr("\<BS>")` | `128` | `60` |
+| `echo strtrans("\<BS>")` | `<80>kb` | `<BS>` |
+
+vimlrs leaves the notation literal. This is the substrate limit `keycodes.rs`
+already documents in its module header: a key with no character form is a
+`K_SPECIAL` (0x80) byte sequence that is not valid UTF-8, and strings are Rust
+`String`. `"\<Esc>"`, `"\<Tab>"`, `"\<CR>"`, `"\<C-A>"` and the rest of the
+character-valued names are correct. Closing it means moving the string layer to
+bytes, not patching `trans_special`.
+
+### R32-O2. A builtin that reports an error still aborts the `:echo` around it
+
+Both engines run `emsg` inside a builtin and then return a default value, so the
+enclosing `:echo` still prints. vimlrs treats the error as fatal to the
+expression and prints nothing:
+
+| probe | vim | Neovim | vimlrs |
+|---|---|---|---|
+| `echo str2nr('0x1f', 0)` | `E474: Invalid argument` then `0` | same | `E474: Invalid argument`, no `0` |
+| `echo string(json_decode('  '))` | `v:none` (no error) | `E474: …` then `0` | `E474: …`, no `0` |
+
+The `json_decode` row is additionally an engine split (vim accepts a blank
+string), and this port follows Neovim on the error itself — only the missing
+value is the defect. Closing it is an evaluator-level change (a builtin `semsg`
+must not make `eval` return FAIL), not a per-builtin fix, so it is recorded
+rather than patched.
+
+### R32-O3. `substitute()` with a `\=` expression that yields a List or Dict
+
+| probe | both engines | vimlrs |
+|---|---|---|
+| `echo string(substitute('x','x','\=[1,2]',''))` | `'1\n2\n'` | `E730: Using a List as a String` |
+| `echo string(substitute('x','x','\={"a":1}',''))` | `'{''a'': 1}'` | `E731: Using a Dictionary as a String` |
+
+The List form is documented (`:help sub-replace-expression`: the items are joined
+with a NL) and is `eval_to_string(arg, convert=true)`'s List branch —
+`tv_list_join` with `"\n"` plus a trailing NL. The Dict form is not explained by
+that function's `else` branch (which is `tv_get_string`, i.e. E731), so the path
+both engines actually take was not identified this round and the fix was not
+guessed at.
+
+### R32-O4. `exists(':cmd')` — unchanged, and now measured
+
+R29-O3 stands. Measured: `exists(':echo')` is `2` and `exists(':ec')` is `1` in
+both engines, `0` here. `cmd_exists()` needs the generated `cmdnames[]` table,
+which this crate does not model.
+
+### R31-O1..O4, R30-O1, R30-O2, R30-O3, R30-O6, R30-O8, R29-O1, R29-O3, R28-O1, R27-O1, R27-O2, R26-O1, R26-O2, R26-O4, R26-O5, R24-O5, R22-O3, R23-O1, R25-O1..O7 — unchanged
+
+R31-N1's `str2float('inf')` row was re-measured this round and is still a
+deliberate Neovim-favoured split: `echo string(1.0/0.0)` is `inf` in vim and
+`str2float('inf')` in both Neovim and this port. It was not "fixed".

@@ -1,0 +1,17 @@
+0
+Expected 'a\\b' but got 'c'
+Pattern 'a\\+' does not match 'bbb'
+Pattern 'b\\+' does match 'bbb'
+Expected 'a\bb' but got 'c'
+Expected 'a\eb' but got 'c'
+Expected 'a\fb' but got 'c'
+Expected 'a\nb' but got 'c'
+Expected 'a\tb' but got 'c'
+Expected 'a\rb' but got 'c'
+Expected 'a\x01b' but got 'c'
+Expected 'a\x7fb' but got 'c'
+Expected 'é' but got 'c'
+Expected '\[x occurs 21 times]' but got 'c'
+Expected 'xxxxxxxxxxxxxxxxxxxx' but got 'c'
+Expected '\[é occurs 25 times]' but got 'c'
+a\b: Expected 1 but got 2

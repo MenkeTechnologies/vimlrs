@@ -1770,11 +1770,26 @@ thread_local! {
 /// machine's vim regardless, which is why `tests/parity_cases/throwpoint.vim`
 /// records the observable parts rather than the literal value.
 fn throw_point() -> String {
+    let chain = estack_sfile().unwrap_or_default();
+    let lnum = SOURCING_LNUM.with(|l| l.get());
+    if chain.is_empty() {
+        return String::new();
+    }
+    format!("{chain}, line {lnum}")
+}
+
+/// c: `estack_sfile(ESTACK_NONE)` (`Src/runtime.c`, not vendored) — the chain
+/// alone, without the `, line N` suffix `throw_exception` appends to it.
+///
+/// Two callers need it at different granularities: [`throw_point`] wants the
+/// suffix, while `prepare_assert_error` (testing.c) puts the line number in its
+/// own `" line N: "` shape, so the shared part is this function.
+fn estack_sfile() -> Option<String> {
     let scripts = crate::ported::eval::fs::SOURCING_NAME.with(|s| s.borrow().clone());
     let funcs: Vec<String> = crate::ported::eval::vars::funccal_stack
         .with(|s| s.borrow().iter().map(|f| f.fc_name.clone()).collect());
     if scripts.is_empty() && funcs.is_empty() {
-        return String::new();
+        return None;
     }
     // c: the first function in the chain is introduced by "function ", the rest
     // are bare names — `function Outer[1]..Thrower`, not `…function Thrower`.
@@ -1790,7 +1805,6 @@ fn throw_point() -> String {
     // function frame's is its call site; a script's is the line that called into
     // the frame below it, i.e. the outermost call site once functions are in play.
     let sites = CALL_SITE_LNUM.with(|c| c.borrow().clone());
-    let lnum = SOURCING_LNUM.with(|l| l.get());
     let mut out = String::new();
     for (i, e) in entries.iter().enumerate() {
         if i > 0 {
@@ -1804,7 +1818,7 @@ fn throw_point() -> String {
             out.push_str(&format!("[{}]", site.unwrap_or(0)));
         }
     }
-    format!("{out}, line {lnum}")
+    Some(out)
 }
 
 /// Publish `v:throwpoint`, to both stores: the thread-local the `v:` read path
@@ -3045,6 +3059,13 @@ fn b_call_member(vm: &mut VM, argc: u8) -> Value {
 }
 
 fn b_call_user(vm: &mut VM, argc: u8) -> Value {
+    // c: `SOURCING_LNUM` is the caller's line at the moment it enters the callee,
+    // and it is what the frame's `[N]` marker in `estack_sfile()` records. The
+    // per-statement marker that normally maintains it is emitted only for
+    // exception-using programs, so read the chunk's line table directly — a call
+    // already costs far more than one Cell store, and without it every `[N]` in
+    // an assert's location prefix read `[0]`.
+    SOURCING_LNUM.with(|l| l.set(vm_line(vm)));
     // Stack: [name, arg0, …, arg{argc-1}] (name pushed first).
     let mut args = Vec::with_capacity(argc as usize);
     for _ in 0..argc {
@@ -3695,6 +3716,7 @@ fn tv_string_item(it: &listitem_T) -> String {
 /// follows Neovim's `testing.c`, which is not part of the vendored eval tree.
 /// Appends through the ported `assert_error` (`vendor/eval/vars.c`).
 fn b_assert_fails(vm: &mut VM, argc: u8) -> Value {
+    SOURCING_LNUM.with(|l| l.set(vm_line(vm)));
     let mut args = Vec::with_capacity(argc as usize);
     for _ in 0..argc {
         args.push(pop_tv(vm));
@@ -3766,8 +3788,13 @@ fn b_assert_fails(vm: &mut VM, argc: u8) -> Value {
 }
 
 /// Append a message to `v:errors` (thin wrapper over the ported `assert_error`).
+///
+/// c: every testing.c assert opens its garray with `prepare_assert_error()`, so
+/// the bridge-level asserts (`assert_fails`/`assert_beeps`/`assert_nobeep`) carry
+/// the same `<script> line N: ` stamp as the ported ones.
 fn set_var_errors(msg: &str) {
-    crate::ported::eval::vars::assert_error(msg);
+    let prefix = crate::ported::eval::funcs::prepare_assert_error();
+    crate::ported::eval::vars::assert_error(&(prefix + msg));
 }
 
 /// Run `{cmd}` (errors captured) and report whether it "rang the bell": an Ex
@@ -3792,6 +3819,7 @@ fn assert_beeps_run(cmd: &str) -> bool {
 /// does NOT cause a beep. Bridge-level (runs a command, like `assert_fails()`);
 /// spec in `vendor/eval.lua`, implementation follows Neovim's testing.c.
 fn b_assert_beeps(vm: &mut VM, argc: u8) -> Value {
+    SOURCING_LNUM.with(|l| l.set(vm_line(vm)));
     let mut args = Vec::with_capacity(argc as usize);
     for _ in 0..argc {
         args.push(pop_tv(vm));
@@ -3809,6 +3837,7 @@ fn b_assert_beeps(vm: &mut VM, argc: u8) -> Value {
 /// `assert_nobeep({cmd})` — run `{cmd}` and record a failure in `v:errors` if it
 /// DOES cause a beep. The complement of `assert_beeps()`.
 fn b_assert_nobeep(vm: &mut VM, argc: u8) -> Value {
+    SOURCING_LNUM.with(|l| l.set(vm_line(vm)));
     let mut args = Vec::with_capacity(argc as usize);
     for _ in 0..argc {
         args.push(pop_tv(vm));
@@ -4460,6 +4489,20 @@ fn call_func(vm: &mut VM, argc: u8, f: fn(&[typval_T], &mut typval_T)) -> Value 
     let mut rettv = tv_num(0);
     f(&args, &mut rettv);
     tv_to_value(rettv)
+}
+
+/// [`call_func`] for the `assert_*` family, which additionally needs
+/// `SOURCING_LNUM` to be current: `prepare_assert_error()` stamps every
+/// `v:errors` entry with the line it was raised on.
+///
+/// The per-statement `VIML_SET_CMDNAME` marker that normally maintains it is
+/// emitted only for programs that use `:try`/`:throw` (see
+/// `compile_viml::compile_stmts`), so an assert in a plain script would report
+/// line 0. Reading the chunk's own line table here costs no bytecode and no
+/// marker, and confines the update to the asserts that observe it.
+fn call_assert_func(vm: &mut VM, argc: u8, f: fn(&[typval_T], &mut typval_T)) -> Value {
+    SOURCING_LNUM.with(|l| l.set(vm_line(vm)));
+    call_func(vm, argc, f)
 }
 
 /// Dispatch a single-argument float builtin (`sqrt`/`floor`/`sin`/…) through the
@@ -5333,6 +5376,11 @@ pub fn install(vm: &mut VM) {
     FUNC_EXISTS_HOOK.with(|h| *h.borrow_mut() = Some(func_exists_hook));
     crate::ported::eval::typval::EVAL_STRING_HOOK
         .with(|h| *h.borrow_mut() = Some(eval_string_hook));
+    // c: `prepare_assert_error()` (testing.c) reads the exestack + SOURCING_LNUM;
+    // both live here, so the ported assert framework reaches them through hooks.
+    crate::ported::eval::typval::ESTACK_SFILE_HOOK.with(|h| *h.borrow_mut() = Some(estack_sfile));
+    crate::ported::eval::typval::SOURCING_LNUM_HOOK
+        .with(|h| *h.borrow_mut() = Some(|| SOURCING_LNUM.with(|l| l.get()) as i64));
     crate::ported::eval::userfunc::FIND_FUNC_HOOK.with(|h| *h.borrow_mut() = Some(find_func_hook));
     crate::ported::eval::userfunc::REMOVE_FUNC_HOOK
         .with(|h| *h.borrow_mut() = Some(remove_func_hook));
@@ -5589,29 +5637,31 @@ pub fn install(vm: &mut VM) {
     });
     vm.register_builtin(VIML_FN_SETTAGSTACK, |vm, n| call_func(vm, n, f_settagstack));
     vm.register_builtin(VIML_FN_ASSERT_EQUAL, |vm, n| {
-        call_func(vm, n, f_assert_equal)
+        call_assert_func(vm, n, f_assert_equal)
     });
     vm.register_builtin(VIML_FN_ASSERT_NOTEQUAL, |vm, n| {
-        call_func(vm, n, f_assert_notequal)
+        call_assert_func(vm, n, f_assert_notequal)
     });
-    vm.register_builtin(VIML_FN_ASSERT_TRUE, |vm, n| call_func(vm, n, f_assert_true));
+    vm.register_builtin(VIML_FN_ASSERT_TRUE, |vm, n| {
+        call_assert_func(vm, n, f_assert_true)
+    });
     vm.register_builtin(VIML_FN_ASSERT_FALSE, |vm, n| {
-        call_func(vm, n, f_assert_false)
+        call_assert_func(vm, n, f_assert_false)
     });
     vm.register_builtin(VIML_FN_ASSERT_MATCH, |vm, n| {
-        call_func(vm, n, f_assert_match)
+        call_assert_func(vm, n, f_assert_match)
     });
     vm.register_builtin(VIML_FN_ASSERT_NOTMATCH, |vm, n| {
-        call_func(vm, n, f_assert_notmatch)
+        call_assert_func(vm, n, f_assert_notmatch)
     });
     vm.register_builtin(VIML_FN_ASSERT_REPORT, |vm, n| {
-        call_func(vm, n, f_assert_report)
+        call_assert_func(vm, n, f_assert_report)
     });
     vm.register_builtin(VIML_FN_ASSERT_INRANGE, |vm, n| {
-        call_func(vm, n, f_assert_inrange)
+        call_assert_func(vm, n, f_assert_inrange)
     });
     vm.register_builtin(VIML_FN_ASSERT_EXCEPTION, |vm, n| {
-        call_func(vm, n, f_assert_exception)
+        call_assert_func(vm, n, f_assert_exception)
     });
     vm.register_builtin(VIML_FN_ASSERT_FAILS, b_assert_fails);
     vm.register_builtin(VIML_FN_SYSTEM, |vm, n| call_func(vm, n, f_system));
@@ -5805,7 +5855,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FN_ARGIDX, |vm, n| call_func(vm, n, f_argidx));
     vm.register_builtin(VIML_FN_ARGV, |vm, n| call_func(vm, n, f_argv));
     vm.register_builtin(VIML_FN_ASSERT_EQUALFILE, |vm, n| {
-        call_func(vm, n, f_assert_equalfile)
+        call_assert_func(vm, n, f_assert_equalfile)
     });
     vm.register_builtin(VIML_FN_ARGLISTID, |vm, n| call_func(vm, n, f_arglistid));
     vm.register_builtin(VIML_FN_FOLDLEVEL, |vm, n| call_func(vm, n, f_foldlevel));

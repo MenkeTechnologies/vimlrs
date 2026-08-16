@@ -3297,8 +3297,13 @@ pub fn f_setreg(argvars: &[typval_T], rettv: &mut typval_T) {
                     }
                     _ => 0,
                 };
+                // c:6614 `int block_len = -1;` is the *auto* width: `str_to_reg`
+                // (`y_width = blocklen == -1 ? maxlen - 1 : blocklen`) then sizes
+                // the block from the longest line it stored. Only a digit run
+                // after `b`/CTRL-V replaces it, so a bare `'b'` must stay -1 —
+                // passing 0 here pinned every auto-sized block register to `^V1`.
                 let width = if ndigits == 0 {
-                    0
+                    -1
                 } else {
                     String::from_utf8_lossy(&rt[1..=ndigits])
                         .parse::<i32>()
@@ -3330,17 +3335,45 @@ pub fn f_setreg(argvars: &[typval_T], rettv: &mut typval_T) {
 
     let mut append = false;
     if argvars.len() > 2 {
-        let opt = tv_get_string(&argvars[2]);
-        for c in opt.bytes() {
+        let opt = tv_get_string(&argvars[2]).into_bytes();
+        // c:6679 `for (; *stropt != NUL; stropt++) switch (*stropt)`. The default
+        // arm calls `get_yank_type(&stropt, …)`, which for a blockwise char
+        // ADVANCES `stropt` over the width digits (c:6596-6600) before the loop's
+        // own `stropt++` — so `'b3'` is one type token, not `b` then a stray `3`.
+        let mut i = 0usize;
+        while i < opt.len() {
+            let c = opt[i];
             match c {
                 b'a' | b'A' => append = true,
                 b'u' | b'"' => {}
                 _ => {
-                    if let Some(t) = get_yank_type(c, 0) {
+                    let ndigits = if matches!(c, b'b' | 0x16) {
+                        opt[i + 1..]
+                            .iter()
+                            .take_while(|d| d.is_ascii_digit())
+                            .count()
+                    } else {
+                        0
+                    };
+                    // c:6598 `*block_len = getdigits_int(&stropt, false, 0) - 1;`
+                    // — absent digits leave the c:6614 `block_len = -1` auto width.
+                    let width = if ndigits == 0 {
+                        -1
+                    } else {
+                        String::from_utf8_lossy(&opt[i + 1..=i + ndigits])
+                            .parse::<crate::ported::window::colnr_T>()
+                            .unwrap_or(1)
+                            - 1
+                    };
+                    // c:6603 an unrecognised char returns FAIL, which this loop
+                    // ignores (no error, no type change).
+                    if let Some(t) = get_yank_type(c, width) {
                         yank_type = Some(t);
                     }
+                    i += ndigits;
                 }
             }
+            i += 1;
         }
     }
 
@@ -5304,6 +5337,87 @@ enum AssertType {
     Other,
 }
 
+/// Port of `prepare_assert_error()` (Neovim `testing.c`, not vendored) — the
+/// location stamp every `v:errors` entry opens with: the `estack_sfile()` chain,
+/// then `line {SOURCING_LNUM}`, then `": "`. A failure recorded at script line 3
+/// therefore reads `…/probe.vim line 3: Expected 1 but got 2`, and one inside a
+/// function names the whole call chain.
+///
+/// The two inputs come through `ESTACK_SFILE_HOOK`/`SOURCING_LNUM_HOOK` because
+/// the exestack belongs to the bridge; with neither installed (a value-layer unit
+/// test) the prefix is empty, which is the C's `sname == NULL && SOURCING_LNUM
+/// == 0` case.
+pub(crate) fn prepare_assert_error() -> String {
+    let sname = crate::ported::eval::typval::ESTACK_SFILE_HOOK
+        .with(|h| *h.borrow())
+        .and_then(|f| f());
+    let lnum = crate::ported::eval::typval::SOURCING_LNUM_HOOK
+        .with(|h| *h.borrow())
+        .map_or(0, |f| f());
+    let mut ga = String::new();
+    if let Some(s) = &sname {
+        ga.push_str(s);
+        if lnum > 0 {
+            ga.push(' ');
+        }
+    }
+    if lnum > 0 {
+        ga.push_str(&format!("line {lnum}"));
+    }
+    if sname.is_some() || lnum > 0 {
+        ga.push_str(": ");
+    }
+    ga
+}
+
+/// Port of `ga_concat_esc()` (Neovim `testing.c`) — append one character to the
+/// assert message, escaping the C0 controls and the backslash so a `v:errors`
+/// entry stays one readable line. A multibyte character (`clen > 1`) is copied
+/// through untouched.
+fn ga_concat_esc(gap: &mut String, c: char) {
+    if c.len_utf8() > 1 {
+        gap.push(c);
+        return;
+    }
+    match c as u8 {
+        0x08 => gap.push_str("\\b"),   // c: BS
+        0x1b => gap.push_str("\\e"),   // c: ESC
+        0x0c => gap.push_str("\\f"),   // c: FF
+        b'\n' => gap.push_str("\\n"),  // c: NL
+        b'\t' => gap.push_str("\\t"),  // c: TAB
+        b'\r' => gap.push_str("\\r"),  // c: CAR
+        b'\\' => gap.push_str("\\\\"), // c: '\\'
+        b if b < b' ' || b == 0x7f => gap.push_str(&format!("\\x{b:02x}")),
+        _ => gap.push(c),
+    }
+}
+
+/// Port of `ga_concat_shorten_esc()` (Neovim `testing.c`) — `ga_concat_esc` over
+/// a whole string, with one extra rule: a run of MORE THAN 20 identical
+/// characters collapses to `\[c occurs N times]`, so a failed assert on a long
+/// padded string does not bury the difference.
+fn ga_concat_shorten_esc(gap: &mut String, str: &str) {
+    let chars: Vec<char> = str.chars().collect();
+    let mut i = 0usize;
+    while i < chars.len() {
+        let c = chars[i];
+        // c: `while (*s != NUL && c == utf_ptr2char(s)) { same_len++; s += clen; }`
+        let mut same_len = 1usize;
+        while i + same_len < chars.len() && chars[i + same_len] == c {
+            same_len += 1;
+        }
+        if same_len > 20 {
+            gap.push_str("\\[");
+            ga_concat_esc(gap, c);
+            gap.push_str(&format!(" occurs {same_len} times]"));
+            i += same_len;
+        } else {
+            ga_concat_esc(gap, c);
+            i += 1;
+        }
+    }
+}
+
 /// Port of `fill_assert_error()` (Neovim `testing.c`, not vendored) — build the
 /// `v:errors` line: an optional `{msg}: ` prefix, then `Expected …`/`Pattern …`
 /// per `atype`, the expected value (or `exp_str` literal), and for the
@@ -5318,6 +5432,8 @@ fn fill_assert_error(
     let mut s = String::new();
     if let Some(m) = opt_msg {
         if m.v_type != VAR_UNKNOWN {
+            // c: the user {msg} goes through plain `ga_concat` — only the VALUES
+            // are escaped, so a message with a backslash in it stays literal.
             s.push_str(&encode_tv2echo(m).to_string_lossy());
             s.push_str(": ");
         }
@@ -5327,23 +5443,60 @@ fn fill_assert_error(
         AssertType::NotEqual => "Expected not equal to ",
         _ => "Expected ",
     });
-    match exp_str {
-        Some(e) => s.push_str(e),
-        None => s.push_str(&encode_tv2string(exp_tv).to_string_lossy()),
+    // c: when BOTH sides are Dicts, the report drops the entries that are equal
+    // and says how many it dropped — so a one-key difference in a wide Dict is
+    // visible instead of buried. `ASSERT_NOTEQUAL` keeps the whole value (there
+    // is no "got" side to diff against). Written inline because the C is inline:
+    // `src/ported/` may only define names the Neovim C has
+    // (`tests/ported_fn_names_match_c.rs`), and this block has no name of its own.
+    let mut omitted = 0;
+    let mut exp_tv = exp_tv.clone();
+    let mut got_tv = got_tv.clone();
+    if exp_str.is_none() && atype != AssertType::NotEqual {
+        if let (v_dict(Some(exp_d)), v_dict(Some(got_d))) = (&exp_tv.vval, &got_tv.vval) {
+            let (exp_d, got_d) = (exp_d.borrow(), got_d.borrow());
+            let exp_out = tv_dict_alloc();
+            let got_out = tv_dict_alloc();
+            // c: first pass over the EXPECTED dict — a key the got side lacks or
+            // disagrees on is kept on BOTH sides, anything else is counted.
+            for (key, tv) in exp_d.dv_hashtab.iter() {
+                match tv_dict_find(&got_d, key) {
+                    Some(other) if tv_equal(tv, other, false) => omitted += 1,
+                    other => {
+                        tv_dict_add_tv(&mut exp_out.borrow_mut(), key, tv.clone());
+                        if let Some(other) = other {
+                            tv_dict_add_tv(&mut got_out.borrow_mut(), key, other.clone());
+                        }
+                    }
+                }
+            }
+            // c: second pass adds the keys only the GOT dict has.
+            for (key, tv) in got_d.dv_hashtab.iter() {
+                if tv_dict_find(&exp_d, key).is_none() {
+                    tv_dict_add_tv(&mut got_out.borrow_mut(), key, tv.clone());
+                }
+            }
+            drop((exp_d, got_d));
+            exp_tv.vval = v_dict(Some(exp_out));
+            got_tv.vval = v_dict(Some(got_out));
+        }
     }
-    match atype {
-        AssertType::NotEqual => {}
-        AssertType::Match => {
-            s.push_str(" does not match ");
-            s.push_str(&encode_tv2string(got_tv).to_string_lossy());
-        }
-        AssertType::NotMatch => {
-            s.push_str(" does match ");
-            s.push_str(&encode_tv2string(got_tv).to_string_lossy());
-        }
-        _ => {
-            s.push_str(" but got ");
-            s.push_str(&encode_tv2string(got_tv).to_string_lossy());
+    match exp_str {
+        Some(e) => ga_concat_shorten_esc(&mut s, e),
+        None => ga_concat_shorten_esc(&mut s, &encode_tv2string(&exp_tv).to_string_lossy()),
+    }
+    if atype != AssertType::NotEqual {
+        s.push_str(match atype {
+            AssertType::Match => " does not match ",
+            AssertType::NotMatch => " does match ",
+            _ => " but got ",
+        });
+        ga_concat_shorten_esc(&mut s, &encode_tv2string(&got_tv).to_string_lossy());
+        if omitted != 0 {
+            s.push_str(&format!(
+                " - {omitted} equal item{} omitted",
+                if omitted == 1 { "" } else { "s" }
+            ));
         }
     }
     s
@@ -5360,7 +5513,8 @@ fn assert_equal_common(argvars: &[typval_T], rettv: &mut typval_T, want_equal: b
         } else {
             AssertType::NotEqual
         };
-        let msg = fill_assert_error(argvars.get(2), None, &argvars[0], &argvars[1], atype);
+        let msg = prepare_assert_error()
+            + &fill_assert_error(argvars.get(2), None, &argvars[0], &argvars[1], atype);
         assert_error(&msg);
         *rettv = typval_T::from(1 as varnumber_T);
     } else {
@@ -5389,7 +5543,8 @@ fn assert_bool(argvars: &[typval_T], rettv: &mut typval_T, is_true: bool) {
     };
     if !ok {
         let lit = if is_true { "True" } else { "False" };
-        let msg = fill_assert_error(argvars.get(1), Some(lit), v, v, AssertType::Other);
+        let msg = prepare_assert_error()
+            + &fill_assert_error(argvars.get(1), Some(lit), v, v, AssertType::Other);
         assert_error(&msg);
         *rettv = typval_T::from(1 as varnumber_T);
     } else {
@@ -5419,7 +5574,8 @@ fn assert_match_common(argvars: &[typval_T], rettv: &mut typval_T, want_match: b
         } else {
             AssertType::NotMatch
         };
-        let msg = fill_assert_error(argvars.get(2), None, &argvars[0], &argvars[1], atype);
+        let msg = prepare_assert_error()
+            + &fill_assert_error(argvars.get(2), None, &argvars[0], &argvars[1], atype);
         assert_error(&msg);
         *rettv = typval_T::from(1 as varnumber_T);
     } else {
@@ -5438,7 +5594,7 @@ pub fn f_assert_notmatch(argvars: &[typval_T], rettv: &mut typval_T) {
 
 /// Port of `f_assert_report()` — append `{msg}` to `v:errors` unconditionally.
 pub fn f_assert_report(argvars: &[typval_T], rettv: &mut typval_T) {
-    assert_error(&tv_get_string(&argvars[0]));
+    assert_error(&(prepare_assert_error() + &tv_get_string(&argvars[0])));
     *rettv = typval_T::from(1 as varnumber_T);
 }
 
@@ -5456,7 +5612,7 @@ pub fn f_assert_inrange(argvars: &[typval_T], rettv: &mut typval_T) {
     let upper = as_f64(&argvars[1]);
     let actual = as_f64(&argvars[2]);
     if actual < lower || actual > upper {
-        let mut msg = String::new();
+        let mut msg = prepare_assert_error();
         if let Some(m) = argvars.get(3) {
             if m.v_type != VAR_UNKNOWN {
                 msg.push_str(&encode_tv2echo(m).to_string_lossy());
@@ -5483,11 +5639,12 @@ pub fn f_assert_exception(argvars: &[typval_T], rettv: &mut typval_T) {
     let exc = get_vim_var_str(VV_EXCEPTION);
     if exc.is_empty() {
         // c: "v:exception is not set" when nothing was caught.
-        assert_error("v:exception is not set");
+        assert_error(&(prepare_assert_error() + "v:exception is not set"));
         *rettv = typval_T::from(1 as varnumber_T);
     } else if !exc.contains(&error) {
         let got = typval_T::from(exc);
-        let msg = fill_assert_error(argvars.get(1), None, &argvars[0], &got, AssertType::Other);
+        let msg = prepare_assert_error()
+            + &fill_assert_error(argvars.get(1), None, &argvars[0], &got, AssertType::Other);
         assert_error(&msg);
         *rettv = typval_T::from(1 as varnumber_T);
     } else {
@@ -7680,7 +7837,7 @@ pub fn f_assert_equalfile(argvars: &[typval_T], rettv: &mut typval_T) {
     } else {
         String::new()
     };
-    assert_error(&format!("{extra}{detail}"));
+    assert_error(&format!("{}{extra}{detail}", prepare_assert_error()));
     rettv.vval = v_number(1);
 }
 
