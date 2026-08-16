@@ -96,6 +96,15 @@ fill_assert_error
 assert_equal_common
 assert_match_common
 assert_bool
+# The location stamp every v:errors entry opens with, and the two escapers that
+# render the values in it. Also real Neovim functions from testing.c, in the same
+# static block as fill_assert_error above:
+#   static void prepare_assert_error(garray_T *gap)
+#   static void ga_concat_esc(garray_T *gap, const char *p, int clen)
+#   static void ga_concat_shorten_esc(garray_T *gap, const char *str)
+prepare_assert_error
+ga_concat_esc
+ga_concat_shorten_esc
 
 # ── message.c (not vendored) — emsg capture for assert_fails() ──
 # emsg/semsg/did_emsg appear as calls in the vendored eval tree, so the
