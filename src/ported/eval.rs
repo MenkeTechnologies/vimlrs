@@ -50,8 +50,7 @@ use std::rc::Rc;
 use crate::ported::eval::typval::{
     tv_blob_copy, tv_blob_equal, tv_clear, tv_dict_equal, tv_equal, tv_get_float,
     tv_get_number_chk, tv_get_string, tv_get_string_buf_chk, tv_get_string_chk, tv_list_equal,
-    tv_list_find,
-    tv_list_find_nr, tv_list_len, tv_list_watch_add,
+    tv_list_find, tv_list_find_nr, tv_list_len, tv_list_watch_add,
 };
 use crate::ported::eval::typval_defs_h::{
     blob_T, dict_T, list_T, partial_T, typval_T, typval_vval_union::*, varnumber_T, VarLockStatus,
@@ -396,8 +395,8 @@ pub fn typval_compare(typ1: &mut typval_T, typ2: &typval_T, r#type: exprtype_T, 
             EXPR_SMALLER => (i < 0) as varnumber_T,
             EXPR_SEQUAL => (i <= 0) as varnumber_T,
             EXPR_MATCH | EXPR_NOMATCH => {
-                let mut m = pattern_match(&s2.to_string_lossy(), &s1.to_string_lossy(), ic)
-                    as varnumber_T;
+                let mut m =
+                    pattern_match(&s2.to_string_lossy(), &s1.to_string_lossy(), ic) as varnumber_T;
                 if r#type == EXPR_NOMATCH {
                     m = (m == 0) as varnumber_T;
                 }

@@ -2950,9 +2950,7 @@ impl Parser {
         }
         let tail = self.src.get(span..).unwrap_or("").to_string();
         self.deferred_e15.push(self.whole_expr_e15());
-        self.toks[self.i].kind = Tok::DeferredErr(format!(
-            "E15: Invalid expression: \"{tail}\""
-        ));
+        self.toks[self.i].kind = Tok::DeferredErr(format!("E15: Invalid expression: \"{tail}\""));
         // The glued run lexed as its own Ident/Number token(s) (`12abc` is
         // `12` + `abc`). Vim never sees them — `eval_number` FAILed on the
         // whole literal — so drop everything the run covers, and only that:

@@ -26,6 +26,10 @@ use std::rc::Rc;
 /// `\=`-replacement expression evaluator hook (`expr -> string`).
 type SubstExprFn = fn(&str) -> String;
 
+/// A cache entry: the compiled pattern, and the diagnostic it raises (kept so a
+/// cache hit still reports it).
+type CachedRegex = (Rc<Regex>, Option<String>);
+
 thread_local! {
     /// Hook (installed by the bridge) that evaluates a `\=`-prefixed substitute
     /// replacement *expression* to its string result. `submatch()` reads
@@ -39,7 +43,7 @@ thread_local! {
     /// Compiled patterns, keyed by the pattern text — see [`Regex::compile`].
     /// The `Option<String>` is the diagnostic the pattern raises, kept so a
     /// cache hit still reports it.
-    static REGEX_CACHE: RefCell<HashMap<String, (Rc<Regex>, Option<String>)>> =
+    static REGEX_CACHE: RefCell<HashMap<String, CachedRegex>> =
         RefCell::new(HashMap::new());
 }
 
