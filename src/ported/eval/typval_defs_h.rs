@@ -224,6 +224,24 @@ impl From<String> for typval_T {
     }
 }
 
+impl From<crate::vimstr::VimStr> for typval_T {
+    /// A `VAR_STRING` value built from BYTES.
+    ///
+    /// The `String` impl above cannot carry a `char_u *` that is not valid
+    /// UTF-8, and a call site that reaches for it has to launder the bytes
+    /// through `from_utf8_lossy` first — which silently rewrites every byte it
+    /// cannot decode as `U+FFFD`. That is a real difference, not a rendering
+    /// one: `'A'[1]` on a string holding `41 c2 97` is the single byte `c2`,
+    /// which vim echoes as `<c2>`, and the lossy path answered `efbfbd`.
+    fn from(s: crate::vimstr::VimStr) -> Self {
+        typval_T {
+            v_type: VarType::VAR_STRING,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: typval_vval_union::v_string(s),
+        }
+    }
+}
+
 /// `struct listitem_S { listitem_T *li_next; listitem_T *li_prev; typval_T
 /// li_tv; }` — an item of a list. (c:167) The `li_next`/`li_prev` chain is
 /// replaced by the owning `Vec` (see file-header RUST-PORT NOTE); `li_tv` is

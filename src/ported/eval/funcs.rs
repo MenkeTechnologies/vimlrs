@@ -336,11 +336,14 @@ pub fn f_function(argvars: &[typval_T], rettv: &mut typval_T) {
 
 /// Port of `f_char2nr()` from `Src/eval/funcs.c` — code point of the first char.
 pub fn f_char2nr(argvars: &[typval_T], rettv: &mut typval_T) {
-    let n = tv_get_string(&argvars[0])
-        .chars()
-        .next()
-        .map_or(0, |c| c as varnumber_T);
-    rettv.vval = v_number(n);
+    // c: `rettv->vval.v_number = utf_ptr2char(tv_get_string(&argvars[0]))`
+    // (`vendor/eval/funcs.c:705`) — `utf_ptr2char` reads BYTES and hands back
+    // the raw lead byte when they do not form a sequence, so `char2nr` on the
+    // `c2` half of a split two-byte character is 194, not U+FFFD. Decoding via
+    // `str::chars()` on a lossy `String` answered 65533 for every such byte,
+    // and for two DIFFERENT ones alike.
+    let s = crate::ported::eval::typval::tv_get_string_buf_chk(&argvars[0]).unwrap_or_default();
+    rettv.vval = v_number(crate::ported::mbyte::utf_ptr2char(s.as_bytes()) as varnumber_T);
 }
 
 /// Port of `f_nr2char()` from `Src/eval/funcs.c` — char for a code point.

@@ -49,7 +49,8 @@ use std::rc::Rc;
 
 use crate::ported::eval::typval::{
     tv_blob_copy, tv_blob_equal, tv_clear, tv_dict_equal, tv_equal, tv_get_float,
-    tv_get_number_chk, tv_get_string, tv_get_string_chk, tv_list_equal, tv_list_find,
+    tv_get_number_chk, tv_get_string, tv_get_string_buf_chk, tv_get_string_chk, tv_list_equal,
+    tv_list_find,
     tv_list_find_nr, tv_list_len, tv_list_watch_add,
 };
 use crate::ported::eval::typval_defs_h::{
@@ -375,11 +376,15 @@ pub fn typval_compare(typ1: &mut typval_T, typ2: &typval_T, r#type: exprtype_T, 
             _ => 0,
         };
     } else {
-        let s1 = tv_get_string(typ1);
-        let s2 = tv_get_string(typ2);
+        // BYTES on purpose: `tv_get_string` hands back a lossy `String`, which
+        // is what made two different undecodable bytes compare equal (see
+        // `mb_strcmp_ic`). The regex arm below still wants text, so it takes
+        // the lossy view of the same bytes.
+        let s1 = tv_get_string_buf_chk(typ1).unwrap_or_default();
+        let s2 = tv_get_string_buf_chk(typ2).unwrap_or_default();
         // c: i = (type != MATCH && type != NOMATCH) ? mb_strcmp_ic(ic, s1, s2) : 0;
         let i: i32 = if r#type != EXPR_MATCH && r#type != EXPR_NOMATCH {
-            mb_strcmp_ic(ic, &s1, &s2)
+            mb_strcmp_ic(ic, s1.as_bytes(), s2.as_bytes())
         } else {
             0
         };
@@ -391,7 +396,8 @@ pub fn typval_compare(typ1: &mut typval_T, typ2: &typval_T, r#type: exprtype_T, 
             EXPR_SMALLER => (i < 0) as varnumber_T,
             EXPR_SEQUAL => (i <= 0) as varnumber_T,
             EXPR_MATCH | EXPR_NOMATCH => {
-                let mut m = pattern_match(&s2, &s1, ic) as varnumber_T;
+                let mut m = pattern_match(&s2.to_string_lossy(), &s1.to_string_lossy(), ic)
+                    as varnumber_T;
                 if r#type == EXPR_NOMATCH {
                     m = (m == 0) as varnumber_T;
                 }
@@ -410,18 +416,81 @@ pub fn typval_compare(typ1: &mut typval_T, typ2: &typval_T, r#type: exprtype_T, 
     OK
 }
 
-/// Port of `mb_strcmp_ic()` (`Src/nvim/strings.c`, extern) reduced to byte/UTF-8
-/// comparison with optional case-fold. Returns <0/0/>0 like `strcmp`.
-fn mb_strcmp_ic(ic: bool, s1: &str, s2: &str) -> i32 {
-    let (a, b) = if ic {
-        (s1.to_lowercase(), s2.to_lowercase())
-    } else {
-        (s1.to_string(), s2.to_string())
-    };
-    match a.cmp(&b) {
+/// Port of `mb_strcmp_ic()` (`vendor/mbyte.c:3054`):
+///
+/// ```c
+/// return (ic ? mb_stricmp(s1, s2) : strcmp(s1, s2));
+/// ```
+///
+/// Both arms take BYTES. `strcmp` compares `unsigned char`s, and `mb_stricmp`
+/// (`utf_strnicmp`, `vendor/mbyte.c:1454`) reads code points but drops back to
+/// "bytewise comparison" (its own words, c:1487) the moment either side holds
+/// a sequence that does not decode — which is a state VimL strings reach
+/// routinely, since every byte-indexed operation on one can cut a character in
+/// half.
+///
+/// Taking `&str` here meant the caller had to launder both operands through
+/// `from_utf8_lossy` first, which collapses every undecodable byte to the SAME
+/// `U+FFFD`. Two different one-byte strings then compared EQUAL: on `41 c2 97`,
+/// `s[1]` is `c2` and `s[2]` is `97`, and `s[1] ==# s[2]` answered 1 where vim
+/// answers 0 (and `s[1] ># s[2]`, which is 194 > 151, answered 0 for 1).
+fn mb_strcmp_ic(ic: bool, s1: &[u8], s2: &[u8]) -> i32 {
+    let sign = |o: std::cmp::Ordering| match o {
         std::cmp::Ordering::Less => -1,
         std::cmp::Ordering::Equal => 0,
         std::cmp::Ordering::Greater => 1,
+    };
+    if !ic {
+        // c: `strcmp(s1, s2)` — `[u8]`'s ordering is the same unsigned-byte,
+        // shorter-is-smaller rule (VimL strings hold no interior NUL that a
+        // `char_u *` would stop at; `list2str([0])` is length 0 in vim too).
+        return sign(s1.cmp(s2));
+    }
+    // c: `utf_strnicmp` — walk both as code points and compare each folded
+    // pair, then fall back to a bytewise comparison of what is left once
+    // either side stops decoding.
+    //
+    // RUST-PORT NOTE: the fold is `mb_tolower` (simple lowercase) rather than
+    // the C's `utf_fold`, which consults nvim's own case-folding table. The two
+    // agree on every mapping this port has been measured against; where they
+    // could differ (the handful of code points whose fold is not their simple
+    // lowercase) this answers the lowercase one.
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < s1.len() && j < s2.len() {
+        let (a, b) = (&s1[i..], &s2[j..]);
+        let (la, lb) = (utf_seq_len(a), utf_seq_len(b));
+        // c:1487 — "Continue with bytewise comparison": an undecodable
+        // sequence on either side ends the character-wise walk.
+        let (Some(la), Some(lb)) = (la, lb) else { break };
+        let (ca, cb) = (
+            crate::ported::mbyte::utf_ptr2char(a),
+            crate::ported::mbyte::utf_ptr2char(b),
+        );
+        if ca != cb {
+            let fold = |c: i32| {
+                char::from_u32(c as u32).map_or(c, |ch| crate::ported::mbyte::mb_tolower(ch) as i32)
+            };
+            let (fa, fb) = (fold(ca), fold(cb));
+            if fa != fb {
+                return sign(fa.cmp(&fb));
+            }
+        }
+        i += la;
+        j += lb;
+    }
+    sign(s1[i..].cmp(&s2[j..]))
+}
+
+/// Byte length of the UTF-8 sequence at the start of `p`, or `None` when the
+/// bytes there do not form one — the `c1 <= 0` / `-1` outcomes of the C's
+/// `utf_safe_read_char_adv` (`vendor/mbyte.c:1460`).
+fn utf_seq_len(p: &[u8]) -> Option<usize> {
+    match std::str::from_utf8(p) {
+        Ok(s) => s.chars().next().map(char::len_utf8),
+        Err(e) if e.valid_up_to() > 0 => {
+            std::str::from_utf8(&p[..e.valid_up_to()]).ok()?.chars().next().map(char::len_utf8)
+        }
+        Err(_) => None,
     }
 }
 
@@ -2119,10 +2188,12 @@ pub fn eval_index_inner(
             // `string_slice`/`char_from_string`); the plain `[i]`/`[a:b]`
             // subscript is BYTE-indexed and may split a multibyte character.
             let v = if exclusive {
+                // `slice()` is character-indexed, so its bounds always land on
+                // character boundaries and a `String` result loses nothing.
                 if is_range {
-                    string_slice(&s, n1, n2, exclusive)
+                    string_slice(&s, n1, n2, exclusive).map(crate::vimstr::VimStr::from)
                 } else {
-                    char_from_string(&s, n1)
+                    char_from_string(&s, n1).map(crate::vimstr::VimStr::from)
                 }
             } else {
                 let bytes = s.as_bytes();
@@ -2144,9 +2215,9 @@ pub fn eval_index_inner(
                     if n1 >= len || n2 < 0 || n1 > n2 {
                         None
                     } else {
-                        Some(
-                            String::from_utf8_lossy(&bytes[n1 as usize..=n2 as usize]).into_owned(),
-                        )
+                        Some(crate::vimstr::VimStr::from(
+                            &bytes[n1 as usize..=n2 as usize],
+                        ))
                     }
                 } else {
                     // c: `v = xmemdupz(s + n1, 1)` — a single BYTE; too big or
@@ -2155,7 +2226,7 @@ pub fn eval_index_inner(
                         None
                     } else {
                         let b = n1 as usize;
-                        Some(String::from_utf8_lossy(&bytes[b..b + 1]).into_owned())
+                        Some(crate::vimstr::VimStr::from(&bytes[b..b + 1]))
                     }
                 }
             };
@@ -5886,7 +5957,7 @@ mod tests {
         // that as a bug; updated when the byte semantics were ported.
         let mut s = typval_T::from("héllo".to_string());
         assert_eq!(eval_index(&mut s, "[1]", false), OK);
-        assert!(matches!(&s.vval, v_string(t) if t == "\u{FFFD}"));
+        assert!(matches!(&s.vval, v_string(t) if t.as_bytes() == b"\xc3"));
         // string[1:3] inclusive
         let mut s2 = typval_T::from("abcdef".to_string());
         eval_index(&mut s2, "[1:3]", false);
@@ -5908,9 +5979,10 @@ mod tests {
         use crate::ported::eval_h::{FAIL, OK};
         use std::{cell::RefCell, rc::Rc};
         // string subscript [1] is BYTE-based (c: `v = xmemdupz(s + n1, 1)`;
-        // vim 9.2/nvim 0.12: `'héllo'[1]` is the lone lead byte <c3>, U+FFFD
-        // after lossy decode). Was asserted char-based ("é") while BUGS.md #8
-        // documented that as a bug; updated when the byte semantics were ported.
+        // vim 9.2 prints `<c3>` for `echo strtrans('héllo'[1])`). The byte is
+        // KEPT, not decoded: this asserted `U+FFFD` while the result was still
+        // being laundered through `from_utf8_lossy`, which made two different
+        // split bytes compare equal — see tests/parity_cases/byte_exact_substring.vim.
         let mut s = typval_T::from("héllo".to_string());
         assert_eq!(
             eval_index_inner(
@@ -5924,7 +5996,7 @@ mod tests {
             ),
             OK
         );
-        assert!(matches!(&s.vval, v_string(t) if t == "\u{FFFD}"));
+        assert!(matches!(&s.vval, v_string(t) if t.as_bytes() == b"\xc3"));
         // string slice [1:3] inclusive
         let mut s2 = typval_T::from("abcdef".to_string());
         eval_index_inner(

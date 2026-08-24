@@ -192,11 +192,12 @@ pub fn f_strpart(argvars: &[typval_T], rettv: &mut typval_T) {
     let start = nbyte as usize;
     let end = start + len as usize;
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(
-        String::from_utf8_lossy(&bytes[start..end])
-            .into_owned()
-            .into(),
-    );
+    // c: `rettv->vval.v_string = vim_strnsave(p + nbyte, len)` — a byte copy.
+    // `strpart()` is documented to cut on BYTE boundaries, so its result is
+    // very often not valid UTF-8 (`strpart('日本語', 1, 3)` is `97 a5 e6`);
+    // `from_utf8_lossy` replaced each such byte with U+FFFD, which vim echoes
+    // as three U+FFFD glyphs where vim echoes `<97><a5><e6>`.
+    rettv.vval = v_string(VimStr::from(&bytes[start..end]));
 }
 
 /// Port of `f_stridx()` from `Src/strings.c` — byte index of `{needle}` in
@@ -522,7 +523,9 @@ pub fn f_strcharpart(argvars: &[typval_T], rettv: &mut typval_T) {
     }
     rettv.v_type = VAR_STRING;
     let (a, b) = (nbyte as usize, (nbyte + len) as usize);
-    rettv.vval = v_string(String::from_utf8_lossy(&bytes[a..b]).into_owned().into());
+    // Byte copy, as in `f_strpart` above: {start} stays byte-based even here,
+    // so a negative or clamped bound can land mid-character.
+    rettv.vval = v_string(VimStr::from(&bytes[a..b]));
 }
 
 /// Port of `f_byteidx()` from `Src/strings.c` — the byte index of the `{nr}`'th

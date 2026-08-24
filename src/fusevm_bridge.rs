@@ -4754,7 +4754,11 @@ fn index_value(base: &typval_T, index: &typval_T) -> typval_T {
                 tv_str(String::new())
             } else {
                 let b = i as usize;
-                tv_str(String::from_utf8_lossy(&bytes[b..b + 1]).into_owned())
+                // BYTES, not text: `xmemdupz(s + n1, 1)` copies one byte, which
+                // is routinely half of a multibyte character. Laundering it
+                // through `from_utf8_lossy` first rewrote that byte as U+FFFD,
+                // so a subscript that vim echoes as `<c2>` answered `<ef><bf><bd>`.
+                tv_str(&bytes[b..b + 1])
             }
         }
         (VAR_BLOB, v_blob(b)) => {
@@ -4860,7 +4864,10 @@ fn slice_value(base: &typval_T, from: &typval_T, to: &typval_T) -> typval_T {
                 tv_str(String::new())
             } else {
                 let (lo, hi) = (lo as usize, hi as usize);
-                tv_str(String::from_utf8_lossy(&bytes[lo..=hi]).into_owned())
+                // Byte-exact for the same reason the single subscript above is:
+                // a byte-indexed slice starts and ends wherever the indexes say,
+                // including inside a character.
+                tv_str(&bytes[lo..=hi])
             }
         }
         (VAR_BLOB, v_blob(b)) => {
