@@ -2856,7 +2856,10 @@ impl Parser {
             // fails the whole eval1 even in a branch that is never evaluated
             // (`(1 ? 350.0 : (-2147483648 .. 1.0e308))` is E15 in both
             // oracles, not 350.0).
-            self.deferred_e15.push(msg.clone());
+            // The message pushed here is the one the SKIPPED positions want —
+            // see `whole_expr_e15`. The token below keeps the position-specific
+            // one, which is what an evaluated position reports.
+            self.deferred_e15.push(self.whole_expr_e15());
             spliced.truncate(1); // keep the '.'
             spliced.push(Token {
                 kind: Tok::DeferredErr(msg),
@@ -2871,6 +2874,104 @@ impl Parser {
         };
         for (k, t) in spliced.into_iter().enumerate() {
             self.toks.insert(self.i + 1 + k, t);
+        }
+    }
+
+    /// `E15: Invalid expression: "%s"` over the WHOLE expression — `eval0`'s
+    /// own fallback (`vendor/eval.c`, `eval0_retarg`):
+    ///
+    /// ```c
+    /// if (!aborting() && did_emsg == did_emsg_before
+    ///                 && called_emsg == called_emsg_before)
+    ///     semsg(_(e_invalid_expression_str), arg);
+    /// ```
+    ///
+    /// `arg` is where eval0 STARTED, not where the failure was. It fires only
+    /// when the failing level emitted nothing itself, and `eval_number()`'s own
+    /// `semsg` is guarded by `if (evaluate)` — so a number-literal failure in a
+    /// branch evaluation never reaches reports the whole expression, while the
+    /// same failure in an evaluated branch reports from the literal onwards:
+    ///
+    /// ```text
+    /// echo 1 ? 12abc : 3      E15: Invalid expression: "12abc : 3"
+    /// echo 0 ? 12abc : 3      E15: Invalid expression: "0 ? 12abc : 3"
+    /// echo 0 && 12abc         E15: Invalid expression: "0 && 12abc"
+    /// echo 0 ? 'a' . 1.0e300 : 3   E15: Invalid expression: "0 ? 'a' . 1.0e300 : 3"
+    /// ```
+    fn whole_expr_e15(&self) -> String {
+        format!("E15: Invalid expression: \"{}\"", self.src)
+    }
+
+    /// Port of `vim_str2nr()`'s `strict` reject (`vendor/charset.c:1368`):
+    ///
+    /// ```c
+    /// // Check for an alphanumeric character immediately following, that is
+    /// // most likely a typo.
+    /// if (strict && ptr - start != maxlen && ASCII_ISALNUM(*ptr)) {
+    ///   return;   // leaves *len == 0
+    /// }
+    /// ```
+    ///
+    /// `eval_number()` passes `strict = TRUE` and turns that zero length into
+    /// `semsg(_(e_invalid_expression_str), *arg)` + FAIL, so a number with a
+    /// letter or digit glued to it is not "a number then a name" — it is a
+    /// parse failure at the number:
+    ///
+    /// ```text
+    ///     echo 12abc      vim  E15: Invalid expression: "12abc"
+    ///     echo 1e5        vim  E15: Invalid expression: "1e5"
+    ///     echo 0xg        vim  E15: Invalid expression: "0xg"
+    ///     echo 007a       vim  E15: Invalid expression: "007a"
+    /// ```
+    ///
+    /// while `_` is not alphanumeric and so still terminates the literal
+    /// normally (`echo 1_000` prints `1`, then E121 for `_000`).
+    ///
+    /// Without this the port read `12abc` as `12` followed by the name `abc`
+    /// and answered E121, and `1e5`/`1e-10` as `1` followed by `e5`/`e`.
+    ///
+    /// The failure is modelled with the same deferred machinery as a re-split
+    /// float (see [`Self::resplit_float_token`]) because it is the same shape:
+    /// it aborts `eval1` from the literal's position, so the text after it is
+    /// dead, and it fails the expression even inside a branch that is never
+    /// evaluated.
+    fn check_number_junk(&mut self) {
+        if !matches!(self.peek(), Tok::Number(_)) {
+            return;
+        }
+        let (span, end) = (self.toks[self.i].span, self.toks[self.i].end);
+        if !self
+            .src
+            .as_bytes()
+            .get(end)
+            .is_some_and(u8::is_ascii_alphanumeric)
+        {
+            return;
+        }
+        let tail = self.src.get(span..).unwrap_or("").to_string();
+        self.deferred_e15.push(self.whole_expr_e15());
+        self.toks[self.i].kind = Tok::DeferredErr(format!(
+            "E15: Invalid expression: \"{tail}\""
+        ));
+        // The glued run lexed as its own Ident/Number token(s) (`12abc` is
+        // `12` + `abc`). Vim never sees them — `eval_number` FAILed on the
+        // whole literal — so drop everything the run covers, and only that:
+        // a bracket or operator after it still has to close its enclosing
+        // list/call (`[1, 12abc]` reports E15, not "missing ]").
+        let run_end = span
+            + self.src[span..]
+                .bytes()
+                .take_while(|b| b.is_ascii_alphanumeric())
+                .count();
+        while self.i + 1 < self.toks.len() {
+            let t = &self.toks[self.i + 1];
+            // `Tok::Eof` sits at the end of the source and so is inside the run
+            // whenever the run reaches it; removing it leaves `advance()` stuck
+            // on the last token and the parse never terminates.
+            if t.kind == Tok::Eof || t.span < end || t.end > run_end {
+                break;
+            }
+            self.toks.remove(self.i + 1);
         }
     }
 
@@ -3102,6 +3203,7 @@ impl Parser {
                 self.resplit_float_token();
             }
         }
+        self.check_number_junk();
         let mut e = self.primary()?;
         e = self.postfix(e)?;
         for op in leaders.into_iter().rev() {

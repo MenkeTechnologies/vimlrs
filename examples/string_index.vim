@@ -30,12 +30,13 @@ call assert_equal('', 'abc'[2:1])
 " ── multibyte: str[i] is a *byte* subscript, matching Vim (BUGS.md #8, fixed
 " round 17) ──
 " 'héllo'[1] is the first byte of the 2-byte 'é' (eval.c:3300,
-" `xmemdupz(s + n1, 1)`). Vim carries the raw lead byte 0xc3; vimlrs stores
-" strings as UTF-8 text, so the split character surfaces as U+FFFD — the same
-" thing Vim's byte renders as once lossily decoded.
+" `xmemdupz(s + n1, 1)`), and that byte is KEPT: the subscript is one byte
+" long and holds 0xc3, which the message layer shows as <c3>.
 let word = 'héllo'
 call assert_equal(5, strchars(word))
-call assert_equal(nr2char(0xFFFD), word[1])
+call assert_equal(1, len(word[1]))
+call assert_equal(0xc3, char2nr(word[1]))
+call assert_equal(strpart(word, 1, 1), word[1])
 call assert_equal('hé', strcharpart(word, 0, 2))
 call assert_equal(char2nr('é'), strgetchar(word, 1))
 " strgetchar past the end returns -1

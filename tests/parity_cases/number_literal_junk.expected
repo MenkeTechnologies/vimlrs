@@ -1,0 +1,24 @@
+1
+E15: Invalid expression: "12abc"
+E15: Invalid expression: "1e5"
+E15: Invalid expression: "3x"
+E15: Invalid expression: "007a"
+E15: Invalid expression: "0xg"
+E15: Invalid expression: "0b2"
+E15: Invalid expression: "5x"
+E15: Invalid expression: "5e3x"
+E15: Invalid expression: "1e-10"
+1 name
+12 name3
+E15: Invalid expression: "12abc]"
+E15: Invalid expression: "1e5 . 'x'"
+E15: Invalid expression: "0 ? 12abc : 3"
+E15: Invalid expression: "0 && 12abc"
+E15: Invalid expression: "1 || 12abc"
+E15: Invalid expression: "12abc : 3"
+E15: Invalid expression: "0e300"
+E15: Invalid expression: "0 ? 'a' . 1.0e300 : 3"
+E15: Invalid expression: "0 && ('a' . 1.0e300)"
+16 15 3 15 123 100000.0
+9223372036854775807
+0z0011
