@@ -4358,6 +4358,180 @@ deliberate Neovim-favoured split: `echo string(1.0/0.0)` is `inf` in vim and
 
 ---
 
+# Round 34 — byte-exact strings, the strict number literal, and two per-call allocations
+
+Method: probes run against `/opt/homebrew/bin/vim` 9.2 (patches 1-1000) through
+`scripts/parity.sh`, which sources the same file through both engines and
+byte-diffs the merged output and the exit status. Everything fixed here is
+recorded as a parity case, so the record is vim's answer and not this port's.
+
+## R34-1. A byte-indexed substring was lossy-decoded — ✅ FIXED
+
+A VimL string is `char_u *` — bytes, no encoding invariant — so every
+byte-indexed operation on one can cut a multibyte character in half and hand the
+halves back. Six call sites did that cut correctly and then ran the result
+through `String::from_utf8_lossy`, which rewrites each undecodable byte as
+U+FFFD: `s[i]` and `s[a:b]` on both the compiled and the tree-walking path,
+`strpart()` and `strcharpart()`.
+
+That is not a rendering difference — a one-byte subscript came back three bytes
+long, and two DIFFERENT cuts collapsed to the same replacement character.
+
+```vim
+let s = list2str([0x41,0x97,0xe6,0x42])   " 41 c2 97 c3 a6 42
+```
+
+| probe | vim 9.2 | vimlrs, before |
+|---|---|---|
+| `strtrans(s[1])` | `<c2>` | three U+FFFD bytes |
+| `len(s[1])` | `1` | `3` |
+| `char2nr(s[1])` | `194` | `65533` |
+| `s[1] ==# s[2]` | `0` | `1` |
+| `s[1] ># s[2]` | `1` | `0` |
+| `strtrans(strpart('日本語',1,3))` | `<97><a5><e6>` | three U+FFFD |
+
+The equality answer came from `mb_strcmp_ic` taking `&str`, which forced its
+caller to lossy-decode both operands. It now takes bytes and is the C's two arms
+(`vendor/mbyte.c:3054`): `strcmp` for `#`, and `utf_strnicmp`'s walk —
+code-point-wise while both sides decode, bytewise from the first sequence that
+does not (`vendor/mbyte.c:1487`) — for `?`. `utf_safe_read_char_adv`
+(`vendor/mbyte.c:741`) and `utf8len_tab_zero` are ported for it.
+
+Recorded in `tests/parity_cases/byte_exact_substring.vim`.
+
+## R34-2. A number literal with junk glued to it was E121, not E15 — ✅ FIXED
+
+`eval_number()` reads an integer with `vim_str2nr(..., strict = TRUE, ...)`, and
+the strict flag has one job (`vendor/charset.c:1366`): a zero length when an
+alphanumeric follows, which becomes `semsg(_(e_invalid_expression_str), *arg)`
++ FAIL. This port read the glued run as a separate name.
+
+| probe | vim 9.2 | vimlrs, before |
+|---|---|---|
+| `echo 12abc` | `E15: Invalid expression: "12abc"` | `E121: Undefined variable: abc` |
+| `echo 1e5` | `E15: Invalid expression: "1e5"` | `E121: Undefined variable: e5` |
+| `echo 0xg` | `E15: Invalid expression: "0xg"` | `E121: Undefined variable: xg` |
+| `echo 007a` | `E15: Invalid expression: "007a"` | `E121: Undefined variable: a` |
+| `echo 1.5e3x` | `E15: Invalid expression: "5e3x"` | `E121: Undefined variable: e3x` |
+
+`_` is not alphanumeric, so `echo 1_000` still splits into `1` and the name
+`_000`, as in vim.
+
+Which text the E15 carries turns out to depend on the position, and the port had
+this wrong for the re-split-float junk too: `eval_number`'s `semsg` is guarded by
+`if (evaluate)`, so in a branch evaluation never reaches nothing is reported
+there and `eval0`'s fallback fires instead — over the WHOLE expression, because
+`arg` is where eval0 started. `echo 0 ? 'a' . 1.0e300 : 3` was
+`E15: … "0e300 : 3"` and is now vim's `E15: … "0 ? 'a' . 1.0e300 : 3"`.
+
+Recorded in `tests/parity_cases/number_literal_junk.vim`.
+
+## R34-3. `\x`, `\X` and octal string escapes produced a code point, not a byte — ✅ FIXED
+
+`eval_string()` writes every escape into a `char *end`, and only `\u`/`\U` go
+through `utf_char2bytes` (`vendor/eval.c:3590`); octal accumulates through the
+same `char` (`vendor/eval.c:3629`), truncating to 8 bits at every step.
+
+| probe | vim 9.2 | vimlrs, before |
+|---|---|---|
+| `len("\xc3")` | `1` | `2` |
+| `len("\303\251")` | `2` | `4` |
+| `str2list("\xc3\xa9")` | `[233]` | `[195, 169]` |
+| `strtrans("\xff")` | `<ff>` | `ÿ` |
+| `str2list("\777")` | `[255]` | `[511]` |
+| `str2list("\U110000")` | `[1114112]` | `[]` |
+| `len("a\0b")` | `1` | `3` |
+| `len("\400")` | `0` | `2` |
+
+The last two are the C buffer's NUL terminator: a byte that resolves to 0 ends
+the string. Carrying the rest needed a byte-shaped literal, since `Tok::Str` /
+`Expr::Str` are `String`s — hence `Tok::BStr` / `Expr::Bytes`, emitted only when
+the bytes do not decode, and the `VIML_BYTES` builtin that rebuilds them from a
+hex constant (a bytecode constant is a `fusevm::Value`, which cannot hold them
+either). `SHARD_FORMAT_VERSION` 5 -> 6.
+
+Recorded in `tests/parity_cases/string_escape_bytes.vim`.
+
+## R34-4. Two allocations that repeated per operation — ✅ FIXED (speed)
+
+Sampling a 400k-iteration function-call loop put `Vec::extend_with` over
+`Vec<Option<BuiltinHandler>>` second only to the futex wait: the fusevm builtin
+table, grown over and over. Every user-function call, `map()`/`filter()`
+element, optional-argument default and `call()`-by-name ran on a fresh
+`VM::new` + `install`, and `install` is 537 `register_builtin` calls, each of
+which grows the table to `id + 1` when the id is past its end.
+
+`VM::reset` (fusevm `vm.rs:869`) deliberately leaves the builtin table alone, so
+finished nested VMs are now pooled and handed back out already installed. The
+JIT flag it also leaves alone and that one does vary per run (`SUPPRESS_JIT` is
+a scoped guard), so it is re-applied on every acquire.
+
+Separately, nothing cached a compiled pattern, so `=~` in a loop re-parsed it
+every iteration. `Regex::compile` memoises by pattern text — the parse is a pure
+function of it — and caches the diagnostic beside the compiled form so an
+invalid pattern still raises once per call.
+
+Debug build, hyperfine, 25 runs, user CPU time:
+
+| workload | before | after | |
+|---|---|---|---|
+| 30000 `call Step(i)` | 1.371 s | 0.758 s | 1.81x |
+| `map`+`filter` over 30000 with lambdas | 2.541 s | 1.254 s | 2.03x |
+| 20000 `=~` + `substitute()` | 0.471 s | 0.409 s | 1.15x |
+| 20000 string concats | 0.248 s | 0.238 s | 1.04x |
+| 20000 dict writes + `keys()` walk | 0.190 s | 0.188 s | unchanged |
+
+## R34-O1. An error inside `:while`/`:for` does not abort the loop
+
+```vim
+let i = 0
+while i < 3
+  echo 'iter' i
+  echo [1] . 'x'
+  let i += 1
+endwhile
+echo 'after-while'
+```
+
+| | |
+|---|---|
+| vim 9.2 | `iter 0`, `E730: …`, `after-while` |
+| vimlrs | all three iterations, then `after-while` |
+
+`:for` behaves the same way, and the script does continue after the loop in
+both. This is the loop half of the `cstack`-equivalent gap R33-O1 already names:
+this port compiles `:while`/`:for` to bytecode jumps with no per-conditional
+state for the back-edge to consult, and the abort has to be reconstructed rather
+than transcribed. A back-edge guard on "an error was raised since the loop
+started" is the shape, but it has to not fire inside `try`/`catch` (where errors
+become exceptions) or under `:silent!`, so it is not a one-line change. Not
+guessed at.
+
+## R34-O2. `string()` of an infinity or a NaN follows the vendored C, not vim
+
+```vim
+echo string(1.0/0.0)   " vim: inf        vimlrs: str2float('inf')
+echo string(-1.0/0.0)  " vim: -inf       vimlrs: -str2float('inf')
+echo string(0.0/0.0)   " vim: nan        vimlrs: str2float('nan')
+```
+
+This is not a port gap — it is the vendored source disagreeing with the
+reference editor. `vendor/eval/encode.c:356,363` writes the `str2float('nan')` /
+`str2float('inf')` forms deliberately, so that `string()` round-trips through
+`eval()`; vim writes the bare words, which do not. The port follows the C it is
+a port of. Same class as R24-O1 (the BELL), and recorded rather than papered
+over: no parity case pins it, because a case would have to encode one engine's
+answer as if it were the contract.
+
+## R33-O2, R33-O3 — unchanged, and both visible in Round 34's probes
+
+`echo 1_000` prints `1` before the E121 in vim and nothing in vimlrs (R33-O2,
+`:echo` writes per argument); `echo string(1e-10)` adds `E116: Invalid arguments
+for function string(1e-10)` after the E15 (R33-O3, the deferred second
+diagnostic). Both lines were dropped from
+`tests/parity_cases/number_literal_junk.vim` rather than recorded, and the case
+says so.
+
 # Round 33 — the builtin-error value model, `\=` typvals, and the exit-status latch
 
 Method unchanged: every probe runs through **both** reference engines (vim

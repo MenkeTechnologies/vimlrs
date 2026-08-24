@@ -60,6 +60,19 @@ echo 'a' . 1.0e300
 echo 0 ? 'a' . 1.0e300 : 3
 echo 0 && ('a' . 1.0e300)
 
+" NOT recorded here, deliberately — two adjacent divergences this probe found
+" that are open items, not this case's subject:
+"   echo 1_000        vim prints `1` before the E121; vimlrs prints only the
+"                     error (BUGS.md R33-O2, `:echo` writes per argument, so an
+"                     error while evaluating argument n lands after argument
+"                     n-1 has already been written). Written above as two
+"                     resolvable names instead, which pins the `_` rule without
+"                     depending on the interleaving.
+"   echo string(1e-10)  vim adds `E116: Invalid arguments for function
+"                     string(1e-10)` after the E15; vimlrs raises only the E15
+"                     (BUGS.md R33-O3, the deferred second diagnostic). The
+"                     bare `echo 1e-10` above pins the E15 without it.
+
 " Everything that was already a valid literal stays one.
 echo 0x10 017 0b11 0o17 1.2.3 1.0e5
 echo 9223372036854775807
