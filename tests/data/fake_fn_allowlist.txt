@@ -443,3 +443,19 @@ hl_exists
 hl_synidattr
 hl_intern
 hl_define_from_args
+
+# ── typename() (vim 9, not in Neovim) ──
+# `typename()` is a VIM 9.2 builtin — `f_typename()` in vim's own
+# `src/eval/funcs.c`, calling `type_name(typval2type(…))`. Neovim has never
+# implemented it, so no `f_typename` appears anywhere under vendor/ and the
+# name cannot be C-traceable to the vendored tree. The port is faithful to
+# vim's, cited and verified against vim 9.2 in the fn's doc comment, and keeps
+# vim's C name so the provenance stays readable.
+f_typename
+# The two helpers `f_typename` is written in terms of. vim builds the same
+# answer through its type machinery (`typval2type` + `type_name` in
+# `src/vim9type.c`), which is a different decomposition, so neither helper has
+# a C counterpart to name: `type_name_of` renders one value's vim9 type name
+# and `member_of` folds a container's element types to their common name.
+type_name_of
+member_of
