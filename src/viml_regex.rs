@@ -20,6 +20,8 @@
 //! ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 
 /// `\=`-replacement expression evaluator hook (`expr -> string`).
 type SubstExprFn = fn(&str) -> String;
@@ -34,6 +36,11 @@ thread_local! {
     /// Groups of the match currently being replaced (index 0 = whole match),
     /// exposed to a `\=` expression through `submatch()`.
     static SUBMATCHES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    /// Compiled patterns, keyed by the pattern text — see [`Regex::compile`].
+    /// The `Option<String>` is the diagnostic the pattern raises, kept so a
+    /// cache hit still reports it.
+    static REGEX_CACHE: RefCell<HashMap<String, (Rc<Regex>, Option<String>)>> =
+        RefCell::new(HashMap::new());
 }
 
 /// `submatch({n})` — the text of group `n` of the match a `substitute(…, '\=…')`
@@ -1163,9 +1170,51 @@ fn class_atom(negated: bool, item: ClassItem) -> Node {
 }
 
 impl Regex {
-    /// Compile a Vim magic-mode pattern. Always succeeds (a malformed tail is
+    /// Compile a Vim magic-mode pattern, reusing the compiled form when this
+    /// pattern has been seen before. Always succeeds (a malformed tail is
     /// treated literally, as Vim is lenient).
-    pub fn compile(pat: &str) -> Regex {
+    ///
+    /// The parse is a pure function of the pattern text — `preprocess_magic`
+    /// and `Parser` read no option and no other state, and the case rule
+    /// (`ic`) is a MATCH-time argument, not a compile-time one — so the result
+    /// can be memoised without changing any answer. What is not pure is the
+    /// diagnostic: an invalid pattern is an error every VimL function that
+    /// takes one raises EVERY time it is called, so the message is cached
+    /// beside the compiled form and re-raised on each hit.
+    ///
+    /// This matters because nothing above this layer caches: `'x' =~ 'pat'`
+    /// inside a loop re-parsed the pattern on every iteration.
+    pub fn compile(pat: &str) -> Rc<Regex> {
+        // Bounded so a script that builds patterns from data (`'\<' . word .
+        // '\>'` over a word list) cannot grow the map without limit. Clearing
+        // wholesale rather than evicting one entry keeps this to two lines; the
+        // pattern set of a real script is far below the bound, so the clear is
+        // not a path that repeats.
+        const MAX_CACHED: usize = 512;
+        if let Some((re, err)) = REGEX_CACHE.with(|c| c.borrow().get(pat).cloned()) {
+            if let Some(msg) = err {
+                crate::ported::message::emsg(&msg);
+            }
+            return re;
+        }
+        let (re, err) = Regex::compile_uncached(pat);
+        let re = Rc::new(re);
+        REGEX_CACHE.with(|c| {
+            let mut c = c.borrow_mut();
+            if c.len() >= MAX_CACHED {
+                c.clear();
+            }
+            c.insert(pat.to_string(), (re.clone(), err.clone()));
+        });
+        if let Some(msg) = err {
+            crate::ported::message::emsg(&msg);
+        }
+        re
+    }
+
+    /// The parse itself, plus the diagnostic it would raise. Split out of
+    /// [`Self::compile`] so the cache can hold both and replay the second.
+    fn compile_uncached(pat: &str) -> (Regex, Option<String>) {
         let (pat, pre_err) = preprocess_magic(pat);
         let mut parser = Parser {
             p: pat.chars().collect(),
@@ -1190,20 +1239,25 @@ impl Regex {
         // and hand back a regex that matches nothing, so each caller falls through to
         // the result it returns once the error has been raised.
         if let Some(msg) = parser.err {
-            crate::ported::message::emsg(&msg);
-            return Regex {
-                branches: Vec::new(),
-                ngroups: 0,
-                forced_ic: None,
-                dead: true,
-            };
+            return (
+                Regex {
+                    branches: Vec::new(),
+                    ngroups: 0,
+                    forced_ic: None,
+                    dead: true,
+                },
+                Some(msg),
+            );
         }
-        Regex {
-            branches,
-            ngroups: parser.ngroups,
-            forced_ic: parser.forced_ic,
-            dead: false,
-        }
+        (
+            Regex {
+                branches,
+                ngroups: parser.ngroups,
+                forced_ic: parser.forced_ic,
+                dead: false,
+            },
+            None,
+        )
     }
 
     fn effective_ic(&self, ic: bool) -> bool {

@@ -3599,14 +3599,57 @@ pub(crate) fn intercept_proceed() -> typval_T {
     ret
 }
 
+thread_local! {
+    /// Nested VMs that have finished, kept for reuse — see [`with_nested_vm`].
+    static NESTED_VMS: RefCell<Vec<VM>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Run `f` on a VM ready to execute `chunk`, recycling a finished one when
+/// there is one.
+///
+/// Every user-function call, every `map()`/`filter()` element and every
+/// optional-argument default runs its body on a nested VM, and each one used to
+/// be a fresh `VM::new` + `install`. `install` is 537 `register_builtin` calls,
+/// and `VM::register_builtin` grows its table to `id + 1` for any id past the
+/// end — so with ids handed out in roughly ascending order that is hundreds of
+/// `Vec::resize`s (reallocate + zero-fill) PER CALL. It was the second-hottest
+/// symbol in a profile of a 400k-iteration function-call loop, behind only the
+/// futex wait.
+///
+/// `VM::reset` (fusevm vm.rs:869) clears the stack, frames, globals, ip and JIT
+/// recorder but deliberately leaves the builtin table alone, so a recycled VM
+/// is already installed. The JIT flag it also leaves alone, and that one DOES
+/// vary between runs, so it is re-applied per acquire.
+///
+/// Reentrancy is safe: the VM handed to `f` is checked OUT of the pool for the
+/// whole call, so a nested `with_nested_vm` inside `f` cannot get the same one.
+fn with_nested_vm<T>(chunk: fusevm::Chunk, f: impl FnOnce(&mut VM) -> T) -> T {
+    let recycled = NESTED_VMS.with(|p| p.borrow_mut().pop());
+    let mut vm = match recycled {
+        Some(mut vm) => {
+            vm.reset(chunk);
+            apply_jit_setting(&mut vm);
+            vm
+        }
+        None => {
+            let mut vm = VM::new(chunk);
+            install(&mut vm);
+            vm
+        }
+    };
+    let out = f(&mut vm);
+    NESTED_VMS.with(|p| p.borrow_mut().push(vm));
+    out
+}
+
 /// Run a chunk on a nested VM **without** resetting the refpool (a user-function
 /// call happens mid-outer-run; clearing the refpool would corrupt the outer
 /// VM's live compound values). The outer `last_result` is saved and restored.
 fn run_chunk_nested(chunk: fusevm::Chunk) {
     let saved = LAST_RESULT.with(|r| r.borrow_mut().take());
-    let mut vm = VM::new(chunk);
-    install(&mut vm);
-    let _ = vm.run();
+    with_nested_vm(chunk, |vm| {
+        let _ = vm.run();
+    });
     LAST_RESULT.with(|r| *r.borrow_mut() = saved);
 }
 
@@ -3615,9 +3658,7 @@ fn run_chunk_nested(chunk: fusevm::Chunk) {
 /// evaluate optional-parameter default expressions at call time. Refpool-safe.
 fn run_value_chunk(chunk: fusevm::Chunk) -> Option<typval_T> {
     let saved = LAST_RESULT.with(|r| r.borrow_mut().take());
-    let mut vm = VM::new(chunk);
-    install(&mut vm);
-    let r = vm.run();
+    let r = with_nested_vm(chunk, |vm| vm.run());
     LAST_RESULT.with(|r2| *r2.borrow_mut() = saved);
     match r {
         fusevm::VMResult::Ok(v) => Some(value_to_tv(&v)),
@@ -3630,9 +3671,9 @@ fn run_value_chunk(chunk: fusevm::Chunk) -> Option<typval_T> {
 /// [`run_chunk_nested`]; restores the outer `last_result`.
 fn run_chunk_capture(chunk: fusevm::Chunk) -> Option<typval_T> {
     let saved = LAST_RESULT.with(|r| r.borrow_mut().take());
-    let mut vm = VM::new(chunk);
-    install(&mut vm);
-    let _ = vm.run();
+    with_nested_vm(chunk, |vm| {
+        let _ = vm.run();
+    });
     let result = LAST_RESULT.with(|r| r.borrow_mut().take());
     LAST_RESULT.with(|r| *r.borrow_mut() = saved);
     result
@@ -4206,14 +4247,15 @@ fn call_builtin_by_name(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
     let argc = args.len() as u8;
     let mut b = fusevm::ChunkBuilder::new();
     b.emit(fusevm::Op::CallBuiltin(id, argc), 0);
-    let mut vm = VM::new(b.build());
-    install(&mut vm);
-    for a in args {
-        vm.push(tv_to_value(a));
-    }
-    // `run()` returns the top-of-stack as its result (it does not leave it on the
-    // stack), so read the builtin's value from there.
-    match vm.run() {
+    let r = with_nested_vm(b.build(), |vm| {
+        for a in args {
+            vm.push(tv_to_value(a));
+        }
+        // `run()` returns the top-of-stack as its result (it does not leave it
+        // on the stack), so read the builtin's value from there.
+        vm.run()
+    });
+    match r {
         fusevm::VMResult::Ok(v) => Some(value_to_tv(&v)),
         _ => None,
     }
@@ -5356,18 +5398,28 @@ fn suppress_jit() -> JitSuppressGuard {
     JitSuppressGuard(SUPPRESS_JIT.with(|c| c.replace(true)))
 }
 
-/// Register every `VIML_*` builtin on a fresh VM before `vm.run()`.
-pub fn install(vm: &mut VM) {
-    // Turn on fusevm's tiered Cranelift JIT (Linear/Block/Tracing). Without
-    // this the JIT never engages — `VM::new` defaults it off and the whole
-    // tier dispatch is gated on it. Safe: only CallBuiltin-free chunks/loop
-    // bodies are eligible; everything else runs on the interpreter exactly as
-    // before, and the tracing tier deopts back to it on a slot-type guard miss.
-    // `VIMLRS_NO_JIT` forces the interpreter (for benchmarking the baseline);
-    // `SUPPRESS_JIT` does the same for the tolerant per-statement sourcing loop.
+/// Turn fusevm's tiered Cranelift JIT (Linear/Block/Tracing) on or off for this
+/// VM. Without it the JIT never engages — `VM::new` defaults it off and the
+/// whole tier dispatch is gated on it. Safe: only CallBuiltin-free chunks/loop
+/// bodies are eligible; everything else runs on the interpreter exactly as
+/// before, and the tracing tier deopts back to it on a slot-type guard miss.
+/// `VIMLRS_NO_JIT` forces the interpreter (for benchmarking the baseline);
+/// `SUPPRESS_JIT` does the same for the tolerant per-statement sourcing loop.
+///
+/// Read fresh on every acquire rather than once per VM, because `SUPPRESS_JIT`
+/// is a scoped guard whose value differs between two runs of the SAME recycled
+/// VM (see [`with_nested_vm`]).
+fn apply_jit_setting(vm: &mut VM) {
     if std::env::var_os("VIMLRS_NO_JIT").is_none() && !SUPPRESS_JIT.with(|c| c.get()) {
         vm.enable_tracing_jit();
+    } else {
+        vm.disable_tracing_jit();
     }
+}
+
+/// Register every `VIML_*` builtin on a fresh VM before `vm.run()`.
+pub fn install(vm: &mut VM) {
+    apply_jit_setting(vm);
     // c: eval.c:206 — `eval_init()` seeds the v: store (vimvars[]) and the
     // function table ONCE, at interpreter startup.
     //

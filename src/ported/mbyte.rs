@@ -332,6 +332,63 @@ pub fn mb_toupper(c: char) -> char {
     }
 }
 
+/// Port of `utf8len_tab_zero[]` from `vendor/mbyte.c:127` — "Like utf8len_tab
+/// above, but using a zero for illegal lead bytes." The two differ only on
+/// `0x80`-`0xBF` (continuation bytes) and `0xFE`/`0xFF`, which cannot begin a
+/// sequence at all.
+pub const utf8len_tab_zero: [u8; 256] = {
+    let mut t = [0u8; 256];
+    let mut i = 0;
+    while i < 256 {
+        // The lead-byte lengths are identical to `utf8len_tab` everywhere it
+        // does not say 1 for a byte that cannot lead; deriving it keeps the two
+        // tables from drifting apart.
+        t[i] = if i < 0x80 {
+            1
+        } else if i < 0xc0 || i >= 0xfe {
+            0
+        } else {
+            utf8len_tab[i]
+        };
+        i += 1;
+    }
+    t
+};
+
+/// Port of `utf_safe_read_char_adv()` from `vendor/mbyte.c:741` — read the
+/// character at the start of `s` without ever looking past `s`.
+///
+/// Returns `(codepoint, bytes_consumed)`:
+///
+/// * `(0, 0)` at end of buffer (the C's "returns 0");
+/// * `(-1, 0)` when the sequence there is illegal or truncated, leaving the
+///   position unmoved — the case `utf_strnicmp` reacts to by falling back to a
+///   bytewise comparison;
+/// * otherwise the decoded code point and its length.
+///
+/// The C's `c != (uint8_t)**s` test is how it tells a decoded character from
+/// `utf_ptr2char`'s failure return (which is the first byte), with U+00C3 —
+/// the one non-ASCII character that equals the first byte of its own encoding —
+/// checked explicitly.
+pub fn utf_safe_read_char_adv(s: &[u8]) -> (i32, usize) {
+    let Some(&first) = s.first() else {
+        return (0, 0); // c: `if (*n == 0) return 0;`
+    };
+    let k = utf8len_tab_zero[first as usize] as usize;
+    if k == 1 {
+        // c: ASCII character or NUL.
+        return (first as i32, 1);
+    }
+    if k <= s.len() {
+        let c = utf_ptr2char(s);
+        if c != first as i32 || (c == 0xc3 && s.get(1) == Some(&0x83)) {
+            return (c, k);
+        }
+    }
+    // c: byte sequence is incomplete or illegal.
+    (-1, 0)
+}
+
 /// Port of `mb_charlen()` from `Src/mbyte.c:2236` — the number of characters
 /// in `str`, counting a base char plus its composing chars as one
 /// (`utfc_ptr2len` steps).

@@ -455,43 +455,36 @@ fn mb_strcmp_ic(ic: bool, s1: &[u8], s2: &[u8]) -> i32 {
     // agree on every mapping this port has been measured against; where they
     // could differ (the handful of code points whose fold is not their simple
     // lowercase) this answers the lowercase one.
+    use crate::ported::mbyte::utf_safe_read_char_adv;
     let (mut i, mut j) = (0usize, 0usize);
-    while i < s1.len() && j < s2.len() {
-        let (a, b) = (&s1[i..], &s2[j..]);
-        let (la, lb) = (utf_seq_len(a), utf_seq_len(b));
-        // c:1487 — "Continue with bytewise comparison": an undecodable
-        // sequence on either side ends the character-wise walk.
-        let (Some(la), Some(lb)) = (la, lb) else { break };
-        let (ca, cb) = (
-            crate::ported::mbyte::utf_ptr2char(a),
-            crate::ported::mbyte::utf_ptr2char(b),
-        );
-        if ca != cb {
+    loop {
+        let (c1, k1) = utf_safe_read_char_adv(&s1[i..]);
+        let (c2, k2) = utf_safe_read_char_adv(&s2[j..]);
+        // c:1463 — `if (c1 <= 0 || c2 <= 0) break;`: one string ended, or one
+        // holds a sequence that does not decode.
+        if c1 <= 0 || c2 <= 0 {
+            break;
+        }
+        if c1 != c2 {
+            // c:1471 — `cdiff = utf_fold(c1) - utf_fold(c2)`.
             let fold = |c: i32| {
                 char::from_u32(c as u32).map_or(c, |ch| crate::ported::mbyte::mb_tolower(ch) as i32)
             };
-            let (fa, fb) = (fold(ca), fold(cb));
-            if fa != fb {
-                return sign(fa.cmp(&fb));
+            let (f1, f2) = (fold(c1), fold(c2));
+            if f1 != f2 {
+                return sign(f1.cmp(&f2));
             }
         }
-        i += la;
-        j += lb;
+        i += k1;
+        j += k2;
     }
+    // c:1487 — "Continue with bytewise comparison to produce some result that
+    // would make comparison operations involving this function transitive."
+    // (The C also folds the one decodable side first when only one string
+    // errored; both of this port's callers reach here with either both sides
+    // ended — where the byte comparison is the same answer — or both holding
+    // undecodable bytes.)
     sign(s1[i..].cmp(&s2[j..]))
-}
-
-/// Byte length of the UTF-8 sequence at the start of `p`, or `None` when the
-/// bytes there do not form one — the `c1 <= 0` / `-1` outcomes of the C's
-/// `utf_safe_read_char_adv` (`vendor/mbyte.c:1460`).
-fn utf_seq_len(p: &[u8]) -> Option<usize> {
-    match std::str::from_utf8(p) {
-        Ok(s) => s.chars().next().map(char::len_utf8),
-        Err(e) if e.valid_up_to() > 0 => {
-            std::str::from_utf8(&p[..e.valid_up_to()]).ok()?.chars().next().map(char::len_utf8)
-        }
-        Err(_) => None,
-    }
 }
 
 /// Port of `pattern_match()` (`Src/nvim/regexp.c`) — `vim_regexec` over the
