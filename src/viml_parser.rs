@@ -3231,6 +3231,7 @@ impl Parser {
                 )],
             }),
             Tok::Str(s) => Ok(Expr::Str(s)),
+            Tok::BStr(b) => Ok(Expr::Bytes(b)),
             Tok::InterpStr(parts) => self.lower_interp(parts),
             Tok::Option(o) => Ok(Expr::Option(o)),
             Tok::Env(e) => Ok(Expr::Env(e)),
@@ -3313,7 +3314,10 @@ impl Parser {
         let mut segs = Vec::with_capacity(parts.len());
         for part in parts {
             match part {
-                InterpPart::Lit(s) => segs.push(Expr::Str(s)),
+                InterpPart::Lit(b) => segs.push(match String::from_utf8(b) {
+                    Ok(s) => Expr::Str(s),
+                    Err(e) => Expr::Bytes(e.into_bytes()),
+                }),
                 InterpPart::Expr(src) => segs.push(parse_expr(&src)?),
             }
         }

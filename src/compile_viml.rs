@@ -224,6 +224,7 @@ fn collect_free_vars(
         Expr::Number(_)
         | Expr::Float(_)
         | Expr::Str(_)
+        | Expr::Bytes(_)
         | Expr::NullFunc
         | Expr::Option(_)
         | Expr::Env(_)
@@ -1135,6 +1136,19 @@ impl Compiler {
         self.emit(Op::LoadConst(idx));
     }
 
+    /// A string literal whose bytes are not valid UTF-8 (`"\xc3"` is the single
+    /// byte `c3` in vim). A bytecode constant is a `fusevm::Value` and
+    /// `Value::Str` is an `Arc<String>`, so the bytes cannot be one; the hex
+    /// form can, and [`h::VIML_BYTES`] turns it back at run time.
+    fn load_bytes(&mut self, bytes: &[u8]) {
+        let mut hex = String::with_capacity(bytes.len() * 2);
+        for b in bytes {
+            hex.push_str(&format!("{b:02x}"));
+        }
+        self.load_str(&hex);
+        self.emit(Op::CallBuiltin(h::VIML_BYTES, 1));
+    }
+
     /// The `u8` operand of a `CallBuiltin`/`Call` opcode.
     ///
     /// Overflowing it is a bytecode-encoding limit, but the CONDITION — a call
@@ -1921,7 +1935,7 @@ impl Compiler {
     fn expr_can_error(expr: &Expr) -> bool {
         !matches!(
             expr,
-            Expr::Number(_) | Expr::Float(_) | Expr::Str(_) | Expr::NullFunc
+            Expr::Number(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bytes(_) | Expr::NullFunc
         )
     }
 
@@ -2204,6 +2218,7 @@ impl Compiler {
                 self.emit(Op::LoadFloat(*f));
             }
             Expr::Str(s) => self.load_str(s),
+            Expr::Bytes(b) => self.load_bytes(b),
             // A parse-position error Vim reports only when the expression runs
             // (same rationale as the wrong-argc call → `VIML_RAISE` lowering).
             Expr::ScriptError(msg) => {

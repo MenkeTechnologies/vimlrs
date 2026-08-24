@@ -64,6 +64,10 @@ pub enum Tok {
     Blob(Vec<u8>),
     /// String literal, already unescaped.
     Str(String),
+    /// String literal whose resolved bytes are not valid UTF-8, so they cannot
+    /// ride in [`Tok::Str`]. `"\xc3"` is the single byte `c3` in vim (see
+    /// [`Lexer::push_double_escape`]), and a VimL string is allowed to hold it.
+    BStr(Vec<u8>),
     /// Interpolated string `$'…{expr}…'` / `$"…{expr}…"` — the ordered list of
     /// literal chunks and raw `{expr}` sources, lowered by the parser to a
     /// concat of the chunks with each expression echo-stringified.
@@ -142,8 +146,10 @@ pub enum Tok {
 /// source text of a `{expr}` region to be sub-parsed and echo-stringified.
 #[derive(Debug, Clone, PartialEq)]
 pub enum InterpPart {
-    /// Literal text with all escapes already resolved.
-    Lit(String),
+    /// Literal text with all escapes already resolved. BYTES, because `\x`,
+    /// `\X` and the octal escapes resolve to a raw byte that need not be valid
+    /// UTF-8 (`$"\xc3"`).
+    Lit(Vec<u8>),
     /// Raw expression source that appeared between `{` and `}`.
     Expr(String),
 }
@@ -491,7 +497,7 @@ impl<'a> Lexer<'a> {
     fn lex_double_string(&mut self) -> Result<Tok, VimlError> {
         let open = self.pos;
         self.pos += 1;
-        let mut out = String::new();
+        let mut out: Vec<u8> = Vec::new();
         loop {
             match self.peek() {
                 // c: `E114: Missing quote: %s`, from the OPENING quote — see
@@ -504,10 +510,13 @@ impl<'a> Lexer<'a> {
                 }
                 b'"' => {
                     self.pos += 1;
-                    return Ok(Tok::Str(out));
+                    return Ok(Self::string_tok(out));
                 }
                 b'\\' => self.push_double_escape(&mut out)?,
-                _ => out.push(self.next_char()),
+                _ => {
+                    let mut buf = [0u8; 4];
+                    out.extend_from_slice(self.next_char().encode_utf8(&mut buf).as_bytes());
+                }
             }
         }
     }
@@ -516,18 +525,32 @@ impl<'a> Lexer<'a> {
     /// `\` is at the current position) and push the resulting char(s) to `out`.
     /// Shared by [`Self::lex_double_string`] and the double-quote interpolated
     /// string body, so both honour the identical escape set.
-    fn push_double_escape(&mut self, out: &mut String) -> Result<(), VimlError> {
+    fn push_double_escape(&mut self, out: &mut Vec<u8>) -> Result<(), VimlError> {
         self.pos += 1; // consume the backslash
         let e = self.peek();
         self.pos += 1;
+        // c: every arm of `eval_string()` writes into a `char *end` — BYTES.
+        // Only `\u`/`\U` go through `utf_char2bytes`; the rest store what they
+        // computed as one byte, which is why `"\xc3"` is one byte long in vim
+        // and not the two-byte UTF-8 encoding of U+00C3.
+        let push_char = |c: char, out: &mut Vec<u8>| {
+            let mut buf = [0u8; 4];
+            out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+        };
         match e {
-            b'n' => out.push('\n'),
-            b't' => out.push('\t'),
-            b'r' => out.push('\r'),
-            b'e' => out.push('\x1b'),
-            b'b' => out.push('\x08'),
-            b'\\' => out.push('\\'),
-            b'"' => out.push('"'),
+            b'n' => out.push(b'\n'),
+            b't' => out.push(b'\t'),
+            b'r' => out.push(b'\r'),
+            b'e' => out.push(0x1b),
+            b'b' => out.push(0x08),
+            b'\\' => out.push(b'\\'),
+            b'"' => out.push(b'"'),
+            // c (vendor/eval.c:3629): octal, at most three digits, accumulated
+            // through a `char` — `*end = (char)((*end << 3) + (*p++ - '0'))` —
+            // so each step truncates to 8 bits and `"\777"` is the byte 255,
+            // `"\400"` the byte 0. This decoded the value as a CODE POINT and
+            // UTF-8-encoded it, making `"\303\251"` four bytes instead of the
+            // two that spell 'é'.
             b'0'..=b'7' => {
                 let mut n = (e - b'0') as u32;
                 for _ in 0..2 {
@@ -539,15 +562,14 @@ impl<'a> Lexer<'a> {
                         break;
                     }
                 }
-                if let Some(ch) = char::from_u32(n) {
-                    out.push(ch);
-                }
+                out.push(n as u8);
             }
-            // c (eval.c:3590): `\x`/`\X` take 2 hex digits and store the raw
-            // byte; `\u` takes 4 and `\U` 8, storing the codepoint as UTF-8.
-            // Fewer digits is fine (`"\u41"` is `A`); *no* hex digit at all means
-            // the escape is not one, and the letter is emitted literally
-            // (`"a\uZZb"` is `auZZb`) — which is what the fallback arm does.
+            // c (vendor/eval.c:3590): `\x`/`\X` take at most 2 hex digits and
+            // store the RAW BYTE (`*end++ = (char)nr`); `\u` takes 4 and `\U` 8
+            // and store the code point through `utf_char2bytes`. Fewer digits is
+            // fine (`"\u41"` is `A`); *no* hex digit at all means the escape is
+            // not one, and the letter is emitted literally (`"a\uZZb"` is
+            // `auZZb`) — which is what the fallback arm does.
             b'x' | b'X' | b'u' | b'U' if (self.peek() as char).is_ascii_hexdigit() => {
                 let maxlen = match e {
                     b'x' | b'X' => 2,
@@ -564,8 +586,16 @@ impl<'a> Lexer<'a> {
                         break;
                     }
                 }
-                if let Some(ch) = char::from_u32(n) {
-                    out.push(ch);
+                if matches!(e, b'x' | b'X') {
+                    out.push(n as u8);
+                } else {
+                    // `utf_char2bytes` has no upper range check, so `"\U110000"`
+                    // is a real four-byte sequence for a code point Rust's
+                    // `char` cannot hold — `char::from_u32` returned None and
+                    // the escape vanished.
+                    let mut buf = [0u8; 6];
+                    let len = crate::ported::mbyte::utf_char2bytes(n as i32, &mut buf);
+                    out.extend_from_slice(&buf[..len.max(0) as usize]);
                 }
             }
             // `\<Esc>`, `\<C-A>`, `\<Space>`, … — the special-key escape
@@ -576,16 +606,32 @@ impl<'a> Lexer<'a> {
                 let rest = &self.s[self.pos - 1..];
                 match crate::ported::keycodes::trans_special(rest) {
                     Some((c, used)) => {
-                        out.push(c);
+                        push_char(c, out);
                         self.pos += used - 1; // the '<' was already consumed
                     }
-                    None => out.push('<'),
+                    None => out.push(b'<'),
                 }
             }
             0 => return Err(VimlError::msg("E114: Missing quote")),
-            other => out.push(other as char),
+            other => out.push(other),
         }
         Ok(())
+    }
+
+    /// The token for a finished double-quoted body.
+    ///
+    /// c: `eval_string()` writes bytes into a buffer and NUL-terminates it, so
+    /// a byte the body resolved to 0 ENDS the string — `len("a\0b")` is 1 and
+    /// `len("\400")` is 0 in vim. This port kept the NUL as an ordinary byte
+    /// and answered 3 and 2.
+    fn string_tok(mut bytes: Vec<u8>) -> Tok {
+        if let Some(nul) = bytes.iter().position(|&b| b == 0) {
+            bytes.truncate(nul);
+        }
+        match String::from_utf8(bytes) {
+            Ok(s) => Tok::Str(s),
+            Err(e) => Tok::BStr(e.into_bytes()),
+        }
     }
 
     /// Lex an interpolated string `$'…'` (literal body, `''`→`'`, no escapes) or
@@ -599,7 +645,7 @@ impl<'a> Lexer<'a> {
         self.pos += 2; // skip `$` and the opening quote
         let quote = if double { b'"' } else { b'\'' };
         let mut parts: Vec<InterpPart> = Vec::new();
-        let mut lit = String::new();
+        let mut lit: Vec<u8> = Vec::new();
         loop {
             let c = self.peek();
             if c == 0 {
@@ -618,7 +664,7 @@ impl<'a> Lexer<'a> {
             if c == quote {
                 // A doubled `''` inside a `$'…'` body is a literal quote.
                 if !double && self.peek2() == b'\'' {
-                    lit.push('\'');
+                    lit.push(b'\'');
                     self.pos += 2;
                     continue;
                 }
@@ -628,7 +674,7 @@ impl<'a> Lexer<'a> {
             match c {
                 b'{' => {
                     if self.peek2() == b'{' {
-                        lit.push('{');
+                        lit.push(b'{');
                         self.pos += 2;
                     } else {
                         self.pos += 1; // consume `{`
@@ -640,7 +686,7 @@ impl<'a> Lexer<'a> {
                 }
                 b'}' => {
                     if self.peek2() == b'}' {
-                        lit.push('}');
+                        lit.push(b'}');
                         self.pos += 2;
                     } else {
                         return Err(VimlError::msg(format!(
@@ -649,7 +695,10 @@ impl<'a> Lexer<'a> {
                         )));
                     }
                 }
-                _ => lit.push(self.next_char()),
+                _ => {
+                    let mut buf = [0u8; 4];
+                    lit.extend_from_slice(self.next_char().encode_utf8(&mut buf).as_bytes());
+                }
             }
         }
         if !lit.is_empty() {

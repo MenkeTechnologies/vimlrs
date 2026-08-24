@@ -274,6 +274,15 @@ pub const VIML_SETREG: u16 = 3570;
 pub const VIML_SETOPT: u16 = 3571;
 /// `:let $ENV = …`
 pub const VIML_SETENV: u16 = 3066;
+/// A string literal whose bytes are not valid UTF-8, carried as hex.
+///
+/// `fusevm::Value::Str` is an `Arc<String>` and a bytecode constant is a
+/// `Value`, so `"\xc3"` — one byte in vim — cannot be a constant directly.
+/// The compiler emits its hex form (always ASCII) as the constant and this
+/// builtin turns it back into the bytes, which then ride the REFPOOL like any
+/// other non-UTF-8 string. Costs one builtin call per such literal, and only
+/// for literals that need it.
+pub const VIML_BYTES: u16 = 3068;
 /// `len()`
 pub const VIML_FN_LEN: u16 = 3100;
 /// `type()`
@@ -2643,6 +2652,19 @@ fn b_setrange(vm: &mut VM, _: u8) -> Value {
     }
     tv_list_assign_range(&dest, &src.borrow(), n1, n2, empty_idx2, "=", "");
     Value::Undef
+}
+
+/// Decode the hex constant emitted for a non-UTF-8 string literal
+/// (see [`VIML_BYTES`]) back into the bytes the literal spelled.
+fn b_bytes(vm: &mut VM, _: u8) -> Value {
+    let hex = tv_get_string(&pop_tv(vm));
+    let b = hex.as_bytes();
+    let mut out = Vec::with_capacity(b.len() / 2);
+    for pair in b.chunks_exact(2) {
+        let nib = |c: u8| (c as char).to_digit(16).unwrap_or(0) as u8;
+        out.push(nib(pair[0]) << 4 | nib(pair[1]));
+    }
+    tv_to_value(tv_str(&out[..]))
 }
 
 fn b_echo(vm: &mut VM, argc: u8) -> Value {
@@ -5406,6 +5428,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_SLICE, b_slice);
     vm.register_builtin(VIML_SETINDEX, b_setindex);
     vm.register_builtin(VIML_SETRANGE, b_setrange);
+    vm.register_builtin(VIML_BYTES, b_bytes);
     vm.register_builtin(VIML_ECHO, b_echo);
     vm.register_builtin(VIML_ECHON, b_echon);
     vm.register_builtin(VIML_SET_RESULT, b_set_result);

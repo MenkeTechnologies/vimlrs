@@ -16,6 +16,11 @@ pub enum Expr {
     Float(f64),
     /// String literal (already unescaped).
     Str(String),
+    /// String literal whose resolved bytes are not valid UTF-8 — what `"\xc3"`
+    /// and `"\303\251"` produce (see `viml_lexer::Lexer::push_double_escape`).
+    /// Kept separate from [`Expr::Str`] so the common case stays a `String` and
+    /// only this one needs the byte-carrying constant form in the compiler.
+    Bytes(Vec<u8>),
     /// vim9 `null_function` / `null_partial` — a Funcref with an empty name.
     ///
     /// It is a *constant*, not a call: `function('')` raises E129 in Vim (a
