@@ -1,0 +1,14 @@
+1
+initial=[]
+caught=[Vim(echo):E730: Using a List as a String]
+after-catch=[]
+after-silent=[E684: List index out of range: 0]
+after-silent-call=[E117: Unknown function: NoSuchFunctionHere]
+cleared=[]
+E730: Using a List as a String
+0
+after-plain=[E730: Using a List as a String]
+ok
+unchanged-by-ok=[E730: Using a List as a String]
+assigned=[assigned by hand]
+overwritten=[E728: Using a Dictionary as a Number]

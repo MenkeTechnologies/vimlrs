@@ -13,6 +13,8 @@
 
 use crate::ported::charset::{transchar_buf, transchar_byte_buf, vim_isprintc};
 use crate::ported::mbyte::{utf_ptr2char, utfc_ptr2len};
+use crate::ported::eval::vars::vv::VV_ERRMSG;
+use crate::ported::eval::vars::set_vim_var_string;
 use crate::vimstr::VimStr;
 use std::cell::{Cell, RefCell};
 
@@ -115,6 +117,14 @@ pub fn emsg(s: &str) {
     // the script as having errored — which is why `silent! call Foo()` on a missing
     // function leaves a sourced script exiting 0.
     if crate::ported::ex_eval::emsg_silent.with(|e| e.get()) != 0 {
+        // c:813 `set_vim_var_string(VV_ERRMSG, s, -1);` — "set v:errmsg, also
+        // when using :silent! cmd". The C's single call sits between the
+        // `cause_errthrow` return (c:798-803) and this `emsg_silent` one
+        // (c:817-846), so it is reached on BOTH the silenced and the displayed
+        // path but on neither thrown one. This port checks `emsg_silent` before
+        // `errthrow` (equivalent: `cause_errthrow` c:189 declines to throw while
+        // `emsg_silent` is up), so the one C site becomes these two.
+        set_vim_var_string(VV_ERRMSG, s);
         return;
     }
     did_emsg.with(|d| d.set(d.get() + 1));
@@ -129,6 +139,9 @@ pub fn emsg(s: &str) {
     // message, in which case nothing is printed here — the exception carries it.
     // Outside a `:try` it declines and the error prints as before.
     if !crate::fusevm_bridge::errthrow(s) {
+        // c:813, the displayed half of the same call — see the `emsg_silent`
+        // branch above.
+        set_vim_var_string(VV_ERRMSG, s);
         // c:855 `ex_exitval = 1;` — the C reaches this only after the
         // `cause_errthrow` and `emsg_silent` returns, i.e. exactly when the message
         // is about to be displayed. Same placement here: an error the `:try` took
@@ -254,3 +267,4 @@ pub fn msg_multiline(str_: &[u8], out: &mut VimStr) {
         msg_outtrans_len(&str_[chunk..], out);
     }
 }
+
