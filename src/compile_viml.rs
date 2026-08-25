@@ -720,7 +720,7 @@ fn slot_plan(stmts: &[(u32, Stmt)], in_function: bool) -> SlotPlan {
             // user/value-builtin calls inside a function. At SCRIPT scope a bare
             // var IS `g:`, which a callee can read — bail. Name-introspecting
             // builtins bail in either scope.
-            Expr::Call { name, args } => {
+            Expr::Call { name, args, .. } => {
                 if !cx.in_function || introspects(name) {
                     *cx.bail = true;
                 } else {
@@ -905,7 +905,7 @@ fn slot_plan(stmts: &[(u32, Stmt)], in_function: bool) -> SlotPlan {
             } => rhs_kind(expr, set, true, in_function),
             // The bitwise builtins always yield an Integer (so valid in either
             // pass) when every argument is itself provably integer.
-            Expr::Call { name, args } if bitwise_native_op(name, args.len()).is_some() => {
+            Expr::Call { name, args, .. } if bitwise_native_op(name, args.len()).is_some() => {
                 args.iter().all(|a| rhs_kind(a, set, true, in_function))
             }
             // A ternary's kind is its branches' kind (the test is irrelevant).
@@ -1242,7 +1242,7 @@ impl Compiler {
             // argument expressions compile inline exactly as `:call`'s would; only
             // the invocation is postponed.
             Stmt::Defer(e) => {
-                let Expr::Call { name, args } = e else {
+                let Expr::Call { name, args, .. } = e else {
                     return Err(VimlError(
                         // c: `:defer` takes a call and nothing else; both engines answer
                         // `E129: Function name required` (measured on `defer 5`).
@@ -1798,7 +1798,7 @@ impl Compiler {
     /// non-int start/bound with `tv_get_number` (exactly as `f_range` does), so a
     /// dynamic bound like `range(a:n)` or `range(len(x))` still runs natively.
     fn range_native_args<'a>(&self, iter: &'a Expr) -> Option<&'a [Expr]> {
-        if let Expr::Call { name, args } = iter {
+        if let Expr::Call { name, args, .. } = iter {
             if name == "range" && (1..=3).contains(&args.len()) {
                 return Some(args);
             }
@@ -2319,7 +2319,7 @@ impl Compiler {
                 expr,
             } => self.expr_is_num(expr),
             // Bitwise builtins of integer args yield an Integer (so also a Number).
-            Expr::Call { name, args } if bitwise_native_op(name, args.len()).is_some() => {
+            Expr::Call { name, args, .. } if bitwise_native_op(name, args.len()).is_some() => {
                 args.iter().all(|a| self.expr_is_int(a))
             }
             // A ternary is a Number when both branches are (the test is irrelevant
@@ -2354,7 +2354,7 @@ impl Compiler {
                 expr,
             } => self.expr_is_int(expr),
             // Bitwise builtins yield an Integer when every argument is an Integer.
-            Expr::Call { name, args } if bitwise_native_op(name, args.len()).is_some() => {
+            Expr::Call { name, args, .. } if bitwise_native_op(name, args.len()).is_some() => {
                 args.iter().all(|a| self.expr_is_int(a))
             }
             // A ternary is an Integer when both branches are.
@@ -2644,6 +2644,7 @@ impl Compiler {
                 self.expr(&Expr::Call {
                     name: "function".to_string(),
                     args: fn_args,
+                    emsg_name: None,
                 })?;
             }
             Expr::Unary { op, expr } => {
@@ -2814,7 +2815,11 @@ impl Compiler {
                 let lend = self.b.current_pos();
                 self.b.patch_jump(jend, lend);
             }
-            Expr::Call { name, args } => {
+            Expr::Call {
+                name,
+                args,
+                emsg_name,
+            } => {
                 // JIT fast path: the bitwise builtins lower to fusevm-NATIVE ops
                 // when every argument is provably integer, so bit-manipulation
                 // loops stay JIT-eligible. `f_and` is `a & b` over `tv_get_number`,
@@ -2836,34 +2841,86 @@ impl Compiler {
                 // such names through the runtime call path so the FFI fallback
                 // in `b_call_user` resolves them; a user `:function` still wins
                 // (it is looked up before the FFI registry there).
-                match builtin_fn_id(name).filter(|_| !crate::rust_ffi::is_ffi_export(name)) {
-                    Some(id) => {
-                        // A wrong argument count is an error Vim raises when it parses
-                        // the expression — i.e. when the command runs. Rejecting it at
-                        // compile time made an *unreachable* bad call abort the whole
-                        // script (`if 0 | echo strlen('a','b') | endif` loads fine in
-                        // Vim), so compile it to a runtime raise instead. Vim never
-                        // evaluates the arguments of such a call, and neither does this.
-                        if let Some(msg) = builtin_argc_error(name, args.len()) {
-                            self.load_str(&msg);
-                            self.emit(Op::CallBuiltin(h::VIML_RAISE, 1));
-                            return Ok(());
+                let id = builtin_fn_id(name).filter(|_| !crate::rust_ffi::is_ffi_export(name));
+                // A wrong argument count is an error Vim raises when the command
+                // RUNS, not when the script loads: rejecting it at compile time made
+                // an *unreachable* bad call abort the whole script (`if 0 | echo
+                // strlen('a','b') | endif` loads fine in Vim). And it raises the
+                // count error only AFTER evaluating the arguments — `call_func`
+                // (`vendor/eval/userfunc.c:580`) runs after `get_func_arguments`
+                // (c:559), so the arguments' side effects happen and an argument
+                // that FAILED pre-empts the count error with E116. Verified against
+                // vim 9.2: `echo strlen(Side(1), Side(2))` prints both of `Side`'s
+                // messages and then E118.
+                let argc_err = id.and_then(|_| builtin_argc_error(name, args.len()));
+                // c: `get_func_tv` calls `call_func` only when `get_func_arguments`
+                // returned OK, and reports `E116: Invalid arguments for function %s`
+                // otherwise (`vendor/eval/userfunc.c:559-588`) — a SECOND diagnostic
+                // after the one the argument itself raised:
+                //
+                //   echo type([1] . '')
+                //   " E730: Using a List as a String
+                //   " E116: Invalid arguments for function type([1] . '')
+                //
+                // Skipped when no argument could fail at all, so a literal call keeps
+                // its original ops.
+                let guarded = args.iter().any(Self::expr_can_error);
+                if guarded {
+                    self.emit(Op::CallBuiltin(h::VIML_ARGS_BEGIN, 0));
+                    self.emit(Op::Pop);
+                }
+                // A user-function call pushes its name below the arguments, so the
+                // failure path has one more stack value to discard.
+                let extra = usize::from(id.is_none());
+                if id.is_none() {
+                    self.load_str(name);
+                }
+                for a in args {
+                    self.expr(a)?;
+                }
+                let mut to_end = None;
+                if guarded {
+                    self.emit(Op::CallBuiltin(h::VIML_ARGS_FAILED, 0));
+                    let ok = self.emit(Op::JumpIfFalse(0));
+                    for _ in 0..args.len() + extra {
+                        self.emit(Op::Pop);
+                    }
+                    // c:587 formats the message over the `name` POINTER, which aims
+                    // into the source — see `Expr::Call::emsg_name`.
+                    self.load_str(emsg_name.as_deref().unwrap_or(name));
+                    // The bare name too: the runtime needs it to tell a call of a
+                    // Funcref-valued VARIABLE from a call of a function.
+                    self.load_str(name);
+                    self.emit(Op::CallBuiltin(h::VIML_ARGS_E116, 2));
+                    to_end = Some(self.emit(Op::Jump(0)));
+                    let here = self.b.current_pos();
+                    self.b.patch_jump(ok, here);
+                }
+                let n = Self::argc(args.len())?;
+                match (argc_err, id) {
+                    // c: `call_func` rejects the count with `FCERR_TOOMANY` /
+                    // `FCERR_TOOFEW` (`vendor/eval/userfunc.c:1625-1628`) once the
+                    // arguments are on the stack — so they are discarded here.
+                    (Some(msg), _) => {
+                        for _ in 0..args.len() + extra {
+                            self.emit(Op::Pop);
                         }
-                        for a in args {
-                            self.expr(a)?;
-                        }
-                        self.emit(Op::CallBuiltin(id, Self::argc(args.len())?));
+                        self.load_str(&msg);
+                        self.emit(Op::CallBuiltin(h::VIML_RAISE, 1));
+                    }
+                    (None, Some(id)) => {
+                        self.emit(Op::CallBuiltin(id, n));
                     }
                     // Unknown name → user-defined function call (resolved by name
                     // at runtime). Stack: [name, arg0, …, argN].
-                    None => {
-                        self.load_str(name);
-                        for a in args {
-                            self.expr(a)?;
-                        }
-                        self.emit(Op::CallBuiltin(h::VIML_CALL_USER, Self::argc(args.len())?));
+                    (None, None) => {
+                        self.emit(Op::CallBuiltin(h::VIML_CALL_USER, n));
                         self.emit_call_unwind_check();
                     }
+                }
+                if let Some(j) = to_end {
+                    let end = self.b.current_pos();
+                    self.b.patch_jump(j, end);
                 }
             }
             // `expr(args)` — evaluate the callee to a Funcref/Partial, push the
@@ -2895,6 +2952,7 @@ impl Compiler {
                 self.expr(&Expr::Call {
                     name: key.clone(),
                     args: args.clone(),
+                    emsg_name: None,
                 })?; // [base, value]
                 self.emit(Op::CallBuiltin(h::VIML_CONCAT, 2)); // [result]
                 let lend = self.b.current_pos();

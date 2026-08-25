@@ -255,6 +255,21 @@ pub const VIML_SETRANGE: u16 = 3055;
 /// (`true` iff it is a Dict). Drives the subscript-vs-concat branch selection.
 pub const VIML_IS_DICT: u16 = 3056;
 /// `:echo`
+/// Remember the evaluator's failure count before a call's argument list — the
+/// entry half of `get_func_arguments` (`vendor/eval/userfunc.c:559`).
+///
+/// A stack rather than a single mark, because an argument may itself be a call
+/// whose own guard would otherwise overwrite the enclosing one's baseline
+/// (`type(type([1] . ''))` reports E116 twice in vim, once per level).
+pub const VIML_ARGS_BEGIN: u16 = 3607;
+/// Pop that baseline and push `Bool(an argument's eval1() returned FAIL)`.
+///
+/// c: `get_func_tv` calls `call_func` only when `get_func_arguments` returned OK
+/// (`vendor/eval/userfunc.c:566`), and reports E116 otherwise (c:583-588).
+pub const VIML_ARGS_FAILED: u16 = 3608;
+/// Raise `E116: Invalid arguments for function %s` over the popped name and push
+/// the call's fallback value. c: `vendor/eval/userfunc.c:587`.
+pub const VIML_ARGS_E116: u16 = 3609;
 /// One `:echo`/`:echon` ARGUMENT, written as soon as it is evaluated.
 ///
 /// c: `ex_echo`'s loop is eval-then-write per argument (`vendor/eval.c:6139-6186`:
@@ -1630,6 +1645,9 @@ thread_local! {
     static HARD_ERR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// `did_emsg` at the start of the current command (see `VIML_LINE_ABORT`).
     static EMSG_MARK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// [`EVAL_FAIL`] as it stood at the start of each open call's argument list —
+    /// see [`VIML_ARGS_BEGIN`].
+    static ARGS_FAIL_STACK: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Mark the error in flight as a HARD failure — see [`VIML_EXC_IS_HARD`].
@@ -1734,6 +1752,57 @@ fn b_raise(vm: &mut VM, _: u8) -> Value {
     if message::err_count.with(|d| d.get()) <= ERR_MARK.with(|m| m.get()) {
         message::emsg(&msg);
     }
+    Value::Int(0)
+}
+
+/// c: the entry to `get_func_arguments` (`vendor/eval/userfunc.c:559`).
+fn b_args_begin(_vm: &mut VM, _: u8) -> Value {
+    let cur = EVAL_FAIL.with(|f| f.get());
+    ARGS_FAIL_STACK.with(|s| s.borrow_mut().push(cur));
+    Value::Undef
+}
+
+/// c: `ret == OK` from `get_func_arguments` (`vendor/eval/userfunc.c:566`),
+/// negated. `EVAL_FAIL` is this port's `eval1() == FAIL`: an error a BUILTIN
+/// reported while still yielding a value is rolled back by [`in_callee`] and does
+/// not count, exactly as `call_func()` returning OK does not fail the caller.
+fn b_args_failed(_vm: &mut VM, _: u8) -> Value {
+    let before = ARGS_FAIL_STACK.with(|s| s.borrow_mut().pop()).unwrap_or(0);
+    Value::Bool(EVAL_FAIL.with(|f| f.get()) > before)
+}
+
+/// c: `emsg_funcname(N_("E116: Invalid arguments for function %s"), name)`
+/// (`vendor/eval/userfunc.c:587`), under the `!aborting() && evaluate` guard at
+/// c:583. `aborting()` is `(did_emsg && force_abort) || got_int || did_throw`;
+/// the disjunct that can be live here is `did_throw`, i.e. a pending exception.
+fn b_args_e116(vm: &mut VM, _: u8) -> Value {
+    let bare = tv_get_string(&pop_tv(vm));
+    let name = tv_get_string(&pop_tv(vm));
+    // c: `emsg_funcname` prints the `name` POINTER, which for a call written in an
+    // expression aims into the source. A callee that is a VARIABLE holding a
+    // Funcref never took that route, though: `eval7` evaluated the variable and
+    // the call goes through `call_func_rettv`, which names the function the
+    // reference points AT. Verified against vim 9.2:
+    //
+    //   let F = function('type') | echo F([1] . '')
+    //   " E116: Invalid arguments for function type
+    let name = if func_exists_hook(&bare) {
+        name
+    } else {
+        match eval_variable(&bare) {
+            Some(v) if matches!(v.v_type, VAR_FUNC | VAR_PARTIAL) => match (&v.v_type, &v.vval) {
+                (VAR_PARTIAL, v_partial(Some(p))) => p.pt_name.clone(),
+                _ => tv_get_string(&v),
+            },
+            _ => name,
+        }
+    };
+    if PENDING_EXC.with(|p| p.borrow().is_none()) {
+        message::semsg(&format!("E116: Invalid arguments for function {name}"));
+    }
+    // c: `get_func_tv` returns FAIL without touching `rettv`, which `eval7` left
+    // as a Number 0 — and the FAIL propagates, which the `semsg` above has
+    // already recorded through `note_error`.
     Value::Int(0)
 }
 
@@ -5244,6 +5313,7 @@ pub fn take_last_result() -> Option<typval_T> {
 pub fn reset_run() {
     REFPOOL.with(|p| p.borrow_mut().clear());
     ECHO_BUF.with(|b| *b.borrow_mut() = None);
+    ARGS_FAIL_STACK.with(|s| s.borrow_mut().clear());
     LAST_RESULT.with(|r| *r.borrow_mut() = None);
     PENDING_EXC.with(|p| *p.borrow_mut() = None);
     V_EXCEPTION.with(|e| e.borrow_mut().clear());
@@ -5687,6 +5757,9 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_SETINDEX, b_setindex);
     vm.register_builtin(VIML_SETRANGE, b_setrange);
     vm.register_builtin(VIML_BYTES, b_bytes);
+    vm.register_builtin(VIML_ARGS_BEGIN, b_args_begin);
+    vm.register_builtin(VIML_ARGS_FAILED, b_args_failed);
+    vm.register_builtin(VIML_ARGS_E116, b_args_e116);
     vm.register_builtin(VIML_ECHO_ARG, b_echo_arg);
     vm.register_builtin(VIML_ECHO_END, b_echo_end);
     vm.register_builtin(VIML_ECHO, b_echo);

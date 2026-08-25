@@ -1,0 +1,45 @@
+1
+E730: Using a List as a String
+E116: Invalid arguments for function type([1] . '')
+--1
+E730: Using a List as a String
+E116: Invalid arguments for function type([1] . '') 'TAIL'
+--2
+E730: Using a List as a String
+E116: Invalid arguments for function type([1] . '') . 'X'
+--3
+E730: Using a List as a String
+E116: Invalid arguments for function type([1] . '')]
+--4
+E730: Using a List as a String
+E116: Invalid arguments for function type([1] . ''))
+E116: Invalid arguments for function type(type([1] . ''))
+--5
+E730: Using a List as a String
+E116: Invalid arguments for function type
+--6
+E730: Using a List as a String
+E116: Invalid arguments for function type([1] . ''))
+E116: Invalid arguments for function type
+--7
+E730: Using a List as a String
+E116: Invalid arguments for function type
+--8
+E730: Using a List as a String
+E116: Invalid arguments for function Side([1] . '')
+--9
+E121: Undefined variable: g:nosuchvar
+E116: Invalid arguments for function type(g:nosuchvar)
+--10
+E730: Using a List as a String
+0
+--11
+SIDE 1
+SIDE 2
+E118: Too many arguments for function: strlen
+--12
+E730: Using a List as a String
+E116: Invalid arguments for function len([1] . '', 'x')
+--13
+E730: Using a List as a String
+--14

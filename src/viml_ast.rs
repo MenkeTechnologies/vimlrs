@@ -141,6 +141,25 @@ pub enum Expr {
         name: String,
         /// Argument expressions.
         args: Vec<Expr>,
+        /// The function name AS THE C SEES IT when it reports `E116: Invalid
+        /// arguments for function %s` (`vendor/eval/userfunc.c:587`).
+        ///
+        /// `emsg_funcname` (c:492-500) formats `%s` over the `name` pointer, and
+        /// that pointer aims INTO the expression being parsed — it is not
+        /// terminated at the end of the name. So the message carries the source
+        /// from the name to the end of the eval buffer, closing brackets, later
+        /// `:echo` arguments and all:
+        ///
+        /// ```vim
+        /// echo type([1] . '') 'TAIL'
+        /// " E116: Invalid arguments for function type([1] . '') 'TAIL'
+        /// ```
+        ///
+        /// `None` for a call the parser synthesized rather than read (a `0z…`
+        /// blob literal, a desugared method chain): those have no source text of
+        /// their own, and fall back to the bare name — which is also what the C
+        /// prints for `:call`, whose name it copies out first.
+        emsg_name: Option<String>,
     },
     /// `base.name(args)` with no space around the dot — syntactically ambiguous
     /// in legacy Vimscript exactly as [`Expr::Member`] is, and resolved the same

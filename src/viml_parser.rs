@@ -198,7 +198,20 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
                 _ => Ok(assign),
             }
         }
-        "call" => Ok(Stmt::Call(parse_expr(strip_legacy_trailing_comment(rest))?)),
+        // c: `ex_call` resolves the name with `trans_function_name`, which hands
+        // `get_func_tv` an allocated, NUL-TERMINATED copy — so the E116 it may
+        // report names the function and nothing else, unlike the same call written
+        // in an expression. Verified against vim 9.2: `call type([1] . '')` is
+        // `E116: Invalid arguments for function type`, while `echo type([1] . '')`
+        // is `E116: … function type([1] . '')`. Only the OUTERMOST call is
+        // renamed; one nested in an argument was still read from the source.
+        "call" => {
+            let mut e = parse_expr(strip_legacy_trailing_comment(rest))?;
+            if let Expr::Call { emsg_name, .. } = &mut e {
+                *emsg_name = None;
+            }
+            Ok(Stmt::Call(e))
+        }
         // `:defer Func(args)` takes a call with no `:call` in front of it, so the
         // expression is parsed exactly as `:call`'s is.
         "defer" => Ok(Stmt::Defer(parse_expr(strip_legacy_trailing_comment(
@@ -3221,6 +3234,9 @@ impl Parser {
     }
 
     fn primary(&mut self) -> Result<Expr, VimlError> {
+        // The source offset of the token about to be consumed. For a call this
+        // is where the C's `name` pointer would aim — see `Expr::Call::emsg_name`.
+        let at = self.peek_span();
         match self.advance() {
             Tok::Number(n) => Ok(Expr::Number(n)),
             Tok::Float(f) => Ok(Expr::Float(f)),
@@ -3234,6 +3250,7 @@ impl Parser {
                 args: vec![Expr::List(
                     bytes.into_iter().map(|b| Expr::Number(b as i64)).collect(),
                 )],
+                emsg_name: None,
             }),
             Tok::Str(s) => Ok(Expr::Str(s)),
             Tok::BStr(b) => Ok(Expr::Bytes(b)),
@@ -3269,7 +3286,11 @@ impl Parser {
                         &format!("E116: Invalid arguments for function {name}"),
                         "E15: Invalid expression: \"%s\"",
                     )?;
-                    Ok(Expr::Call { name, args })
+                    Ok(Expr::Call {
+                        name,
+                        args,
+                        emsg_name: at.and_then(|s| self.src.get(s..)).map(str::to_string),
+                    })
                 } else if vim9_active() {
                     // vim9 keyword literals (`vim9.txt`): in a `:vim9script` script
                     // or a `def…enddef` body, bare `true`/`false`/`null` are the
@@ -3298,6 +3319,7 @@ impl Parser {
                         "null_blob" => Ok(Expr::Call {
                             name: "list2blob".to_string(),
                             args: vec![Expr::List(Vec::new())],
+                            emsg_name: None,
                         }),
                         "null_function" | "null_partial" => Ok(Expr::NullFunc),
                         _ => Ok(Expr::Var(name)),
