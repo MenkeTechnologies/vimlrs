@@ -255,6 +255,18 @@ pub const VIML_SETRANGE: u16 = 3055;
 /// (`true` iff it is a Dict). Drives the subscript-vs-concat branch selection.
 pub const VIML_IS_DICT: u16 = 3056;
 /// `:echo`
+/// `:let &opt op= …` — push `Bool(the C would refuse this operator for this
+/// option's type)`, having reported E734 if so.
+///
+/// c: `ex_let_option` (`vendor/eval/vars.c:1379-1384`) — `.` on a non-string
+/// option, or anything but `.` on a string one, is `e_letwrong`. It has to be a
+/// runtime test because it reads the option's CURRENT type. Stack: name, op.
+pub const VIML_OPT_OP_BAD: u16 = 3611;
+/// `x op= y` — port of `eexe_mod_op` (`vendor/eval/executor.c:201`), the C's
+/// COMPOUND-assignment operator. Not the expression operator: this one is a type
+/// table and reports `E734: Wrong variable type for op=` for a combination it
+/// does not have, leaving the variable alone. Stack (bottom→top): lhs, rhs, op.
+pub const VIML_MOD_OP: u16 = 3610;
 /// Remember the evaluator's failure count before a call's argument list — the
 /// entry half of `get_func_arguments` (`vendor/eval/userfunc.c:559`).
 ///
@@ -1753,6 +1765,41 @@ fn b_raise(vm: &mut VM, _: u8) -> Value {
         message::emsg(&msg);
     }
     Value::Int(0)
+}
+
+/// c: `ex_let_option` (`vendor/eval/vars.c:1379-1384`):
+///
+/// ```c
+/// if (op != NULL && *op != '='
+///     && ((curval.type != kOptValTypeString && *op == '.')
+///         || (curval.type == kOptValTypeString && *op != '.'))) {
+///   semsg(_(e_letwrong), op);
+/// ```
+fn b_opt_op_bad(vm: &mut VM, _: u8) -> Value {
+    let op = tv_get_string(&pop_tv(vm)).chars().next().unwrap_or('=');
+    let name = tv_get_string(&pop_tv(vm));
+    let name = name
+        .strip_prefix("l:")
+        .or_else(|| name.strip_prefix("g:"))
+        .unwrap_or(&name);
+    let is_string = crate::ported::option::get_option_value(name).v_type == VAR_STRING;
+    let bad = (!is_string && op == '.') || (is_string && op != '.');
+    if bad {
+        message::semsg(&format!("E734: Wrong variable type for {op}="));
+    }
+    Value::Bool(bad)
+}
+
+/// c: `eexe_mod_op(tv1, tv2, op)` (`vendor/eval/executor.c:201`), reached from
+/// `ex_let_one`. On FAIL the C never assigns, and the `emsg` the port already
+/// raised has marked the evaluator as failed — which is what makes the `:let`
+/// store skip, exactly as it does for any other failed right-hand side.
+fn b_mod_op(vm: &mut VM, _: u8) -> Value {
+    let op = tv_get_string(&pop_tv(vm)).chars().next().unwrap_or('=');
+    let rhs = pop_tv(vm);
+    let mut lhs = pop_tv(vm);
+    crate::ported::eval::executor::eexe_mod_op(&mut lhs, &rhs, op);
+    tv_to_value(lhs)
 }
 
 /// c: the entry to `get_func_arguments` (`vendor/eval/userfunc.c:559`).
@@ -5757,6 +5804,8 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_SETINDEX, b_setindex);
     vm.register_builtin(VIML_SETRANGE, b_setrange);
     vm.register_builtin(VIML_BYTES, b_bytes);
+    vm.register_builtin(VIML_MOD_OP, b_mod_op);
+    vm.register_builtin(VIML_OPT_OP_BAD, b_opt_op_bad);
     vm.register_builtin(VIML_ARGS_BEGIN, b_args_begin);
     vm.register_builtin(VIML_ARGS_FAILED, b_args_failed);
     vm.register_builtin(VIML_ARGS_E116, b_args_e116);

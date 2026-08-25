@@ -84,6 +84,17 @@ pub enum Expr {
         lhs: Box<Expr>,
         /// Right operand.
         rhs: Box<Expr>,
+        /// True when this node is the desugaring of a COMPOUND `:let` (`x += y`)
+        /// rather than an operator the source wrote.
+        ///
+        /// The two are different functions in the C. An expression operator runs
+        /// `eval5`/`eval6`, which coerce freely; `x op= y` runs `eexe_mod_op`
+        /// (`vendor/eval/executor.c:201`), which is a TYPE TABLE — a Dict or
+        /// Funcref on the right, a Dict/Funcref/Bool/Special on the left, `%=`
+        /// with a Float, `.=` with a Float, a List with anything but `+=`, all
+        /// give `E734: Wrong variable type for op=` and leave the variable alone.
+        /// `let d = {} | let d += [1]` is E734 in vim, not E745.
+        mod_op: bool,
     },
     /// Comparison (`eval4`) — carries the case flag and `is`/`isnot`.
     Compare {

@@ -889,7 +889,7 @@ fn slot_plan(stmts: &[(u32, Stmt)], in_function: bool) -> SlotPlan {
             Expr::Number(_) => true,
             Expr::Float(_) => !is_int,
             Expr::Var(n) => slot_key(n, in_function).is_some_and(|k| set.contains(k)),
-            Expr::Arith { op, lhs, rhs } => {
+            Expr::Arith { op, lhs, rhs, .. } => {
                 !matches!(op, ArithOp::Concat)
                     && rhs_kind(lhs, set, is_int, in_function)
                     && rhs_kind(rhs, set, is_int, in_function)
@@ -2175,6 +2175,38 @@ impl Compiler {
         )
     }
 
+    /// The operator of a COMPOUND `:let` (`+= -= *= /= %= .=`), or `None` for a
+    /// plain `=`. See `Expr::Arith::mod_op`.
+    fn let_compound_op(expr: &Expr) -> Option<char> {
+        match expr {
+            Expr::Arith {
+                op, mod_op: true, ..
+            } => Some(match op {
+                ArithOp::Add => '+',
+                ArithOp::Sub => '-',
+                ArithOp::Mul => '*',
+                ArithOp::Div => '/',
+                ArithOp::Mod => '%',
+                ArithOp::Concat => '.',
+            }),
+            _ => None,
+        }
+    }
+
+    /// The same, restricted to the arithmetic operators — the set
+    /// `vim_strchr("+-*/%", *op)` picks out in `ex_let_env` and
+    /// `ex_let_register`.
+    fn arith_compound_op(expr: &Expr) -> Option<char> {
+        Self::let_compound_op(expr).filter(|c| *c != '.')
+    }
+
+    /// c: `semsg(_(e_letwrong), op)` — "E734: Wrong variable type for %s=".
+    fn raise_letwrong(&mut self, op: char) {
+        self.load_str(&format!("E734: Wrong variable type for {op}="));
+        self.emit(Op::CallBuiltin(h::VIML_RAISE, 1));
+        self.emit(Op::Pop);
+    }
+
     fn let_stmt(&mut self, target: &LetTarget, expr: &Expr) -> Result<(), VimlError> {
         match target {
             LetTarget::Var(name) => {
@@ -2214,6 +2246,13 @@ impl Compiler {
                 Ok(())
             }
             LetTarget::Env(name) => {
+                // c: `ex_let_env` (`vendor/eval/vars.c:1316`) — an ARITHMETIC
+                // compound on an environment variable is `e_letwrong` before
+                // anything is evaluated; only `.=` is defined for one (c:1326).
+                if let Some(op) = Self::arith_compound_op(expr) {
+                    self.raise_letwrong(op);
+                    return Ok(());
+                }
                 self.expr(expr)?;
                 self.load_str(name);
                 self.emit(Op::CallBuiltin(h::VIML_SETENV, 2));
@@ -2278,6 +2317,13 @@ impl Compiler {
                 Ok(())
             }
             LetTarget::Register(c) => {
+                // c: `ex_let_register` (`vendor/eval/vars.c:1457`) — same rule as
+                // for an environment variable: `+-*/%` is `e_letwrong`, `.=` reads
+                // the register and appends (c:1465).
+                if let Some(op) = Self::arith_compound_op(expr) {
+                    self.raise_letwrong(op);
+                    return Ok(());
+                }
                 // `:let @r = expr` → setreg(r, expr). Push the register name then
                 // the value (the `f_setreg(argvars)` order).
                 self.load_str(&c.to_string());
@@ -2287,12 +2333,27 @@ impl Compiler {
                 Ok(())
             }
             LetTarget::Option(name) => {
+                // c: `ex_let_option` (`vendor/eval/vars.c:1379-1384`) — `.=` on a
+                // number option and `+=`/`-=`/… on a string one are `e_letwrong`,
+                // and the option keeps its value. The option's type is only known
+                // at run time, so the test is too.
+                let mut skip = None;
+                if let Some(op) = Self::let_compound_op(expr) {
+                    self.load_str(name);
+                    self.load_str(&op.to_string());
+                    self.emit(Op::CallBuiltin(h::VIML_OPT_OP_BAD, 2));
+                    skip = Some(self.emit(Op::JumpIfTrue(0)));
+                }
                 // `:let &opt = expr` → set the option. Push the option name then
                 // the value; the bridge applies it via `option::do_set`.
                 self.load_str(name);
                 self.expr(expr)?;
                 self.emit(Op::CallBuiltin(h::VIML_SETOPT, 2));
                 self.emit(Op::Pop);
+                if let Some(j) = skip {
+                    let end = self.b.current_pos();
+                    self.b.patch_jump(j, end);
+                }
                 Ok(())
             }
         }
@@ -2311,7 +2372,7 @@ impl Compiler {
         match e {
             Expr::Number(_) | Expr::Float(_) => true,
             Expr::Var(name) => self.slots.contains_key(self.slot_key(name)), // slotted ⇒ Number
-            Expr::Arith { op, lhs, rhs } => {
+            Expr::Arith { op, lhs, rhs, .. } => {
                 !matches!(op, ArithOp::Concat) && self.expr_is_num(lhs) && self.expr_is_num(rhs)
             }
             Expr::Unary {
@@ -2346,7 +2407,7 @@ impl Compiler {
         match e {
             Expr::Number(_) => true,
             Expr::Var(name) => self.int_slots.contains(self.slot_key(name)),
-            Expr::Arith { op, lhs, rhs } => {
+            Expr::Arith { op, lhs, rhs, .. } => {
                 !matches!(op, ArithOp::Concat) && self.expr_is_int(lhs) && self.expr_is_int(rhs)
             }
             Expr::Unary {
@@ -2681,7 +2742,12 @@ impl Compiler {
                 };
                 self.emit(Op::CallBuiltin(id, 1));
             }
-            Expr::Arith { op, lhs, rhs } => {
+            Expr::Arith {
+                op,
+                lhs,
+                rhs,
+                mod_op,
+            } => {
                 // JIT fast path: integer `+`/`-`/`*` lower to fusevm-NATIVE ops
                 // (`Op::Add`/`Sub`/`Mul`) so the chunk stays eligible for the
                 // 3-tier Cranelift JIT. Sound because `Value::Int` <-> Number
@@ -2715,6 +2781,43 @@ impl Compiler {
                     self.expr(lhs)?;
                     self.expr(rhs)?;
                     self.emit(Op::Mod);
+                    return Ok(());
+                }
+                // c: `ex_let_one` applies a COMPOUND assignment with `eexe_mod_op`
+                // (`vendor/eval/executor.c:201`), which is a type table rather than
+                // the coercing expression operator: `let d = {} | let d += [1]` is
+                // `E734: Wrong variable type for +=` in vim, not E745. The native
+                // paths above stay — they are only taken when both operands are
+                // provably Number, and `eexe_mod_op` agrees with them there.
+                if *mod_op {
+                    // c: `ex_let_one` reads the current value with `eval_variable`
+                    // and RETURNS if that failed — `let g:nosuch += 1` is E121 alone,
+                    // never also E734. Same for a right-hand side that failed.
+                    self.emit(Op::CallBuiltin(h::VIML_ARGS_BEGIN, 0));
+                    self.emit(Op::Pop);
+                    self.expr(lhs)?;
+                    self.expr(rhs)?;
+                    self.emit(Op::CallBuiltin(h::VIML_ARGS_FAILED, 0));
+                    let ok = self.emit(Op::JumpIfFalse(0));
+                    self.emit(Op::Pop); // rhs
+                    self.emit(Op::Pop); // lhs
+                                        // The `:let` store is skipped by its own failure guard, so the
+                                        // value left here is never written anywhere.
+                    self.emit(Op::LoadInt(0));
+                    let to_end = self.emit(Op::Jump(0));
+                    let here = self.b.current_pos();
+                    self.b.patch_jump(ok, here);
+                    self.load_str(match op {
+                        ArithOp::Add => "+",
+                        ArithOp::Sub => "-",
+                        ArithOp::Mul => "*",
+                        ArithOp::Div => "/",
+                        ArithOp::Mod => "%",
+                        ArithOp::Concat => ".",
+                    });
+                    self.emit(Op::CallBuiltin(h::VIML_MOD_OP, 3));
+                    let end = self.b.current_pos();
+                    self.b.patch_jump(to_end, end);
                     return Ok(());
                 }
                 self.expr(lhs)?;

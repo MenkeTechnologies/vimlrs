@@ -2320,6 +2320,9 @@ fn parse_let(rest: &str) -> Result<Stmt, VimlError> {
                 op,
                 lhs: Box::new(cur),
                 rhs: Box::new(parse_expr(rhs)?),
+                // c: `ex_let_one` applies the operator with `eexe_mod_op`, not with
+                // the expression operator — see `Expr::Arith::mod_op`.
+                mod_op: true,
             }
         }
     };
@@ -3167,6 +3170,7 @@ impl Parser {
                 op,
                 lhs: Box::new(lhs),
                 rhs: Box::new(rhs),
+                mod_op: false,
             };
         }
         Ok(lhs)
@@ -3188,6 +3192,7 @@ impl Parser {
                 op,
                 lhs: Box::new(lhs),
                 rhs: Box::new(rhs),
+                mod_op: false,
             };
         }
         Ok(lhs)
