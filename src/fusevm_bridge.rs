@@ -262,6 +262,10 @@ pub const VIML_IS_DICT: u16 = 3056;
 /// BEFORE `eexe_mod_op` — so a locked List is not extended in place and then
 /// refused, it is refused first. Stack: name.
 pub const VIML_VAR_LOCKED: u16 = 3612;
+/// Raise a COMMAND-level diagnostic — one the C reports after the argument was
+/// parsed, so it does not abandon the rest of a `|`-separated line. Stack: the
+/// message. See [`in_command_error`].
+pub const VIML_RAISE_CMD: u16 = 3613;
 /// `:let &opt op= …` — push `Bool(the C would refuse this operator for this
 /// option's type)`, having reported E734 if so.
 ///
@@ -1684,6 +1688,26 @@ fn set_hard_err() {
     HARD_ERR.with(|h| h.set(true));
 }
 
+/// Run a COMMAND-level diagnostic — one the C raises after the argument was
+/// already parsed and evaluated — without counting it as an evaluator failure.
+///
+/// c: the distinction is whether `eap->nextcmd` was set. `ex_let`'s `eval0`
+/// FAILING means the parse never reached the `|`, so the rest of the line is
+/// dropped; `eexe_mod_op` refusing the operator afterwards (`E734`) is the
+/// COMMAND failing with the argument already consumed, and vim carries on to
+/// the next `|`-separated command. Measured:
+///
+/// ```vim
+/// silent! let g:b = [] . ''   | echo 'ran'   " abandoned — eval0 FAILed
+/// silent! let g:e *= [2]      | echo 'ran'   " RAN — E734 is ex_let_one's
+/// ```
+fn in_command_error<T>(f: impl FnOnce() -> T) -> T {
+    let saved = EVAL_FAIL.with(|c| c.get());
+    let out = f();
+    EVAL_FAIL.with(|c| c.set(saved));
+    out
+}
+
 /// Count one error against [`EVAL_FAIL`]. Called by `message::emsg` alongside its
 /// own `err_count` bump, so the two counters advance together *except* across a
 /// callee's body, which [`in_callee`] rolls back.
@@ -1716,6 +1740,11 @@ pub fn note_error() {
 fn in_callee<T>(f: impl FnOnce() -> T) -> T {
     let saved_fail = EVAL_FAIL.with(|c| c.get());
     let saved_mark = FAIL_MARK.with(|m| m.get());
+    // The eval5 operand pre-check inside a CALLEE's body is that body's
+    // mid-parse abort, not this command's — the caller's expression was parsed
+    // in full. Without the rollback, `silent! let g:a = C() | echo 'ran'` with a
+    // failing `C()` abandoned the line, where vim runs the `echo`.
+    let saved_hard = HARD_ERR.with(|h| h.get());
     let out = f();
     // c: `eval_func` (`Src/eval.c`) — "Stop the expression evaluation when
     // immediately aborting on error, or when an interrupt occurred or an exception
@@ -1735,6 +1764,7 @@ fn in_callee<T>(f: impl FnOnce() -> T) -> T {
     if PENDING_EXC.with(|p| p.borrow().is_none()) {
         EVAL_FAIL.with(|c| c.set(saved_fail));
         FAIL_MARK.with(|m| m.set(saved_mark));
+        HARD_ERR.with(|h| h.set(saved_hard));
         // Same condition, for the same reason: c:647's `!force_abort` guard means
         // an error the callee turned into an exception is NOT forgotten.
     }
@@ -1818,7 +1848,9 @@ fn b_opt_op_bad(vm: &mut VM, _: u8) -> Value {
     let is_string = crate::ported::option::get_option_value(name).v_type == VAR_STRING;
     let bad = (!is_string && op == '.') || (is_string && op != '.');
     if bad {
-        message::semsg(&format!("E734: Wrong variable type for {op}="));
+        // c: `ex_let_option` reports this with the argument already parsed, so
+        // it does not abandon the rest of the line — see [`in_command_error`].
+        in_command_error(|| message::semsg(&format!("E734: Wrong variable type for {op}=")));
     }
     Value::Bool(bad)
 }
@@ -1831,7 +1863,9 @@ fn b_mod_op(vm: &mut VM, _: u8) -> Value {
     let op = tv_get_string(&pop_tv(vm)).chars().next().unwrap_or('=');
     let rhs = pop_tv(vm);
     let mut lhs = pop_tv(vm);
-    crate::ported::eval::executor::eexe_mod_op(&mut lhs, &rhs, op);
+    // c: `eexe_mod_op`'s E734 is `ex_let_one` failing with the argument already
+    // evaluated, not `eval0` failing — see [`in_command_error`].
+    in_command_error(|| crate::ported::eval::executor::eexe_mod_op(&mut lhs, &rhs, op));
     tv_to_value(lhs)
 }
 
@@ -1886,9 +1920,52 @@ fn b_args_e116(vm: &mut VM, _: u8) -> Value {
     Value::Int(0)
 }
 
-fn b_line_abort(_vm: &mut VM, _: u8) -> Value {
+/// [`VIML_RAISE_CMD`] — `b_raise` for a diagnostic the COMMAND reports rather
+/// than the evaluator.
+fn b_raise_cmd(vm: &mut VM, argc: u8) -> Value {
+    in_command_error(|| b_raise(vm, argc))
+}
+
+fn b_line_abort(vm: &mut VM, _: u8) -> Value {
+    // c: the rest of a `|`-separated line is skipped by `ea.skip`
+    // (`ex_docmd.c:2027-2031`), whose live disjunct here is `did_emsg` — so a
+    // REPORTED error abandons the line.
     let reported = message::did_emsg.with(|d| d.get()) > EMSG_MARK.with(|m| m.get());
-    Value::Bool(reported || HARD_ERR.with(|h| h.get()))
+    // `:silent!` keeps `did_emsg` clear, and yet vim still abandons the line for
+    // some silenced errors and not others. The discriminator is whose evaluation
+    // failed — measured, one probe per row:
+    //
+    //   silent! let g:b = [] . ''      | echo 'ran'   abandoned (eval5 FAILed)
+    //   silent! call nosuchfunc_zz()   | echo 'ran'   abandoned (E117, the
+    //                                                 dispatcher's own failure)
+    //   silent! let g:a = C()          | echo 'ran'   RAN — the failure was
+    //                                                 inside a callee's body
+    //   silent! let g:g = {x -> …}(1)  | echo 'ran'   RAN — likewise
+    //   silent! echo strlen([1])       | echo 'ran'   RAN — a builtin's own emsg
+    //   echo strlen([1])               | echo 'ran'   abandoned (did_emsg)
+    //
+    // The other half is per COMMAND, and is about the parse pointer rather than
+    // any error state: a command that did not consume its argument never sets
+    // `eap->nextcmd`, so the rest of the line is dropped even with nothing
+    // reported. The three rules the compiler distinguishes:
+    //
+    //   1  the line is dropped only when the parse aborted MID-expression,
+    //      which is `eval5`'s operand pre-check (`vendor/eval.c:2405`, this
+    //      port's HARD_ERR): `[] . 'x'` reports E730 before the right operand is
+    //      even parsed, so `arg` never reaches the `|`. An E117, E121 or E684
+    //      comes AFTER the expression was consumed, and vim carries on —
+    //      `silent! echo nosuchfn() | let x = 'ran'` RUNS.
+    //   2  `:call` additionally sets `nextcmd` only when `get_func_tv`
+    //      SUCCEEDED, so a failed call drops the line even though the argument
+    //      was consumed: `silent! call nosuchfn() | let x = 'ran'` does NOT run.
+    //
+    // Every row was measured in vim 9.2 and Neovim 0.12.5 alike.
+    let rule = tv_get_number_chk(&pop_tv(vm), None);
+    let hard = HARD_ERR.with(|h| h.get());
+    Value::Bool(match rule {
+        1 => reported || hard,
+        _ => reported || hard || eval_failed_since_mark(),
+    })
 }
 
 fn b_err_since(_vm: &mut VM, _: u8) -> Value {
@@ -6061,6 +6138,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_MOD_OP, b_mod_op);
     vm.register_builtin(VIML_OPT_OP_BAD, b_opt_op_bad);
     vm.register_builtin(VIML_VAR_LOCKED, b_var_locked);
+    vm.register_builtin(VIML_RAISE_CMD, b_raise_cmd);
     vm.register_builtin(VIML_ARGS_BEGIN, b_args_begin);
     vm.register_builtin(VIML_ARGS_FAILED, b_args_failed);
     vm.register_builtin(VIML_ARGS_E116, b_args_e116);

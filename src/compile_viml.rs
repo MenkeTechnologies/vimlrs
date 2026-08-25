@@ -1144,6 +1144,24 @@ impl Compiler {
         })
     }
 
+    /// Which rule decides whether this command sets `eap->nextcmd`, and so
+    /// whether a failure of its own drops the rest of a `|`-separated line —
+    /// see `fusevm_bridge::b_line_abort`. `:silent` is a modifier, not a
+    /// command, so it is looked through exactly as `stmt_cmdname` does.
+    fn nextcmd_rule(s: &Stmt) -> i64 {
+        match s {
+            // c: `ex_call` is the one that sets `eap->nextcmd` only when the
+            // call SUCCEEDED, so a failed call drops the rest of the line even
+            // though `get_func_arguments` had consumed the `(…)`.
+            Stmt::Call(_) => 2,
+            Stmt::Silent { stmt, .. } => Self::nextcmd_rule(stmt),
+            // Everything else — `:echo` included (`vendor/eval.c:6187` sets it
+            // from wherever the argument loop stopped) — drops the line only
+            // when the PARSE aborted mid-expression.
+            _ => 1,
+        }
+    }
+
     fn compile_stmts(&mut self, stmts: &[(u32, Stmt)]) -> Result<(), VimlError> {
         for (line, s) in stmts {
             // The line every op emitted for this statement is tagged with. It
@@ -1591,7 +1609,10 @@ impl Compiler {
                         // Not `ERR_SINCE`: a `:silent!` error is not *reported*, and
                         // Vim carries on with the rest of the line after one. A hard
                         // failure abandons the line even when silenced.
-                        self.emit(Op::CallBuiltin(h::VIML_LINE_ABORT, 0));
+                        // The command's `eap->nextcmd` rule — see
+                        // `fusevm_bridge::b_line_abort`.
+                        self.emit(Op::LoadInt(Self::nextcmd_rule(inner)));
+                        self.emit(Op::CallBuiltin(h::VIML_LINE_ABORT, 1));
                         to_end.push(self.emit(Op::JumpIfTrue(0)));
                     }
                 }
@@ -2216,7 +2237,9 @@ impl Compiler {
     /// c: `semsg(_(e_letwrong), op)` — "E734: Wrong variable type for %s=".
     fn raise_letwrong(&mut self, op: char) {
         self.load_str(&format!("E734: Wrong variable type for {op}="));
-        self.emit(Op::CallBuiltin(h::VIML_RAISE, 1));
+        // c: reported by `ex_let_env`/`ex_let_register`/`ex_let_option` with the
+        // argument already parsed, so it does not abandon the rest of the line.
+        self.emit(Op::CallBuiltin(h::VIML_RAISE_CMD, 1));
         self.emit(Op::Pop);
     }
 

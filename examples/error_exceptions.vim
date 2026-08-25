@@ -144,15 +144,27 @@ catch
 endtry
 call assert_match('E730', s:esc)
 
-" --- and a hard failure abandons the rest of the line even under `:silent!`, while an
-"     ordinary silenced error lets the line continue
+" --- what abandons the rest of a `|`-separated line under `:silent!`.
+"     A command drops the line when it never set `eap->nextcmd`, and there are two
+"     ways not to: the PARSE aborted mid-expression (eval5's operand pre-check,
+"     vendor/eval.c:2405 — `[] . 'x'` reports E730 before the right operand is even
+"     read), or the command is `:call`, which sets nextcmd only when get_func_tv
+"     succeeded. An E117/E121/E684 in any OTHER command comes after the argument was
+"     consumed, and the line carries on.
+"     Measured identically in vim 9.2 and Neovim 0.12.5; this file used to assert
+"     the `:call` row the other way round, which was this port's old behaviour and
+"     neither editor's.
 let s:hard = 'not-run'
 silent! echo [1] . 'x' | let s:hard = 'ran'
 call assert_equal('not-run', s:hard)
 
 let s:soft = 'not-run'
 silent! call nosuchfn() | let s:soft = 'ran'
-call assert_equal('ran', s:soft)
+call assert_equal('not-run', s:soft)
+
+let s:soft2 = 'not-run'
+silent! echo nosuchfn() | let s:soft2 = 'ran'
+call assert_equal('ran', s:soft2)
 
 " --- a builtin call with the WRONG NUMBER OF ARGUMENTS is an error Vim raises when it
 "     runs the command, not when it loads the script. So an unreachable bad call is
