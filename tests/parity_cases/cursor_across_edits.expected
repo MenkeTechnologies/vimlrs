@@ -1,0 +1,16 @@
+0
+after setline   line= 1 $= 5
+cursor 3        line= 3
+append above    line= 4 $= 6
+append below    line= 4 $= 7
+append 2 above  line= 6 $= 9
+delete above    line= 5 $= 8
+delete below    line= 5 $= 7
+cursor 4        line= 4
+delete spanning line= 3 $= 4
+delete all      line= 1 $= 1
+setline past    line= 1 $= 5
+setline replace line= 3 $= 5
+delete oob      line= 2 $= 5
+setline 0       line= 2 $= 5
+append empty    line= 2 $= 5

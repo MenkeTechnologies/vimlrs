@@ -4710,6 +4710,7 @@ fn set_buffer_lines(lnum: varnumber_T, lines: Vec<String>, append: bool) -> varn
     // observable: `setline(1, ['x','y'])` over two existing lines moves the tick
     // by 2 while `append(1, ['d','e'])` moves it by 1. Measured identically on
     // vim 9.2 and Neovim 0.12.5.
+    let len_before = curbuf_len();
     let (replaced, added) = CURBUF.with(|b| {
         let mut b = b.borrow_mut();
         if b.is_empty() {
@@ -4743,6 +4744,21 @@ fn set_buffer_lines(lnum: varnumber_T, lines: Vec<String>, append: bool) -> varn
             (replaced, added)
         }
     });
+    // c:221-231 `appended_lines_mark(append_lnum, added)` and then, for the
+    // window showing the buffer, `if (wp->w_cursor.lnum > append_lnum)
+    // wp->w_cursor.lnum += added;` — text inserted ABOVE the cursor pushes it
+    // down, text inserted below leaves it alone. `append_lnum` is the line the
+    // insertion went after: the argument for `append()` (c:150), and the line
+    // count before the run for a `setline()` that ran off the end (c:155).
+    if added > 0 {
+        let append_lnum = if append { lnum.max(0) } else { len_before };
+        CURPOS.with(|c| {
+            let mut c = c.borrow_mut();
+            if c.0 > append_lnum {
+                c.0 += added as varnumber_T;
+            }
+        });
+    }
     // c: `changed_bytes()` per replaced line, then one `appended_lines_mark()`.
     let bumps = replaced + usize::from(added > 0);
     for _ in 0..bumps {
@@ -6805,6 +6821,23 @@ pub fn f_deletebufline(argvars: &[typval_T], rettv: &mut typval_T) {
         b.drain(lo..hi);
         if b.is_empty() {
             b.push(String::new());
+        }
+    });
+    // c:550-562 for the window showing the buffer: a cursor BELOW the deleted
+    // block moves up by the count, a cursor INSIDE it lands on `first`, and
+    // either way it is clamped to the shortened buffer.
+    let last = last.min(len);
+    let count = last - first + 1;
+    let new_len = curbuf_len();
+    CURPOS.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.0 > last {
+            c.0 -= count;
+        } else if c.0 > first {
+            c.0 = first;
+        }
+        if c.0 > new_len {
+            c.0 = new_len;
         }
     });
     // c: `deleted_lines_mark(first, count)` (`vendor/change.c:509`) — one bump
