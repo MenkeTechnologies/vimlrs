@@ -4439,7 +4439,12 @@ fn assert_beeps_run(cmd: &str) -> bool {
     let before = message::did_emsg.with(|d| d.get());
     let saved_exc = V_EXCEPTION.with(|e| e.borrow().clone());
     message::capture_errors_begin();
-    let parse_err = run_source_nested(cmd).err();
+    // c: the command runs with the assert's own `called_emsg` bookkeeping and
+    // does not fail the EXPRESSION the assert sits in — the same rule
+    // `call_func()` follows for a callee's body. Without the rollback, an
+    // `assert_beeps()` that saw its beep left the evaluator marked as failed, and
+    // the `assert_equal(0, assert_beeps(…))` around it reported E116.
+    let parse_err = in_callee(|| run_source_nested(cmd).err());
     PENDING_EXC.with(|p| *p.borrow_mut() = None);
     let _ = message::capture_errors_take();
     let beeped = parse_err.is_some() || message::did_emsg.with(|d| d.get()) > before;

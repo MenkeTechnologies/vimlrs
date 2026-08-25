@@ -1770,8 +1770,13 @@ fn find_top_eq(s: &str) -> Option<usize> {
 /// defined (`islocked('g:c')` answered -1).
 fn scope_prefix_len(s: &str) -> usize {
     let b = s.as_bytes();
-    let is_scope = b.len() >= 2
+    // A vim9 type annotation requires white space after its colon (`var s:
+    // string`, vim's E1069 without it), and a scope prefix never has any
+    // (`g:c`). That is the whole discriminator — without it `var s: string`
+    // read `s:` as the script scope and declared nothing at all.
+    let is_scope = b.len() > 2
         && b[1] == b':'
+        && !b[2].is_ascii_whitespace()
         && matches!(b[0], b'g' | b'b' | b'w' | b't' | b's' | b'l' | b'a' | b'v');
     usize::from(is_scope) * 2
 }

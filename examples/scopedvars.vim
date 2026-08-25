@@ -19,7 +19,10 @@ call assert_false(has_key(g:, 'absent'))
 function! ArgKeys(one, two)
   return sort(keys(a:))
 endfunction
-call assert_equal(['0', '000', 'one', 'two'], ArgKeys(1, 2))
+" `a:` also holds firstline/lastline in every non-lambda frame
+" (call_user_func, Src/nvim/eval/userfunc.c:1090-1098). Measured, identically,
+" on Neovim 0.12.5 and vim 9.2.
+call assert_equal(['0', '000', 'firstline', 'lastline', 'one', 'two'], ArgKeys(1, 2))
 
 " ── scoped-var getters: return the {def} argument, else '' ──
 call assert_equal('DEF', getbufvar(1, 'missing', 'DEF'))
