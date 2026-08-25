@@ -1,0 +1,25 @@
+1
+A =
+E730: Using a List as a String 0 B
+--1
+C
+E730: Using a List as a String
+--2
+E
+E474: Invalid argument 0 F
+--3G
+E730: Using a List as a String0H
+--4
+E730: Using a List as a String
+--5
+I
+E730: Using a List as a String
+--6
+--7
+errmsg= E730: Using a List as a String
+--8
+L 1 2.5 [1, 2] {'a': 1} v:null
+--9
+'
+M 1 2'
+'N12'

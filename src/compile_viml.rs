@@ -2105,16 +2105,62 @@ impl Compiler {
         self.emit(Op::Pop);
     }
 
+    /// `:echo` / `:echon`, compiled ARGUMENT BY ARGUMENT.
+    ///
+    /// c: `ex_echo`'s loop (`vendor/eval.c:6139-6186`) evaluates one argument and
+    /// writes it before touching the next, so an error raised while evaluating
+    /// argument N lands after argument N-1 has already appeared:
+    ///
+    /// ```vim
+    /// echo 'A =' strlen([1]) 'B'
+    /// " A =
+    /// " E730: Using a List as a String 0 B
+    /// ```
+    ///
+    /// Evaluating everything and writing once — what this did before — put the
+    /// error text first. `eval1() == FAIL` for an argument `break`s the loop
+    /// (c:6146-6155), so a failing argument also drops the ones after it, and the
+    /// mark is retaken per argument because that is the granularity the C tests at.
     fn echo(&mut self, args: &[Expr], id: u16) -> Result<(), VimlError> {
-        // Snapshot did_emsg before evaluating the args so the echo can suppress
-        // its output (and the spurious fallback value) if evaluation errors.
-        self.emit(Op::CallBuiltin(h::VIML_ERR_MARK, 0));
-        self.emit(Op::Pop);
-        for a in args {
-            self.expr(a)?;
+        // `:echo` with no arguments has no loop turn at all; the single-call form
+        // still carries the empty-message conventions the capture sinks expect.
+        if args.is_empty() {
+            self.emit(Op::CallBuiltin(h::VIML_ERR_MARK, 0));
+            self.emit(Op::Pop);
+            self.emit(Op::CallBuiltin(id, 0));
+            self.emit(Op::Pop);
+            return Ok(());
         }
-        let n = Self::argc(args.len())?;
-        self.emit(Op::CallBuiltin(id, n));
+        let newline = i64::from(id == h::VIML_ECHO);
+        let mut to_end = Vec::new();
+        for (i, a) in args.iter().enumerate() {
+            // Snapshot did_emsg/EVAL_FAIL before THIS argument, so the test below
+            // asks about this argument's `eval1()` and not a previous one's.
+            self.emit(Op::CallBuiltin(h::VIML_ERR_MARK, 0));
+            self.emit(Op::Pop);
+            self.expr(a)?;
+            // c:6146 `if (eval1(&arg, &rettv, &evalarg) == FAIL) { … break; }`.
+            // `EVAL_FAIL`, not `did_emsg`: a builtin that reports an error and
+            // still yields a value keeps its `:echo` (`echo str2nr('0x1f', 0)`
+            // prints the E474 AND `0`), while a `:silent!` failure prints nothing
+            // even though it was never reported.
+            self.emit(Op::CallBuiltin(h::VIML_ERR_SINCE, 0));
+            let ok = self.emit(Op::JumpIfFalse(0));
+            self.emit(Op::Pop); // drop the recovered value the failed eval left
+            to_end.push(self.emit(Op::Jump(0)));
+            let here = self.b.current_pos();
+            self.b.patch_jump(ok, here);
+            self.emit(Op::LoadInt(i64::from(i == 0)));
+            self.emit(Op::LoadInt(newline));
+            self.emit(Op::CallBuiltin(h::VIML_ECHO_ARG, 3));
+            self.emit(Op::Pop);
+        }
+        let end = self.b.current_pos();
+        for j in to_end {
+            self.b.patch_jump(j, end);
+        }
+        self.emit(Op::LoadInt(newline));
+        self.emit(Op::CallBuiltin(h::VIML_ECHO_END, 1));
         self.emit(Op::Pop);
         Ok(())
     }

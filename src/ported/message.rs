@@ -149,9 +149,9 @@ pub fn emsg(s: &str) {
         ex_exitval.with(|e| e.set(1));
         // c: `msg_start()` — an error message begins on a fresh line, so a
         // half-written `:echon` line is terminated first rather than having the
-        // error run onto the end of it.
-        crate::fusevm_bridge::msg_flush_line();
-        eprintln!("{s}");
+        // error run onto the end of it. It does NOT end one: `msg_col` is left
+        // non-zero, so a following `:echo` argument continues on the error's line.
+        crate::fusevm_bridge::msg_emsg(s);
     }
 }
 

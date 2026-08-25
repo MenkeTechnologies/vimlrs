@@ -255,6 +255,20 @@ pub const VIML_SETRANGE: u16 = 3055;
 /// (`true` iff it is a Dict). Drives the subscript-vs-concat branch selection.
 pub const VIML_IS_DICT: u16 = 3056;
 /// `:echo`
+/// One `:echo`/`:echon` ARGUMENT, written as soon as it is evaluated.
+///
+/// c: `ex_echo`'s loop is eval-then-write per argument (`vendor/eval.c:6139-6186`:
+/// `eval1()`, the `atstart` / separator handling at c:6160-6179, then
+/// `msg_multiline` at c:6181, then the next argument) — so an error raised while
+/// evaluating argument N appears AFTER argument N-1 has already been printed.
+/// Stack (bottom→top): value, atstart, newline (`:echo` = 1, `:echon` = 0).
+pub const VIML_ECHO_ARG: u16 = 3605;
+/// End of one `:echo`/`:echon` — flushes the capture buffer. Stack: newline.
+///
+/// Only a capture (`execute()`, `:redir`, an embedding host) needs it: those
+/// callers are handed one string per `:echo`, so the arguments are joined again
+/// before the sink sees them. The stdout path has already written each argument.
+pub const VIML_ECHO_END: u16 = 3606;
 pub const VIML_ECHO: u16 = 3060;
 /// `:echon`
 pub const VIML_ECHON: u16 = 3061;
@@ -1357,6 +1371,12 @@ thread_local! {
     static LAST_RESULT: RefCell<Option<typval_T>> = const { RefCell::new(None) };
     /// `:echo` sink: `Some(buf)` captures (tests/embedding), `None` is stdout.
     static ECHO_SINK: RefCell<Option<Vec<u8>>> = const { RefCell::new(None) };
+    /// The arguments of the `:echo` currently being written, joined, while a
+    /// capture sink is active — see [`VIML_ECHO_END`]. `None` between statements,
+    /// and still `None` after an `:echo` whose FIRST argument failed to evaluate,
+    /// which is how "nothing was echoed at all" stays distinguishable from
+    /// "an empty string was".
+    static ECHO_BUF: RefCell<Option<crate::vimstr::VimStr>> = const { RefCell::new(None) };
     /// c: `msg_col` (`globals.h`) — is there already text on the message line?
     ///
     /// Vim's newline is a **leading** separator, not a trailing one: `msg_start()`
@@ -2744,6 +2764,57 @@ fn b_echon(vm: &mut VM, argc: u8) -> Value {
     Value::Undef
 }
 
+/// c: one turn of `ex_echo`'s loop, after `eval1()` returned OK for this
+/// argument (`vendor/eval.c:6160-6183`).
+fn b_echo_arg(vm: &mut VM, _: u8) -> Value {
+    let newline = tv_get_number_chk(&pop_tv(vm), None) != 0;
+    let atstart = tv_get_number_chk(&pop_tv(vm), None) != 0;
+    let tv = pop_tv(vm);
+    let mut body = crate::vimstr::VimStr::new();
+    // c:6177-6179 `msg_puts_hl(" ", echo_hl_id, false)` — the separator goes
+    // between arguments, so not before the first, and never for `:echon`.
+    if !atstart && newline {
+        body.push_str(" ");
+    }
+    // c:6181 `msg_multiline(cstr_as_string(encode_tv2echo(&rettv)), …)`.
+    message::msg_multiline(&encode_tv2echo(&tv), &mut body);
+    if ECHO_SINK.with(|s| s.borrow().is_some()) {
+        ECHO_BUF.with(|b| {
+            let mut b = b.borrow_mut();
+            b.get_or_insert_with(crate::vimstr::VimStr::new)
+                .push_bytes(&body);
+        });
+        return Value::Undef;
+    }
+    // c:6168-6176 `if (eap->cmdidx == CMD_echo) msg_start();` — under `atstart`
+    // only, and after this argument was evaluated, so an error the evaluation
+    // reported has already had the line to itself.
+    msg_put(&body, newline && atstart);
+    Value::Undef
+}
+
+/// c: the tail of `ex_echo` (`vendor/eval.c:6191-6203`).
+fn b_echo_end(vm: &mut VM, _: u8) -> Value {
+    let newline = tv_get_number_chk(&pop_tv(vm), None) != 0;
+    let Some(body) = ECHO_BUF.with(|b| b.borrow_mut().take()) else {
+        return Value::Undef;
+    };
+    // Inside execute(), Vim *prefixes* each `:echo` with a newline (so
+    // `string(execute("echo 5"))` is "\n5"); every other capture keeps the
+    // line-per-message shape its callers already parse. `:echon` adds neither.
+    let exec_capture = EXECUTE_DEPTH.with(|d| d.get()) > 0;
+    let mut line = crate::vimstr::VimStr::new();
+    if newline && exec_capture {
+        line.push_char('\n');
+    }
+    line.push_bytes(&body);
+    if newline && !exec_capture {
+        line.push_char('\n');
+    }
+    echo_write(&line);
+    Value::Undef
+}
+
 fn echo_impl(vm: &mut VM, argc: u8, newline: bool) {
     let mut parts = Vec::with_capacity(argc as usize);
     for _ in 0..argc {
@@ -2826,6 +2897,43 @@ fn msg_put(body: &[u8], newline: bool) {
         None => body,
     };
     MSG_COL.with(|c| c.set(!tail.is_empty()));
+}
+
+/// Write one error message under the same message-column model `:echo` uses.
+///
+/// c: `emsg_multiline` reaches the display through `msg_start()`, which breaks the
+/// message line only when there is already text on it, and leaves `msg_col`
+/// non-zero afterwards — so the NEXT thing written continues on the error's line.
+/// That is visible as soon as `:echo` writes its arguments one at a time:
+///
+/// ```vim
+/// echo 'A =' strlen([1]) 'B'
+/// " A =
+/// " E730: Using a List as a String 0 B
+/// ```
+///
+/// The text goes to stderr (Vim prints errors there) while `:echo` goes to
+/// stdout, so stdout is flushed first: the two streams are usually merged by
+/// whoever is reading them, and Rust's stdout only flushes itself at a newline.
+pub fn msg_emsg(s: &str) {
+    // A capture (`execute()`, `:redir`, an embedding host) collects `:echo` output
+    // only — the error goes to stderr either way — and it keeps its own
+    // line-per-message convention rather than the message column (see
+    // [`echo_impl`]). So the column is neither read nor written while one is
+    // active, exactly as before this shared it with `:echo`.
+    if ECHO_SINK.with(|s| s.borrow().is_some()) {
+        eprintln!("{s}");
+        return;
+    }
+    if MSG_COL.with(|c| c.get()) {
+        echo_write(b"\n");
+        MSG_COL.with(|c| c.set(false));
+    }
+    use std::io::Write;
+    let _ = std::io::stdout().lock().flush();
+    eprint!("{s}");
+    let _ = std::io::stderr().lock().flush();
+    MSG_COL.with(|c| c.set(true));
 }
 
 /// Close the message line if the run left text on it. Vim itself never writes
@@ -5135,6 +5243,7 @@ pub fn take_last_result() -> Option<typval_T> {
 /// Reset per-run state (refpool, last result, `did_emsg`, `ex_exitval`).
 pub fn reset_run() {
     REFPOOL.with(|p| p.borrow_mut().clear());
+    ECHO_BUF.with(|b| *b.borrow_mut() = None);
     LAST_RESULT.with(|r| *r.borrow_mut() = None);
     PENDING_EXC.with(|p| *p.borrow_mut() = None);
     V_EXCEPTION.with(|e| e.borrow_mut().clear());
@@ -5578,6 +5687,8 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_SETINDEX, b_setindex);
     vm.register_builtin(VIML_SETRANGE, b_setrange);
     vm.register_builtin(VIML_BYTES, b_bytes);
+    vm.register_builtin(VIML_ECHO_ARG, b_echo_arg);
+    vm.register_builtin(VIML_ECHO_END, b_echo_end);
     vm.register_builtin(VIML_ECHO, b_echo);
     vm.register_builtin(VIML_ECHON, b_echon);
     vm.register_builtin(VIML_SET_RESULT, b_set_result);
