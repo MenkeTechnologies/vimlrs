@@ -4482,7 +4482,36 @@ sourced file, whatever it is — silent-Ex sets the window up after the first on
 That is a startup-sequencing artifact of `-es`, not a language rule, and an
 implementation was written and then REVERTED rather than encode it.
 
-### R37-O2. The partial value of a failed lambda body
+### R37-O2. `:silent!` around an `abort` function whose `:try` has no `:catch`
+
+New territory this round, and the one shape in it the port gets wrong. Seven
+others match and are recorded in `tests/parity_cases/try_in_abort_function.vim`;
+this one is:
+
+```vim
+function! B() abort
+  try
+    echo [1] . 'x'
+  finally
+    echo '  finally B'
+  endtry
+  return 'B-done'
+endfunction
+silent! let g:r = B()
+echo 'AFTER'
+```
+
+Both engines print NOTHING and stop the sourced script — not even `AFTER`. This
+port runs on and assigns `B-done`. Unsilenced, the same script matches byte for
+byte in both engines (the finally runs, E730 is reported, the script stops), so
+the divergence is specific to `emsg_silent` combined with FC_ABORT and a try
+conditional with no catch clause. `cause_errthrow` (`vendor/ex_eval.c:189`)
+declines to throw while `emsg_silent` is up and `emsg` returns before
+`did_emsg++` (`vendor/message.c:817-846`), so neither of the two flags that
+normally stop a body is set — and yet both engines stop. Measured, not guessed
+at.
+
+### R37-O3. The partial value of a failed lambda body
 
 See R37-1 — four of eleven measured shapes.
 
