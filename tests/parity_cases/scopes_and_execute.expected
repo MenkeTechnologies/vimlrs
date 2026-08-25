@@ -1,0 +1,41 @@
+0
+g:G= global b:B= buffer w:W= window t:T= tab s:S= script
+w: whole= {'W': 'window'}  t: whole= {'T': 'tab'}
+exists: 1 1 1 1
+--1
+  l:x= 1 y= 2 l:y= 2 x= 1
+  keys(l:)= ['s', 'x', 'y']
+  string(l:)= {'s': 'str', 'x': 1, 'y': 2}
+  get(l:,x)= 1
+  has_key(l:,y)= 1
+  outer scopes: global script buffer window tab
+--2
+  sum= 4950 keys= ['i', 's']
+--3
+after unlet b:B= 0
+unlet missing errmsg= E108: No such variable: "b:nosuch2"
+--4
+v:true= v:true v:false= v:false v:null= v:null v:none= v:none
+type(v:errmsg)= 1 type(v:count)= 0
+let v:version errmsg= E46: Cannot change read-only variable "v:version"
+--5
+eval round trip= [1, {'a': 'b'}, 2.5, v:null]
+eval expr= 7
+eval bad errmsg= E15: Invalid expression: "1 +"
+eval of a name= global
+--6
+execute one= '
+1'
+execute list= '
+1
+2'
+execute silent= '
+x'
+execute nested= '
+5'
+eval(execute())= '
+3'
+execute built stmt= 42
+execute concat args= 7
+  execute into l:= 9 keys= ['v']
+--7

@@ -708,6 +708,16 @@ fn slot_plan(stmts: &[(u32, Stmt)], in_function: bool) -> SlotPlan {
         matches!(name, "exists" | "eval" | "execute" | "call")
     }
 
+    /// A bare SCOPE DICT — `l:`, `g:`, `b:`, `w:`, `t:`, `s:`, `a:`, `v:`.
+    ///
+    /// Reading one hands the script every variable in that scope at once
+    /// (`keys(l:)`, `string(l:)`, `get(l:, 'x')`), so a slotted local would be
+    /// MISSING from an answer vim gives in full. A slot has no name and lives
+    /// outside the scope dict, so the only sound response is not to slot at all.
+    fn is_scope_dict(name: &str) -> bool {
+        matches!(name, "l:" | "g:" | "b:" | "w:" | "t:" | "s:" | "a:" | "v:")
+    }
+
     struct Ctx<'a> {
         bail: &'a mut bool,
         assigns: &'a mut HashMap<String, Vec<Expr>>,
@@ -768,6 +778,7 @@ fn slot_plan(stmts: &[(u32, Stmt)], in_function: bool) -> SlotPlan {
                     walk_expr(t, cx);
                 }
             }
+            Expr::Var(name) if is_scope_dict(name) => *cx.bail = true,
             Expr::List(items) => items.iter().for_each(|i| walk_expr(i, cx)),
             Expr::Dict(pairs) => pairs.iter().for_each(|(k, v)| {
                 walk_expr(k, cx);
