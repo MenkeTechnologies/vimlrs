@@ -1539,6 +1539,732 @@ pub fn f_has(argvars: &[typval_T], rettv: &mut typval_T) {
 /// branch (`autocmd_supported`, c:1391) are deferred — neither function body is
 /// in `vendor/`, and both need an ex-command name table this crate does not model
 /// yet. Both fall through to the internal-variable branch, which answers 0.
+/// `cmdnames[]` — every built-in Ex command, in the order the C's table has
+/// them (`src/nvim/ex_cmds.lua`, generated into `ex_cmds_defs.generated.h`).
+///
+/// The ORDER is the whole content of the abbreviation rule: `find_ex_command`
+/// (`ex_docmd.c:3130-3137`) walks forward and takes the FIRST entry whose name
+/// starts with what was typed, so `:s` is `substitute` and not `:sort`, and
+/// `:co` is `copy` while `:con` is `continue`. The C jumps into the table with a
+/// precomputed two-letter index; scanning from the start answers identically,
+/// because every entry that could match shares those two letters and the index
+/// merely points at the first of them.
+pub const CMDNAMES: &[&str] = &[
+    "append",
+    "abbreviate",
+    "abclear",
+    "aboveleft",
+    "all",
+    "amenu",
+    "anoremenu",
+    "args",
+    "argadd",
+    "argdelete",
+    "argdo",
+    "argdedupe",
+    "argedit",
+    "argglobal",
+    "arglocal",
+    "argument",
+    "ascii",
+    "autocmd",
+    "augroup",
+    "aunmenu",
+    "buffer",
+    "bNext",
+    "ball",
+    "badd",
+    "balt",
+    "bcd",
+    "bchdir",
+    "bdelete",
+    "belowright",
+    "bfirst",
+    "blast",
+    "bmodified",
+    "bnext",
+    "botright",
+    "bprevious",
+    "brewind",
+    "break",
+    "breakadd",
+    "breakdel",
+    "breaklist",
+    "browse",
+    "buffers",
+    "bufdo",
+    "bunload",
+    "bwipeout",
+    "change",
+    "cNext",
+    "cNfile",
+    "cabbrev",
+    "cabclear",
+    "cabove",
+    "caddbuffer",
+    "caddexpr",
+    "caddfile",
+    "cafter",
+    "call",
+    "catch",
+    "cbuffer",
+    "cbefore",
+    "cbelow",
+    "cbottom",
+    "cc",
+    "cclose",
+    "cd",
+    "cdo",
+    "center",
+    "cexpr",
+    "cfile",
+    "cfdo",
+    "cfirst",
+    "cgetfile",
+    "cgetbuffer",
+    "cgetexpr",
+    "chdir",
+    "changes",
+    "checkhealth",
+    "checkpath",
+    "checktime",
+    "chistory",
+    "clist",
+    "clast",
+    "close",
+    "clearjumps",
+    "cmap",
+    "cmapclear",
+    "cmenu",
+    "cnext",
+    "cnewer",
+    "cnfile",
+    "cnoremap",
+    "cnoreabbrev",
+    "cnoremenu",
+    "copy",
+    "colder",
+    "colorscheme",
+    "command",
+    "comclear",
+    "compiler",
+    "continue",
+    "confirm",
+    "connect",
+    "const",
+    "copen",
+    "cprevious",
+    "cpfile",
+    "cquit",
+    "crewind",
+    "cunmap",
+    "cunabbrev",
+    "cunmenu",
+    "cwindow",
+    "delete",
+    "delmarks",
+    "debug",
+    "debuggreedy",
+    "defer",
+    "delcommand",
+    "delfunction",
+    "detach",
+    "display",
+    "diffupdate",
+    "diffget",
+    "diffoff",
+    "diffpatch",
+    "diffput",
+    "diffsplit",
+    "diffthis",
+    "digraphs",
+    "djump",
+    "dlist",
+    "doautocmd",
+    "doautoall",
+    "drop",
+    "dsearch",
+    "dsplit",
+    "edit",
+    "earlier",
+    "echo",
+    "echoerr",
+    "echohl",
+    "echomsg",
+    "echon",
+    "else",
+    "elseif",
+    "emenu",
+    "endif",
+    "endfunction",
+    "endfor",
+    "endtry",
+    "endwhile",
+    "enew",
+    "eval",
+    "ex",
+    "execute",
+    "exit",
+    "exmode",
+    "exusage",
+    "file",
+    "files",
+    "filetype",
+    "filter",
+    "find",
+    "finally",
+    "finish",
+    "first",
+    "fold",
+    "foldclose",
+    "folddoopen",
+    "folddoclosed",
+    "foldopen",
+    "for",
+    "function",
+    "fclose",
+    "global",
+    "goto",
+    "grep",
+    "grepadd",
+    "gui",
+    "gvim",
+    "help",
+    "helpclose",
+    "helpgrep",
+    "helptags",
+    "highlight",
+    "hide",
+    "history",
+    "horizontal",
+    "insert",
+    "iabbrev",
+    "iabclear",
+    "if",
+    "ijump",
+    "ilist",
+    "imap",
+    "imapclear",
+    "imenu",
+    "inoremap",
+    "inoreabbrev",
+    "inoremenu",
+    "intro",
+    "iput",
+    "isearch",
+    "isplit",
+    "iunmap",
+    "iunabbrev",
+    "iunmenu",
+    "join",
+    "jumps",
+    "k",
+    "keepmarks",
+    "keepjumps",
+    "keeppatterns",
+    "keepalt",
+    "list",
+    "lNext",
+    "lNfile",
+    "last",
+    "labove",
+    "language",
+    "laddexpr",
+    "laddbuffer",
+    "laddfile",
+    "lafter",
+    "later",
+    "lbuffer",
+    "lbefore",
+    "lbelow",
+    "lbottom",
+    "lcd",
+    "lchdir",
+    "lclose",
+    "ldo",
+    "left",
+    "leftabove",
+    "let",
+    "lexpr",
+    "lfile",
+    "lfdo",
+    "lfirst",
+    "lgetfile",
+    "lgetbuffer",
+    "lgetexpr",
+    "lgrep",
+    "lgrepadd",
+    "lhelpgrep",
+    "lhistory",
+    "ll",
+    "llast",
+    "llist",
+    "lmap",
+    "lmapclear",
+    "lmake",
+    "lnoremap",
+    "lnext",
+    "lnewer",
+    "lnfile",
+    "loadview",
+    "loadkeymap",
+    "lockmarks",
+    "lockvar",
+    "log",
+    "lolder",
+    "lopen",
+    "lprevious",
+    "lpfile",
+    "lrewind",
+    "ltag",
+    "lunmap",
+    "lua",
+    "luado",
+    "luafile",
+    "lvimgrep",
+    "lvimgrepadd",
+    "lwindow",
+    "ls",
+    "lsp",
+    "move",
+    "mark",
+    "make",
+    "map",
+    "mapclear",
+    "marks",
+    "match",
+    "menu",
+    "menutranslate",
+    "messages",
+    "mkexrc",
+    "mksession",
+    "mkspell",
+    "mkvimrc",
+    "mkview",
+    "mode",
+    "mzscheme",
+    "mzfile",
+    "next",
+    "new",
+    "nmap",
+    "nmapclear",
+    "nmenu",
+    "nnoremap",
+    "nnoremenu",
+    "noremap",
+    "noautocmd",
+    "nohlsearch",
+    "noreabbrev",
+    "noremenu",
+    "noswapfile",
+    "normal",
+    "number",
+    "nunmap",
+    "nunmenu",
+    "oldfiles",
+    "omap",
+    "omapclear",
+    "omenu",
+    "only",
+    "onoremap",
+    "onoremenu",
+    "options",
+    "ounmap",
+    "ounmenu",
+    "ownsyntax",
+    "print",
+    "packadd",
+    "packdel",
+    "packloadall",
+    "packupdate",
+    "pbuffer",
+    "pclose",
+    "perl",
+    "perldo",
+    "perlfile",
+    "pedit",
+    "pop",
+    "popup",
+    "ppop",
+    "preserve",
+    "previous",
+    "profile",
+    "profdel",
+    "psearch",
+    "ptag",
+    "ptNext",
+    "ptfirst",
+    "ptjump",
+    "ptlast",
+    "ptnext",
+    "ptprevious",
+    "ptrewind",
+    "ptselect",
+    "put",
+    "pwd",
+    "python",
+    "pydo",
+    "pyfile",
+    "py3",
+    "py3do",
+    "python3",
+    "py3file",
+    "pyx",
+    "pyxdo",
+    "pythonx",
+    "pyxfile",
+    "quit",
+    "quitall",
+    "qall",
+    "read",
+    "recover",
+    "redo",
+    "redir",
+    "redraw",
+    "redrawstatus",
+    "redrawtabline",
+    "registers",
+    "resize",
+    "restart",
+    "retab",
+    "return",
+    "rewind",
+    "right",
+    "rightbelow",
+    "rshada",
+    "runtime",
+    "rundo",
+    "ruby",
+    "rubydo",
+    "rubyfile",
+    "rviminfo",
+    "substitute",
+    "sNext",
+    "sargument",
+    "sall",
+    "sandbox",
+    "saveas",
+    "sbuffer",
+    "sbNext",
+    "sball",
+    "sbfirst",
+    "sblast",
+    "sbmodified",
+    "sbnext",
+    "sbprevious",
+    "sbrewind",
+    "scriptnames",
+    "scriptencoding",
+    "set",
+    "setfiletype",
+    "setglobal",
+    "setlocal",
+    "sfind",
+    "sfirst",
+    "simalt",
+    "sign",
+    "silent",
+    "sleep",
+    "slast",
+    "smagic",
+    "smap",
+    "smapclear",
+    "smenu",
+    "snext",
+    "snomagic",
+    "snoremap",
+    "snoremenu",
+    "source",
+    "sort",
+    "split",
+    "spellgood",
+    "spelldump",
+    "spellinfo",
+    "spellrepall",
+    "spellrare",
+    "spellundo",
+    "spellwrong",
+    "sprevious",
+    "srewind",
+    "stop",
+    "stag",
+    "startinsert",
+    "startgreplace",
+    "startreplace",
+    "stopinsert",
+    "stjump",
+    "stselect",
+    "sunhide",
+    "sunmap",
+    "sunmenu",
+    "suspend",
+    "sview",
+    "swapname",
+    "syntax",
+    "syntime",
+    "syncbind",
+    "t",
+    "tcd",
+    "tchdir",
+    "tNext",
+    "tag",
+    "tags",
+    "tab",
+    "tabclose",
+    "tabdo",
+    "tabedit",
+    "tabfind",
+    "tabfirst",
+    "tabmove",
+    "tablast",
+    "tabnext",
+    "tabnew",
+    "tabonly",
+    "tabprevious",
+    "tabNext",
+    "tabrewind",
+    "tabs",
+    "tcl",
+    "tcldo",
+    "tclfile",
+    "terminal",
+    "tfirst",
+    "throw",
+    "tjump",
+    "tlast",
+    "tlmenu",
+    "tlnoremenu",
+    "tlunmenu",
+    "tmenu",
+    "tmap",
+    "tmapclear",
+    "tnext",
+    "tnoremap",
+    "topleft",
+    "tprevious",
+    "trewind",
+    "trust",
+    "try",
+    "tselect",
+    "tunmenu",
+    "tunmap",
+    "undo",
+    "undojoin",
+    "undolist",
+    "unabbreviate",
+    "unhide",
+    "uniq",
+    "unlet",
+    "unlockvar",
+    "unmap",
+    "unmenu",
+    "unsilent",
+    "update",
+    "uptime",
+    "vglobal",
+    "version",
+    "verbose",
+    "vertical",
+    "visual",
+    "view",
+    "vimgrep",
+    "vimgrepadd",
+    "viusage",
+    "vmap",
+    "vmapclear",
+    "vmenu",
+    "vnoremap",
+    "vnew",
+    "vnoremenu",
+    "vsplit",
+    "vunmap",
+    "vunmenu",
+    "write",
+    "wNext",
+    "wall",
+    "while",
+    "winsize",
+    "wincmd",
+    "windo",
+    "winpos",
+    "wnext",
+    "wprevious",
+    "wq",
+    "wqall",
+    "wshada",
+    "wundo",
+    "wviminfo",
+    "xit",
+    "xall",
+    "xmap",
+    "xmapclear",
+    "xmenu",
+    "xnoremap",
+    "xnoremenu",
+    "xunmap",
+    "xunmenu",
+    "yank",
+    "z",
+    "!",
+    "#",
+    "&",
+    "<",
+    "=",
+    ">",
+    "@",
+    "~",
+    "Next",
+];
+
+/// `cmdmods[]` — the command modifiers (`ex_docmd.c:3171-3196`), each with the
+/// shortest accepted abbreviation. `cmd_exists()` checks these BEFORE the
+/// command table (c:3229-3239).
+pub const CMDMODS: &[(&str, usize)] = &[
+    ("aboveleft", 3),
+    ("belowright", 3),
+    ("botright", 2),
+    ("browse", 3),
+    ("confirm", 4),
+    ("filter", 4),
+    ("hide", 3),
+    ("horizontal", 3),
+    ("keepalt", 5),
+    ("keepjumps", 5),
+    ("keepmarks", 3),
+    ("keeppatterns", 5),
+    ("leftabove", 5),
+    ("lockmarks", 3),
+    ("noautocmd", 3),
+    ("noswapfile", 3),
+    ("rightbelow", 6),
+    ("sandbox", 3),
+    ("silent", 3),
+    ("tab", 3),
+    ("topleft", 2),
+    ("unsilent", 3),
+    ("verbose", 4),
+    ("vertical", 4),
+];
+
+/// Port of `cmd_exists()` from `ex_docmd.c:3226` (upstream; `ex_docmd.c` is not
+/// in `vendor/`, but its call site is — `vendor/eval/funcs.c:1388`).
+///
+/// ```c
+/// // Check command modifiers.                                       c:3229
+/// if (name[j] == NUL && j >= cmdmods[i].minlen)
+///   return cmdmods[i].name[j] == NUL ? 2 : 1;                       c:3237
+/// char *p = find_ex_command(&ea, &full);                            c:3248
+/// if (*skipwhite(p) != NUL) return 0;   // trailing garbage         c:3255
+/// return ea.cmdidx == CMD_SIZE ? 0 : (full ? 2 : 1);                c:3258
+/// ```
+///
+/// 2 for a name given in full, 1 for an accepted abbreviation, 0 for neither.
+pub fn cmd_exists(name: &str) -> varnumber_T {
+    // c:3229-3239 the command MODIFIERS come first, matched on their own minimum
+    // abbreviation rather than on table order.
+    for (modname, minlen) in CMDMODS {
+        if name.len() >= *minlen && modname.starts_with(name) {
+            return if modname.len() == name.len() { 2 } else { 1 };
+        }
+    }
+    if name.is_empty() {
+        return 0;
+    }
+    // c:3243-3244 `:2match`/`:3match` are reached with the digit skipped.
+    let (digit, cmd) = match name.as_bytes()[0] {
+        b'2' | b'3' => (true, &name[1..]),
+        _ => (false, name),
+    };
+    let b = cmd.as_bytes();
+    if b.is_empty() {
+        return 0;
+    }
+    // c:3028-3049 `one_letter_cmd()` — `:k` and the `:s` family are ONE character
+    // long whatever follows, so `:si` is `:s` plus the trailing garbage `i` and
+    // answers 0, while `:sig` is not one of them and reaches the table as `sign`.
+    let one_letter = (b[0] == b'k' && (b.get(1) != Some(&b'e') || b.get(2) != Some(&b'e')))
+        || (b[0] == b's'
+            && (matches!(b.get(1), Some(b'c'))
+                && (b.len() == 2
+                    || (b[2] != b's'
+                        && b[2] != b'r'
+                        && (b.len() == 3 || (b[3] != b'i' && b.get(4) != Some(&b'p')))))
+                || matches!(b.get(1), Some(b'g'))
+                || (matches!(b.get(1), Some(b'i'))
+                    && !matches!(b.get(2), Some(b'm') | Some(b'l') | Some(b'g')))
+                || matches!(b.get(1), Some(b'I'))
+                || (matches!(b.get(1), Some(b'r')) && b.get(2) != Some(&b'e'))));
+    if one_letter {
+        // c:3063 `p++` — exactly one character is the command; c:3255 rejects
+        // anything left over. `full` is set unconditionally at c:3065.
+        return if b.len() == 1 && !digit { 2 } else { 0 };
+    }
+    // c:3068-3081 the command word is the leading run of letters (with `:py3`'s
+    // digits allowed), or ONE character out of `@!=><&~#`.
+    let mut len = b.iter().take_while(|c| c.is_ascii_alphabetic()).count();
+    if cmd.starts_with("py") {
+        len += b[len..]
+            .iter()
+            .take_while(|c| c.is_ascii_alphanumeric())
+            .count();
+    }
+    if len == 0 {
+        if b.len() == 1 && b"@!=><&~#".contains(&b[0]) {
+            len = 1;
+        } else {
+            return 0;
+        }
+    }
+    // c:3255 anything after the command word disqualifies it.
+    if len != b.len() {
+        return 0;
+    }
+    // c:3084-3100 `:dl`/`:dp` is `:d` with the `l`/`p` flag, so the flag letter
+    // is not part of the name.
+    if b[0] == b'd' && matches!(b[len - 1], b'l' | b'p') {
+        let i = cmd
+            .bytes()
+            .zip("delete".bytes())
+            .take_while(|(a, b)| a == b)
+            .count();
+        if i == len - 1 {
+            len -= 1;
+        }
+    }
+    let cmd = &cmd[..len];
+    // c:3125-3128 Neovim makes `:def` an unknown command "to avoid confusing
+    // behavior" (#23149). vim 9.2 has a real `:def` and answers 2 — a deliberate
+    // engine split this port takes Neovim's side of, because that is the C it
+    // ports.
+    if cmd == "def" {
+        return 0;
+    }
+    // c:3130-3139 the table walk: the FIRST entry whose name starts with what
+    // was typed wins, and `full` says the name was given complete.
+    if let Some(hit) = CMDNAMES.iter().find(|n| n.starts_with(cmd)) {
+        // c:3157-3161 `:ho` is forced unresolved: it would otherwise match
+        // `horizontal`, which as a MODIFIER needs three characters.
+        if *hit == "horizontal" && cmd.len() == 2 {
+            return 0;
+        }
+        // c:3252 a leading digit is only allowed for `:match`.
+        if digit && *hit != "match" {
+            return 0;
+        }
+        return if hit.len() == cmd.len() { 2 } else { 1 };
+    }
+    if digit {
+        return 0;
+    }
+    // c:3142-3149 "Look for a user defined command as a last resort" — same
+    // exact-then-unique-prefix rule `find_ucmd` implements.
+    if find_ucmd(cmd).is_none() {
+        return 0;
+    }
+    // The registry is keyed by name, so "given in full" is membership.
+    varnumber_T::from(USER_COMMANDS.with(|c| c.borrow().contains_key(cmd))) + 1
+}
+
 pub fn f_exists(argvars: &[typval_T], rettv: &mut typval_T) {
     let name = tv_get_string(&argvars[0]);
     let present = if let Some(env) = name.strip_prefix('$') {
@@ -1575,6 +2301,11 @@ pub fn f_exists(argvars: &[typval_T], rettv: &mut typval_T) {
         crate::ported::eval::typval::FUNC_EXISTS_HOOK
             .with(|h| *h.borrow())
             .is_some_and(|f| f(func))
+    } else if let Some(cmd) = name.strip_prefix(':') {
+        // c:1387 `n = cmd_exists(p + 1);` — 2 for a full name, 1 for an accepted
+        // abbreviation, so this branch does not fold into the bool below.
+        rettv.vval = v_number(cmd_exists(cmd));
+        return;
     } else if let Some(au) = name.strip_prefix('#') {
         // c:1389 a leading '#' queries autocommands — `#{event}` or
         // `#{event}#{pat}`.
@@ -10988,56 +11719,85 @@ pub fn f_getstacktrace(_argvars: &[typval_T], rettv: &mut typval_T) {
 /// its full name.
 pub fn f_fullcommand(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.v_type = VAR_STRING;
-    let mut name = tv_get_string(&argvars[0]);
-    // c: a leading range/`:`/bang is stripped before matching.
-    name = name
-        .trim_start_matches([':', ' '])
-        .trim_end_matches('!')
-        .to_string();
-    // (minimum-abbreviation, full-name), in command-table precedence order.
-    const CMDS: &[(&str, &str)] = &[
-        ("printf", "printf"),
-        ("e", "edit"),
-        ("ec", "echo"),
-        ("echom", "echomsg"),
-        ("w", "write"),
-        ("wq", "wq"),
-        ("q", "quit"),
-        ("qa", "quitall"),
-        ("s", "substitute"),
-        ("sp", "split"),
-        ("se", "set"),
-        ("so", "source"),
-        ("g", "global"),
-        ("norm", "normal"),
-        ("vs", "vsplit"),
-        ("b", "buffer"),
-        ("bn", "bnext"),
-        ("bp", "bprevious"),
-        ("d", "delete"),
-        ("y", "yank"),
-        ("pu", "put"),
-        ("co", "copy"),
-        ("m", "move"),
-        ("r", "read"),
-        ("let", "let"),
-        ("cal", "call"),
-        ("fu", "function"),
-        ("retu", "return"),
-        ("if", "if"),
-        ("for", "for"),
-        ("wh", "while"),
-        ("try", "try"),
-        ("au", "autocmd"),
-        ("com", "command"),
-    ];
-    let result = if name.is_empty() {
-        String::new()
+    let arg = tv_get_string(&argvars[0]);
+    // c:3270 `while (*name == ':') name++;` then `skip_range()`.
+    let name = arg.trim_start_matches(':');
+    let name = name.trim_start_matches(|c: char| {
+        c.is_ascii_digit() || matches!(c, ',' | '%' | '.' | '$' | '+' | '-' | ' ')
+    });
+    // c:3275 `:2match`/`:3match` are reached with the digit skipped.
+    let cmd = match name.as_bytes().first() {
+        Some(b'2') | Some(b'3') => &name[1..],
+        _ => name,
+    };
+    let b = cmd.as_bytes();
+    // c:3028-3049 `one_letter_cmd()` — `:k` and the `:s` family are one
+    // character whatever follows, so `fullcommand('si')` is `substitute`.
+    let one_letter = !b.is_empty()
+        && ((b[0] == b'k' && (b.get(1) != Some(&b'e') || b.get(2) != Some(&b'e')))
+            || (b[0] == b's'
+                && (matches!(b.get(1), Some(b'c'))
+                    && (b.len() == 2
+                        || (b[2] != b's'
+                            && b[2] != b'r'
+                            && (b.len() == 3 || (b[3] != b'i' && b.get(4) != Some(&b'p')))))
+                    || matches!(b.get(1), Some(b'g'))
+                    || (matches!(b.get(1), Some(b'i'))
+                        && !matches!(b.get(2), Some(b'm') | Some(b'l') | Some(b'g')))
+                    || matches!(b.get(1), Some(b'I'))
+                    || (matches!(b.get(1), Some(b'r')) && b.get(2) != Some(&b'e')))));
+    let result = if one_letter {
+        if b[0] == b'k' { "k" } else { "substitute" }.to_string()
     } else {
-        CMDS.iter()
-            .find(|(min, full)| name.starts_with(min) && full.starts_with(&name))
-            .map(|(_, full)| full.to_string())
-            .unwrap_or_default()
+        // c:3068-3081 the command word — letters, `:py3`'s digits, or one of
+        // `@!=><&~#`; c:3278 an unknown one yields the empty string.
+        let mut len = b.iter().take_while(|c| c.is_ascii_alphabetic()).count();
+        if cmd.starts_with("py") {
+            len += b[len..]
+                .iter()
+                .take_while(|c| c.is_ascii_alphanumeric())
+                .count();
+        }
+        if len == 0 && b.len() == 1 && b"@!=><&~#".contains(&b[0]) {
+            len = 1;
+        }
+        // c:3084-3100 `:dl`/`:dp` is `:d` with the `l`/`p` flag, so the flag
+        // letter is not part of the name — `fullcommand('dl')` is `delete`.
+        if len > 0 && b[0] == b'd' && matches!(b[len - 1], b'l' | b'p') {
+            let i = cmd
+                .bytes()
+                .zip("delete".bytes())
+                .take_while(|(a, b)| a == b)
+                .count();
+            if i == len - 1 {
+                len -= 1;
+            }
+        }
+        let word = &cmd[..len];
+        // c:3125-3128 Neovim makes `:def` unknown; vim 9.2 answers `def`.
+        if word.is_empty() || word == "def" {
+            String::new()
+        } else {
+            CMDNAMES
+                .iter()
+                .find(|n| n.starts_with(word))
+                // c:3157-3161 `:ho` is forced unresolved.
+                .filter(|n| !(**n == "horizontal" && word.len() == 2))
+                .map(|n| n.to_string())
+                // c:3283 a user command answers with its own name.
+                .or_else(|| {
+                    find_ucmd(word).map(|_| {
+                        USER_COMMANDS.with(|c| {
+                            c.borrow()
+                                .keys()
+                                .find(|k| k.starts_with(word))
+                                .cloned()
+                                .unwrap_or_default()
+                        })
+                    })
+                })
+                .unwrap_or_default()
+        }
     };
     rettv.vval = v_string(result.into());
 }

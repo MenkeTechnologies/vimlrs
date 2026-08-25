@@ -1,0 +1,83 @@
+0
+s         1 substitute
+su        1 substitute
+sub       1 substitute
+substitute 2 substitute
+sor       1 sort
+sort      2 sort
+co        1 copy
+con       1 continue
+cont      1 continue
+ret       1 retab
+retu      1 return
+bre       1 brewind
+brea      1 break
+fin       1 find
+fina      1 finally
+fo        1 fold
+for       2 for
+tr        1 trewind
+try       2 try
+el        1 else
+i         1 insert
+r         1 read
+re        1 read
+--1
+k         2 k
+si        0 substitute
+sig       1 sign
+sign      2 sign
+sim       1 simalt
+sil       1 silent
+sI        0 substitute
+sg        0 substitute
+sr        0 substitute
+sre       1 srewind
+ke        0 k
+kee       1 keepmarks
+--2
+d         1 delete
+dl        1 delete
+dp        1 delete
+del       1 delete
+delete    2 delete
+dli       1 dlist
+--3
+ho        0 
+hor       1 horizontal
+horizontal 2 horizontal
+--4
+sil-mod   1 2 0
+verb      1 1 2
+vert      1 1 2
+bot       1 1 2
+top       1 1 2
+abo       1 1 2
+keepj     1 2
+rightb    1 2
+--5
+bang      2 !
+amp       2 &
+lt        2 <
+gt        2 >
+eq        2 =
+at        2 @
+tilde     2 ~
+hash      2 #
+--6
+2match    2 match
+3match    2 match
+2echo     0
+1match    0
+--7
+garbage   0 0 0
+Upper     0
+--8
+before    0 
+after     2 Foo
+prefix    1 Foo
+deleted   0
+--9
+colon     echo echo
+range     substitute delete
+--10
