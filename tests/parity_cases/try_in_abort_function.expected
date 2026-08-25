@@ -1,0 +1,25 @@
+1
+  caught Vim(echo):E730: Using a List as a String
+  after-try A
+A-done
+--1
+  propagated Vim(echo):E730: Using a List as a String
+--2
+  caught in D Vim(echo):E730: Using a List as a String
+D-done
+--3
+  caught 1
+  caught 2
+  caught 3
+E-done n=3
+--4
+  caught boom
+  F propagated Vim(echo):E730: Using a List as a String
+--5
+  finally G
+  G propagated Vim(echo):E730: Using a List as a String
+--6
+E730: Using a List as a String
+  H carries on
+H-done
+--7
