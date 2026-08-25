@@ -37,6 +37,10 @@ pub struct UserFuncDef {
     /// function out of a Dict binds it to that Dict (c: `make_partial`,
     /// userfunc.c:3805, whose only gate is `fp->uf_flags & FC_DICT`).
     pub dict: bool,
+    /// c: `FC_ABORT` — declared `abort`. The body was compiled to stop at its
+    /// first error, and the error stays visible to the caller (see the
+    /// `did_emsg` restore in `fusevm_bridge::in_callee`).
+    pub abort: bool,
     /// Compiled function body.
     pub chunk: fusevm::Chunk,
     /// How many of the leading [`Self::params`] are SYNTHETIC capture
@@ -259,7 +263,8 @@ fn build_user_func_def(
         bang: flags.bang,
         vim9: flags.vim9,
         dict: flags.dict,
-        chunk: compile_function_body(body, exc, def_line)?,
+        abort: flags.abort,
+        chunk: compile_function_body(body, exc, def_line, flags.abort)?,
     })
 }
 
@@ -274,6 +279,8 @@ struct FuncFlags {
     vim9: bool,
     /// c: `FC_DICT` — the function takes a `self` dict.
     dict: bool,
+    /// c: `FC_ABORT` — the `abort` attribute.
+    abort: bool,
 }
 
 /// Split a `:function` name that targets a Dict key (`d.key`, `g:d.key`,
@@ -385,6 +392,7 @@ fn compile_program_inner(
             bang,
             vim9,
             dict: _,
+            abort,
         } = s
         {
             // `:function d.key()` defines an ANONYMOUS function and stores a
@@ -405,6 +413,7 @@ fn compile_program_inner(
                         bang: *bang,
                         vim9: *vim9,
                         dict: true,
+                        abort: *abort,
                     };
                     funcs.push(build_user_func_def(
                         &anon, args, defaults, body, flags, *line, exc,
@@ -488,6 +497,7 @@ fn compile_function_body(
     body: &[(u32, Stmt)],
     exc: bool,
     def_line: u32,
+    abort: bool,
 ) -> Result<fusevm::Chunk, VimlError> {
     let mut c = Compiler::new(true, exc);
     // vim numbers a function body's lines from 1 at the first line AFTER the
@@ -501,9 +511,21 @@ fn compile_function_body(
     if !exc {
         (c.slots, c.int_slots) = slot_plan(body, true);
     }
+    // c: `ex_docmd.c:647-651` resets `did_emsg` after every command of a function
+    // body — `&& !func_has_abort(real_cookie)`. Without the `abort` attribute the
+    // flag never survives one command, so nothing in a plain body is ever skipped;
+    // WITH it the flag persists and `ea.skip` (c:2027-2031) drops the rest of the
+    // body. Compiling the whole body at conditional depth 1 is exactly that: every
+    // statement gets the skip test and they all land at the body end.
+    if abort {
+        c.cond_enter();
+    }
     c.unwind.push(Vec::new());
     c.compile_stmts(body)?;
     let frame = c.unwind.pop().expect("fn unwind frame");
+    if abort {
+        c.cond_leave();
+    }
     let end = c.b.current_pos();
     for j in std::mem::take(&mut c.returns) {
         c.b.patch_jump(j, end);
@@ -612,6 +634,29 @@ struct Compiler {
     /// [`Compiler::cur_line`]. Zero for a script chunk (absolute file lines) and
     /// the `:function` header's line for a body chunk.
     line_base: u32,
+    /// Nesting depth of open `:if`/`:while`/`:for` blocks — this port's stand-in
+    /// for `cstack.cs_idx >= 0`.
+    ///
+    /// c: `do_cmdline` clears `did_emsg` between command lines only while the
+    /// condition stack is EMPTY (`ex_docmd.c:448-454`). Inside a conditional the
+    /// flag persists, and `ea.skip` (`ex_docmd.c:2027-2031`) then skips every
+    /// following command until the outermost conditional closes. So a check is
+    /// needed exactly at depth > 0, and the resume point is where the depth
+    /// returns to 0.
+    cond_depth: u32,
+    /// Jump sites of the per-statement `did_emsg` skip test, patched to the end
+    /// of the OUTERMOST enclosing conditional (where the C's reset happens).
+    aborts: Vec<usize>,
+    /// Index of the `Op::Jump` reserved at the head of the outermost conditional,
+    /// so a baseline op can be spliced in front of it if the block turns out to
+    /// need one. See [`Compiler::cond_leave`].
+    cond_head: Option<usize>,
+    /// Count of `Op::CallBuiltin`s emitted so far. Every VimL diagnostic is
+    /// raised from a builtin (`emsg()` has no native-op caller), so a statement
+    /// that did not move this counter cannot have errored and needs no skip test
+    /// — which is what keeps a slotted numeric loop body CallBuiltin-free and
+    /// therefore JIT-traceable.
+    calls: u32,
     /// Debug (`--dap`) build: emit a `SET_LINENO` marker before each statement.
     /// Copied from [`DEBUG_MARKERS`] at construction so every chunk of the
     /// program — main, `:function` bodies, lambda bodies — is marked alike.
@@ -1031,6 +1076,10 @@ impl Compiler {
             int_slots: std::collections::HashSet::new(),
             cur_line: 0,
             line_base: 0,
+            cond_depth: 0,
+            aborts: Vec::new(),
+            cond_head: None,
+            calls: 0,
             dbg: DEBUG_MARKERS.with(|d| d.get()),
         }
     }
@@ -1105,6 +1154,7 @@ impl Compiler {
                     self.emit(Op::Pop);
                 }
             }
+            let calls_before = self.calls;
             self.stmt(s)?;
             if self.exc {
                 self.emit(Op::CallBuiltin(h::VIML_CHECK_EXC, 0));
@@ -1112,6 +1162,16 @@ impl Compiler {
                 if let Some(frame) = self.unwind.last_mut() {
                     frame.push(j);
                 }
+            }
+            // c: `ea.skip` (`ex_docmd.c:2027-2031`) — every command after one that
+            // reported an error is skipped while `did_emsg` holds, and inside a
+            // conditional nothing resets it. Emitted only when the statement
+            // actually reached a builtin: `emsg()` is unreachable from the native
+            // ops, so a fully-lowered numeric statement cannot have set the flag.
+            // The exception check above runs first, so a pending throw still
+            // unwinds through its own frame rather than taking this exit.
+            if self.calls > calls_before {
+                self.emit_block_abort_check(0);
             }
         }
         Ok(())
@@ -1128,6 +1188,9 @@ struct LoopCtx {
 
 impl Compiler {
     fn emit(&mut self, op: Op) -> usize {
+        if matches!(op, Op::CallBuiltin(..)) {
+            self.calls += 1;
+        }
         self.b.emit(op, self.cur_line)
     }
 
@@ -1207,9 +1270,28 @@ impl Compiler {
                 self.emit(Op::Pop);
                 Ok(())
             }
-            Stmt::If { arms, else_body } => self.if_stmt(arms, else_body),
-            Stmt::While { cond, body } => self.while_stmt(cond, body),
-            Stmt::For { vars, iter, body } => self.for_stmt(vars, iter, body),
+            // The three cstack-pushing block commands. `cond_enter`/`cond_leave`
+            // bracket them so an error inside skips to the end of the OUTERMOST
+            // one — see [`Compiler::cond_depth`].
+            Stmt::If { arms, else_body } => {
+                self.cond_enter();
+                let r = self.if_stmt(arms, else_body);
+                self.cond_leave();
+                r
+            }
+            Stmt::While { cond, body } => {
+                self.cond_enter();
+                let r = self.while_stmt(cond, body);
+                self.cond_leave();
+                r
+            }
+            Stmt::For { vars, iter, body } => {
+                self.cond_enter();
+                let r = self.for_stmt(vars, iter, body);
+                self.cond_leave();
+                r
+            }
+
             Stmt::Execute(args) => {
                 for a in args {
                     self.expr(a)?;
@@ -1400,6 +1482,7 @@ impl Compiler {
                 bang,
                 vim9,
                 dict,
+                abort,
             } => {
                 // A `:function` reached HERE (in `stmt`, not `compile_program`'s
                 // top-level loop) is nested inside a control-flow block and/or
@@ -1423,6 +1506,7 @@ impl Compiler {
                     bang: *bang,
                     vim9: *vim9,
                     dict: *dict,
+                    abort: *abort,
                 };
                 let def = build_user_func_def(
                     name,
@@ -1636,7 +1720,16 @@ impl Compiler {
     ) -> Result<(), VimlError> {
         let mut end_jumps = Vec::new();
         for (cond, body) in arms {
+            let calls_before = self.calls;
             self.cond(cond)?;
+            // c: `ex_if` reads `CHECK_SKIP` (`vendor/ex_eval.c:865`, the macro at
+            // c:80-85) — an error raised WHILE evaluating the condition sets
+            // `did_emsg`, so neither the `:if` body nor the `:else` runs; c:1590
+            // spells the same test out again for `ex_else`. The condition value is
+            // on the stack, hence `drop = 1`.
+            if self.calls > calls_before {
+                self.emit_block_abort_check(1);
+            }
             let jf = self.emit(Op::JumpIfFalse(0));
             self.compile_stmts(body)?;
             end_jumps.push(self.emit(Op::Jump(0)));
@@ -1668,7 +1761,17 @@ impl Compiler {
         let ctx = self.loops.pop().expect("loop ctx");
         let l_test = self.b.current_pos();
         self.b.patch_jump(to_test, l_test);
+        let calls_before = self.calls;
         self.cond(cond)?;
+        // c: `ex_while` passes `skip = CHECK_SKIP` to `eval_to_bool`
+        // (`vendor/ex_eval.c:1007-1009`) and only activates the loop when
+        // `!skip && !error && result` (c:1042). An error in the condition
+        // therefore leaves the loop inactive — on the first pass AND on the
+        // backedge, which is the second half of why a failing body runs the loop
+        // exactly once.
+        if self.calls > calls_before {
+            self.emit_block_abort_check(1);
+        }
         self.emit(Op::JumpIfTrue(l_body));
         let l_end = self.b.current_pos();
         for j in ctx.breaks {
@@ -1801,7 +1904,15 @@ impl Compiler {
         let item_var = format!("\u{1}for_item_{n}");
 
         // list = <iter>;  idx = 0
+        let calls_before = self.calls;
         self.expr(iter)?;
+        // c: `ex_while`'s `:for` arm calls `eval_for_line` and then only advances
+        // when `!error && fi != NULL && !skip` (`vendor/ex_eval.c:1021-1030`) —
+        // an error while evaluating the list leaves the loop inactive. vim
+        // materializes the list ONCE, so this test is likewise outside the loop.
+        if self.calls > calls_before {
+            self.emit_block_abort_check(1);
+        }
         self.set_var(&list_var);
         self.emit(Op::LoadInt(0));
         self.set_var(&idx_var);
@@ -1857,6 +1968,85 @@ impl Compiler {
             self.b.patch_jump(j, l_incr);
         }
         Ok(())
+    }
+
+    /// Open a `:if`/`:while`/`:for` block.
+    ///
+    /// c: `do_cmdline` clears `did_emsg` before this command line, because the
+    /// condition stack is still empty (`ex_docmd.c:448-454`) — so an error from an
+    /// EARLIER statement must not skip anything inside this block. Establishing
+    /// that baseline needs a builtin call, and a builtin call in the chunk is
+    /// exactly what stops a slotted numeric loop being JIT-compiled. So the
+    /// outermost block only reserves a native `Op::Jump` here; [`Compiler::cond_leave`]
+    /// decides, once it knows whether anything inside can error at all, whether to
+    /// give it a destination that sets the baseline first.
+    fn cond_enter(&mut self) {
+        if self.cond_depth == 0 {
+            self.cond_head = Some(self.emit(Op::Jump(0)));
+        }
+        self.cond_depth += 1;
+    }
+
+    /// Close it. When the outermost one closes the condition stack is empty again
+    /// and the C's next `did_emsg = false` is due, so this is where every skip test
+    /// collected inside lands.
+    fn cond_leave(&mut self) {
+        self.cond_depth -= 1;
+        if self.cond_depth != 0 {
+            return;
+        }
+        let head = self.cond_head.take().expect("conditional head");
+        let body = head + 1;
+        let aborts = std::mem::take(&mut self.aborts);
+        if aborts.is_empty() {
+            // Nothing in the block reached a builtin, so nothing in it could have
+            // called `emsg()`: no baseline is needed and the reserved jump just
+            // falls through to the block.
+            self.b.patch_jump(head, body);
+            return;
+        }
+        // Something can error. Land the skip jumps at the end of the block, then
+        // append the baseline op OUT OF LINE and point the reserved jump at it —
+        // the block itself stays exactly as compiled.
+        let end = self.b.current_pos();
+        for j in aborts {
+            self.b.patch_jump(j, end);
+        }
+        let over = self.emit(Op::Jump(0));
+        let prologue = self.b.current_pos();
+        self.emit(Op::CallBuiltin(h::VIML_BLOCK_ENTER, 0));
+        self.emit(Op::Pop);
+        self.emit(Op::Jump(body));
+        let after = self.b.current_pos();
+        self.b.patch_jump(over, after);
+        self.b.patch_jump(head, prologue);
+    }
+
+    /// The `did_emsg` half of `ea.skip` (`ex_docmd.c:2027-2031`), as a jump out of
+    /// the enclosing conditional. `drop` is the number of stack values the jump
+    /// has to discard (1 when the test sits on top of an already-evaluated loop
+    /// or `:if` condition, 0 between statements).
+    ///
+    /// No-op at depth 0: there the C would have reset `did_emsg` before the next
+    /// command line, so nothing is skipped.
+    fn emit_block_abort_check(&mut self, drop: usize) {
+        if self.cond_depth == 0 {
+            return;
+        }
+        self.emit(Op::CallBuiltin(h::VIML_BLOCK_ABORT, 0));
+        if drop == 0 {
+            let j = self.emit(Op::JumpIfTrue(0));
+            self.aborts.push(j);
+            return;
+        }
+        let cont = self.emit(Op::JumpIfFalse(0));
+        for _ in 0..drop {
+            self.emit(Op::Pop);
+        }
+        let j = self.emit(Op::Jump(0));
+        self.aborts.push(j);
+        let here = self.b.current_pos();
+        self.b.patch_jump(cont, here);
     }
 
     /// After a user-function call leaves its result on the stack, check whether
@@ -2373,7 +2563,7 @@ impl Compiler {
                     })
                     .collect();
                 stmts.push((1, Stmt::Return(Some((**body).clone()))));
-                let chunk = compile_function_body(&stmts, self.exc, 0)?;
+                let chunk = compile_function_body(&stmts, self.exc, 0, false)?;
                 let n_captures = cap_params.len();
                 LAMBDA_FUNCS.with(|f| {
                     f.borrow_mut().push(UserFuncDef {
@@ -2391,6 +2581,8 @@ impl Compiler {
                         // c: `get_lambda_tv` builds the ufunc with
                         // `FC_LAMBDA|FC_CLOSURE`, never `FC_DICT` — a lambda
                         // stored in a Dict is not bound to it.
+                        // c: `get_lambda_tv` sets no `FC_ABORT` either.
+                        abort: false,
                         dict: false,
                         chunk,
                     })

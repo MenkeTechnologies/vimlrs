@@ -356,6 +356,12 @@ pub enum Stmt {
         /// `:function d.key()` form (`fudi.fd_dict != NULL`). Reading such a
         /// function out of a Dict binds it to that Dict (`make_partial`).
         dict: bool,
+        /// c: `FC_ABORT` — the `abort` attribute. A function declared `abort`
+        /// stops at the first error instead of running on: `do_cmdline` skips
+        /// the `did_emsg` reset it otherwise performs after every command of a
+        /// function body (`ex_docmd.c:647-651`), so the flag stays set through
+        /// the rest of the body AND out into the caller.
+        abort: bool,
     },
     /// `:try … :catch {pat} … :finally … :endtry`.
     /// `:try` … `:endtry`.

@@ -12,9 +12,9 @@
 #![allow(non_upper_case_globals)]
 
 use crate::ported::charset::{transchar_buf, transchar_byte_buf, vim_isprintc};
-use crate::ported::mbyte::{utf_ptr2char, utfc_ptr2len};
-use crate::ported::eval::vars::vv::VV_ERRMSG;
 use crate::ported::eval::vars::set_vim_var_string;
+use crate::ported::eval::vars::vv::VV_ERRMSG;
+use crate::ported::mbyte::{utf_ptr2char, utfc_ptr2len};
 use crate::vimstr::VimStr;
 use std::cell::{Cell, RefCell};
 
@@ -267,4 +267,3 @@ pub fn msg_multiline(str_: &[u8], out: &mut VimStr) {
         msg_outtrans_len(&str_[chunk..], out);
     }
 }
-

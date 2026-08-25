@@ -1277,6 +1277,26 @@ pub const VIML_CHECK_EXC: u16 = 3074;
 pub const VIML_CATCH_MATCH: u16 = 3075;
 /// At program end: if an exception is still pending, report `E605` and clear it.
 pub const VIML_REPORT_UNCAUGHT: u16 = 3076;
+/// Re-anchor the `did_emsg` baseline: the outermost `:if`/`:while`/`:for` is
+/// about to open.
+///
+/// c: `do_cmdline` clears `did_emsg` before each command line while the condition
+/// stack is empty (`ex_docmd.c:448-454`, and c:430 on entry) — so an error
+/// reported by an earlier statement skips nothing inside this block. Emitted out
+/// of line by the compiler, and only for a block that contains something able to
+/// call `emsg()` at all.
+pub const VIML_BLOCK_ENTER: u16 = 3604;
+/// Push `Bool(an error has been reported since the enclosing conditional
+/// opened)` — the per-statement skip test inside an `:if`/`:while`/`:for` block.
+///
+/// c: the `did_emsg` disjunct of `ea.skip` (`ex_docmd.c:2027-2031`), which is
+/// what makes every command after a failing one a no-op; of `CHECK_SKIP`
+/// (`vendor/ex_eval.c:80-85`), read by `ex_if` (c:865) and `ex_while` (c:1007);
+/// and of the `!did_emsg` guard on the `:endwhile`/`:endfor` backedge
+/// (`ex_docmd.c:667`). The flag persists because `do_cmdline` clears it between
+/// command lines ONLY while the condition stack is empty (`ex_docmd.c:448-454`:
+/// `next_cmdline == NULL && !force_abort && cstack.cs_idx < 0`).
+pub const VIML_BLOCK_ABORT: u16 = 3603;
 /// Register a deferred (block-level) `:function` when its line executes. Pops the
 /// staging key emitted by the compiler and moves the staged def into the live
 /// `FUNCTIONS` registry — see `b_define_func`.
@@ -1424,6 +1444,13 @@ thread_local! {
     /// The currently-raised, not-yet-caught exception value (`:throw`). `Some`
     /// while unwinding toward a `:catch`. Models `ex_eval.c`'s `current_exception`.
     static PENDING_EXC: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// The `did_emsg` baseline of the current `do_cmdline` frame — everything
+    /// above it is "an error was reported since the enclosing conditional
+    /// opened". See [`VIML_BLOCK_ABORT`]. Saved and restored across a user
+    /// function's body, because the C's `did_emsg` baseline is per-`do_cmdline`
+    /// and a function body is its own (`ex_docmd.c:430`).
+    static BLOCK_MARK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+
     /// `v:exception` — the most recently caught exception text.
     static V_EXCEPTION: RefCell<String> = const { RefCell::new(String::new()) };
     /// `v:throwpoint` — where the most recently caught exception was raised.
@@ -1641,6 +1668,8 @@ fn in_callee<T>(f: impl FnOnce() -> T) -> T {
     if PENDING_EXC.with(|p| p.borrow().is_none()) {
         EVAL_FAIL.with(|c| c.set(saved_fail));
         FAIL_MARK.with(|m| m.set(saved_mark));
+        // Same condition, for the same reason: c:647's `!force_abort` guard means
+        // an error the callee turned into an exception is NOT forgotten.
     }
     out
 }
@@ -2028,6 +2057,44 @@ fn b_check_exc(_vm: &mut VM, _: u8) -> Value {
     Value::Bool(PENDING_EXC.with(|p| p.borrow().is_some()))
 }
 
+/// c: `ex_docmd.c:430` / c:448-454 — `did_emsg = false` while the condition stack
+/// is empty.
+fn b_block_enter(_vm: &mut VM, _: u8) -> Value {
+    BLOCK_MARK.with(|m| m.set(message::did_emsg.with(|d| d.get())));
+    Value::Undef
+}
+
+/// c: `ea.skip` (`ex_docmd.c:2027-2031`) is
+/// `did_emsg || got_int || did_throw || <enclosing conditional inactive>`.
+///
+/// Only the `did_emsg` disjunct is asked here. `did_throw` is the pending
+/// exception, which this VM unwinds through its own `VIML_CHECK_EXC` frames — so
+/// it is EXCLUDED, or a throw inside a loop inside a `:try` would take the block
+/// exit instead of the catch. `got_int` has no counterpart in this port.
+///
+/// A hit also re-marks. The compiler patches every one of these tests to the end
+/// of the OUTERMOST enclosing conditional, which is precisely where the C's
+/// `cstack.cs_idx < 0` reset (`ex_docmd.c:448-454`) becomes due — so performing
+/// it here, at the moment the jump is taken, is the same reset at the same point
+/// in the program. Doing it this way rather than with a marker op at the top of
+/// each block is what keeps a slotted numeric loop free of `CallBuiltin`s
+/// entirely, and therefore JIT-compilable.
+fn b_block_abort(_vm: &mut VM, _: u8) -> Value {
+    let cur = message::did_emsg.with(|d| d.get());
+    // `did_emsg` can move DOWN — `:catch` zeroes it (`vendor/ex_eval.c:116`), and
+    // `assert_fails()` restores it around the expression it runs. Re-anchor rather
+    // than let a stale high-water mark mask every later error.
+    if BLOCK_MARK.with(|m| m.get()) > cur {
+        BLOCK_MARK.with(|m| m.set(cur));
+        return Value::Bool(false);
+    }
+    let hit = cur > BLOCK_MARK.with(|m| m.get()) && PENDING_EXC.with(|p| p.borrow().is_none());
+    if hit {
+        BLOCK_MARK.with(|m| m.set(cur));
+    }
+    Value::Bool(hit)
+}
+
 fn b_catch_match(vm: &mut VM, _: u8) -> Value {
     let pat = tv_get_string(&pop_tv(vm));
     let pending = PENDING_EXC.with(|p| p.borrow().clone());
@@ -2048,6 +2115,7 @@ fn b_catch_match(vm: &mut VM, _: u8) -> Value {
         // did_emsg, got_int, did_throw". Handling the error clears the error state,
         // which is why a script that catches an error still exits successfully.
         message::did_emsg.with(|d| d.set(0));
+        BLOCK_MARK.with(|m| m.set(0));
         observe_errors_clear();
     }
     Value::Bool(matched)
@@ -3426,7 +3494,35 @@ fn call_user_function_raw(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
     // c: an error inside the body sets `did_emsg`, but `call_func()` still returns
     // OK with the function's `rettv` — the caller's `eval1()` does not fail. See
     // [`in_callee`]; the body's own statements still see their own failures.
+    // c: a function body is its own `do_cmdline`, which clears `did_emsg` on entry
+    // (`ex_docmd.c:430`) and again after every command it runs — unless the function
+    // was declared `abort` (`ex_docmd.c:647-651`: `did_emsg && !force_abort &&
+    // getline_equal(…, get_func_line) && !func_has_abort(real_cookie)`). So an error
+    // inside a plain function is INVISIBLE to the caller, and a `:while` around the
+    // call keeps looping; an `abort` one stops the caller too. Verified against
+    // vim 9.2 — the same body with and without the attribute runs the caller's
+    // three-iteration loop three times, and once.
+    //
+    // The C zeroes `did_emsg`; this restores the caller's own value, so a baseline
+    // taken before the call stays meaningful. The two differ only when the caller
+    // had ALREADY errored earlier in the same statement, which the C would forget.
+    //
+    // `!force_abort` is the third guard: an error the body turned into an exception
+    // is not forgotten either, and `PENDING_EXC` is this VM's stand-in for it.
+    let saved_emsg = message::did_emsg.with(|d| d.get());
+    let saved_block = BLOCK_MARK.with(|m| m.get());
     in_callee(|| run_chunk_nested(func.chunk.clone()));
+    BLOCK_MARK.with(|m| m.set(saved_block));
+    // A LAMBDA body is not a `do_cmdline` at all — `call_user_func` evaluates
+    // `FC_LAMBDA`'s single expression directly (`userfunc.c`), so c:430/c:647-651
+    // never run for one and its error stays visible. Verified against vim 9.2: the
+    // same erroring body called from a three-iteration `:while` runs three times as
+    // a `:function` and ONCE as a `{x -> …}`. `<lambda>N` is vim's own name for
+    // them (`get_lambda_name()`, userfunc.c:269), so it is the flag.
+    let is_lambda = func.name.starts_with("<lambda>");
+    if !func.abort && !is_lambda && PENDING_EXC.with(|p| p.borrow().is_none()) {
+        message::did_emsg.with(|d| d.set(saved_emsg));
+    }
     CUR_CMDNAME.with(|c| *c.borrow_mut() = caller_cmdname);
     // The body's lines are relative to its own `:function`; restore the caller's
     // so a later error in the caller reports the caller's line.
@@ -5043,6 +5139,7 @@ pub fn reset_run() {
     PENDING_EXC.with(|p| *p.borrow_mut() = None);
     V_EXCEPTION.with(|e| e.borrow_mut().clear());
     message::did_emsg.with(|d| d.set(0));
+    BLOCK_MARK.with(|m| m.set(0));
     // The exit-status latch is per *process* in the C; per run here, so an
     // embedding host (or the REPL) does not inherit a previous script's status.
     message::ex_exitval.with(|e| e.set(0));
@@ -6201,6 +6298,8 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_TRY_ENTER, b_try_enter);
     vm.register_builtin(VIML_TRY_LEAVE, b_try_leave);
     vm.register_builtin(VIML_CHECK_EXC, b_check_exc);
+    vm.register_builtin(VIML_BLOCK_ENTER, b_block_enter);
+    vm.register_builtin(VIML_BLOCK_ABORT, b_block_abort);
     vm.register_builtin(VIML_CATCH_MATCH, b_catch_match);
     vm.register_builtin(VIML_REPORT_UNCAUGHT, b_report_uncaught);
     vm.register_builtin(VIML_DEFINE_FUNC, b_define_func);

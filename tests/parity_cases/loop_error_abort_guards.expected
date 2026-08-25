@@ -1,0 +1,28 @@
+1
+-- 1. :silent! does not abort the loop
+still here n=1
+still here n=2
+still here n=3
+n=3 errmsg=E730: Using a List as a String
+-- 2. a caught error does not abort the loop
+caught Vim(echo):E730: Using a List as a String
+caught Vim(echo):E730: Using a List as a String
+caught Vim(echo):E730: Using a List as a String
+n=3
+-- 3. an UNCAUGHT error inside a :try around the loop still stops the loop
+caught Vim(echo):E730: Using a List as a String
+n=1
+-- 4. an error inside a plain function does not abort the caller
+E730: Using a List as a String
+the plain body carries on
+E730: Using a List as a String
+the plain body carries on
+E730: Using a List as a String
+the plain body carries on
+n=3
+-- 5. ... but an `abort` function stops its own body AND the caller
+E730: Using a List as a String
+n=1
+-- 6. a lambda is not a do_cmdline: its error DOES stop the caller
+E730: Using a List as a String
+n=1

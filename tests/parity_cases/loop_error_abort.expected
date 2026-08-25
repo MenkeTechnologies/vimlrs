@@ -1,0 +1,29 @@
+1
+-- 1. error in a :while body: one iteration, rest of the body skipped
+E730: Using a List as a String
+i=1
+-- 2. and the same for :for
+E730: Using a List as a String
+n=1
+-- 3. an error in the :while CONDITION: zero iterations
+E730: Using a List as a String
+i=0
+-- 4. an error in the :for list: zero iterations
+E730: Using a List as a String
+n=0
+-- 5. an error in an :if condition skips the :else too
+E730: Using a List as a String
+past the :if
+-- 6. an error in an :if body resumes after the :endif
+E730: Using a List as a String
+past the :endif
+-- 7. nested: the unwind goes out to the OUTERMOST block, not one level
+E730: Using a List as a String
+o=1 i=1
+-- 8. an :if nested in a :while unwinds the whole :while
+body end n=1
+E730: Using a List as a String
+n=2
+-- 9. did_emsg does NOT persist past the outermost block
+i=2
+the next block still runs
