@@ -1,0 +1,33 @@
+0
+char       'plain' v ['plain']
+line       'l1
+l2
+' V ['l1', 'l2']
+list       'x
+y
+' V ['x', 'y']
+block      'x
+y' ^V1 ['x', 'y']
+block5     'z' ^V5
+append     'ab' v
+append l   'p
+' V
+empty reg  '' []
+set empty  '' [v]
+--1
+let @i     'via let' v
+let nl     'two
+lines' v
+--2
+reg_recording= ''  reg_executing= ''
+--3
+invalid    []
+readonly   v v v v
+blackhole  v ''
+block w2   'ab
+cd' ^V2 ['ab', 'cd']
+append lw  'a
+b
+' V
+empty list '' []
+--4

@@ -51,6 +51,10 @@ pub enum MotionType {
     LineWise,
     /// `kMTBlockWise` (with its block width).
     BlockWise(colnr_T),
+    /// `kMTUnknown` — no type at all, which `format_reg_type` renders as the
+    /// EMPTY string (`vendor/ops.c:228-230`). An unset register has one, so
+    /// `getregtype('z')` is `''` and not `'v'`.
+    Unknown,
 }
 
 /// `yreg_mode_t` (`register_defs.h`) — modes for [`get_yank_register`].
@@ -269,15 +273,15 @@ pub fn format_reg_type(reg_type: MotionType, reg_width: colnr_T) -> String {
         MotionType::CharWise => "v".to_string(),
         // c: CTRL_V_STR "%" PRIdCOLNR, reg_width + 1  (CTRL_V_STR == "\x16")
         MotionType::BlockWise(_) => format!("\u{16}{}", reg_width + 1),
+        // c:228-230 `case kMTUnknown: buf[0] = NUL; return 0;`
+        MotionType::Unknown => String::new(),
     }
 }
 
 /// Port of `get_reg_type()` from vendor/ops.c — the motion type of register
 /// `regname` (and, for a blockwise register, its width).
 ///
-/// RUST-PORT NOTE: C returns `kMTUnknown` for the special/absent-register cases;
-/// this carve-out returns `(CharWise, 0)` to preserve the existing builtin-bridge
-/// contract (`getregtype()` of an absent register yields `"v"` in vimlrs). The
+/// The
 /// special read-only registers (`%`, `#`, `=`, `:`, `/`, `.`, CTRL-{F,P,W,A},
 /// `_`) all report charwise, matching C.
 pub fn get_reg_type(regname: char) -> (MotionType, colnr_T) {
@@ -290,8 +294,9 @@ pub fn get_reg_type(regname: char) -> (MotionType, colnr_T) {
         _ => {}
     }
 
+    // c:252 `if (regname != NUL && !valid_yank_reg(regname, false)) return kMTUnknown;`
     if regname != 0 && !valid_yank_reg(regname, false) {
-        return (MotionType::CharWise, 0); // c: return kMTUnknown;
+        return (MotionType::Unknown, 0);
     }
 
     let i = get_yank_register(regname, YREG_PASTE);
@@ -304,7 +309,8 @@ pub fn get_reg_type(regname: char) -> (MotionType, colnr_T) {
             }
             return (reg.y_type, 0);
         }
-        (MotionType::CharWise, 0) // c: return kMTUnknown;
+        // c:264 an unset register (`y_array == NULL`) has no type.
+        (MotionType::Unknown, 0)
     })
 }
 
