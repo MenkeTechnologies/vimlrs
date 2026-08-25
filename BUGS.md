@@ -4358,6 +4358,292 @@ deliberate Neovim-favoured split: `echo string(1.0/0.0)` is `inf` in vim and
 
 ---
 
+# Round 35 — the abort rule, `:echo`'s per-argument write, and the lock model
+
+Method: probes run against `/opt/homebrew/bin/vim` 9.2 through
+`scripts/parity.sh`, which sources the same file through both engines and
+byte-diffs the merged output and the exit status. Every fix is recorded as a
+parity case, so the record is vim's answer and not this port's. Where the two
+reference engines disagree, `/opt/homebrew/bin/nvim` 0.12.5 was run as well and
+the vendored C decides; those splits are named below rather than recorded.
+
+Baselines held throughout: `cargo test --lib` 413/413, the differential fuzzer
+`--count 1500 --seed 7` at `ok 1441 / GAPS 0 / PANICS 0`, and `--tiers` on a
+slotted numeric loop at `trace-eligible=true traced=true`, `reaches native code
+true`. The corpus went 54 -> 64 cases, all byte-identical.
+
+## R35-1. An error inside `:while`/`:for`/`:if` did not skip the rest of it — ✅ FIXED (R33-O1, R34-O1)
+
+vim runs ONE iteration of a `:while` whose body errors; this port ran every one.
+The mechanism is `did_emsg`, and it is in two halves.
+
+**Vendored half.** `vendor/ex_eval.c:80-85` `CHECK_SKIP` is `did_emsg || got_int
+|| did_throw || <the enclosing conditional is not active>`, read by `ex_if`
+(c:865) and by `ex_while` (c:1007), which passes it as `skip` to `eval_to_bool`
+and only activates the loop when `!skip && !error && result` (c:1042). That is
+why an error in a `:while` condition or a `:for` list gives ZERO iterations, and
+why the `:else` of an `:if` whose condition errored is skipped as well (c:1590).
+
+**Empirical half.** `do_cmdline` is not vendored, so it was established probe by
+probe against vim 9.2 and then confirmed against the upstream source. Three
+facts, each measured before it was read:
+
+| probe | vim 9.2 | this port, before |
+|---|---|---|
+| `while g:i<3` / `let g:i+=1` / `echo [1].'x'` / `endwhile` | `i=1` | `i=3` |
+| the same with a second statement after the failing one | that statement never runs | it runs every iteration |
+| an error at top level, then a `:while` on the NEXT line | the loop runs normally | the same |
+| an error two loops deep | BOTH loops end | neither does |
+| an error inside an `:if` inside a `:while` | the whole `:while` ends | neither does |
+
+The C behind them: `did_emsg` is cleared between command lines only while the
+condition stack is empty (`ex_docmd.c:448-454`: `next_cmdline == NULL &&
+!force_abort && cstack.cs_idx < 0`), `ea.skip` (c:2027-2031) carries the flag to
+EVERY command rather than only the conditionals, and the `:endwhile`/`:endfor`
+backedge is guarded by `!did_emsg` (c:667). So the skip runs out to the
+outermost open block and execution resumes after it.
+
+**Not triggered by** — each measured, and each now a row of
+`tests/parity_cases/loop_error_abort_guards.vim`:
+
+| | why |
+|---|---|
+| `:silent!` | `emsg_multiline` returns at `vendor/message.c:817-846`, before `did_emsg++` at c:870 |
+| a caught error | `:catch` resets `did_emsg` (`vendor/ex_eval.c:116`) |
+| an error inside a plain function body | a function is its own `do_cmdline`, which resets the flag after every command unless the function is `abort` (`ex_docmd.c:647-651`) |
+
+The `abort` attribute is therefore now parsed and honoured — its body stops at
+the first error and the caller stops too. A LAMBDA is not a `do_cmdline` at all
+(`call_user_func` evaluates its single expression), so its error DOES stop the
+caller; verified both ways.
+
+Cost: a block whose body never reaches a builtin cannot have called `emsg()`, so
+it gets no test at all and the baseline op is emitted out of line. A slotted
+numeric loop stays `CallBuiltin`-free and JIT-traced.
+
+## R35-2. `:echo` wrote all its arguments after evaluating all of them — ✅ FIXED (R33-O2)
+
+`vendor/eval.c:6139-6186` is eval-then-write per argument: `eval1()` at c:6146,
+the `atstart`/separator handling at c:6160-6179, `msg_multiline` at c:6181, then
+the next argument. So an error raised while evaluating argument N appears AFTER
+argument N-1 has already been written.
+
+| | `echo 'A =' strlen([1]) 'B'` |
+|---|---|
+| vim 9.2 | `A =` NL `E730: Using a List as a String 0 B` |
+| this port, before | `E730: Using a List as a String` NL `A = 0 B` |
+
+The second line needed the other half: `emsg()` reaches the display through
+`msg_start()`, which breaks the message line only when there is text on it and
+leaves the column non-zero — so what `:echo` writes next continues on the
+error's line. `emsg()` here used `eprintln!`, which ended it. It now goes through
+the same column model `:echo` uses, except under a capture, which keeps its own
+line-per-message convention.
+
+## R35-3. The deferred E116 after a failed call argument — ✅ FIXED (R33-O3)
+
+`get_func_tv` calls `call_func` only when `get_func_arguments` returned OK
+(`vendor/eval/userfunc.c:559-566`) and otherwise reports E116 (c:583-588). This
+port raised nothing.
+
+The message text is not the function name. `emsg_funcname` (c:492-500) formats
+`%s` over the `name` POINTER, which aims into the expression source and is not
+terminated at the end of the name:
+
+| script | vim 9.2 |
+|---|---|
+| `echo type([1] . '') 'TAIL'` | `E116: Invalid arguments for function type([1] . '') 'TAIL'` |
+| `echo [type([1] . '')]` | `E116: … function type([1] . '')]` |
+| `echo type(type([1] . ''))` | one E116 per level, innermost first |
+| `call type([1] . '')` | `E116: … function type` — `ex_call` hands over a NUL-terminated copy |
+| `let F = function('type')` then `echo F([1] . '')` | `E116: … function type` — `eval7` evaluated the variable instead |
+
+`Expr::Call` now carries that source slice, taken from the parser's own token
+span. The same C also fixed the argument-count ORDER: `call_func` (c:580) runs
+after `get_func_arguments` (c:559), so the arguments of a wrong-arity call are
+evaluated — their side effects happen — and a failed argument pre-empts E118
+with E116. This checked the count at compile time and skipped the arguments.
+
+## R35-4. `emsg()` never recorded `v:errmsg` — ✅ FIXED
+
+`vendor/message.c:813` `set_vim_var_string(VV_ERRMSG, s, -1)` — "set v:errmsg,
+also when using :silent! cmd". The call sits between the `cause_errthrow` return
+(c:798-803) and the `emsg_silent` one (c:817-846), so it is reached on the
+silenced and the displayed path but on neither thrown one: a caught error leaves
+`v:errmsg` alone, a `:silent!` one records it. This port never wrote the
+variable at all, which made the documented idiom for reading a silenced
+command's error answer nothing.
+
+## R35-5. A compound `:let` ran the expression operator — ✅ FIXED
+
+`x op= y` and `x op y` are different functions in the C. This port desugared the
+first into the second, so every combination the C refuses was silently coerced:
+
+| script | vim 9.2 | this port, before |
+|---|---|---|
+| `let d = {}` then `let d += [1]` | `E734: Wrong variable type for +=`, `d` unchanged | E745, `d` clobbered |
+| `let f = 1.5` then `let f %= 2` | `E734: … for %=` | `f` became a Number |
+| `let s = 'ab'` then `let s .= 1.5` | `E734: … for .=` | `'ab1.5'` |
+| `let @r += 1` | `E734: … for +=` | the register was overwritten |
+| `let &textwidth .= 'x'` | `E734: … for .=` | the option became 0 |
+
+`vendor/eval/executor.c:201` `eexe_mod_op` is a type table, and it was ALREADY
+ported at `src/ported/eval/executor.rs` (with its `tv_op_*` helpers and unit
+tests) — simply never reached from the compiled `:let` path. The env/register/
+option guards are `vendor/eval/vars.c:1316`, c:1457 and c:1379-1384. The native
+Number fast paths still take precedence, so a slotted `let i += 1` keeps
+lowering to `Op::Add`.
+
+Side effect on the statement fuzzer: `--stmts --count 1200 --seed 11` went from
+`ok 1141 / GAPS 11 (6 distinct)` to `ok 1147 / GAPS 5 (5 distinct)`.
+
+## R35-6. Writing into a locked container was not checked — ✅ FIXED
+
+With `g:l` locked, `let g:l[0] = 9` mutated it, `add(g:l, 4)` appended,
+`extend(g:d, …)` merged, and `let g:l += [4]` reported E741 AFTER `eexe_mod_op`
+had already extended the list in place.
+
+`set_var_lval` tests `value_check_lock(lp->ll_newkey == NULL ? lp->ll_tv->v_lock
+: lp->ll_tv->vval.v_dict->dv_lock, …)` — for an EXISTING element that is the
+element's own lock, and only for a NEW Dict key the Dict's. That is what makes
+`lockvar`'s depth observable, since `tv_item_lock`
+(`vendor/eval/typval.c:3777`) recurses into the elements only while `deep < 0 ||
+deep > 1`:
+
+| script | vim 9.2 |
+|---|---|
+| `lockvar g:l` then `let g:l[0] = 9` | `E741: Value is locked: g:l[0] = 9` |
+| `lockvar 1 g:l` then `let g:l[0] = 7` | allowed |
+| `lockvar 2 g:n` then `let g:n[0][0] = 9` | allowed |
+| `lockvar 3 g:n` then `let g:n[0][0] = 9` | `E741: … g:n[0][0] = 9` |
+
+The message names `lp->ll_name`, which `get_lval` leaves pointing INTO the source
+for a subscripted lval — hence the whole remaining command in the text, while
+the un-subscripted `let g:l += [4]` is just `g:l`. `f_add`
+(`vendor/eval/list.c:434, 442`) and `extend()`/`extendnew()` (c:656, c:594)
+carry their own guard naming the argument.
+
+## R35-7. The `a:` scope was missing its read-only rules — ✅ FIXED
+
+From `call_user_func` (`vendor/eval/userfunc.c:1065-1174`):
+
+- `a:firstline` and `a:lastline` exist in every non-lambda frame (c:1090-1098);
+  this port had neither.
+- every a: value is stamped `VAR_FIXED` (c:1151), and so is every `a:000` list
+  item (c:1171) — `let a:000[0] = 99` is `E742: Cannot change value of a:000[0]
+  = 99`, not a silent mutation.
+- `cleanup_function_call` copies those items out with `tv_copy` when the list
+  outlives the frame (c:834-837), which clears the ITEM locks but not the list's:
+  `add()` on a returned `a:000` still refuses, assigning to one of its elements
+  does not. Both measured.
+- writing an a: name is E46 for one that exists (`var_check_ro`, vars.c:2857 ->
+  c:2947) and E461 for one that does not (c:2882); this port answered E461 for
+  both. `set_var_const` asks read-only BEFORE the value lock (c:2853-2859), which
+  is why the order matters now that a: items are also FIXED.
+
+## R35-8. `exists()` stopped at the name — ✅ FIXED
+
+`f_exists`'s last branch is `n = var_exists(p)` (`vendor/eval/funcs.c:1396`), and
+`var_exists` (`vendor/eval/vars.c:3371`) is not a name lookup: after
+`eval_variable` succeeds on the leading name it runs `handle_subscript` over the
+rest (c:3389) and rejects anything left over (c:3395). So `exists('g:l[0]')`,
+`exists('g:d.a')` and `exists('g:d["a"]')` are 1 and this port answered 0 — while
+`exists('g:d.nokey')` and `exists('g:l[9]')` are 0 for the right reason. Errors
+raised while walking are swallowed: vim leaves `v:errmsg` untouched.
+
+## R35-9. `const g:c = [1]` declared a variable called `g` — ✅ FIXED
+
+Found while probing the lock model. The vim9 `name: type` annotation stripper
+read the SCOPE colon as an annotation, so `:const`/`:var` with any scoped name
+truncated it: the value landed in `g`, the intended variable was never defined
+(`islocked('g:c')` answered -1), and the implied `lockvar!` locked the wrong
+thing. A leading scope prefix is now skipped before the annotation colon is
+looked for.
+
+## R35-10. A slotted local was invisible in the `l:` scope dict — ✅ FIXED
+
+`slot_plan` lowers a provably-Number function-local to a fusevm slot, which has
+no name and does not live in `fc_l_vars`. Reading the scope dict WHOLE therefore
+did not see it: with `let l:x = 1`, `keys(l:)` answered `[]` where vim answers
+`['x']`. The existing guard was a list of introspecting BUILTINS (`exists`,
+`eval`, `execute`, `call`), which `keys(l:)` is not on and which could never be
+complete. The bail now triggers on a bare scope-dict reference anywhere in the
+chunk.
+
+## vim/Neovim splits found this round (the vendored C decides)
+
+| probe | vim 9.2 | Neovim 0.12.5 = this port |
+|---|---|---|
+| `let n = 1` then `let n .= v:true` | `'1v:true'` | `E734: Wrong variable type for .=` |
+| `let n = 1` then `let n ..= v:null` | `'1v:null'` | `E734: … for .=` |
+
+`vendor/eval/executor.c:206-210` rejects `(VAR_BOOL || VAR_SPECIAL) && *op ==
+'.'`; vim has no such clause. Not put in the record.
+
+## Still open
+
+### R35-O1. `exists(':cmd')` — unchanged from R32-O4
+
+`cmd_exists` needs vim's full ex-command name table (2 for a full name, 1 for an
+accepted abbreviation). This port carries only the abbreviations its own
+statement dispatcher accepts, so answering from that table would be right for
+the commands it happens to list and wrong for the rest. Measured but not
+attempted; the new `exists_forms` case says so in its header.
+
+### R35-O2. `has('patchNNN')` / `has('patch-x.y.z')`
+
+Both engines answer these relative to their own patch level. This port's
+`v:version` is 801 and it asserts no patch level at all, so `has('patch1')` is 0
+where vim 9.2 says 1. Answering would mean this port claiming a vim patch level,
+which is a decision and not a port.
+
+### R35-O3. `b:changedtick`
+
+vim's is a fixed read-only dictitem in `b_vars` fed by the buffer's own edit
+counter. `buf_T` here carries the `changedtick` field and `buf_get_changedtick`
+reads it, but nothing bumps it and its initial value is 0 where a fresh vim
+buffer is already at 2. Wiring the name up without the counter would answer 0 to
+every read, so it stays absent; the `scopes_and_execute` case says so.
+
+### R35-O4. `bufnr('%')` and the `buf*()` family
+
+`bufnr('%')` answers -1 while `getbufinfo()` answers one buffer, and
+`bufexists`/`buflisted`/`bufloaded`/`bufwinnr` are fixed "no buffers" stubs —
+older than the buffer list they now sit next to (`src/ported/buffer.rs` has
+`firstbuf`/`curbuf` and the `buflist_*` lookups). Measured, not attempted.
+
+### R35-O5. The cursor does not move with buffer edits
+
+After a run of `append()`/`deletebufline()` calls vim answers `line('.') = 2`
+and this port answers 1: the ported edit paths do not adjust the cursor the way
+`mark_adjust`/`changed_lines` do. Measured, not attempted.
+
+### R35-O6. `map()`/`filter()` with a LAMBDA callback that fails
+
+`map([1,2], {i,v -> v . [1]})` reports E730 ONCE and yields `[1, 2]` in vim; this
+port reports it per item and yields `[0, 0]`. The equivalent STRING-callback
+forms are already at parity (`filter_map_callback_fail` covers them), so the
+break is in the lambda path's failure propagation, not in `filter_map_one`.
+Pre-existing; verified unrelated to this round's changes.
+
+### R35-O7. An error inside a one-line `try | … | catch | … | endtry`
+
+The five remaining `--stmts` fuzzer gaps are all this shape, inside `execute()`.
+The refinement is named in `compile_viml.rs`'s `Stmt::LineGroup` arm: an error
+abandons the rest of the command line, which takes the `:catch` with it, so the
+error is NOT caught. Only the "hard failure" half is modelled. Six of the eleven
+gaps that stood at the start of this round closed as a side effect of R35-5.
+
+### R32-O1, R31-O1..O4, R30-*, R29-*, R28-O1, R27-*, R26-*, R25-*, R24-O5, R23-O1, R22-O3 — unchanged
+
+`tests/ported_fn_names_match_c` is GREEN. Every ported name added this round is
+its C original (`eexe_mod_op` and the `tv_op_*` helpers were already there;
+`var_exists`, `lval_lock`, `b_mod_op`, `b_block_abort` and the rest of the new
+bridge functions live in the synthesis zone, which the gate does not scan).
+`tests/data/fake_fn_allowlist.txt` was not touched.
+
+---
+
 # Round 34 — byte-exact strings, the strict number literal, and two per-call allocations
 
 Method: probes run against `/opt/homebrew/bin/vim` 9.2 (patches 1-1000) through
