@@ -5801,44 +5801,98 @@ pub fn f_environ(_argvars: &[typval_T], rettv: &mut typval_T) {
 // window measurement is -1, and there is one implicit window and tab page.
 
 /// Port of `f_bufnr()` (buffer.c) — no such buffer → -1.
-pub fn f_bufnr(_argvars: &[typval_T], rettv: &mut typval_T) {
-    // Embedded: the host's current-buffer number; standalone: no buffers -> -1.
-    let n = crate::fusevm_bridge::editor_buf_nr().unwrap_or(-1);
-    *rettv = typval_T::from(n);
+pub fn f_bufnr(argvars: &[typval_T], rettv: &mut typval_T) {
+    // Embedded: the host owns the buffer list and answers for it.
+    if let Some(n) = crate::fusevm_bridge::editor_buf_nr() {
+        *rettv = typval_T::from(n);
+        return;
+    }
+    // c:429 `rettv->vval.v_number = -1;`
+    let mut nr = -1 as varnumber_T;
+    // c:431 no argument at all → curbuf.
+    let buf = if argvars.is_empty() || argvars[0].v_type == VAR_UNKNOWN {
+        crate::ported::buffer::curbuf.with(|c| c.borrow().clone())
+    } else if !tv_check_str_or_nr(&argvars[0]) {
+        // c:437 one error, not two — which is why this does not go through
+        // `tv_get_buf_from_arg`.
+        *rettv = typval_T::from(nr);
+        return;
+    } else {
+        tv_get_buf(&argvars[0], false)
+    };
+    // c:456 `if (buf != NULL) rettv->vval.v_number = buf->b_fnum;`
+    if let Some(b) = buf {
+        nr = b.borrow().handle as varnumber_T;
+    }
+    *rettv = typval_T::from(nr);
 }
 /// Port of `f_bufexists()` (buffer.c) — no buffers → 0.
-pub fn f_bufexists(_argvars: &[typval_T], rettv: &mut typval_T) {
-    *rettv = typval_T::from(0 as varnumber_T);
+pub fn f_bufexists(argvars: &[typval_T], rettv: &mut typval_T) {
+    // c:374 `rettv->vval.v_number = (find_buffer(&argvars[0]) != NULL);`
+    let found = crate::ported::eval::buffer::find_buffer(&argvars[0]).is_some();
+    *rettv = typval_T::from(varnumber_T::from(found));
 }
 /// Port of `f_buflisted()` (buffer.c) — no buffers → 0.
-pub fn f_buflisted(_argvars: &[typval_T], rettv: &mut typval_T) {
-    *rettv = typval_T::from(0 as varnumber_T);
+pub fn f_buflisted(argvars: &[typval_T], rettv: &mut typval_T) {
+    // c:383 `(buf != NULL && buf->b_p_bl)`
+    let listed = crate::ported::eval::buffer::find_buffer(&argvars[0])
+        .is_some_and(|b| b.borrow().b_p_bl != 0);
+    *rettv = typval_T::from(varnumber_T::from(listed));
 }
 /// Port of `f_bufloaded()` (buffer.c) — no buffers → 0.
-pub fn f_bufloaded(_argvars: &[typval_T], rettv: &mut typval_T) {
-    *rettv = typval_T::from(0 as varnumber_T);
+pub fn f_bufloaded(argvars: &[typval_T], rettv: &mut typval_T) {
+    // c:405 `(buf != NULL && buf->b_ml.ml_mfp != NULL)` — "has a memline".
+    // Every buffer here carries its line store from creation, so existing is
+    // loaded.
+    let loaded = crate::ported::eval::buffer::find_buffer(&argvars[0]).is_some();
+    *rettv = typval_T::from(varnumber_T::from(loaded));
 }
 /// Port of `f_bufname()` (buffer.c) — no buffer → "" (the C NULL string).
-pub fn f_bufname(_argvars: &[typval_T], rettv: &mut typval_T) {
-    // Embedded: the host's current-buffer name; standalone: "" (C NULL string).
-    let name = crate::fusevm_bridge::editor_buf_name().unwrap_or_default();
+pub fn f_bufname(argvars: &[typval_T], rettv: &mut typval_T) {
+    // Embedded: the host's current-buffer name.
+    if let Some(name) = crate::fusevm_bridge::editor_buf_name() {
+        *rettv = typval_T::from(name);
+        return;
+    }
+    // c:413 no argument → curbuf; otherwise `tv_get_buf_from_arg`.
+    let buf = if argvars.is_empty() || argvars[0].v_type == VAR_UNKNOWN {
+        crate::ported::buffer::curbuf.with(|c| c.borrow().clone())
+    } else {
+        tv_get_buf_from_arg(&argvars[0])
+    };
+    // c:420 a buffer with no `b_fname` yields the C NULL string, i.e. "".
+    let name = buf
+        .and_then(|b| b.borrow().b_fname.clone())
+        .unwrap_or_default();
     *rettv = typval_T::from(name);
 }
 /// Port of `f_bufwinnr()`/`buf_win_common()` (buffer.c) — no window → -1.
-pub fn f_bufwinnr(_argvars: &[typval_T], rettv: &mut typval_T) {
-    *rettv = typval_T::from(-1 as varnumber_T);
+pub fn f_bufwinnr(argvars: &[typval_T], rettv: &mut typval_T) {
+    buf_win_common(argvars, rettv, true);
 }
 /// Port of `f_bufwinid()`/`buf_win_common()` (buffer.c) — no window → -1.
-pub fn f_bufwinid(_argvars: &[typval_T], rettv: &mut typval_T) {
-    *rettv = typval_T::from(-1 as varnumber_T);
+pub fn f_bufwinid(argvars: &[typval_T], rettv: &mut typval_T) {
+    buf_win_common(argvars, rettv, false);
 }
 /// Port of `f_winnr()` (window.c) — the single implicit window → 1.
 pub fn f_winnr(_argvars: &[typval_T], rettv: &mut typval_T) {
     *rettv = typval_T::from(1 as varnumber_T);
 }
 /// Port of `f_winbufnr()` (window.c) — no buffer in the window → -1.
-pub fn f_winbufnr(_argvars: &[typval_T], rettv: &mut typval_T) {
-    *rettv = typval_T::from(-1 as varnumber_T);
+pub fn f_winbufnr(argvars: &[typval_T], rettv: &mut typval_T) {
+    // c:798-803 `find_win_by_nr_or_id()`, then `wp->w_buffer->b_fnum`; an
+    // unknown window is -1. This port has exactly one window: number 0 (the
+    // current one) or 1, id 1000.
+    let nr = argvars.first().map_or(0, |a| tv_get_number_chk(a, None));
+    let this_win = matches!(nr, 0 | 1 | 1000);
+    let n = if this_win {
+        crate::ported::buffer::curbuf
+            .with(|c| c.borrow().clone())
+            .map_or(-1, |b| b.borrow().handle as varnumber_T)
+    } else {
+        -1
+    };
+    *rettv = typval_T::from(n);
 }
 /// Port of `f_winwidth()` (window.c) — no measurable window → -1.
 pub fn f_winwidth(_argvars: &[typval_T], rettv: &mut typval_T) {
@@ -5850,7 +5904,13 @@ pub fn f_winheight(_argvars: &[typval_T], rettv: &mut typval_T) {
 }
 /// Port of `f_winlayout()` (window.c) — no window tree → empty List.
 pub fn f_winlayout(_argvars: &[typval_T], rettv: &mut typval_T) {
-    tv_list_alloc_ret(rettv, 0);
+    // c:825-829 `tv_list_alloc_ret(rettv, 2)` then `get_framelayout()`, whose
+    // FR_LEAF arm appends `"leaf"` and the window's handle (c:238-242). One
+    // window means one leaf frame, and window ids start at 1000.
+    let l = tv_list_alloc_ret(rettv, 2);
+    let mut lb = l.borrow_mut();
+    tv_list_append_string(&mut lb, "leaf");
+    tv_list_append_number(&mut lb, 1000);
 }
 /// Port of `f_winline()` (window.c) — no screen → cursor window row 0.
 pub fn f_winline(_argvars: &[typval_T], rettv: &mut typval_T) {
@@ -6174,44 +6234,119 @@ pub fn f_serverstop(_argvars: &[typval_T], rettv: &mut typval_T) {
 // channels, and sockets need an event loop the standalone interpreter does not
 // run, so they fail (-1) or are no-ops (0); jobwait returns an empty List.
 
-/// `{def}` argument at `idx`, or "" when absent — the `get_var_from` fallback.
-fn get_var_from(argvars: &[typval_T], idx: usize) -> typval_T {
-    match argvars.get(idx) {
+/// Port of `get_var_from()` from `vendor/eval/vars.c:3081`.
+///
+/// `htname` is the C's scope selector: `'b'`, `'w'` or `'t'`. This port has one
+/// buffer, one window and one tab page, so the C's `switch_win`/`curbuf` dance
+/// (c:3099-3106) has nothing to switch to and the lookups go straight at the
+/// scope dicts.
+fn get_var_from(argvars: &[typval_T], name_idx: usize, htname: char) -> typval_T {
+    let varname = tv_get_string(&argvars[name_idx]);
+    let varname = varname.as_str();
+    // c:3089 `rettv` starts as an empty String and c:3161 copies `deftv` over it
+    // only when the caller supplied one.
+    let deftv = match argvars.get(name_idx + 1) {
         Some(d) if d.v_type != VAR_UNKNOWN => d.clone(),
         _ => typval_T::from(String::new()),
+    };
+    let scope = match htname {
+        'b' => "b:",
+        'w' => "w:",
+        _ => "t:",
+    };
+    // c:3122 an EMPTY name yields a Dict of every variable in the scope.
+    if varname.is_empty() {
+        return crate::ported::eval::vars::eval_variable(scope).unwrap_or(deftv);
     }
+    // c:3102 a leading `&` reads an OPTION rather than a variable; `&` alone is
+    // every buffer-/window-local option. Only the single-option form is modelled
+    // (there is one buffer, so its locals are the globals).
+    if let Some(opt) = varname.strip_prefix('&') {
+        if opt.is_empty() {
+            return deftv;
+        }
+        let tv = crate::ported::option::get_option_value(opt);
+        return if tv.v_type == VAR_UNKNOWN { deftv } else { tv };
+    }
+    // c:3137 the ordinary hashtable lookup; absent → the `{def}` argument
+    // (c:3160-3163).
+    crate::ported::eval::vars::eval_variable(&format!("{scope}{varname}")).unwrap_or(deftv)
 }
-/// Port of `f_getbufvar()` (vars.c) — no buffer → `{def}` (arg 2) or "".
+
+/// Port of `f_getbufvar()` from `vendor/eval/vars.c:3549`.
 pub fn f_getbufvar(argvars: &[typval_T], rettv: &mut typval_T) {
-    *rettv = get_var_from(argvars, 2);
+    // c:3552 `buf_T *const buf = tv_get_buf_from_arg(&argvars[0]);` — c:3092's
+    // `htname != 'b' || buf != NULL` guard makes an unknown buffer the default.
+    if tv_get_buf_from_arg(&argvars[0]).is_none() {
+        *rettv = match argvars.get(2) {
+            Some(d) if d.v_type != VAR_UNKNOWN => d.clone(),
+            _ => typval_T::from(String::new()),
+        };
+        return;
+    }
+    *rettv = get_var_from(argvars, 1, 'b');
 }
-/// Port of `f_getwinvar()` (vars.c) — no window → `{def}` (arg 2) or "".
+/// Port of `f_getwinvar()` from `vendor/eval/vars.c:3184`.
 pub fn f_getwinvar(argvars: &[typval_T], rettv: &mut typval_T) {
-    *rettv = get_var_from(argvars, 2);
+    *rettv = get_var_from(argvars, 1, 'w');
 }
-/// Port of `f_gettabvar()` (vars.c) — no tab page → `{def}` (arg 2) or "".
+/// Port of `f_gettabvar()` from `vendor/eval/vars.c:3533`.
 pub fn f_gettabvar(argvars: &[typval_T], rettv: &mut typval_T) {
-    *rettv = get_var_from(argvars, 2);
+    *rettv = get_var_from(argvars, 1, 't');
 }
-/// Port of `f_gettabwinvar()` (vars.c) — no tab/window → `{def}` (arg 3) or "".
+/// Port of `f_gettabwinvar()` from `vendor/eval/vars.c` — `getwinvar()` with a
+/// leading tab-page argument.
 pub fn f_gettabwinvar(argvars: &[typval_T], rettv: &mut typval_T) {
-    *rettv = get_var_from(argvars, 3);
+    *rettv = get_var_from(argvars, 2, 'w');
 }
-/// Port of `f_setbufvar()` (vars.c) — no buffer → no-op (0).
-pub fn f_setbufvar(_argvars: &[typval_T], rettv: &mut typval_T) {
+/// Port of `f_setbufvar()` from `vendor/eval/vars.c:3605`.
+pub fn f_setbufvar(argvars: &[typval_T], rettv: &mut typval_T) {
     *rettv = typval_T::from(0 as varnumber_T);
+    // c:3608 `!tv_check_str_or_nr(&argvars[0])` returns without a write.
+    if !tv_check_str_or_nr(&argvars[0]) {
+        return;
+    }
+    // c:3612-3616 an unknown buffer writes nothing.
+    if tv_get_buf(&argvars[0], false).is_none() {
+        return;
+    }
+    setwinvar(&tv_get_string(&argvars[1]), &argvars[2], "b:");
 }
-/// Port of `f_setwinvar()` (vars.c) — no window → no-op (0).
-pub fn f_setwinvar(_argvars: &[typval_T], rettv: &mut typval_T) {
+/// Port of `f_setwinvar()` from `vendor/eval/vars.c:3599`.
+pub fn f_setwinvar(argvars: &[typval_T], rettv: &mut typval_T) {
     *rettv = typval_T::from(0 as varnumber_T);
+    setwinvar(&tv_get_string(&argvars[1]), &argvars[2], "w:");
 }
-/// Port of `f_settabvar()` (vars.c) — no tab page → no-op (0).
-pub fn f_settabvar(_argvars: &[typval_T], rettv: &mut typval_T) {
+/// Port of `f_settabvar()` from `vendor/eval/vars.c:3558`.
+pub fn f_settabvar(argvars: &[typval_T], rettv: &mut typval_T) {
     *rettv = typval_T::from(0 as varnumber_T);
+    setwinvar(&tv_get_string(&argvars[1]), &argvars[2], "t:");
 }
-/// Port of `f_settabwinvar()` (vars.c) — no tab/window → no-op (0).
-pub fn f_settabwinvar(_argvars: &[typval_T], rettv: &mut typval_T) {
+/// Port of `f_settabwinvar()` from `vendor/eval/vars.c:3593` — `setwinvar()`
+/// with a leading tab-page argument.
+pub fn f_settabwinvar(argvars: &[typval_T], rettv: &mut typval_T) {
     *rettv = typval_T::from(0 as varnumber_T);
+    setwinvar(&tv_get_string(&argvars[2]), &argvars[3], "w:");
+}
+
+/// Port of `setwinvar()` from `vendor/eval/vars.c:3644` — the shared tail of
+/// `f_setbufvar`/`f_setwinvar`/`f_settabvar`/`f_settabwinvar`. `scope` selects
+/// which of `"b:"`/`"w:"`/`"t:"` the name is written under.
+fn setwinvar(varname: &str, varp: &typval_T, scope: &str) {
+    if varname.is_empty() {
+        return;
+    }
+    // c:3619 `if (*varname == '&') { … set_option_from_tv(varname + 1, varp); }`.
+    // `set_option_from_tv` writes the `option_optval` store, which is not the
+    // one `&opt` reads back from in this port — `do_set` is, and it is the same
+    // entry point `:set` and `:let &opt =` already use, so the write is visible.
+    if let Some(opt) = varname.strip_prefix('&') {
+        crate::ported::option::do_set(&format!("{opt}={}", tv_get_string(varp)));
+        return;
+    }
+    // c:3633 `set_var(bufvarname, varname_len + 2, varp, true);`
+    let name = format!("{scope}{varname}");
+    crate::ported::eval::vars::set_var(&name, name.len(), varp.clone(), true);
 }
 /// Port of `f_jobstart()` (funcs.c) — no event loop to run the job → -1.
 pub fn f_jobstart(_argvars: &[typval_T], rettv: &mut typval_T) {
@@ -6841,8 +6976,27 @@ pub fn find_win_for_curbuf() {}
 
 /// Port of `buf_win_common()` (buffer.c) — the shared body of `bufwinnr()`/
 /// `bufwinid()`: no window shows the buffer → -1.
-pub fn buf_win_common(_argvars: &[typval_T], rettv: &mut typval_T, _get_nr: bool) {
-    *rettv = typval_T::from(-1 as varnumber_T);
+pub fn buf_win_common(argvars: &[typval_T], rettv: &mut typval_T, get_nr: bool) {
+    // c:464-468 an invalid argument or an unknown buffer answers -1 before any
+    // window is searched.
+    let Some(buf) = tv_get_buf_from_arg(&argvars[0]) else {
+        *rettv = typval_T::from(-1 as varnumber_T);
+        return;
+    };
+    // c:470-486 walk the current tab's windows for one showing `buf`. This port
+    // has exactly one window and it is on `curbuf`; `get_nr` picks the window
+    // NUMBER (1-based) over its id, and ids start at 1000 (`vendor/window.c`).
+    let is_curbuf = crate::ported::buffer::curbuf
+        .with(|c| c.borrow().clone())
+        .is_some_and(|c| std::rc::Rc::ptr_eq(&c, &buf));
+    let n: varnumber_T = if !is_curbuf {
+        -1
+    } else if get_nr {
+        1
+    } else {
+        1000
+    };
+    *rettv = typval_T::from(n);
 }
 
 // ════════════════════════════════════════════════════════════════════════════

@@ -1,0 +1,46 @@
+0
+bufnr()      = 1
+bufnr('%')   = 1
+bufnr('')    = 1
+bufnr('$')   = 1
+bufnr(1)     = 1
+bufnr(9)     = -1
+bufnr('nosuchname') = -1
+--1
+bufname()    =[]
+bufname('%') =[]
+bufname(1)   =[]
+bufname(9)   =[]
+--2
+bufexists(1) = 1 bufexists(9)= 0
+bufexists('')= 0
+buflisted(1) = 1 buflisted(9)= 0
+bufloaded(1) = 1 bufloaded(9)= 0
+--3
+bufwinnr(1)  = 1 bufwinnr(9)= -1
+bufwinid(1)  = 1000 bufwinid(9)= -1
+winnr()      = 1 winnr('$')= 1
+tabpagenr()  = 1 tabpagewinnr(1)= 1
+winbufnr(1)  = 1 winbufnr(9)= -1
+winlayout()  = ['leaf', 1000]
+--4
+getbufvar one    = 7
+getbufvar absent = 'DEF'
+getbufvar nodef  = ''
+getbufvar tick   = 2
+getbufvar all t  = 4
+getbufvar badbuf = 'DEF'
+--5
+setbufvar        = 8 8
+setbufvar badbuf = 0
+--6
+getwinvar        = 'W' 'DEF'
+gettabvar        = 'T' 'DEF'
+gettabwinvar     = 'W'
+setwinvar        = 'W2'
+settabvar        = 'T2'
+settabwinvar     = 'W3'
+--7
+getbufvar &tw    = 11
+setbufvar &tw    = 22
+--8
