@@ -1,0 +1,34 @@
+1
+default     [1, 2, 3]
+numeric     [2, 9, 10]
+string      ['A', 'a', 'b']
+icase       ['A', 'a', 'b']
+lambda      [1, 2, 3]
+lambda rev  [3, 2, 1]
+funcname    [1, 2, 3]
+funcref     [1, 2, 3]
+stable      [[0, 'c'], [1, 'a'], [1, 'b']]
+dict arg    [1, 2, 3]
+badcmp err  E702: Sort compare function failed
+errcmp      E702: Sort compare function failed
+uniq        [1, 2, 3]
+uniq cmp    [1, 2, 3, 4]
+sort f      [0.5, 1.0, 1.5]
+sort l      ['A', 'a', 'b']
+sort N      ['x10', 'x9']
+--1
+reported   
+E730: Using a List as a String
+E702: Sort compare function failed [3, 1, 2]
+reported v  E702: Sort compare function failed
+nonnumber   E702: Sort compare function failed
+string ret  
+fn noisy v  E730: Using a List as a String
+uniq err    E882: Uniq compare function failed
+--2
+silent reports [3, 1, 2] [E730: Using a List as a String]
+silent fails   [3, 1, 2] [E702: Sort compare function failed]
+silent nonnum  [3, 1, 2] [E702: Sort compare function failed]
+silent ok      [1, 2, 3] []
+silent fn noisy[1, 2, 3] [E730: Using a List as a String]
+--3

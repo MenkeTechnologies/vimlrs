@@ -1667,6 +1667,16 @@ thread_local! {
     /// [`EVAL_FAIL`] as it stood at the start of each open call's argument list —
     /// see [`VIML_ARGS_BEGIN`].
     static ARGS_FAIL_STACK: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+    /// Whether the user function that returned most recently failed to evaluate
+    /// its body — this VM's stand-in for `call_func()` returning FAIL.
+    ///
+    /// c: `call_func` returns FAIL only for an `FCERR_*` when the callee is a
+    /// `:function`, because a function body is a `do_cmdline` and swallows its
+    /// own errors. A LAMBDA body is an EXPRESSION, so its failure IS the call's
+    /// failure — which is what makes `sort()` report `E702` for a comparator
+    /// whose body errored. Recorded inside [`in_callee`], before it rolls the
+    /// caller's bookkeeping back.
+    static LAST_CALL_FAILED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Mark the error in flight as a HARD failure — see [`VIML_EXC_IS_HARD`].
@@ -3872,7 +3882,12 @@ fn call_user_function_raw(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
     // is not forgotten either, and `PENDING_EXC` is this VM's stand-in for it.
     let saved_emsg = message::did_emsg.with(|d| d.get());
     let saved_block = BLOCK_MARK.with(|m| m.get());
-    in_callee(|| run_chunk_nested(func.chunk.clone()));
+    let fail_before = EVAL_FAIL.with(|f| f.get());
+    in_callee(|| {
+        run_chunk_nested(func.chunk.clone());
+        // Read INSIDE, before `in_callee` restores the caller's counter.
+        LAST_CALL_FAILED.with(|c| c.set(EVAL_FAIL.with(|f| f.get()) > fail_before));
+    });
     BLOCK_MARK.with(|m| m.set(saved_block));
     // A LAMBDA body is not a `do_cmdline` at all — `call_user_func` evaluates
     // `FC_LAMBDA`'s single expression directly (`userfunc.c`), so c:430/c:647-651
@@ -4522,8 +4537,38 @@ fn eval_callback(
 /// layer's `SORT_FUNCREF_HOOK`): call the user function with the two items and
 /// read its result as a Number. `None` signals a call/type error.
 fn sort_compare_funcref(name: &str, a: &typval_T, b: &typval_T) -> Option<varnumber_T> {
+    // c:1310-1324 `int res = call_func(...); if (res == FAIL) { … err = true; }
+    // else { n = tv_get_number_chk(&rettv, &err); }` — a FAILED call and a
+    // result that is not a Number both raise `item_compare_func_err`, which is
+    // what `E702: Sort compare function failed` reports.
+    //
+    // `call_func` FAILS for a LAMBDA whose body failed to evaluate: a lambda body
+    // is an expression, not a `do_cmdline`, so nothing swallows the failure the
+    // way a `:function` body's does. `did_emsg` is the observable — this port
+    // deliberately does not restore it across a lambda (see `call_user_func`).
+    // A lambda's failure has two observable forms, and both make `call_func`
+    // FAIL: its body's evaluation failed, or the body merely REPORTED an error
+    // (which leaves `did_emsg` set, since a lambda is not a `do_cmdline` and so
+    // nothing resets it). Measured in vim 9.2, all seven combinations:
+    //
+    //   {a,b -> [] . ''}        E702 — the body failed to evaluate
+    //   {a,b -> strlen([1])}    E702 — reported, and did_emsg is set
+    //   silent! … strlen([1])   E730 only — :silent! keeps did_emsg clear
+    //   {a,b -> 'x'} / [1]      E702 via the non-Number result instead
+    //   a :function that reports, or fails, does NEITHER — its own do_cmdline
+    //   resets did_emsg and swallows the failure.
+    let before = message::did_emsg.with(|d| d.get());
     let r = call_user_function(name, vec![a.clone(), b.clone()])?;
-    Some(tv_get_number_chk(&r, None))
+    let raised = message::did_emsg.with(|d| d.get()) > before;
+    if name.starts_with("<lambda>") && (LAST_CALL_FAILED.with(|c| c.get()) || raised) {
+        return None;
+    }
+    let mut error = false;
+    let n = tv_get_number_chk(&r, Some(&mut error));
+    if error {
+        return None;
+    }
+    Some(n)
 }
 
 /// The "evaluate an expression string" hook (installed into `EVAL_STRING_HOOK`),
