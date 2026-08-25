@@ -4358,6 +4358,142 @@ deliberate Neovim-favoured split: `echo string(1.0/0.0)` is `inf` in vim and
 
 ---
 
+# Round 37 — the lambda body, and what abandons a bar-separated line
+
+Method unchanged: probes against `/opt/homebrew/bin/vim` 9.2 through
+`scripts/parity.sh`, with `/opt/homebrew/bin/nvim` 0.12.5 alongside. Round 36
+left five items open; one closes here, one is settled as unmodellable with a
+sharper measurement, and a bug found while probing the first turned into the
+larger fix.
+
+Baselines: `cargo test` green in full (14 test binaries, 413 lib tests), the
+fuzzer `--count 1500 --seed 7` at `ok 1441 / GAPS 0 / PANICS 0` and `--stmts
+--count 1200 --seed 11` at `ok 1147 / GAPS 5`, corpus 72 -> 73.
+
+## R37-1. A lambda body has its own text, and its own failure value — ✅ FIXED (R36-O2)
+
+Two halves of one fact: `get_lambda_tv` (`Src/nvim/eval/userfunc.c:356-405`)
+stores the lambda's BODY TEXT for the function it generates.
+
+**The text.** `E116`'s message is `%s` over a pointer INTO the source
+(`emsg_funcname`, `vendor/eval/userfunc.c:492-500`), so inside a lambda it stops
+at the body's end while outside one it runs to the end of the eval buffer:
+
+| script | vim 9.2 | this port, before |
+|---|---|---|
+| `echo map([1], {i,v -> strlen([1] . '')})` | `… function strlen([1] . '')` | `… strlen([1] . '')})` |
+| `echo call({x -> abs([1] . '')}, [1])` | `… function abs([1] . '')` | `… abs([1] . '')}, [1])` |
+| `echo strlen([1] . '') 'TAIL'` (no lambda) | `… strlen([1] . '') 'TAIL'` | already right |
+
+The parser now finds the matching `}` in the TOKEN stream before parsing the
+body, so every diagnostic built inside is clipped as it is built and nesting
+falls out of the stack.
+
+**The value.** c:1276-1282 — "when the function was aborted because of an error,
+return -1" — `if ((did_emsg && (fp->uf_flags & FC_ABORT)) || rettv->v_type ==
+VAR_UNKNOWN)`. Only a lambda reaches the second disjunct: `get_lambda_tv` sets
+neither `FC_ABORT` (c:392-397) nor a return value when its single expression
+fails, while a `:function` already carries the Number-zero rettv `call_func`
+pre-initialised. All six shapes measured:
+
+| callee | result |
+|---|---|
+| `:function` with no `:return`, a bare `:return`, or a FAILING `:return` | 0 |
+| the same three declared `abort` | 0 |
+| a lambda whose body failed | **-1** |
+
+Residue, recorded rather than claimed: for four shapes vim answers the PARTIAL
+value the failed expression had already computed — `{x -> [] . ''}` is `[]`,
+`{x -> 'a' . [1]}` is `''`, `{x -> [1][9]}` is `[]`, `{x -> 1 + {}}` is `0` —
+where this port answers -1. Modelling that means every failing operator writing
+its left operand as the statement result. Seven of the eleven measured shapes
+now match, against one before.
+
+## R37-2. What abandons the rest of a bar-separated line — ✅ FIXED
+
+Found while probing the above: `silent! let g:a = C() | echo 'ran'` with a
+failing `C()` abandoned the line, where both engines run the `echo`. Six more
+shapes were measured and the port had five wrong.
+
+The C has two independent reasons and this port modelled a mixture of them.
+`ea.skip` (`ex_docmd.c:2027-2031`) skips every command after one that REPORTED
+an error, which `:silent!` prevents by keeping `did_emsg` clear
+(`vendor/message.c:817-846`). Separately, a command that never set
+`eap->nextcmd` drops the line whether or not anything was reported — and there
+are exactly two ways not to set it:
+
+1. **the PARSE aborted mid-expression.** That is `eval5`'s operand pre-check
+   (`vendor/eval.c:2405`, this port's `HARD_ERR`): `[] . 'x'` reports E730
+   before the right operand is even read, so `arg` never reaches the `|`. An
+   E117/E121/E684/E734/E741 comes AFTER the argument was consumed and the line
+   carries on.
+2. **the command is `:call`**, which sets `nextcmd` only when `get_func_tv`
+   succeeded.
+
+| script (all `:silent!`) | both engines | this port, before |
+|---|---|---|
+| `echo [1] . 'x' \| …` | dropped | dropped ✓ |
+| `echo nosuchfn() \| …` | RUNS | dropped |
+| `let x = nosuchfn() \| …` | RUNS | dropped |
+| `call nosuchfn() \| …` | dropped | RAN |
+| `let x = C() \| …` (callee failed) | RUNS | dropped |
+| `let x = {…}(1) \| …` (lambda failed) | RUNS | dropped |
+| `let d += [1]` / `let @r += 1` / `let &tw .= 'x'` / `let $E += 1` | RUNS | dropped |
+| `let g:locked += [2]` / `let x = g:nosuch` / `let x = [1][9]` | RUNS | dropped |
+
+Three things had to move. `HARD_ERR` is now rolled back across a callee's body by
+`in_callee`, because a mid-parse abort inside a CALLEE is that body's, not this
+command's. The command-level diagnostics the C raises with the argument already
+consumed — `eexe_mod_op`'s E734, `ex_let_env`/`ex_let_register`/`ex_let_option`'s
+E734, the lock check — no longer count as evaluator failures. And the abandon
+test takes the command's own `nextcmd` rule.
+
+`examples/error_exceptions.vim` asserted the `:call` row the other way round.
+Measured in both engines: `not-run`. It was this port's own old behaviour frozen
+as an expectation, the same way `examples/buffers.vim` had frozen
+`bufnr('%') == -1`, and is corrected with the measurement in its comment. That is
+the third example file this has been found in; they are self-tests written
+against the port, so any one of them can be a gap in disguise.
+
+## Still open
+
+### R37-O1. `line('.')` before the first write — investigated, NOT modellable (was R36-O3)
+
+Both engines answer `line('.') == 0`, `col('.') == 0`, `getpos('.') == [0,0,0,0]`
+and `getcurpos() == [0,0,1,0,1]` at the top of a sourced file, and 1 afterwards.
+The C explains the disagreement between the two position builtins exactly:
+`getpos('.')` goes through `var2fpos` (`vendor/eval/funcs.c:2033`), which answers
+NULL for an unplaced cursor so every field falls back to 0 (c:2037-2042), while
+`getcurpos()` takes `fp = &curwin->w_cursor` directly (c:2025) and reads
+`fp->col + 1` == 1 (c:2039-2041, c:2051-2053).
+
+What could not be modelled is the TRIGGER. It is not "the first buffer access":
+
+```text
+echo string(getpos('.'))                    → [0, 0, 0, 0]
+" a comment
+echo string(getpos('.'))                    → [0, 1, 1, 0]
+echo 'x'
+echo string(getpos('.'))                    → [0, 1, 1, 0]
+```
+
+A COMMENT line places the cursor. The trigger is the second command line of the
+sourced file, whatever it is — silent-Ex sets the window up after the first one.
+That is a startup-sequencing artifact of `-es`, not a language rule, and an
+implementation was written and then REVERTED rather than encode it.
+
+### R37-O2. The partial value of a failed lambda body
+
+See R37-1 — four of eleven measured shapes.
+
+### R36-O1 (`has('patchNNN')`), R36-O4 (window geometry), R36-O5 (the command-SET split), R35-O7, R32-O1, R31-O1..O4, R30-*, R29-*, R28-O1, R27-*, R26-*, R25-*, R24-O5, R23-O1, R22-O3 — unchanged
+
+`tests/ported_fn_names_match_c` is GREEN and `tests/data/fake_fn_allowlist.txt`
+is untouched. Both new bridge helpers this round (`in_command_error`,
+`b_raise_cmd`) live in the synthesis zone, which the gate does not scan.
+
+---
+
 # Round 36 — the buffer model, and the Ex-command table
 
 Method unchanged: probes against `/opt/homebrew/bin/vim` 9.2 through
