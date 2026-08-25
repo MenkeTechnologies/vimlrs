@@ -4358,6 +4358,222 @@ deliberate Neovim-favoured split: `echo string(1.0/0.0)` is `inf` in vim and
 
 ---
 
+# Round 36 — the buffer model, and the Ex-command table
+
+Method unchanged: probes against `/opt/homebrew/bin/vim` 9.2 through
+`scripts/parity.sh`, with `/opt/homebrew/bin/nvim` 0.12.5 run alongside wherever
+the two references could disagree. Every fix is recorded as a parity case, from
+vim, via `-r`. Round 35 left seven items open; five of them close here.
+
+Baselines: `cargo test` green in full (413 lib tests plus every integration
+binary), the differential fuzzer `--count 1500 --seed 7` at `ok 1441 / GAPS 0 /
+PANICS 0`, and `--tiers` still `trace-eligible=true traced=true`, `reaches
+native code true` — re-checked on a slotted numeric loop, on a loop whose body
+holds an `:if`/`:else`, and on `for i in range(N)`. The corpus went 64 -> 71.
+
+## R36-1. `map()`/`filter()` did not stop on a callback that only REPORTED an error — ✅ FIXED (R35-O6)
+
+`filter_map_one()` returns FAIL only when `eval_expr_typval()` did, and a LAMBDA
+callback never makes it: `call_func()` returns OK whatever the body reported. The
+stop for that case is a separate test the C makes after each successful item —
+`if (did_emsg) { tv_clear(&newtv); break; }` (`vendor/eval/list.c:311` List,
+c:119 Dict, c:189 Blob, c:243 String) — which DISCARDS the value just computed
+and ends the walk.
+
+| probe | both engines | this port, before |
+|---|---|---|
+| `map([1,2], {i,v -> v . 'x'[1]})` | E730 once, `[1, 2]` | E730 twice, `[0, 0]` |
+| `map([1,2,3], {i,v -> v == 2 ? [] . '' : v * 10})` | `[10, 2, 3]` | `[10, 0, 30]` |
+| `mapnew([1,2], {…})` | `[]` | `[0, 0]` |
+| the same written as a STRING expression | already right | already right |
+
+The flag only means "this callback errored" because `filter_map()` clears it
+before the walk (c:380-383) and ORs the caller's back after (c:401); both are
+ported too. The existing `filter_map_callback_fail` case pins the eval-FAIL half
+and is deliberately all `:silent!`, which keeps `did_emsg` clear — unaffected.
+
+## R36-2. `b:changedtick` never counted anything — ✅ FIXED (R35-O3)
+
+The field existed on `buf_T` and `buf_get_changedtick` read it, but nothing
+created a `buf_T` outside the unit tests and nothing ever bumped it.
+
+Three pieces, all citable:
+
+- vim always has a current buffer — `main.c` creates the initial unnamed one
+  with `buflist_new(NULL, NULL, 1, BLN_CURBUF | BLN_LISTED)` before any script
+  runs. `install()` now does the same.
+- `buf_inc_changedtick` (`Src/buffer.h:87`, inline) is reached from
+  `changed_common` via `changed(buf)` (`vendor/change.c:143`). The edit paths
+  bump it where the C's do: `changed_bytes` (c:425) once per REPLACED line,
+  `appended_lines_mark` (c:484) once for the whole appended BLOCK,
+  `deleted_lines_mark` (c:509) once per deleted block.
+- the variable: read, listed in the `b:` scope snapshot, E46 on assignment
+  (`changedtick_di` is `DI_FLAGS_RO|DI_FLAGS_FIX`, `vars.c:2947`).
+
+That asymmetry is observable and is the whole content of the new case:
+
+| script | both engines |
+|---|---|
+| a fresh buffer | 2 |
+| `setline(1, 'a')`, even with the same text | +1 |
+| `setline(1, ['x','y'])` over two existing lines | +2 |
+| `append(1, ['d','e'])` | +1 |
+| `deletebufline('', 1, 2)` | +1 |
+| an out-of-range `setline`, an empty List, a rejected delete | +0 |
+
+The SEED is empirical, like Round 35's `do_cmdline` half: the inline behind
+`buf_init_changedtick` is not vendored, and a fresh buffer answers 2 in both
+engines — measured with `enew!` after a modification, which allocates a new
+buffer rather than reusing the unnamed one.
+
+## R36-3. The `buf*()` family were "no buffers" stubs — ✅ FIXED (R35-O4)
+
+`bufnr('%')` answered -1 while `getbufinfo()` reported one buffer, and
+`getbufvar`/`setbufvar` were a default-returning read and a no-op write. With a
+`curbuf` in existence they can do their jobs, and each is now its C:
+
+| function | C |
+|---|---|
+| `f_bufnr` | `vendor/eval/buffer.c:425`, through `tv_get_buf` (`vendor/eval/funcs.c:471-506`): a Number is a buffer number, `""` the current buffer, `"$"` the last |
+| `f_bufexists`/`f_buflisted`/`f_bufloaded` | c:372, c:378, c:400, through `find_buffer` (`vendor/eval/buffer.c:47`) |
+| `f_bufname` | c:409 — `b_fname`, or the C NULL string |
+| `buf_win_common` | c:462 — `bufwinnr`/`bufwinid`; window ids start at 1000 |
+| `get_var_from` | `vendor/eval/vars.c:3081` — an empty name yields the whole scope Dict (c:3122), a leading `&` reads the option (c:3102) |
+| `setwinvar` | c:3644 — the shared tail of all four setters |
+| `f_winbufnr`, `f_winlayout` | `vendor/eval/window.c:796`, c:825 (its FR_LEAF arm at c:238-242) |
+
+`examples/buffers.vim` asserted the old contract — `bufnr('%') == -1` and
+`winbufnr(1) == -1`, both of which vim 9.2 and Neovim 0.12.5 answer 1. Measured
+in all three and corrected to the editors' answer; its header prose now says what
+is actually missing, which is a TERMINAL, not a buffer. Only the builtins that
+measure one (`winwidth`, `winheight`, `winrestcmd`) still answer -1/'' , and
+those are not portable expectations — the two engines disagree on the height.
+
+## R36-4. The Ex-command name table — ✅ FIXED (R35-O1)
+
+`exists(':cmd')` always answered 0 and `fullcommand()` ran off a hand-written
+39-entry list. Both now use `cmdnames[]` itself: all 564 built-in commands in the
+C's own table order, transcribed from `src/nvim/ex_cmds.lua`, plus the 24 command
+modifiers from `ex_docmd.c:3171-3196`.
+
+**The order IS the abbreviation rule.** `find_ex_command`
+(`ex_docmd.c:3130-3139`) walks forward and takes the FIRST entry whose name
+starts with what was typed, so `:s` is `substitute` and not `sort`, `:co` is
+`copy` while `:con` is `continue`, and `:ret` is `retab` while `:retu` is
+`return`. The C jumps in with a precomputed two-letter index; scanning from the
+start answers identically, because every entry that could match shares those two
+letters and the index merely points at the first of them.
+
+Four rules ride along, each measured before it was read:
+
+| rule | C | effect |
+|---|---|---|
+| `one_letter_cmd` | c:3028-3049 | `:k` and the `:s` family are ONE character whatever follows, so `:si` is `:s` plus the trailing garbage `i` (0) while `:sig` reaches the table as `sign` (1) |
+| the `d` flag | c:3084-3100 | `:dl`/`:dp` is `:d` with the `l`/`p` flag, so `fullcommand('dl')` is `delete`, not `dlist` |
+| `:ho` | c:3157-3161 | forced unresolved, because `horizontal` as a MODIFIER needs three characters |
+| a leading digit | c:3252 | allowed only for `:match` |
+
+Swept exhaustively: all 564 names plus every 1..4-character prefix — 1445 probes
+— against both engines. 1398 agree with vim 9.2, and **all 47 that do not are
+command-SET differences**: nvim-only `:checkhealth`, `:detach`, `:log`,
+`:packdel`, `:restart`, `:trust`, `:lsp`, `:terminal`, `:bchdir`, `:exmode`, …
+and vim-only `:open`, `:profile`, `:perlfile`, `:fclose`, `:rshada`, `:trust`.
+This port carries Neovim's table, which is the C it ports. Against Neovim 0.12.5
+the same sweep leaves 16, and all but one are commands newer than that binary;
+the last is `:ho`, whose fix that binary predates. Only names both engines have
+are in the record.
+
+## R36-5. The cursor did not move with the text around it — ✅ FIXED (R35-O5)
+
+`set_buffer_lines` (`vendor/eval/buffer.c:221-231`) runs `appended_lines_mark`
+and then, for the window showing the buffer, `if (wp->w_cursor.lnum >
+append_lnum) wp->w_cursor.lnum += added;` — text inserted ABOVE the cursor pushes
+it down, below leaves it alone. `f_deletebufline` (c:550-562) is the mirror and
+has three cases: a cursor BELOW the deleted block moves up by the count, one
+INSIDE it lands on `first`, and either way it is clamped to the shortened buffer.
+
+Not claimed: `line('.')` before anything has been written, where vim answers 0 and
+this port answers 1. That is a silent-Ex startup state, not an edit rule.
+
+## R36-6. A failing `sort()` comparator is E702 — ✅ FIXED
+
+`item_compare2` (`vendor/eval/typval.c:1279`) sets `item_compare_func_err` when
+`call_func` returned FAIL (c:1314-1317) or when the result is not a Number
+(c:1319), and `do_sort_uniq` then reports `E702: Sort compare function failed`
+(c:1382-1383) and leaves the List alone. This port only ever reported the
+comparator's own error.
+
+`call_func` FAILS for a LAMBDA and not for a `:function`, because a lambda body
+is an EXPRESSION while a function body is its own `do_cmdline` — the same
+distinction Round 35 established for the abort rule. All seven combinations were
+measured in vim 9.2 first:
+
+| comparator | answer |
+|---|---|
+| `{a,b -> [] . ''}` | E702 — the body failed to evaluate |
+| `{a,b -> strlen([1])}` | E702 — reported, and `did_emsg` is left set |
+| the same under `:silent!` | E730 only — `:silent!` keeps `did_emsg` clear |
+| `{a,b -> 'x'}` / `{a,b -> [1]}` | E702, via the non-Number result instead |
+| a `:function` that reports, or fails | NEITHER |
+
+The non-Number half needed the `tv_get_number_chk` out-param the port was passing
+`None` for — the same omission R33-4 found in `f_strpart`.
+
+## R36-7. An unset register had a type — ✅ FIXED
+
+`get_reg_type` (`vendor/ops.c:235`) answers `kMTUnknown` for a register that was
+never set (`y_array == NULL`, c:264) and for an invalid name (c:252), and
+`format_reg_type` renders that as the EMPTY string (c:228-230). The port had no
+`kMTUnknown` variant and returned `kMTCharWise` for both, under a RUST-PORT NOTE
+saying it did so "to preserve the existing builtin-bridge contract" — i.e. the
+divergence was the contract. `getregtype('z')` on an untouched register is now
+`''`, as in both engines.
+
+## Still open
+
+### R36-O1. `has('patchNNN')` — unchanged from R35-O2
+
+Both engines answer relative to their own patch level. This port's `v:version` is
+801 and it asserts no patch level, so `has('patch1')` is 0 where vim 9.2 says 1.
+Answering would mean this port claiming a vim patch level, which is a decision
+and not a port.
+
+### R36-O2. The E116 tail inside a LAMBDA body
+
+Round 35's deferred E116 quotes the source from the function name onward. vim
+stores a lambda's body text separately (`get_lambda_tv`), so an E116 raised
+INSIDE one stops at the lambda's `}`; this port quotes the enclosing parse buffer
+and carries the trailing `})` too. Measured; the fix needs the parser to truncate
+every `emsg_name` in a lambda body to the body's end offset, which is a recursive
+`Expr` rewrite. The new `filter_map_did_emsg` case says so where it sidesteps it.
+
+### R36-O3. `line('.')` before the first write
+
+vim answers 0 in silent-Ex mode and this port answers 1. Every edit-driven cursor
+move now matches; this is the startup state alone.
+
+### R36-O4. The window geometry builtins
+
+`winwidth`/`winheight`/`winrestcmd` answer -1/'' because there is no terminal.
+Both engines answer the screen size, and they disagree with each other on the
+height (23 vs 22), so there is no portable expectation to record.
+
+### R36-O5. The Neovim/vim command-SET split
+
+47 of the 1445 command probes differ between the engines because the command sets
+differ. This port carries Neovim's table. Not a bug; recorded so the number is
+not mistaken for one later.
+
+### R35-O7, R32-O1, R31-O1..O4, R30-*, R29-*, R28-O1, R27-*, R26-*, R25-*, R24-O5, R23-O1, R22-O3 — unchanged
+
+`tests/ported_fn_names_match_c` is GREEN. It fired twice this round — on
+`filter_map_did_emsg`, and on `get_var_def`/`set_scoped_var` — and both times the
+answer was to inline the expression or fold it into the real C name
+(`setwinvar`), never to touch `tests/data/fake_fn_allowlist.txt`, which is
+unchanged.
+
+---
+
 # Round 35 — the abort rule, `:echo`'s per-argument write, and the lock model
 
 Method: probes run against `/opt/homebrew/bin/vim` 9.2 through
