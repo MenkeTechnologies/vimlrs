@@ -2376,6 +2376,12 @@ type EstackSfileFn = fn() -> Option<String>;
 /// innermost entry of the exestack. Installed by the bridge for the same reason.
 type SourcingLnumFn = fn() -> i64;
 
+/// `var_exists()` (`Src/eval/vars.c:3371`) — does this NAME, with its `d.key` /
+/// `l[idx]` / `f(expr)` subscripts applied, resolve? The subscript half is
+/// `handle_subscript` in the C, i.e. the expression engine, which lives in the
+/// bridge — so the bridge installs it.
+type VarExistsFn = fn(&str) -> bool;
+
 thread_local! {
     /// Bridge-installed funcref comparator for `sort()`/`uniq()` with a `{func}`
     /// argument: `(name, a, b) -> Some(cmp)`, or `None` on a call/type error.
@@ -2393,6 +2399,10 @@ thread_local! {
 
     /// `exists("*name")` hook — true if `name` is a defined builtin/user function.
     pub static FUNC_EXISTS_HOOK: std::cell::RefCell<Option<FuncExistsFn>> =
+        const { std::cell::RefCell::new(None) };
+
+    /// `var_exists()` hook — see [`VarExistsFn`].
+    pub static VAR_EXISTS_HOOK: std::cell::RefCell<Option<VarExistsFn>> =
         const { std::cell::RefCell::new(None) };
 
     /// "Evaluate an expression string → result" hook, installed by the bridge.

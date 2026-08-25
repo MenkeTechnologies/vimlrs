@@ -1580,8 +1580,17 @@ pub fn f_exists(argvars: &[typval_T], rettv: &mut typval_T) {
         // `#{event}#{pat}`.
         au_exists(au)
     } else {
-        // c:1396 Internal variable.
-        crate::ported::eval::vars::eval_variable(&name).is_some()
+        // c:1396 `n = var_exists(p);` — which is NOT just a name lookup: it reads
+        // the leading name and then applies whatever `d.key` / `l[idx]` / `f(…)`
+        // subscripts follow (`vendor/eval/vars.c:3386-3397`), so
+        // `exists('g:d.nokey')` and `exists('g:l[9]')` are 0 while
+        // `exists('g:l[0][0]')` is 1. The subscript half is the expression engine,
+        // which lives in the bridge; without the hook this falls back to the plain
+        // name lookup.
+        match crate::ported::eval::typval::VAR_EXISTS_HOOK.with(|h| *h.borrow()) {
+            Some(f) => f(&name),
+            None => crate::ported::eval::vars::eval_variable(&name).is_some(),
+        }
     };
     rettv.vval = v_number(present as varnumber_T);
 }

@@ -4529,6 +4529,49 @@ fn eval_string_hook(expr: &str) -> Option<typval_T> {
     run_chunk_capture(chunk)
 }
 
+/// Port of `var_exists()` from `vendor/eval/vars.c:3371`.
+///
+/// ```c
+/// const int len = get_name_len(&var, &tofree, true, false);      // c:3379
+/// if (len > 0) {
+///   n = eval_variable(name, len, &tv, NULL, false, true) == OK;  // c:3386
+///   if (n) { n = handle_subscript(&var, &tv, …) == OK; }         // c:3389
+/// }
+/// if (*var != NUL) { n = false; }                                // c:3395
+/// ```
+///
+/// The subscript walk is this port's expression engine instead: the whole string
+/// is compiled and run, which applies the same subscripts and rejects the same
+/// trailing garbage (c:3395 falls out of the parse). Errors raised on the way are
+/// SWALLOWED — `exists('g:d.nokey')` is 0 in vim and leaves `v:errmsg` and the
+/// error state untouched — so the run happens under a capture and every counter
+/// the capture moved is put back.
+fn var_exists(var: &str) -> bool {
+    // c:3379-3386 — the leading name must resolve on its own first.
+    let len = crate::ported::eval::get_name_len(var);
+    if len <= 0 {
+        return false;
+    }
+    let Some(name) = var.get(..len as usize) else {
+        return false;
+    };
+    if eval_variable(name).is_none() {
+        return false;
+    }
+    // c:3389 — no subscripts to apply.
+    if var.len() == name.len() {
+        return true;
+    }
+    let errs = message::err_count.with(|c| c.get());
+    let emsg = message::did_emsg.with(|d| d.get());
+    message::capture_errors_begin();
+    let ok = eval_string_hook(var).is_some();
+    let _ = message::capture_errors_take();
+    let raised = message::err_count.with(|c| c.get()) > errs;
+    message::did_emsg.with(|d| d.set(emsg));
+    ok && !raised
+}
+
 /// The user-function lookup hook (installed into `FIND_FUNC_HOOK`): map a
 /// registered `UserFuncDef` to the ported reduced `ufunc_T` (name + arity).
 fn find_func_hook(name: &str) -> Option<crate::ported::eval::userfunc::ufunc_T> {
@@ -6055,6 +6098,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FN_FLATTEN, |vm, n| call_func(vm, n, f_flatten));
     CALL_FUNC_HOOK.with(|h| *h.borrow_mut() = Some(call_func_hook));
     FUNC_EXISTS_HOOK.with(|h| *h.borrow_mut() = Some(func_exists_hook));
+    crate::ported::eval::typval::VAR_EXISTS_HOOK.with(|h| *h.borrow_mut() = Some(var_exists));
     crate::ported::eval::typval::EVAL_STRING_HOOK
         .with(|h| *h.borrow_mut() = Some(eval_string_hook));
     // c: `prepare_assert_error()` (testing.c) reads the exestack + SOURCING_LNUM;
