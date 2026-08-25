@@ -1,0 +1,36 @@
+1
+E730: Using a List as a String
+E116: Invalid arguments for function strlen([1] . '')
+[1]
+--1
+E730: Using a List as a String
+E116: Invalid arguments for function type([1] . '')
+E702: Sort compare function failed
+[2, 1]
+--2
+E730: Using a List as a String
+E116: Invalid arguments for function add(g:seen, v == 1 ? [] . '' : v)
+seen= []
+--3
+E730: Using a List as a String
+E116: Invalid arguments for function len([1] . '')
+-1
+--4
+E730: Using a List as a String
+E116: Invalid arguments for function abs([1] . '')
+-1
+--5
+E730: Using a List as a String
+E116: Invalid arguments for function strlen([1] . '')
+[1]
+--6
+E730: Using a List as a String
+E116: Invalid arguments for function strlen([1] . '') 'TAIL'
+--7
+fn no-return   = 0
+fn bare return = 0
+fn failing ret = 0
+abort failing  = 0
+lambda failing = -1
+lambda ok      = 7
+--8

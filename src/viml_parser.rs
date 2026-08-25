@@ -2729,6 +2729,29 @@ impl Parser {
         self.src.get(at..).unwrap_or("")
     }
 
+    /// The source from `at` to the end of the expression buffer — the text a
+    /// `%s`-over-a-source-pointer diagnostic carries. See [`Parser::clip`].
+    fn src_from(&self, at: usize) -> String {
+        let end = self.clip.last().copied().unwrap_or(self.src.len());
+        self.src.get(at..end.max(at)).unwrap_or("").to_string()
+    }
+
+    /// The span of the `}` that closes the lambda body starting at the current
+    /// token, found in the TOKEN stream before the body is parsed so every
+    /// diagnostic built inside it can be clipped as it is built.
+    fn lambda_body_end(&self) -> Option<usize> {
+        let mut depth = 0u32;
+        for t in &self.toks[self.i..] {
+            match t.kind {
+                Tok::LBrace | Tok::HashBrace => depth += 1,
+                Tok::RBrace if depth == 0 => return Some(t.span),
+                Tok::RBrace => depth -= 1,
+                _ => {}
+            }
+        }
+        None
+    }
+
     /// `E15: Invalid expression: "%s"` over [`Self::rest`] — `e_invexpr2`
     /// (Neovim `errors.h:37`), quotes included.
     ///
@@ -2787,6 +2810,23 @@ struct Parser {
     /// the parser runs out of tokens with an operand still expected — see
     /// `lex_prefix` and [`Self::invexpr`].
     lex_err: Option<VimlError>,
+    /// Where the expression buffer being parsed ENDS, innermost last.
+    ///
+    /// c: `get_lambda_tv` (`Src/nvim/eval/userfunc.c`) stores the lambda's BODY
+    /// TEXT for the function it generates, so a diagnostic raised inside a
+    /// lambda quotes only up to that body's end — while the same call written
+    /// outside one quotes to the end of the enclosing eval buffer. That is
+    /// visible in `E116`, whose text is `%s` over a pointer INTO the source
+    /// (see `Expr::Call::emsg_name`):
+    ///
+    /// ```vim
+    /// echo map([1], {i,v -> strlen([1] . '')})
+    /// " E116: Invalid arguments for function strlen([1] . '')
+    /// ```
+    ///
+    /// — no trailing `})`. Empty at the top level, where the buffer ends with
+    /// the source.
+    clip: Vec<usize>,
 }
 
 impl Parser {
@@ -2802,6 +2842,7 @@ impl Parser {
             depth: 0,
             deferred_e15: Vec::new(),
             lex_err: None,
+            clip: Vec::new(),
         }
     }
 
@@ -3323,7 +3364,7 @@ impl Parser {
                     Ok(Expr::Call {
                         name,
                         args,
-                        emsg_name: at.and_then(|s| self.src.get(s..)).map(str::to_string),
+                        emsg_name: at.map(|s| self.src_from(s)),
                     })
                 } else if vim9_active() {
                     // vim9 keyword literals (`vim9.txt`): in a `:vim9script` script
@@ -3774,7 +3815,17 @@ impl Parser {
             }
         }
         self.eat_or(&Tok::Arrow, "E451: Expected }: %s")?;
-        let body = self.eval1()?;
+        // c: the body's TEXT is what `get_lambda_tv` stores for the generated
+        // function, so everything parsed inside it quotes only up to the `}`.
+        let clipped = self
+            .lambda_body_end()
+            .inspect(|e| self.clip.push(*e))
+            .is_some();
+        let body = self.eval1();
+        if clipped {
+            self.clip.pop();
+        }
+        let body = body?;
         // c: `E451: Expected }: %s`.
         self.eat_or(&Tok::RBrace, "E451: Expected }: %s")?;
         Ok(Expr::Lambda {

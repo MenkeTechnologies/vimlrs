@@ -3930,6 +3930,20 @@ fn call_user_function_raw(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
     CALL_SITE_LNUM.with(|c| {
         c.borrow_mut().pop();
     });
+    // c:1276-1282 `// when the function was aborted because of an error, return
+    // -1` — `if ((did_emsg && (fp->uf_flags & FC_ABORT)) || rettv->v_type ==
+    // VAR_UNKNOWN) { … rettv->vval.v_number = -1; }`.
+    //
+    // Only a LAMBDA reaches the second disjunct: `get_lambda_tv` sets neither
+    // FC_ABORT (`vendor/eval/userfunc.c:392-397`) nor a return value when its
+    // single expression fails to evaluate, while a `:function` already carries
+    // the Number-zero rettv `call_func` pre-initialised. Measured, all seven
+    // shapes: a `:function` with no `:return`, a bare `:return`, a failing
+    // `:return`, and the same three declared `abort`, all yield 0; only
+    // `{x -> len([1] . '')}(1)` yields -1.
+    if is_lambda && LAST_CALL_FAILED.with(|c| c.get()) {
+        return Some(tv_num(-1));
+    }
     // c: a function with no :return yields 0.
     Some(ret.unwrap_or_else(|| tv_num(0)))
 }
