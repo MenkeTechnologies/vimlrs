@@ -1,0 +1,23 @@
+0
+exists       = 1 type= 0
+start        = 2
+setline      = 3
+setline same = 4
+setline diff = 5
+append 1     = 6
+append 2     = 7
+setline list = 9
+delete one   = 10
+delete range = 11
+setbufline   = 12
+appendbufline= 13
+no edit      = 13
+setline oob  = 13
+setline 0    = 13
+append empty = 13
+setline empty= 13
+delete oob   = 13
+lines now    = 2
+setline span = 15 $= 3
+assign errmsg= E46: Cannot change read-only variable "b:changedtick"
+still        = 15

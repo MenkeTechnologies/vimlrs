@@ -183,6 +183,19 @@ pub fn buf_get_changedtick(buf: &buf_T) -> varnumber_T {
     buf.changedtick
 }
 
+/// Port of `buf_inc_changedtick()` from `Src/buffer.h:87` (inline; not
+/// vendored) — bump `b:changedtick`.
+///
+/// c: reached from `changed_common()` via `changed(buf)`
+/// (`vendor/change.c:143`), which is where every edit path converges:
+/// `changed_bytes()` (c:425) once per REPLACED line, `appended_lines_mark()`
+/// (c:484) once per appended BLOCK, `deleted_lines_mark()` (c:509) once per
+/// deleted block.
+pub fn buf_inc_changedtick(buf: &mut buf_T) {
+    // c: buf->changedtick_di.di_tv.vval.v_number++;
+    buf.changedtick += 1;
+}
+
 // ---------------------------------------------------------------------------
 // memline.c line accessors — backed by the Vec<String> store (RUST-PORT NOTE)
 // ---------------------------------------------------------------------------
@@ -502,8 +515,13 @@ pub fn buflist_new(
         let mut b = buf.borrow_mut();
         // c:1995 buf->b_vars = tv_dict_alloc(); init_var_dict(...);
         b.b_vars = Some(tv_dict_alloc());
-        // c:1997 buf_init_changedtick(buf);  (changedtick starts at 0)
-        b.changedtick = 0;
+        // c:1997 `buf_init_changedtick(buf);`. The inline that call reaches
+        // (`Src/buffer.h`) is not vendored, so the seed is empirical: a FRESH
+        // buffer answers `b:changedtick` == 2 in vim 9.2 and Neovim 0.12.5
+        // alike, before any edit and with `-u NONE` (measured with `enew!`
+        // after a modification, which allocates a new buffer rather than
+        // reusing the unnamed one).
+        b.changedtick = 2;
 
         // c:2000 if (ffname != NULL) { buf->b_ffname = ffname; buf->b_sfname = ... }
         if let Some(ref f) = ffname {

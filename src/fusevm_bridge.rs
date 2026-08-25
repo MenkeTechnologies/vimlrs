@@ -6101,6 +6101,20 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FN_STR2LIST, |vm, n| call_func(vm, n, f_str2list));
     vm.register_builtin(VIML_FN_LIST2STR, |vm, n| call_func(vm, n, f_list2str));
     vm.register_builtin(VIML_FN_FLATTEN, |vm, n| call_func(vm, n, f_flatten));
+    // c: vim always has a current buffer — `main.c` creates the initial unnamed
+    // one with `buflist_new(NULL, NULL, 1, BLN_CURBUF | BLN_LISTED)` before any
+    // script runs, which is why `bufnr('%')` is 1 and `b:changedtick` answers a
+    // Number in the very first line of a `-u NONE` session. This port had no
+    // `buf_T` at all outside its tests, so everything that reads one answered
+    // the "no buffers" default.
+    {
+        use crate::ported::buffer::{buflist_new, curbuf, BLN_CURBUF, BLN_LISTED};
+        if curbuf.with(|c| c.borrow().is_none()) {
+            if let Some(b) = buflist_new(None, None, 1, BLN_CURBUF | BLN_LISTED) {
+                curbuf.with(|c| *c.borrow_mut() = Some(b));
+            }
+        }
+    }
     CALL_FUNC_HOOK.with(|h| *h.borrow_mut() = Some(call_func_hook));
     FUNC_EXISTS_HOOK.with(|h| *h.borrow_mut() = Some(func_exists_hook));
     crate::ported::eval::typval::VAR_EXISTS_HOOK.with(|h| *h.borrow_mut() = Some(var_exists));

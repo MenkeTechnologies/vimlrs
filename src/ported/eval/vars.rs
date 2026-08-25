@@ -90,6 +90,15 @@ pub fn set_var(name: &str, name_len: usize, tv: typval_T, _copy: bool) {
             script_vars.with(|d| tv_dict_add_tv(&mut d.borrow_mut(), &varname, tv));
         }
         VarScopeDict::Buffer => {
+            // c: `changedtick_di.di_flags = DI_FLAGS_RO|DI_FLAGS_FIX`, so
+            // `var_check_ro` (`vendor/eval/vars.c:2947`) refuses it —
+            // `let b:changedtick = 5` is E46, not a write.
+            if varname == "changedtick" {
+                crate::ported::message::semsg(&format!(
+                    "E46: Cannot change read-only variable \"{name}\""
+                ));
+                return;
+            }
             buffer_vars.with(|d| tv_dict_add_tv(&mut d.borrow_mut(), &varname, tv));
         }
         VarScopeDict::Window => {
@@ -1577,7 +1586,22 @@ pub fn find_var(name: &str, _no_autoload: bool) -> Option<typval_T> {
         return Some(match scope {
             VarScopeDict::Global => globvardict.with(|d| scope_snapshot(&d.borrow())),
             VarScopeDict::Script => script_vars.with(|d| scope_snapshot(&d.borrow())),
-            VarScopeDict::Buffer => buffer_vars.with(|d| scope_snapshot(&d.borrow())),
+            VarScopeDict::Buffer => {
+                // c: `changedtick_di` is a member of the buffer's `b_vars`
+                // hashtable, so reading the scope whole lists it.
+                let snap = buffer_vars.with(|d| scope_snapshot(&d.borrow()));
+                let tick = crate::ported::buffer::curbuf.with(|b| {
+                    b.borrow().as_ref().map(|buf| {
+                        typval_T::from(crate::ported::buffer::buf_get_changedtick(&buf.borrow()))
+                    })
+                });
+                if let (Some(tv), v_dict(Some(d))) = (tick, &snap.vval) {
+                    d.borrow_mut()
+                        .dv_hashtab
+                        .insert("changedtick".to_string(), tv);
+                }
+                snap
+            }
             VarScopeDict::Window => window_vars.with(|d| scope_snapshot(&d.borrow())),
             VarScopeDict::Tabpage => tabpage_vars.with(|d| scope_snapshot(&d.borrow())),
             VarScopeDict::VimVar => scope_snapshot(&get_vimvar_dict()),
@@ -1601,7 +1625,20 @@ pub fn find_var(name: &str, _no_autoload: bool) -> Option<typval_T> {
     match scope {
         VarScopeDict::Global => globvardict.with(|d| tv_dict_find(&d.borrow(), &varname).cloned()),
         VarScopeDict::Script => script_vars.with(|d| tv_dict_find(&d.borrow(), &varname).cloned()),
-        VarScopeDict::Buffer => buffer_vars.with(|d| tv_dict_find(&d.borrow(), &varname).cloned()),
+        VarScopeDict::Buffer => {
+            // c: `b:changedtick` is not an entry of `b_vars` at all — it is the
+            // buffer's own `changedtick_di`, a DI_FLAGS_RO|DI_FLAGS_FIX dictitem
+            // living in `buf_T` and read through `buf_get_changedtick()`
+            // (`Src/buffer.h:84`). Looking it up in the scope dict found nothing.
+            if varname == "changedtick" {
+                return crate::ported::buffer::curbuf.with(|b| {
+                    b.borrow().as_ref().map(|buf| {
+                        typval_T::from(crate::ported::buffer::buf_get_changedtick(&buf.borrow()))
+                    })
+                });
+            }
+            buffer_vars.with(|d| tv_dict_find(&d.borrow(), &varname).cloned())
+        }
         VarScopeDict::Window => window_vars.with(|d| tv_dict_find(&d.borrow(), &varname).cloned()),
         VarScopeDict::Tabpage => {
             tabpage_vars.with(|d| tv_dict_find(&d.borrow(), &varname).cloned())

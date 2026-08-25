@@ -3972,34 +3972,58 @@ fn set_buffer_lines(lnum: varnumber_T, lines: Vec<String>, append: bool) -> varn
     if crate::fusevm_bridge::editor_host_active() {
         return crate::fusevm_bridge::editor_set_lines(lnum, lines, append).unwrap_or(1);
     }
-    CURBUF.with(|b| {
+    // c: `set_buffer_lines` (`vendor/eval/buffer.c:126`) bumps `b:changedtick`
+    // once per REPLACED line — `inserted_bytes()` -> `changed_bytes()`
+    // (`vendor/change.c:425`) at c:200 — and ONCE for the whole appended block,
+    // `appended_lines_mark(append_lnum, added)` at c:221. That asymmetry is
+    // observable: `setline(1, ['x','y'])` over two existing lines moves the tick
+    // by 2 while `append(1, ['d','e'])` moves it by 1. Measured identically on
+    // vim 9.2 and Neovim 0.12.5.
+    let (replaced, added) = CURBUF.with(|b| {
         let mut b = b.borrow_mut();
         if b.is_empty() {
             b.push(String::new());
         }
         if append {
             let pos = (lnum.max(0) as usize).min(b.len());
+            let mut added = 0;
             for (i, l) in lines.into_iter().enumerate() {
                 b.insert(pos + i, l);
+                added += 1;
             }
-            0
+            (0, added)
         } else {
             if lnum < 1 {
-                return 1;
+                return (0, 0);
             }
+            let (mut replaced, mut added) = (0, 0);
             for (i, l) in lines.into_iter().enumerate() {
                 let idx = (lnum - 1) as usize + i;
                 if idx < b.len() {
                     b[idx] = l;
+                    replaced += 1;
                 } else if idx == b.len() {
                     b.push(l);
+                    added += 1;
                 } else {
                     break;
                 }
             }
-            0
+            (replaced, added)
         }
-    })
+    });
+    // c: `changed_bytes()` per replaced line, then one `appended_lines_mark()`.
+    let bumps = replaced + usize::from(added > 0);
+    for _ in 0..bumps {
+        crate::ported::buffer::curbuf.with(|b| {
+            if let Some(buf) = b.borrow().as_ref() {
+                crate::ported::buffer::buf_inc_changedtick(&mut buf.borrow_mut());
+            }
+        });
+    }
+    // c: an out-of-range `lnum` breaks the loop before anything is written and
+    // the FAIL result stands (c:186).
+    varnumber_T::from(!append && lnum < 1)
 }
 
 /// Collect a String-or-List `{text}` argument into a vector of lines.
@@ -5990,6 +6014,13 @@ pub fn f_deletebufline(argvars: &[typval_T], rettv: &mut typval_T) {
         b.drain(lo..hi);
         if b.is_empty() {
             b.push(String::new());
+        }
+    });
+    // c: `deleted_lines_mark(first, count)` (`vendor/change.c:509`) — one bump
+    // for the whole deleted block, and none at all for a rejected range.
+    crate::ported::buffer::curbuf.with(|b| {
+        if let Some(buf) = b.borrow().as_ref() {
+            crate::ported::buffer::buf_inc_changedtick(&mut buf.borrow_mut());
         }
     });
     *rettv = typval_T::from(0 as varnumber_T);
