@@ -1,0 +1,40 @@
+1
+list map    
+E730: Using a List as a String [1, 2]
+--1
+list map mid
+E730: Using a List as a String [10, 2, 3]
+--2
+list filter 
+E730: Using a List as a String [1, 2, 3]
+--3
+mapnew      
+E730: Using a List as a String []
+--4
+dict map    
+E730: Using a List as a String {'a': 1}
+--5
+string map  
+E730: Using a List as a String ''
+--6
+blob map    
+E730: Using a List as a String 0z0102
+--7
+unknown fn  
+E117: Unknown function: nosuchfunction_xyz [1, 2]
+--8
+string cb   
+E730: Using a List as a String [1, 2]
+--9
+string cb mid
+E730: Using a List as a String [10, 2, 3]
+--10
+late fail   
+E730: Using a List as a String [101, 102, 3, 4]
+--11
+clean        [2, 4, 6]
+clean filter [2, 4]
+--12
+E730: Using a List as a String
+foreach seen [1]
+--13

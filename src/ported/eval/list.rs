@@ -397,6 +397,16 @@ fn filter_map_list(
                 failed = true;
                 break;
             }
+            // c:311 `if (did_emsg) { tv_clear(&newtv); break; }` — the value
+            // this item just produced is DISCARDED and the walk stops.
+            // `filter_map_one` returns FAIL only when `eval_expr_typval` did,
+            // which a LAMBDA callback never does (`call_func()` returns OK
+            // whatever the body reported), so this is the only thing that stops
+            // one.
+            Some(_) if crate::ported::message::did_emsg.with(|d| d.get()) != 0 => {
+                failed = true;
+                break;
+            }
             Some((newtv, rem)) => match filtermap {
                 FILTERMAP_MAP | FILTERMAP_MAPNEW => out.push(listitem_T { li_tv: newtv }),
                 FILTERMAP_FILTER => {
@@ -465,6 +475,8 @@ fn filter_map_dict(
         let key = str_tv(k.clone());
         match filter_map_one(&val, &key, expr, filtermap) {
             None => break,
+            // c:119 — the Dict's copy of the same test.
+            Some(_) if crate::ported::message::did_emsg.with(|d| d.get()) != 0 => break,
             Some((newtv, rem)) => match filtermap {
                 FILTERMAP_MAP => {
                     d.borrow_mut().dv_hashtab.insert(k, newtv);
@@ -536,6 +548,8 @@ fn filter_map_blob(
         let key = nr_tv(idx as varnumber_T);
         match filter_map_one(&tv, &key, expr, filtermap) {
             None => break,
+            // c:189 — the Blob's copy of the same test.
+            Some(_) if crate::ported::message::did_emsg.with(|d| d.get()) != 0 => break,
             Some((newtv, rem)) => {
                 if filtermap != FILTERMAP_FOREACH {
                     if newtv.v_type != VAR_NUMBER && newtv.v_type != VAR_BOOL {
@@ -578,6 +592,8 @@ fn filter_map_string(str: &str, filtermap: filtermap_T, expr: &typval_T, rettv: 
         let key = nr_tv(idx as varnumber_T);
         match filter_map_one(&tv, &key, expr, filtermap) {
             None => break,
+            // c:243 — the String's copy of the same test.
+            Some(_) if crate::ported::message::did_emsg.with(|d| d.get()) != 0 => break,
             Some((newtv, rem)) => {
                 if filtermap == FILTERMAP_MAP || filtermap == FILTERMAP_MAPNEW {
                     if newtv.v_type != VAR_STRING {
@@ -626,12 +642,22 @@ fn filter_map(argvars: &[typval_T], rettv: &mut typval_T, filtermap: filtermap_T
         return;
     }
     let expr = &argvars[1];
+    // c:380-383 "We reset `did_emsg` to be able to detect whether an error
+    // occurred during evaluation of the expression": the loops below break on
+    // `did_emsg` (c:119, c:189, c:243, c:311), which only means "this callback
+    // errored" if the flag starts clear. c:401 puts the caller's back.
+    let save_did_emsg = crate::ported::message::did_emsg.with(|d| d.get());
+    crate::ported::message::did_emsg.with(|d| d.set(0));
     match (argvars[0].v_type, &argvars[0].vval) {
         (VAR_DICT, v_dict(Some(d))) => filter_map_dict(d, filtermap, arg_errmsg, expr, rettv),
         (VAR_BLOB, v_blob(Some(b))) => filter_map_blob(b, filtermap, arg_errmsg, expr, rettv),
         (VAR_STRING, _) => filter_map_string(&tv_get_string(&argvars[0]), filtermap, expr, rettv),
         (VAR_LIST, v_list(Some(l))) => filter_map_list(l, filtermap, arg_errmsg, expr, rettv),
         _ => {} // NULL container
+    }
+    // c:401 `did_emsg |= save_did_emsg;`
+    if save_did_emsg != 0 {
+        crate::ported::message::did_emsg.with(|d| d.set(d.get() + save_did_emsg));
     }
 }
 
