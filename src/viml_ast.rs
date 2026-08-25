@@ -250,6 +250,16 @@ pub enum LetTarget {
         base: Box<Expr>,
         /// The index/key expression.
         index: Box<Expr>,
+        /// The `:let` argument as written, from the target to the end of the
+        /// command.
+        ///
+        /// c: `lp->ll_name`, which `get_lval` leaves pointing INTO the source
+        /// when the lval is subscripted — so `value_check_lock(…, lp->ll_name,
+        /// TV_CSTRING)` prints the whole thing: `let g:l[0] = 9` on a locked List
+        /// is `E741: Value is locked: g:l[0] = 9`, while the un-subscripted
+        /// `let g:l += [4]` is `E741: Value is locked: g:l`. `None` for a target
+        /// the compiler synthesized rather than read.
+        src: Option<String>,
     },
     /// `let [a, b] = list` / `let [a, b; rest] = list` — list-unpack.
     List {
@@ -267,6 +277,8 @@ pub enum LetTarget {
         idx1: Option<Box<Expr>>,
         /// The last index (`None` → to the end).
         idx2: Option<Box<Expr>>,
+        /// The `:let` argument as written — see [`LetTarget::Index::src`].
+        src: Option<String>,
     },
 }
 

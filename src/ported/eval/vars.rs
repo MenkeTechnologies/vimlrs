@@ -131,8 +131,23 @@ pub fn set_var(name: &str, name_len: usize, tv: typval_T, _copy: bool) {
             }
         }
         VarScopeDict::FuncArgs => {
-            // c:2882 can't add an "a:" variable; existing a: args are read-only.
-            crate::ported::message::semsg(&format!("E461: Illegal variable name: {name}"));
+            // The C splits these two: an EXISTING `a:` item is DI_FLAGS_RO, so
+            // `set_var_const` refuses it through `var_check_ro` (c:2857 →
+            // c:2947) with `E46: Cannot change read-only variable`; a NEW `a:`
+            // name never gets that far and is `e_illvar` at c:2882. Verified
+            // against vim 9.2: `let a:a = 5` in a function with parameter `a` is
+            // E46, `let a:zz = 5` is E461.
+            let exists = funccal_stack.with(|s| {
+                s.borrow()
+                    .last()
+                    .is_some_and(|f| tv_dict_find(&f.fc_l_avars, &varname).is_some())
+            });
+            let msg = if exists {
+                format!("E46: Cannot change read-only variable \"{name}\"")
+            } else {
+                format!("E461: Illegal variable name: {name}")
+            };
+            crate::ported::message::semsg(&msg);
         }
     }
 }

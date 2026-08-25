@@ -424,6 +424,8 @@ fn compile_program_inner(
                             target: LetTarget::Index {
                                 base: Box::new(base),
                                 index: Box::new(Expr::Str(key)),
+                                // Synthesized by the `:function d.key()` desugar.
+                                src: None,
                             },
                             // NOT `function('1')`: vim rejects a numeric name there
                             // (E129/E475 — verified), even though its own numbered
@@ -2207,44 +2209,68 @@ impl Compiler {
         self.emit(Op::Pop);
     }
 
+    /// `:let {name} = {expr}` for a plain variable target.
+    fn let_var(&mut self, name: &str, expr: &Expr) -> Result<(), VimlError> {
+        // Vim abandons a command whose expression raised an error, so a
+        // failed `:let` leaves the variable ALONE:
+        //
+        //   let g:v = 'orig'
+        //   silent! let g:v = [1] . 'x'   " E730
+        //   echo g:v                      " still 'orig' in Vim
+        //
+        // Without this the recovered value ('0x') was stored and the script
+        // carried on with corrupted data. An expression that cannot raise
+        // (a literal, or arithmetic the compiler already proved numeric)
+        // skips the guard, so `let i = i + 1` keeps its native fast path.
+        // `expr_is_num` is the same judgement the native-arithmetic fast
+        // path already relies on: an expression it proves numeric is
+        // compiled to raw ops that cannot raise, so guarding it would only
+        // put `CallBuiltin`s back into loop bodies the JIT needs to trace.
+        if Self::expr_can_error(expr) && !self.expr_is_num(expr) {
+            self.emit(Op::CallBuiltin(h::VIML_ERR_MARK, 0));
+            self.emit(Op::Pop);
+            self.expr(expr)?;
+            self.emit(Op::CallBuiltin(h::VIML_ERR_SINCE, 0));
+            let j_failed = self.emit(Op::JumpIfTrue(0));
+            self.set_var(name);
+            let j_done = self.emit(Op::Jump(0));
+            // Failed: drop the recovered value, leave the variable as it was.
+            let here = self.b.current_pos();
+            self.b.patch_jump(j_failed, here);
+            self.emit(Op::Pop);
+            let after = self.b.current_pos();
+            self.b.patch_jump(j_done, after);
+        } else {
+            self.expr(expr)?;
+            self.set_var(name);
+        }
+        Ok(())
+    }
+
     fn let_stmt(&mut self, target: &LetTarget, expr: &Expr) -> Result<(), VimlError> {
         match target {
-            LetTarget::Var(name) => {
-                // Vim abandons a command whose expression raised an error, so a
-                // failed `:let` leaves the variable ALONE:
-                //
-                //   let g:v = 'orig'
-                //   silent! let g:v = [1] . 'x'   " E730
-                //   echo g:v                      " still 'orig' in Vim
-                //
-                // Without this the recovered value ('0x') was stored and the script
-                // carried on with corrupted data. An expression that cannot raise
-                // (a literal, or arithmetic the compiler already proved numeric)
-                // skips the guard, so `let i = i + 1` keeps its native fast path.
-                // `expr_is_num` is the same judgement the native-arithmetic fast
-                // path already relies on: an expression it proves numeric is
-                // compiled to raw ops that cannot raise, so guarding it would only
-                // put `CallBuiltin`s back into loop bodies the JIT needs to trace.
-                if Self::expr_can_error(expr) && !self.expr_is_num(expr) {
-                    self.emit(Op::CallBuiltin(h::VIML_ERR_MARK, 0));
-                    self.emit(Op::Pop);
-                    self.expr(expr)?;
-                    self.emit(Op::CallBuiltin(h::VIML_ERR_SINCE, 0));
-                    let j_failed = self.emit(Op::JumpIfTrue(0));
-                    self.set_var(name);
-                    let j_done = self.emit(Op::Jump(0));
-                    // Failed: drop the recovered value, leave the variable as it was.
-                    let here = self.b.current_pos();
-                    self.b.patch_jump(j_failed, here);
-                    self.emit(Op::Pop);
-                    let after = self.b.current_pos();
-                    self.b.patch_jump(j_done, after);
-                } else {
-                    self.expr(expr)?;
-                    self.set_var(name);
-                }
+            // A SLOTTED local cannot be locked: `slot_plan` refuses to slot anything
+            // in a body that contains `:lockvar` at all (see its `Stmt::LockVar`
+            // bail), and a fusevm slot has no lock state to begin with. Skipping the
+            // check there is what keeps `let s += i` a bare `Op::Add` and the loop
+            // JIT-traceable.
+            LetTarget::Var(name)
+                if Self::let_compound_op(expr).is_some()
+                    && !self.slots.contains_key(self.slot_key(name)) =>
+            {
+                // c: `ex_let_one` → `set_var_lval`, whose `value_check_lock` runs
+                // BEFORE `eexe_mod_op`. Order matters: `eexe_mod_op` extends a List
+                // IN PLACE, so checking afterwards (which is where the plain `=`
+                // path checks) would report E741 on an already-mutated list.
+                self.load_str(name);
+                self.emit(Op::CallBuiltin(h::VIML_VAR_LOCKED, 1));
+                let locked = self.emit(Op::JumpIfTrue(0));
+                self.let_var(name, expr)?;
+                let end = self.b.current_pos();
+                self.b.patch_jump(locked, end);
                 Ok(())
             }
+            LetTarget::Var(name) => self.let_var(name, expr),
             LetTarget::Env(name) => {
                 // c: `ex_let_env` (`vendor/eval/vars.c:1316`) — an ARITHMETIC
                 // compound on an environment variable is `e_letwrong` before
@@ -2282,7 +2308,7 @@ impl Compiler {
                 }
                 Ok(())
             }
-            LetTarget::Index { base, index } => {
+            LetTarget::Index { base, index, src } => {
                 // `let base[index] = value` — push value, base, index; the bridge
                 // sets base[index] = value (and fires Dict watchers). `base` is an
                 // expression, so nested `d['a']['b']` resolves the inner container
@@ -2290,11 +2316,17 @@ impl Compiler {
                 self.expr(expr)?;
                 self.expr(base)?;
                 self.expr(index)?;
-                self.emit(Op::CallBuiltin(h::VIML_SETINDEX, 3));
+                self.load_str(src.as_deref().unwrap_or(""));
+                self.emit(Op::CallBuiltin(h::VIML_SETINDEX, 4));
                 self.emit(Op::Pop);
                 Ok(())
             }
-            LetTarget::Range { base, idx1, idx2 } => {
+            LetTarget::Range {
+                base,
+                idx1,
+                idx2,
+                src,
+            } => {
                 // `let base[idx1:idx2] = list` — push the source list, base, idx1
                 // (default 0), idx2 (Undef → "to the end"); the bridge assigns
                 // the range in place via tv_list_assign_range.
@@ -2312,7 +2344,8 @@ impl Compiler {
                         self.emit(Op::LoadUndef);
                     }
                 }
-                self.emit(Op::CallBuiltin(h::VIML_SETRANGE, 4));
+                self.load_str(src.as_deref().unwrap_or(""));
+                self.emit(Op::CallBuiltin(h::VIML_SETRANGE, 5));
                 self.emit(Op::Pop);
                 Ok(())
             }

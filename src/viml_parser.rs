@@ -1761,6 +1761,27 @@ fn find_top_eq(s: &str) -> Option<usize> {
 
 /// Byte offset of the first top-level `:` in `s` (a vim9 `name: type`
 /// annotation separator), skipping strings and bracketed groups.
+/// Byte length of a leading SCOPE prefix (`g:`, `b:`, `w:`, `t:`, `s:`, `l:`,
+/// `a:`, `v:`), or 0.
+///
+/// Its colon is not a vim9 type annotation: `const g:c = [1]` declares the
+/// global `g:c`, and reading the `g:` colon as `name: type` truncated the name to
+/// `g` — the value landed in a variable called `g` and the intended one was never
+/// defined (`islocked('g:c')` answered -1).
+fn scope_prefix_len(s: &str) -> usize {
+    let b = s.as_bytes();
+    let is_scope = b.len() >= 2
+        && b[1] == b':'
+        && matches!(b[0], b'g' | b'b' | b'w' | b't' | b's' | b'l' | b'a' | b'v');
+    usize::from(is_scope) * 2
+}
+
+/// [`find_top_colon`] applied past any leading scope prefix.
+fn find_type_colon(s: &str) -> Option<usize> {
+    let skip = scope_prefix_len(s);
+    find_top_colon(&s[skip..]).map(|p| p + skip)
+}
+
 fn find_top_colon(s: &str) -> Option<usize> {
     let b = s.as_bytes();
     let mut depth = 0i32;
@@ -1805,7 +1826,7 @@ fn strip_vim9_type(rest: &str) -> String {
     if decl.starts_with('[') {
         return rest.to_string();
     }
-    match find_top_colon(decl) {
+    match find_type_colon(decl) {
         Some(p) => format!("{} {}", decl[..p].trim_end(), tail),
         None => rest.to_string(),
     }
@@ -1829,7 +1850,7 @@ fn vim9_var_decl(rest: &str) -> String {
     if trimmed.starts_with('[') {
         return rest.to_string();
     }
-    let Some(p) = find_top_colon(trimmed) else {
+    let Some(p) = find_type_colon(trimmed) else {
         return rest.to_string();
     };
     let name = trimmed[..p].trim_end();
@@ -2287,11 +2308,13 @@ fn parse_let(rest: &str) -> Result<Stmt, VimlError> {
                     base: Box::new(parse_expr(base_src)?),
                     idx1: parse_opt(a)?,
                     idx2: parse_opt(b)?,
+                    src: Some(rest.trim().to_string()),
                 }
             }
             None => LetTarget::Index {
                 base: Box::new(parse_expr(base_src)?),
                 index: Box::new(parse_expr(index_src)?),
+                src: Some(rest.trim().to_string()),
             },
         }
     } else if !lhs.contains('[')
@@ -2305,6 +2328,7 @@ fn parse_let(rest: &str) -> Result<Stmt, VimlError> {
         LetTarget::Index {
             base: Box::new(parse_expr(base)?),
             index: Box::new(Expr::Str(key.to_string())),
+            src: Some(rest.trim().to_string()),
         }
     } else {
         LetTarget::Var(lhs.to_string())
@@ -2613,7 +2637,7 @@ fn let_target_expr(target: &LetTarget) -> Result<Expr, VimlError> {
         LetTarget::Option(n) => Expr::Option(n.clone()),
         LetTarget::Env(n) => Expr::Env(n.clone()),
         LetTarget::Register(c) => Expr::Register(*c),
-        LetTarget::Index { base, index } => Expr::Index {
+        LetTarget::Index { base, index, .. } => Expr::Index {
             base: base.clone(),
             index: index.clone(),
         },

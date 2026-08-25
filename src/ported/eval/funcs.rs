@@ -1098,14 +1098,31 @@ pub fn f_add(argvars: &[typval_T], rettv: &mut typval_T) {
     match (argvars[0].v_type, &argvars[0].vval) {
         // c: VAR_LIST — append the value.
         (VAR_LIST, v_list(Some(l))) => {
-            tv_list_append_tv(&mut l.borrow_mut(), argvars[1].clone());
-            *rettv = argvars[0].clone();
+            // c:434 `if (!value_check_lock(tv_list_locked(l), N_("add() argument"),
+            // TV_TRANSLATE))` — a locked List refuses the append and says so.
+            let locked = l.borrow().lv_lock;
+            if !crate::ported::eval::typval::value_check_lock(
+                locked,
+                Some("add() argument"),
+                crate::ported::eval::typval::TV_TRANSLATE,
+            ) {
+                tv_list_append_tv(&mut l.borrow_mut(), argvars[1].clone());
+                *rettv = argvars[0].clone();
+            }
         }
         // c: VAR_BLOB — append the value as a byte.
         (VAR_BLOB, v_blob(Some(b))) => {
-            let n = tv_get_number_chk(&argvars[1], None);
-            b.borrow_mut().bv_ga.push(n as u8);
-            *rettv = argvars[0].clone();
+            // c:442 the same guard for a Blob.
+            let locked = b.borrow().bv_lock;
+            if !crate::ported::eval::typval::value_check_lock(
+                locked,
+                Some("add() argument"),
+                crate::ported::eval::typval::TV_TRANSLATE,
+            ) {
+                let n = tv_get_number_chk(&argvars[1], None);
+                b.borrow_mut().bv_ga.push(n as u8);
+                *rettv = argvars[0].clone();
+            }
         }
         _ => emsg("E897: List or Blob required"),
     }

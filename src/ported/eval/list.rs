@@ -146,13 +146,25 @@ pub fn f_count(argvars: &[typval_T], rettv: &mut typval_T) {
 /// Append `argvars[1]`'s items to the `argvars[0]` list (at index `argvars[2]`,
 /// if given), returning the result. `is_new` (extendnew) works on a copy. Lock
 /// checks are skipped (locks are unmodeled).
-fn extend_list(argvars: &[typval_T], is_new: bool, rettv: &mut typval_T) {
+fn extend_list(argvars: &[typval_T], arg_errmsg: &str, is_new: bool, rettv: &mut typval_T) {
     let mut error = false;
     // c: l1 = argvars[0].vval.v_list;  (is_new → a fresh copy)
     let l1_orig = match &argvars[0].vval {
         v_list(Some(l)) => l.clone(),
         _ => return,
     };
+    // c:656 `if (!is_new && value_check_lock(tv_list_locked(l1), arg_errmsg,
+    // TV_TRANSLATE)) return;` — extend() refuses a locked List; extendnew()
+    // works on a copy and does not.
+    if !is_new
+        && crate::ported::eval::typval::value_check_lock(
+            l1_orig.borrow().lv_lock,
+            Some(arg_errmsg),
+            crate::ported::eval::typval::TV_TRANSLATE,
+        )
+    {
+        return;
+    }
     let l1 = if is_new {
         tv_list_copy(&l1_orig, false)
     } else {
@@ -202,7 +214,7 @@ fn extend_list(argvars: &[typval_T], is_new: bool, rettv: &mut typval_T) {
 ///
 /// Merge `argvars[1]`'s entries into the `argvars[0]` dict using action
 /// `argvars[2]` (`keep`/`force`/`error`, default `force`), returning the result.
-fn extend_dict(argvars: &[typval_T], is_new: bool, rettv: &mut typval_T) {
+fn extend_dict(argvars: &[typval_T], arg_errmsg: &str, is_new: bool, rettv: &mut typval_T) {
     let d1_orig = match &argvars[0].vval {
         v_dict(Some(d)) => d.clone(),
         _ => return,
@@ -215,6 +227,16 @@ fn extend_dict(argvars: &[typval_T], is_new: bool, rettv: &mut typval_T) {
             return;
         }
     };
+    // c:594 the same guard for a Dict.
+    if !is_new
+        && crate::ported::eval::typval::value_check_lock(
+            d1_orig.borrow().dv_lock,
+            Some(arg_errmsg),
+            crate::ported::eval::typval::TV_TRANSLATE,
+        )
+    {
+        return;
+    }
     let d1 = if is_new {
         tv_dict_copy(&d1_orig, false)
     } else {
@@ -250,11 +272,11 @@ fn extend_dict(argvars: &[typval_T], is_new: bool, rettv: &mut typval_T) {
 
 /// Port of `extend()` from `Src/eval/list.c:707` — the `extend`/`extendnew`
 /// dispatcher.
-fn extend(argvars: &[typval_T], rettv: &mut typval_T, is_new: bool) {
+fn extend(argvars: &[typval_T], rettv: &mut typval_T, arg_errmsg: &str, is_new: bool) {
     if argvars[0].v_type == VAR_LIST && argvars[1].v_type == VAR_LIST {
-        extend_list(argvars, is_new, rettv);
+        extend_list(argvars, arg_errmsg, is_new, rettv);
     } else if argvars[0].v_type == VAR_DICT && argvars[1].v_type == VAR_DICT {
-        extend_dict(argvars, is_new, rettv);
+        extend_dict(argvars, arg_errmsg, is_new, rettv);
     } else {
         // c: semsg(e_listdictarg, is_new ? "extendnew()" : "extend()");
         let name = if is_new { "extendnew" } else { "extend" };
@@ -266,12 +288,14 @@ fn extend(argvars: &[typval_T], rettv: &mut typval_T, is_new: bool) {
 
 /// Port of `f_extend()` from `Src/eval/list.c:720`.
 pub fn f_extend(argvars: &[typval_T], rettv: &mut typval_T) {
-    extend(argvars, rettv, false);
+    // c:722 `char *errmsg = N_("extend() argument");`
+    extend(argvars, rettv, "extend() argument", false);
 }
 
 /// Port of `f_extendnew()` from `Src/eval/list.c:728`.
 pub fn f_extendnew(argvars: &[typval_T], rettv: &mut typval_T) {
-    extend(argvars, rettv, true);
+    // c:730 `char *errmsg = N_("extendnew() argument");`
+    extend(argvars, rettv, "extendnew() argument", true);
 }
 
 // ── map() / filter() / mapnew() / foreach() (Src/eval/list.c) ──

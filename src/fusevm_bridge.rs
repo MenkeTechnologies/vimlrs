@@ -255,6 +255,13 @@ pub const VIML_SETRANGE: u16 = 3055;
 /// (`true` iff it is a Dict). Drives the subscript-vs-concat branch selection.
 pub const VIML_IS_DICT: u16 = 3056;
 /// `:echo`
+/// `:let x op= …` — push `Bool(the variable is locked)`, having reported E741 if
+/// so.
+///
+/// c: `ex_let_one` runs `get_lval` then `set_var_lval`, whose lock check comes
+/// BEFORE `eexe_mod_op` — so a locked List is not extended in place and then
+/// refused, it is refused first. Stack: name.
+pub const VIML_VAR_LOCKED: u16 = 3612;
 /// `:let &opt op= …` — push `Bool(the C would refuse this operator for this
 /// option's type)`, having reported E734 if so.
 ///
@@ -1767,6 +1774,22 @@ fn b_raise(vm: &mut VM, _: u8) -> Value {
     Value::Int(0)
 }
 
+/// c: the `value_check_lock(lp->ll_tv->v_lock, …)` in `set_var_lval`, hoisted to
+/// where the C performs it — before the operator is applied. Same test
+/// `b_setvar` makes for a plain `=`, which is too late for a compound one
+/// because `eexe_mod_op` extends a List IN PLACE.
+fn b_var_locked(vm: &mut VM, _: u8) -> Value {
+    let name = tv_get_string(&pop_tv(vm));
+    let Some(old) = crate::ported::eval::vars::find_var(&name, true) else {
+        return Value::Bool(false);
+    };
+    Value::Bool(crate::ported::eval::typval::value_check_lock(
+        old.v_lock,
+        Some(name.as_str()),
+        crate::ported::eval::typval::TV_CSTRING,
+    ))
+}
+
 /// c: `ex_let_option` (`vendor/eval/vars.c:1379-1384`):
 ///
 /// ```c
@@ -2345,6 +2368,19 @@ fn b_setvar(vm: &mut VM, _: u8) -> Value {
     // than inside `set_var` because the ported `do_lock_var` writes the *newly
     // locked* value back through `set_var`, and a check there would make
     // `:unlockvar` impossible.
+    // c: `set_var_const` tests in this order (`vendor/eval/vars.c:2853-2859`):
+    // read-only FIRST, then the value lock, then the variable lock. Every `a:`
+    // item is both DI_FLAGS_RO and VAR_FIXED, so asking about the lock first
+    // would answer E741 where the C answers `E46: Cannot change read-only
+    // variable`. `set_var` owns the a: scope's two messages (E46 for an existing
+    // item, E461 for a new name), so hand it straight over.
+    if matches!(
+        crate::ported::eval::vars::find_var_ht_dict(&name, name.len()),
+        Some((crate::ported::eval::vars::VarScopeDict::FuncArgs, _))
+    ) {
+        set_var(&name, name.len(), val, false);
+        return Value::Undef;
+    }
     if let Some(old) = crate::ported::eval::vars::find_var(&name, true) {
         if matches!(
             old.v_lock,
@@ -2740,10 +2776,65 @@ fn b_slice(vm: &mut VM, _: u8) -> Value {
 
 /// `let base[index] = value` — set a List/Dict/Blob element in place. For a Dict
 /// this also fires any registered watchers (the add/change side).
+/// The lock `set_var_lval` tests before writing into a container.
+///
+/// c: `value_check_lock(lp->ll_newkey == NULL ? lp->ll_tv->v_lock
+/// : lp->ll_tv->vval.v_dict->dv_lock, …)` — for an EXISTING element that is the
+/// ELEMENT's own `v_lock`, and only for a NEW Dict key is it the Dict's
+/// `dv_lock`. The distinction is exactly what `lockvar`'s depth controls
+/// (`tv_item_lock`, vendor/eval/typval.c:3777, recurses into the elements only
+/// while `deep < 0 || deep > 1`): `lockvar 1 g:l` leaves `let g:l[0] = 7`
+/// allowed while the default depth 2 refuses it, and by the same arithmetic
+/// `lockvar 2 g:n` still allows `let g:n[0][0] = 9`.
+fn lval_lock(
+    base: &typval_T,
+    index: &typval_T,
+) -> crate::ported::eval::typval_defs_h::VarLockStatus {
+    use crate::ported::eval::typval_defs_h::VarLockStatus;
+    match (base.v_type, &base.vval) {
+        (VAR_DICT, v_dict(Some(d))) => {
+            let key = tv_get_string(index);
+            let d = d.borrow();
+            match d.dv_hashtab.get(&key) {
+                Some(item) => item.v_lock,
+                // c: `ll_newkey != NULL` — adding a key tests the Dict itself.
+                None => d.dv_lock,
+            }
+        }
+        (VAR_LIST, v_list(Some(l))) => {
+            let l = l.borrow();
+            let n = tv_get_number_chk(index, None);
+            let len = l.lv_items.len() as varnumber_T;
+            let idx = if n < 0 { n + len } else { n };
+            match usize::try_from(idx).ok().and_then(|i| l.lv_items.get(i)) {
+                Some(item) => item.li_tv.v_lock,
+                // Out of range: the index error is the C's first complaint, so
+                // leave it to the existing path and report no lock here.
+                None => VarLockStatus::VAR_UNLOCKED,
+            }
+        }
+        (VAR_BLOB, v_blob(Some(b))) => b.borrow().bv_lock,
+        _ => VarLockStatus::VAR_UNLOCKED,
+    }
+}
+
 fn b_setindex(vm: &mut VM, _: u8) -> Value {
+    let lval = tv_get_string(&pop_tv(vm));
     let index = pop_tv(vm);
     let base = pop_tv(vm);
     let value = pop_tv(vm);
+    // c: `set_var_lval` checks the container's lock before writing into it and
+    // names the lval in the message — `lp->ll_name`, which for a SUBSCRIPTED
+    // target still points into the source. Verified against vim 9.2:
+    // `lockvar g:l | let g:l[0] = 9` is `E741: Value is locked: g:l[0] = 9`.
+    if crate::ported::eval::typval::value_check_lock(
+        lval_lock(&base, &index),
+        (!lval.is_empty()).then_some(lval.as_str()),
+        crate::ported::eval::typval::TV_CSTRING,
+    ) {
+        return Value::Undef;
+    }
+
     match (base.v_type, &base.vval) {
         (VAR_DICT, v_dict(Some(d))) => {
             let key = tv_get_string(&index);
@@ -2811,10 +2902,23 @@ fn b_setrange(vm: &mut VM, _: u8) -> Value {
         tv_list_assign_range, tv_list_check_range_index_one, tv_list_check_range_index_two,
         tv_list_copy,
     };
+    let lval = tv_get_string(&pop_tv(vm));
     let idx2_tv = pop_tv(vm);
     let idx1_tv = pop_tv(vm);
     let base = pop_tv(vm);
     let value = pop_tv(vm);
+    // c: `set_var_lval` checks the container's lock before writing into it and
+    // names the lval in the message — `lp->ll_name`, which for a SUBSCRIPTED
+    // target still points into the source. Verified against vim 9.2:
+    // `lockvar g:l | let g:l[0] = 9` is `E741: Value is locked: g:l[0] = 9`.
+    if crate::ported::eval::typval::value_check_lock(
+        lval_lock(&base, &idx1_tv),
+        (!lval.is_empty()).then_some(lval.as_str()),
+        crate::ported::eval::typval::TV_CSTRING,
+    ) {
+        return Value::Undef;
+    }
+
     // `vendor/eval.c:1035` — the BASE being indexed must be a List, Dict or
     // Blob, and that is E689. E709 belongs to the *assigned value* (c:1096), not
     // to the base; reporting it here answered `let x = 5 | let x[0:1] = [1,2]`
@@ -3662,7 +3766,13 @@ fn call_user_function_raw(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
     // Track vim9-def-ness parallel to the frame so `b_getvar` can fall back to
     // script scope for a bare name inside a vim9 def (but not a legacy function).
     VIM9_DEF_STACK.with(|s| s.borrow_mut().push(func.vim9));
-    let bind_avar = |key: &str, v: typval_T| {
+    // c: `call_user_func` stamps every a: value FIXED — `v->di_tv.v_lock =
+    // VAR_FIXED` (`vendor/eval/userfunc.c:1151`), and the a:000 list items too
+    // (c:1171). That is what makes `let a:000[0] = 99` `E742: Cannot change
+    // value of …` rather than a silent mutation; `tv_copy` clears the lock
+    // again on the way out, so a value READ out of a: is ordinary.
+    let bind_avar = |key: &str, mut v: typval_T| {
+        v.v_lock = crate::ported::eval::typval_defs_h::VarLockStatus::VAR_FIXED;
         crate::ported::eval::vars::funccal_stack.with(|s| {
             if let Some(top) = s.borrow_mut().last_mut() {
                 tv_dict_add_tv(&mut top.fc_l_avars, key, v);
@@ -3693,7 +3803,34 @@ fn call_user_function_raw(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
     for (i, v) in extra.iter().enumerate() {
         bind_avar(&(i + 1).to_string(), v.clone());
     }
-    bind_avar("000", new_list(extra));
+    // c: `tv_list_set_lock(&fc->fc_l_varlist, VAR_FIXED)`
+    // (`vendor/eval/userfunc.c:1088`) — `a:000` is not merely read-only as a
+    // NAME, its LIST is fixed, so `let a:000[0] = 9` and `add(a:000, 5)` are
+    // `E742: Cannot change value of …` rather than silent mutations.
+    let a000 = new_list(extra);
+    if let v_list(Some(l)) = &a000.vval {
+        let mut lb = l.borrow_mut();
+        lb.lv_lock = crate::ported::eval::typval_defs_h::VarLockStatus::VAR_FIXED;
+        // c:1171 `TV_LIST_ITEM_TV(li)->v_lock = VAR_FIXED` — each item too.
+        for li in lb.lv_items.iter_mut() {
+            li.li_tv.v_lock = crate::ported::eval::typval_defs_h::VarLockStatus::VAR_FIXED;
+        }
+    }
+    let a000_items = match &a000.vval {
+        v_list(Some(l)) => Some(l.clone()),
+        _ => None,
+    };
+    bind_avar("000", a000);
+    // c: `call_user_func` sets `a:firstline`/`a:lastline` alongside `a:0`
+    // (`vendor/eval/userfunc.c:1090-1098`) from `funcexe->fe_firstline` /
+    // `fe_lastline`, which for a call that is not `:{range}call` are both the
+    // cursor line (`userfunc.c:1571`). Verified against vim 9.2: `string(a:)`
+    // inside a plain function includes `'firstline': 1, 'lastline': 1`.
+    let cursor_lnum = crate::ported::window::curwin
+        .with(|c| c.borrow().as_ref().map(|w| w.borrow().w_cursor.lnum))
+        .unwrap_or(1);
+    bind_avar("firstline", tv_num(cursor_lnum as varnumber_T));
+    bind_avar("lastline", tv_num(cursor_lnum as varnumber_T));
 
     // The caller's current line is this frame's call site, for `v:throwpoint`.
     CALL_SITE_LNUM.with(|c| c.borrow_mut().push(SOURCING_LNUM.with(|l| l.get())));
@@ -3762,6 +3899,16 @@ fn call_user_function_raw(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
     crate::ported::eval::vars::funccal_stack.with(|s| {
         s.borrow_mut().pop();
     });
+    // c: `cleanup_function_call` (`vendor/eval/userfunc.c:834-837`) — when the
+    // a:000 list outlives the frame it is not freed but COPIED item by item, and
+    // `tv_copy` clears `v_lock`. The list's own VAR_FIXED is not cleared, which is
+    // exactly why `add()` on a returned a:000 still refuses while assigning to one
+    // of its elements does not. Verified against vim 9.2 and Neovim 0.12.5.
+    if let Some(l) = a000_items {
+        for li in l.borrow_mut().lv_items.iter_mut() {
+            li.li_tv.v_lock = crate::ported::eval::typval_defs_h::VarLockStatus::VAR_UNLOCKED;
+        }
+    }
     VIM9_DEF_STACK.with(|s| {
         s.borrow_mut().pop();
     });
@@ -5806,6 +5953,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_BYTES, b_bytes);
     vm.register_builtin(VIML_MOD_OP, b_mod_op);
     vm.register_builtin(VIML_OPT_OP_BAD, b_opt_op_bad);
+    vm.register_builtin(VIML_VAR_LOCKED, b_var_locked);
     vm.register_builtin(VIML_ARGS_BEGIN, b_args_begin);
     vm.register_builtin(VIML_ARGS_FAILED, b_args_failed);
     vm.register_builtin(VIML_ARGS_E116, b_args_e116);
