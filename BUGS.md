@@ -4358,6 +4358,78 @@ deliberate Neovim-favoured split: `echo string(1.0/0.0)` is `inf` in vim and
 
 ---
 
+# Round 38 — the `:call` error mark, and a vim9 `:def`'s bare names
+
+Method: the five `tests/examples.rs` `KNOWN_OPEN` entries, each re-measured
+against `/usr/local/bin/vim` 9.2 before anything was changed. Two were engine
+bugs and three were assertions pinning one engine's incidentals. `KNOWN_OPEN` is
+empty as of this round.
+
+## R38-1. `:call` took no error mark, so a later raise was swallowed — ✅ FIXED (closes R25-O1)
+
+`Stmt::Expr` and `:echo` both emit `VIML_ERR_MARK` before evaluating, and
+`b_raise` reports only while `err_count <= ERR_MARK` — the "expression evaluation
+aborts on the first error" rule. `Stmt::Call` emitted no mark, so a `:call`
+compared against whichever statement last took one. Once ANY earlier error had
+bumped the counter, a deferred raise inside a `:call` went silent:
+
+```vim
+call assert_fails('call abs()', 'E119')                 " passes alone
+call assert_fails('call get([])', 'E119') | call assert_fails('call abs()', 'E119')
+"                                            ^ 'command did not fail' before
+```
+
+That is why the gap looked context-dependent: it needed a preceding error, and
+inserting any statement that took a fresh mark hid it again. Fixed by emitting
+the mark at the head of `Stmt::Call`, exactly as `Stmt::Expr` does.
+
+## R38-2. `assert_fails()` discarded an exception raised inside a called function — ✅ FIXED (closes R25-O1's second half)
+
+`b_assert_fails` cleared `PENDING_EXC` after the nested run and asked only
+`parse_err.is_some() || did_emsg > before`. A `:throw` from inside a user
+function called by `{cmd}` unwinds PAST the nested top level and is still pending
+there, so the command that failed was recorded as not having failed
+(`examples/testing.vim`'s `assert_fails("call ParseKV('nope')", 'E0:')`). The
+pending exception is now taken rather than dropped: it counts as the failure and
+its text joins the list `{error}` is matched against.
+
+## R38-3. A vim9 `:def` slotted a bare name that is the SCRIPT variable — ✅ FIXED (closes R25-O4)
+
+`b_getvar` already fell back to script scope for a bare name in a `:def` frame.
+There was no write half, and worse, `compile_function_body` slot-allocated the
+same bare names, so the assignment never reached `b_setvar` at all:
+
+```vim
+vim9script
+var counter = 0
+def Bump()
+  counter = counter + 1
+enddef
+Bump()
+echo counter        " 0 here, 1 in vim 9.2
+```
+
+Two changes: `b_setvar` mirrors the read fallback (bare name + `:def` frame +
+unknown locally + known globally → write the script var), and a `:def` body is
+excluded from slot planning. The exclusion is what makes the fallback reachable,
+and it is needed because the parser lowers `var x = 1` and `x = 1` to the same
+`Stmt::Let` — the body alone cannot tell a declaration from an assignment.
+vim9 forbids a `:def` local from shadowing a script variable (E1054), so the
+redirect cannot capture a legitimate local.
+
+## R38-4. Two example assertions pinned one engine's incidentals — ✅ FIXED (closes R25-O2, R25-O3)
+
+`examples/json.vim` hardcoded a `json_encode()` key ORDER. A Dict is a hash, the
+order is the table's, and nvim additionally emits `: ` and `, `. It now asserts
+content: the round-trip, every key/value fragment against the whitespace-free
+form, and the total length (so a fragment cannot be missing and the string still
+match).
+
+`examples/map_commands.vim` asserted absolute `len(maplist())` counts, which
+count whatever mappings the engine already had (nvim 103/102, vim 12/11 with
+defaults loaded, 6/5 with `-u NONE`). It now records a baseline before defining
+anything and asserts `baseline + 6` / `baseline + 5`.
+
 # Round 37 — the lambda body, and what abandons a bar-separated line
 
 Method unchanged: probes against `/opt/homebrew/bin/vim` 9.2 through

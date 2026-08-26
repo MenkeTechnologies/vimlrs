@@ -2468,6 +2468,24 @@ fn b_setvar(vm: &mut VM, _: u8) -> Value {
         set_var(&name, name.len(), val, false);
         return Value::Undef;
     }
+    // vim9 def bare-name fallback, the WRITE half of the one `b_getvar` makes.
+    // Inside a `:def`, a bare name that is not a local or a parameter is the
+    // SCRIPT-level `var` — assigning to it mutates that variable, it does not
+    // create a function-local shadow (vim9 forbids the shadow outright: E1054).
+    // vimlrs keeps script-level `var`/`const` in the global dict, so redirect
+    // there when the name is unknown locally and known globally. Without this
+    // the read fallback saw the script var while every write landed in the
+    // frame, so `def Bump() | counter = counter + 1 | enddef` left `counter`
+    // at its initial value (measured against vim 9.2, which reports 3 after
+    // three calls).
+    let local_miss = crate::ported::eval::vars::find_var(&name, true).is_none();
+    if local_miss && is_vim9_def_frame() && !name.contains(':') && !name.contains('#') {
+        let scoped = format!("g:{name}");
+        if crate::ported::eval::vars::find_var(&scoped, true).is_some() {
+            set_var(&scoped, scoped.len(), val, false);
+            return Value::Undef;
+        }
+    }
     if let Some(old) = crate::ported::eval::vars::find_var(&name, true) {
         if matches!(
             old.v_lock,
@@ -4477,14 +4495,22 @@ fn b_assert_fails(vm: &mut VM, argc: u8) -> Value {
     let saved_exc = V_EXCEPTION.with(|e| e.borrow().clone());
     message::capture_errors_begin();
     let parse_err = run_source_nested(&cmd).err();
-    // A throw that unwound to the nested top level is reported + cleared there;
-    // clear any residue so it cannot escape into the caller's script.
-    PENDING_EXC.with(|p| *p.borrow_mut() = None);
+    // A throw that unwound to the nested top level is reported + cleared there,
+    // and one raised inside a user function called by `{cmd}` unwinds PAST it
+    // and is still pending here. Take it rather than merely clearing it: the
+    // command failed either way, and the exception text is what `{error}` is
+    // matched against (`assert_fails("call F()", 'E0:')` where `F()` throws
+    // `E0:` recorded "command did not fail" while the throw was discarded).
+    let pending = PENDING_EXC.with(|p| p.borrow_mut().take());
     let mut errs = message::capture_errors_take();
     if let Some(e) = &parse_err {
         errs.insert(0, e.to_string());
     }
-    let failed = parse_err.is_some() || message::did_emsg.with(|d| d.get()) > before;
+    if let Some(exc) = &pending {
+        errs.push(exc.clone());
+    }
+    let failed =
+        parse_err.is_some() || pending.is_some() || message::did_emsg.with(|d| d.get()) > before;
     message::did_emsg.with(|d| d.set(before));
     set_vim_var_string(VV_EXCEPTION, &saved_exc);
     V_EXCEPTION.with(|e| *e.borrow_mut() = saved_exc);

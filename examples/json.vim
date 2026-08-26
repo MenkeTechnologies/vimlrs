@@ -17,7 +17,16 @@ let encoded = json_encode(config)
 let decoded = json_decode(encoded)
 
 " ── unit tests ──
-call assert_equal('{"name":"vimlrs","version":[0,1,0],"features":["jit","lsp","dap"],"standalone":true}', encoded)
+" A Dict is a hash, not an ordered map, so json_encode() emits the keys in the
+" hash table's order — which is an implementation detail that differs between
+" engines (and nvim also puts a space after ':' and ','). Assert the CONTENT:
+" the round-trip below, plus every key/value pair, against the whitespace-free
+" form. Pinning one engine's key order would be pinning the oracle, not JSON.
+let compact = substitute(encoded, ' ', '', 'g')
+for s:frag in ['"name":"vimlrs"', '"version":[0,1,0]', '"features":["jit","lsp","dap"]', '"standalone":true']
+  call assert_true(stridx(compact, s:frag) >= 0, 'missing from encoding: ' . s:frag)
+endfor
+call assert_equal(strlen('{}') + strlen(join(['"name":"vimlrs"', '"version":[0,1,0]', '"features":["jit","lsp","dap"]', '"standalone":true'], ',')), strlen(compact))
 call assert_equal('vimlrs', decoded['name'])
 call assert_equal([0, 1, 0], decoded['version'])
 call assert_equal('0.1.0', join(map(copy(decoded['version']), 'string(v:val)'), '.'))

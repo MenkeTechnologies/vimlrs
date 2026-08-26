@@ -4,6 +4,10 @@
 " standalone.
 " Self-test: asserts into v:errors, throws at the end if anything failed.
 
+" The mappings already in place before this script defines any — the baseline
+" every count below is relative to.
+let s:before = len(maplist())
+
 " --- :nmap / :inoremap define mode-scoped mappings
 nmap <C-a> :wall<CR>
 inoremap jj <Esc>
@@ -27,10 +31,15 @@ vmap > >gv
 call assert_equal('v', maparg('>', 'v', 0, 1).mode)
 
 " --- :unmap removes a single mapping; :mapclear clears a whole mode
-call assert_equal(5, len(maplist()))
+" Counted as a DELTA against the mappings that were already live, because an
+" engine started with its own defaults loaded has its own baseline (vim and
+" nvim each ship a different set). This script adds six: four normal-mode, one
+" insert, one visual — `vmap` maps visual+select, and maplist() reports that
+" pair as ONE entry with mode 'v'.
+call assert_equal(s:before + 6, len(maplist()))
 nunmap <C-a>
 call assert_equal('', maparg('<C-a>', 'n'))
-call assert_equal(4, len(maplist()))
+call assert_equal(s:before + 5, len(maplist()))
 
 imapclear
 call assert_equal('', maparg('jj', 'i'))

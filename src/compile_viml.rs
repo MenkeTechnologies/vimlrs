@@ -264,7 +264,7 @@ fn build_user_func_def(
         vim9: flags.vim9,
         dict: flags.dict,
         abort: flags.abort,
-        chunk: compile_function_body(body, exc, def_line, flags.abort)?,
+        chunk: compile_function_body(body, exc, def_line, flags.abort, flags.vim9)?,
     })
 }
 
@@ -500,6 +500,7 @@ fn compile_function_body(
     exc: bool,
     def_line: u32,
     abort: bool,
+    vim9: bool,
 ) -> Result<fusevm::Chunk, VimlError> {
     let mut c = Compiler::new(true, exc);
     // vim numbers a function body's lines from 1 at the first line AFTER the
@@ -510,7 +511,15 @@ fn compile_function_body(
     // Slot-allocate provably-Number locals so a numeric loop body lowers to
     // native ops the JIT can trace. (Exceptions add per-statement unwind
     // CallBuiltins that would break a native loop, so only when `!exc`.)
-    if !exc {
+    // A vim9 `:def` is excluded: there, a bare name that the body never declares
+    // with `var` IS the script-level variable, and slotting it would turn every
+    // assignment into a frame-local write the script never sees (`def Bump() |
+    // counter = counter + 1 | enddef` left `counter` at 0 while vim 9.2 reports
+    // 3 after three calls). The parser lowers `var x = 1` and `x = 1` to the same
+    // `Stmt::Let`, so the body alone cannot tell a declaration from an
+    // assignment — until it can, a def body keeps its names dict-backed and the
+    // `b_setvar` script-scope fallback resolves them at run time.
+    if !exc && !vim9 {
         (c.slots, c.int_slots) = slot_plan(body, true);
     }
     // c: `ex_docmd.c:647-651` resets `did_emsg` after every command of a function
@@ -1263,6 +1272,16 @@ impl Compiler {
             Stmt::Echon(args) => self.echo(args, h::VIML_ECHON),
             Stmt::Let { target, expr } => self.let_stmt(target, expr),
             Stmt::Call(e) => {
+                // Mark the error count first, exactly as `Stmt::Expr` and `:echo`
+                // do: `:call` is its own ex-command, so a deferred `VIML_RAISE`
+                // inside it (a wrong-arity builtin, say) must compare against
+                // THIS command's snapshot. Without the mark it compared against
+                // whichever statement last took one, so `call abs()` stayed
+                // silent after any earlier error had bumped the counter —
+                // `assert_fails('call abs()', 'E119')` passed alone and failed
+                // when a passing `assert_fails` ran before it.
+                self.emit(Op::CallBuiltin(h::VIML_ERR_MARK, 0));
+                self.emit(Op::Pop);
                 self.expr(e)?;
                 self.emit(Op::Pop);
                 Ok(())
@@ -2737,7 +2756,7 @@ impl Compiler {
                     })
                     .collect();
                 stmts.push((1, Stmt::Return(Some((**body).clone()))));
-                let chunk = compile_function_body(&stmts, self.exc, 0, false)?;
+                let chunk = compile_function_body(&stmts, self.exc, 0, false, false)?;
                 let n_captures = cap_params.len();
                 LAMBDA_FUNCS.with(|f| {
                     f.borrow_mut().push(UserFuncDef {

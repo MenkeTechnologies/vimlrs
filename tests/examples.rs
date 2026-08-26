@@ -65,43 +65,17 @@ fn has_vim_error(line: &str) -> bool {
 /// and printed "all assertions passed". Fixing that (BUGS.md R25-2) made 8
 /// real, long-standing failures visible for the first time; three were wrong
 /// expectations in the example and were corrected against both oracles, and
-/// these five are genuine open gaps.
+/// five were genuine gaps. The list is EMPTY now that those five are closed:
+/// two were engine bugs (`:call` took no error mark, so `assert_fails()` could
+/// not see a raise after any earlier error; a vim9 `:def` slotted a bare name
+/// that is the SCRIPT variable, so every write stayed in the frame), and three
+/// were assertions that pinned one engine's incidentals — json_encode() key
+/// order and absolute `maplist()` counts — which now assert content and deltas.
 ///
 /// An entry that starts PASSING fails this test, so it cannot outlive the gap it
 /// names, and every entry must also be an open item in BUGS.md. A script NOT
 /// listed here must still pass outright — a new failure is a hard failure.
-const KNOWN_OPEN: &[(&str, &str)] = &[
-    (
-        "builtin_arity",
-        "R25-O1: assert_fails() does not observe a builtin arity error (E119/E118) \
-         raised from a `call` statement in this file's context, so four checks \
-         report 'command did not fail'. Both oracles pass this script.",
-    ),
-    (
-        "testing",
-        "R25-O1: same assert_fails() detection gap, for a user function's \
-         argument-count error (`call ParseKV('nope')`). Both oracles pass.",
-    ),
-    (
-        "json",
-        "R25-O2: json_encode() Dict key ORDER. The assertion hardcodes vim 9.2's \
-         order, which vim reproduces and this port does not; nvim 0.12.4 emits \
-         this port's order but with a space after ':' and ','. Oracle-dependent \
-         — the assertion needs rewriting to be order-independent.",
-    ),
-    (
-        "map_commands",
-        "R25-O3: len(maplist()) is 6/5 here against the script's 5/4. Both \
-         oracles disagree with the script AND with each other (nvim 103/102, \
-         vim 12/11 — they count their own default mappings), so the expected \
-         value has to be made relative rather than absolute.",
-    ),
-    (
-        "vim9_script_scope",
-        "R25-O4: a vim9 script-scope counter reads 0 where the script expects 3. \
-         Both oracles pass this script, so this is a real vim9 scoping gap.",
-    ),
-];
+const KNOWN_OPEN: &[(&str, &str)] = &[];
 
 #[test]
 fn examples_self_tests_pass() {
