@@ -5527,3 +5527,57 @@ The differential fuzzer is unchanged by this round: `--count 1500 --seed 7` is
 `ok 1441 / GAPS 0 / PANICS 0`, and `--stmts --count 1200 --seed 11` is `ok 1141 /
 GAPS 11 (6 distinct) / PANICS 0` both before and after — the 11 were confirmed
 pre-existing by re-running them against a stashed `origin/main` build.
+
+## R35-1. The `Vim(cmd):` tag inside `execute()` named the CALLER's command — ✅ FIXED
+
+`execute()` compiles its command string as a program of its own, and the
+per-statement `Vim(cmd):` marker was emitted only when the compiler saw that
+program using exceptions (`compile_program_inner`'s `let exc = uses_exceptions(…)`,
+guarding the `VIML_SET_CMDNAME` emission). The reasoning — nothing else can
+observe the tag — holds for a whole script and fails for a nested one: the
+CALLER's `:try` observes the tag of a command that ran inside `execute()`, even
+though the executed string contains no `:try` of its own.
+
+So the tag kept whatever the enclosing statement had last set:
+
+```text
+try
+  let s:r = execute('echo {}+1')
+catch
+  echo v:exception
+endtry
+" vim 9.2 and nvim 0.12:  Vim(echo):E728: Using a Dictionary as a Number
+" vimlrs (before):        Vim(let):E728:  Using a Dictionary as a Number
+```
+
+`let` came from the `:let` that captured the result. Same for `Vim(echo):E745`
+and `Vim(echo):E117`; a nested `:let` really is `let` and was already right.
+
+A nested program now always carries the tag (`compile_program_nested`). Pinned by
+`tests/parity_cases/execute_command_name_tag.vim`, whose `.expected` was recorded
+from real vim; the case diverges with the change reverted.
+
+Invisible to `fuzz-parity`, which keeps only the E-NUMBER (`enumber()`) and
+discards the `Vim(cmd)` prefix — the same blind spot the frame-name gaps sit in.
+The statement-fuzz gap count is unchanged at seed 62003 for that reason, not
+because nothing moved.
+
+## R35-O1. `:try | … | catch | … | endtry` on ONE bar-separated line does not catch
+
+Reproduced, not fixed. The multi-line form is correct; the bar form aborts the
+script instead of catching:
+
+```text
+$ cat m2.vim
+try | let s:r = execute('echo {}+1') | catch | echo v:exception | endtry
+echo "after"
+
+" vim 9.2: catches, prints the exception, then `after`
+" vimlrs:  prints `E728: Using a Dictionary as a Number` UNCAUGHT and stops,
+"          so `after` never runs and the exit status is 1
+```
+
+The same script written across separate lines catches correctly and prints
+`after`, so this is the bar-separated line splitting rather than `execute()` or
+the exception machinery. Found while writing the R35-1 probe, which originally
+used the bar form and failed for this reason instead of the one it was testing.
