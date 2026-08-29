@@ -1712,8 +1712,19 @@ pub fn regex_matchlist(pat: &str, subject: &str, ic: bool) -> Vec<String> {
 pub fn regex_substitute(subject: &str, pat: &str, sub: &str, flags: &str) -> String {
     let chars: Vec<char> = subject.chars().collect();
     let re = Regex::compile(pat);
-    let global = flags.contains('g');
-    let ic = flags.contains('i');
+    // c: `int do_all = (flags[0] == 'g');` (`do_string_sub`, eval.c) — the FIRST
+    // character and nothing else. Reading it as "contains a g" made
+    // `substitute('aaa','a','X','xg')` and `substitute('aaa','a','X','combining')`
+    // replace every match where Vim replaces one; `'g '`, `'gzz'` and `'ggg'`
+    // are global in both, which is what tells the two readings apart.
+    let global = flags.starts_with('g');
+    // `substitute()` has NO `i` flag: `do_string_sub` sets `regmatch.rm_ic = p_ic`
+    // from the `'ignorecase'` OPTION and never looks at `flags` again. Measured,
+    // `substitute('AAA','a','X','i')` is `'AAA'` in Vim and was `'XAA'` here.
+    // Case-insensitivity comes from the pattern's own `\c` (handled by the regex
+    // compiler) or from `'ignorecase'`, which this path does not consult yet —
+    // Vim's default is `noignorecase`, so `false` is its default behaviour.
+    let ic = false;
     // A `\=`-prefixed replacement is a Vim expression evaluated per match (with
     // `submatch()` available), not literal text.
     let sub_expr = sub.strip_prefix("\\=");
@@ -2000,6 +2011,36 @@ mod tests {
         assert!(regex_match("\\d\\+", "x42y", false));
         assert!(regex_match("[a-c]\\{2}", "xbcx", false));
         assert!(!regex_match("[^0-9]", "5", false));
+    }
+
+    /// `substitute()`'s `{flags}` is read by `do_string_sub` as
+    /// `int do_all = (flags[0] == 'g')` (eval.c) — the FIRST character, and no
+    /// other flag exists. Reading it as "contains a g" replaced every match for
+    /// `'xg'` and for any word ending in g (`'combining'`), and an invented `i`
+    /// flag made `substitute('AAA','a','X','i')` answer `'XAA'` where Vim leaves
+    /// `'AAA'` untouched: case-insensitivity comes from the pattern's `\c` or
+    /// from `'ignorecase'`, never from these flags.
+    ///
+    /// Every expectation was read off `vim 9.2`. Found by `fuzz-parity`
+    /// (seed 91117) as `substitute('0x1f','\_.','X','écombining')`.
+    #[test]
+    fn substitute_flags_are_read_as_vim_reads_them() {
+        // Global iff the flags START with `g` — trailing junk does not matter.
+        for f in ["g", "gg", "ggg", "gx", "g ", "gzz"] {
+            assert_eq!(regex_substitute("aaa", "a", "X", f), "XXX", "flags {f:?}");
+        }
+        // A `g` anywhere but first is not the flag.
+        for f in ["", "xg", " g", "ag", "&g", "G", "combining", "é"] {
+            assert_eq!(regex_substitute("aaa", "a", "X", f), "Xaa", "flags {f:?}");
+        }
+        // There is no `i` flag: these leave an uppercase subject alone.
+        for f in ["i", "gi", "ig"] {
+            assert_eq!(regex_substitute("AAA", "a", "X", f), "AAA", "flags {f:?}");
+        }
+        // The pattern's own `\c` still forces a case-insensitive match, and the
+        // leading `g` still governs how many are replaced.
+        assert_eq!(regex_substitute("AAA", "\\ca", "X", "g"), "XXX");
+        assert_eq!(regex_substitute("AAA", "\\ca", "X", ""), "XAA");
     }
 
     #[test]
