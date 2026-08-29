@@ -4308,7 +4308,8 @@ fn run_source_nested(src: &str) -> Result<(), VimlError> {
     }
     CMD_RECURSE.with(|c| c.set(depth + 1));
     let r = (|| {
-        let prog = crate::compile_viml::compile_program(&crate::viml_parser::parse_program(src)?)?;
+        let prog =
+            crate::compile_viml::compile_program_nested(&crate::viml_parser::parse_program(src)?)?;
         register_prog_funcs(&mut prog.funcs.into_iter());
         stage_deferred_funcs(prog.deferred_funcs);
         run_chunk_nested(prog.main);
@@ -4449,9 +4450,20 @@ fn b_execute(vm: &mut VM, argc: u8) -> Value {
     // EXECUTE_DEPTH switches `:echo` to the leading-newline capture convention.
     let saved = ECHO_SINK.with(|s| s.borrow_mut().replace(Vec::new()));
     EXECUTE_DEPTH.with(|d| d.set(d.get() + 1));
+    // A HARD failure abandons the command line it was parsed on, and the line
+    // `execute()` runs is a NESTED one — `do_cmdline` recursing, not this
+    // command. So the flag is restored across the nested run whatever happens
+    // inside it, including when the error became an exception: the caller's
+    // `:catch` on the same line must still see it. Without this,
+    // `try | let s:r = execute('echo {}+1') | catch | echo v:exception | endtry`
+    // abandoned the OUTER line and exited 1, where vim catches and runs on.
+    // `in_callee` does the same rollback for a user function, but only when no
+    // exception is pending, which is precisely the case that matters here.
+    let saved_hard = HARD_ERR.with(|h| h.get());
     for cmd in cmds {
         let _ = run_source_nested(&cmd);
     }
+    HARD_ERR.with(|h| h.set(saved_hard));
     EXECUTE_DEPTH.with(|d| d.set(d.get() - 1));
     let out = ECHO_SINK.with(|s| s.borrow_mut().take().unwrap_or_default());
     ECHO_SINK.with(|s| *s.borrow_mut() = saved);

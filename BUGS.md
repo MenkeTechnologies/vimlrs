@@ -5528,7 +5528,7 @@ The differential fuzzer is unchanged by this round: `--count 1500 --seed 7` is
 GAPS 11 (6 distinct) / PANICS 0` both before and after — the 11 were confirmed
 pre-existing by re-running them against a stashed `origin/main` build.
 
-## R35-1. The `Vim(cmd):` tag inside `execute()` named the CALLER's command — ✅ FIXED
+## R39-1. The `Vim(cmd):` tag inside `execute()` named the CALLER's command — ✅ FIXED
 
 `execute()` compiles its command string as a program of its own, and the
 per-statement `Vim(cmd):` marker was emitted only when the compiler saw that
@@ -5562,22 +5562,39 @@ discards the `Vim(cmd)` prefix — the same blind spot the frame-name gaps sit i
 The statement-fuzz gap count is unchanged at seed 62003 for that reason, not
 because nothing moved.
 
-## R35-O1. `:try | … | catch | … | endtry` on ONE bar-separated line does not catch
+## R39-2. An error from `execute()` abandoned the caller's command line — ✅ FIXED
 
-Reproduced, not fixed. The multi-line form is correct; the bar form aborts the
-script instead of catching:
+**This corrects what I first wrote here, which was wrong.** The first draft said
+`:try | … | catch | … | endtry` on one bar-separated line does not catch. It does.
+`try | echo {}+1 | catch | echo "c" | endtry` abandons the line in vim 9.2 TOO —
+`{}+1` inside `:echo` is the `eval5` left-operand pre-check, a HARD failure, and
+vim deliberately does not let a `:catch` on that same line see it. That half was
+parity all along; measured with `bash scripts/parity.sh`, which reads vim's own
+output, after an earlier probe of mine had captured nothing from vim and I read
+the empty capture as disagreement.
+
+The real bug was narrower and only involved `execute()`:
 
 ```text
-$ cat m2.vim
+$ cat probe.vim
 try | let s:r = execute('echo {}+1') | catch | echo v:exception | endtry
 echo "after"
 
-" vim 9.2: catches, prints the exception, then `after`
-" vimlrs:  prints `E728: Using a Dictionary as a Number` UNCAUGHT and stops,
-"          so `after` never runs and the exit status is 1
+" vim 9.2:  exit 0, `Vim(echo):E728: …` then `after`
+" vimlrs:   exit 1, `E728: …` uncaught, `after` never runs
 ```
 
-The same script written across separate lines catches correctly and prints
-`after`, so this is the bar-separated line splitting rather than `execute()` or
-the exception machinery. Found while writing the R35-1 probe, which originally
-used the bar form and failed for this reason instead of the one it was testing.
+A hard failure abandons the command line it was PARSED on, and the line
+`execute()` runs is a nested one — `do_cmdline` recursing, not the caller's
+command. `HARD_ERR` was left set by the nested run, so the outer line was
+abandoned as though its own parse had aborted. `b_execute` now restores the flag
+across the nested run unconditionally. `in_callee` already did this for a user
+function, but only when no exception is pending — which is exactly the case that
+matters here, since the nested error has become one.
+
+Scoped by measurement: the direct hard failure still abandons the line (both
+engines), `strlen({})` and an unknown function are still caught on one line, and
+`silent! let g:a = execute('echo {}+1') | echo 'ran'` still runs the `echo`.
+Pinned by `tests/parity_cases/execute_error_is_catchable_on_one_line.vim`, whose
+`.expected` was recorded from real vim; it diverges with the change reverted.
+

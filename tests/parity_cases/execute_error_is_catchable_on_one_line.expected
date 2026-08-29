@@ -1,0 +1,8 @@
+0
+caught-let:Vim(echo):E728: Using a Dictionary as a Number
+caught-echo:Vim(echo):E728: Using a Dictionary as a Number
+caught-strlen:Vim(let):E731: Using a Dictionary as a String
+caught-fn:Vim(let):E117: Unknown function: undefined_fn_xyz
+ran-after-silent
+caught-multi:Vim(echo):E745: Using a List as a Number
+end

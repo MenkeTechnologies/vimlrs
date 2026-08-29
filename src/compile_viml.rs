@@ -345,7 +345,23 @@ fn next_lambda_name() -> String {
 /// Compile a program: top-level statements into `main`, `:function` definitions
 /// into `funcs`.
 pub fn compile_program(stmts: &[(u32, Stmt)]) -> Result<CompiledProgram, VimlError> {
-    compile_program_inner(stmts, true)
+    compile_program_inner(stmts, true, false)
+}
+
+/// Compile a program that runs INSIDE another one — an `execute()` command
+/// string, an `eval()` expression, a nested `:source`.
+///
+/// Identical to [`compile_program`] except that the command-name tag is always
+/// emitted. `compile_program` emits it only when the program itself uses
+/// exceptions, on the reasoning that nothing else can observe it — which is true
+/// of a whole script and false of a nested one: the CALLER's `:try` observes the
+/// tag of a command that ran inside `execute()`, even though the executed string
+/// contains no `:try` of its own. Without this,
+/// `try | echo execute('echo {}+1') | catch | echo v:exception | endtry` reported
+/// `Vim(let):E728` — whatever tag the enclosing statement had last set — where
+/// both vim 9.2 and nvim 0.12 report `Vim(echo):E728`.
+pub fn compile_program_nested(stmts: &[(u32, Stmt)]) -> Result<CompiledProgram, VimlError> {
+    compile_program_inner(stmts, true, true)
 }
 
 /// Compile a program that is only *part* of a script — one statement of a
@@ -358,17 +374,20 @@ pub fn compile_program(stmts: &[(u32, Stmt)]) -> Result<CompiledProgram, VimlErr
 /// slot absorbs it and `g:A` is never written — the next statement's `echo A`
 /// then raised E121 where vim prints 1.
 pub fn compile_script_stmt(stmts: &[(u32, Stmt)]) -> Result<CompiledProgram, VimlError> {
-    compile_program_inner(stmts, false)
+    compile_program_inner(stmts, false, false)
 }
 
 fn compile_program_inner(
     stmts: &[(u32, Stmt)],
     slot_top: bool,
+    nested: bool,
 ) -> Result<CompiledProgram, VimlError> {
     // Exceptions are global: if anything in the program throws or `:try`s, every
     // compilation unit emits unwind checks (so a throw can propagate through a
-    // function call into a caller's `:try`).
-    let exc = uses_exceptions(stmts);
+    // function call into a caller's `:try`). A NESTED program counts as using
+    // them whatever it contains, because the program that ran it may be inside a
+    // `:try` that observes what happens here.
+    let exc = nested || uses_exceptions(stmts);
     LAMBDA_FUNCS.with(|f| f.borrow_mut().clear());
     DEFERRED_FUNCS.with(|f| f.borrow_mut().clear());
     // LAMBDA_COUNTER is NOT reset here. c: `lambda_no` is a `static int` inside
