@@ -129,6 +129,35 @@ early-return dropped it. ✅ FIXED: `string(-0.0)` → `-0.0`.
 
 ## Error-output / edge
 
+### `:let` list-unpack target count — ✅ FIXED
+`:let [a, b] = list` lowered straight to one `VIML_INDEX` per name plus a slice
+for `; rest`, with no count check — which is not the shape of the C, whose
+`ex_let_vars` (`vendor/eval/vars.c:1036-1051`) tests the count and returns FAIL
+*before* assigning anything. Two answers were wrong:
+- `let [u, v] = [1]` → `E684: List index out of range: 1`, where vim raises
+  `E688: More targets than List items` — the index error was an artefact of the
+  lowering, not the diagnostic vim gives.
+- `let [u, v] = [1, 2, 3]` → **no error at all**: `u` and `v` were bound to 1 and
+  2 and the surplus dropped, where vim raises
+  `E687: Less targets than List items`.
+
+`VIML_UNPACK_CHECK` now runs before the stores, transcribing the C's two
+conditions (`semicolon == 0 && var_count < len`, `var_count - semicolon > len`)
+with `var_count` counting the rest name as the C does, and a failed check jumps
+past every store — so `exists()` reports each name unset afterwards, which is
+what vim leaves behind. Covered by `tests/parity_cases/let_unpack_arity.vim`.
+
+### A non-List right-hand side names a different error than vim 9.2
+`let [g, h] = 'ab'` is `E1535: List or Tuple required` on the reference binary
+(VIM 9.2, 2026 Feb 14) and `E714: List required` here — which is what the
+vendored C says (`vars.c:1037`, ported at `src/ported/eval/vars.rs`) and what
+this frontend has always emitted. Tuples postdate the vendored source, so the
+message moved in vim between the two. This is a REFERENCE-VERSION divergence
+rather than a porting mistake, and choosing between them is a decision about
+which vim the port tracks — so it is recorded rather than changed, and the
+`let_unpack_arity` parity case deliberately does not assert it.
+
+
 ### 9. Spurious fallback value printed after a runtime error — ✅ FIXED
 A `VIML_ERR_MARK` op snapshots `did_emsg` before `:echo`/`:echon` evaluate their
 args; the echo prints nothing if it rose (the command aborted on error). The

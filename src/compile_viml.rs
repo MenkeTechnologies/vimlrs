@@ -2365,6 +2365,19 @@ impl Compiler {
                 let tmp = format!("\u{1}unpack_{n}");
                 self.expr(expr)?;
                 self.set_var(&tmp);
+                // The C checks the target count against the list BEFORE it
+                // assigns anything (`ex_let_vars`, vars.c:1036-1051). Lowering
+                // straight to index/slice skipped that: too few items surfaced
+                // as `VIML_INDEX`'s E684 rather than E688, and too many were
+                // accepted silently where vim raises E687.
+                self.get_var(&tmp);
+                self.emit(Op::LoadInt(names.len() as i64 + i64::from(rest.is_some())));
+                self.emit(Op::LoadInt(i64::from(rest.is_some())));
+                self.emit(Op::CallBuiltin(h::VIML_UNPACK_CHECK, 3));
+                // A failed count leaves EVERY name untouched, which is what
+                // `exists()` reports afterwards — the C returns FAIL before its
+                // assignment loop, so jumping past the stores is the same shape.
+                let jf = self.emit(Op::JumpIfFalse(0));
                 for (i, name) in names.iter().enumerate() {
                     self.get_var(&tmp);
                     self.emit(Op::LoadInt(i as i64));
@@ -2378,6 +2391,8 @@ impl Compiler {
                     self.emit(Op::CallBuiltin(h::VIML_SLICE, 3));
                     self.set_var(r);
                 }
+                let after = self.b.current_pos();
+                self.b.patch_jump(jf, after);
                 Ok(())
             }
             LetTarget::Index { base, index, src } => {

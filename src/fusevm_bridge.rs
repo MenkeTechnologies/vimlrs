@@ -266,6 +266,9 @@ pub const VIML_VAR_LOCKED: u16 = 3612;
 /// parsed, so it does not abandon the rest of a `|`-separated line. Stack: the
 /// message. See [`in_command_error`].
 pub const VIML_RAISE_CMD: u16 = 3613;
+/// `:let [a, b; rest] = expr` — the target-count check, before any name is set.
+/// Stack (top-down): `semicolon, var_count, list`. See [`b_unpack_check`].
+pub const VIML_UNPACK_CHECK: u16 = 3614;
 /// `:let &opt op= …` — push `Bool(the C would refuse this operator for this
 /// option's type)`, having reported E734 if so.
 ///
@@ -2791,6 +2794,40 @@ fn b_make_dict(vm: &mut VM, argc: u8) -> Value {
         v_lock: VAR_UNLOCKED,
         vval: v_dict(Some(d)),
     })
+}
+
+/// c: `ex_let_vars` (`vendor/eval/vars.c:1036-1051`) — the two target-count
+/// errors a list unpack raises BEFORE it assigns anything.
+///
+/// The compiled path lowers `:let [a, b] = expr` to one index per name plus a
+/// slice for the rest, which is not what the C does and skipped this check
+/// entirely: too FEW items reached `VIML_INDEX` and came back as
+/// `E684: List index out of range` (the wrong error), and too MANY items were
+/// silently accepted — `let [u, v] = [1, 2, 3]` bound 1 and 2 and said nothing
+/// where vim raises E687. `var_count` counts every target including the rest
+/// name and `semicolon` is 1 when `; rest` is written, exactly as the C names
+/// them, so both conditions transcribe directly.
+fn b_unpack_check(vm: &mut VM, _: u8) -> Value {
+    let semicolon = crate::ported::eval::typval::tv_get_number(&pop_tv(vm));
+    let var_count = crate::ported::eval::typval::tv_get_number(&pop_tv(vm));
+    let list = pop_tv(vm);
+    if list.v_type != VAR_LIST {
+        crate::ported::message::emsg("E714: List required"); // c:1037
+        return Value::Bool(false);
+    }
+    let len = match &list.vval {
+        v_list(Some(l)) => crate::ported::eval::typval::tv_list_len(&l.borrow()),
+        _ => 0,
+    }; // c:1042
+    if semicolon == 0 && var_count < len as i64 {
+        crate::ported::message::emsg("E687: Less targets than List items"); // c:1044
+        return Value::Bool(false);
+    }
+    if var_count - semicolon > len as i64 {
+        crate::ported::message::emsg("E688: More targets than List items"); // c:1048
+        return Value::Bool(false);
+    }
+    Value::Bool(true)
 }
 
 fn b_index(vm: &mut VM, _: u8) -> Value {
@@ -6168,6 +6205,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_MAKE_LIST, b_make_list);
     vm.register_builtin(VIML_MAKE_DICT, b_make_dict);
     vm.register_builtin(VIML_INDEX, b_index);
+    vm.register_builtin(VIML_UNPACK_CHECK, b_unpack_check);
     vm.register_builtin(VIML_IS_DICT, b_is_dict);
     vm.register_builtin(VIML_SLICE, b_slice);
     vm.register_builtin(VIML_SETINDEX, b_setindex);
