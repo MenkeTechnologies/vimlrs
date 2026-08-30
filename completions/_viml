@@ -17,6 +17,8 @@ _viml() {
     '--dump-tokens[print the lexer token stream for the script and exit]' \
     '--dump-ast[print the parsed AST for the script and exit]' \
     '--dump-bytecode[print the compiled fusevm bytecode for the script and exit]' \
+    '--tiers[run it, then report which fusevm tiers took its chunks]' \
+    '--repl[start the interactive REPL]' \
     '*:VimL script file:_files -g "*.vim"'
 }
 
