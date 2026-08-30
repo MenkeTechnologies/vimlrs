@@ -111,12 +111,14 @@ pub fn f_type(argvars: &[typval_T], rettv: &mut typval_T) {
 /// all-alike gives `list<T>`/`dict<T>`, anything else — including an empty
 /// container — gives `<any>`. Verified against vim 9.2:
 ///
-///   typename([])          → list<any>      typename([1,2])    → list<number>
-///   typename([1,'a'])     → list<any>      typename([[1,2]])  → list<list<number>>
-///   typename([[]])        → list<list<any>>  typename({'a':1}) → dict<number>
-///   typename(v:null)      → special        typename(v:none)   → special
+/// ```text
+/// typename([])          → list<any>      typename([1,2])    → list<number>
+/// typename([1,'a'])     → list<any>      typename([[1,2]])  → list<list<number>>
+/// typename([[]])        → list<list<any>>  typename({'a':1}) → dict<number>
+/// typename(v:null)      → special        typename(v:none)   → special
+/// ```
 ///
-/// A Funcref's signature is built by [`func_type_name_of`].
+/// A Funcref's signature is built by the private `type_name_of`.
 pub fn f_typename(argvars: &[typval_T], rettv: &mut typval_T) {
     *rettv = typval_T::from(type_name_of(&argvars[0]));
 }

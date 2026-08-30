@@ -264,7 +264,7 @@ pub const VIML_IS_DICT: u16 = 3056;
 pub const VIML_VAR_LOCKED: u16 = 3612;
 /// Raise a COMMAND-level diagnostic — one the C reports after the argument was
 /// parsed, so it does not abandon the rest of a `|`-separated line. Stack: the
-/// message. See [`in_command_error`].
+/// message. See `in_command_error`.
 pub const VIML_RAISE_CMD: u16 = 3613;
 /// `:let [a, b; rest] = expr` — the target-count check, before any name is set.
 /// Stack (top-down): `semicolon, var_count, list`. Handled by the private
@@ -1712,9 +1712,9 @@ fn in_command_error<T>(f: impl FnOnce() -> T) -> T {
     out
 }
 
-/// Count one error against [`EVAL_FAIL`]. Called by `message::emsg` alongside its
+/// Count one error against `EVAL_FAIL`. Called by `message::emsg` alongside its
 /// own `err_count` bump, so the two counters advance together *except* across a
-/// callee's body, which [`in_callee`] rolls back.
+/// callee's body, which `in_callee` rolls back.
 pub fn note_error() {
     EVAL_FAIL.with(|f| f.set(f.get() + 1));
 }
@@ -7019,7 +7019,7 @@ pub fn dap_frame_names() -> Vec<String> {
 
 /// Live call depth for the debugger: 0 at script level, 1 inside a function
 /// body, 2 one call deeper. This is `funccal_stack`'s own length — the same
-/// value [`call_user_function_raw`] compares against `maxfuncdepth` — not a
+/// value `call_user_function_raw` compares against `maxfuncdepth` — not a
 /// counter the debugger keeps in parallel.
 ///
 /// awkrs's debugger owns a `call_depth: usize` bumped by `enter_sub` /

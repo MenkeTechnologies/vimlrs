@@ -66,7 +66,7 @@ pub enum Tok {
     Str(String),
     /// String literal whose resolved bytes are not valid UTF-8, so they cannot
     /// ride in [`Tok::Str`]. `"\xc3"` is the single byte `c3` in vim (see
-    /// [`Lexer::push_double_escape`]), and a VimL string is allowed to hold it.
+    /// `push_double_escape`), and a VimL string is allowed to hold it.
     BStr(Vec<u8>),
     /// Interpolated string `$'…{expr}…'` / `$"…{expr}…"` — the ordered list of
     /// literal chunks and raw `{expr}` sources, lowered by the parser to a

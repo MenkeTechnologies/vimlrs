@@ -35,8 +35,9 @@ pub mod builtin_docs;
 pub mod cli;
 pub mod compile_viml;
 pub mod dap;
-/// A DAP *client* for driving `viml --dap` — shared by `tests/dap.rs` and the
-/// fuzzer's `--dap` mode. Development tooling, not part of the runtime.
+// Outer docs here would merge with dap_client.rs's own `//!` block and make
+// rustdoc resolve that block's links against the crate root; the module
+// documents itself.
 pub mod dap_client;
 pub mod fusevm_bridge;
 pub mod fusevm_disasm;
@@ -57,7 +58,8 @@ pub mod viml_ast;
 pub mod viml_lexer;
 pub mod viml_parser;
 pub mod viml_regex;
-/// The byte-string backing a VimL `VAR_STRING` (the C's `char_u *`).
+// Outer docs here would merge with vimstr.rs's own `//!` block, resolving its
+// links against the crate root; the module documents itself.
 pub mod vimstr;
 
 pub use fusevm_bridge::{eval_expr, eval_source};

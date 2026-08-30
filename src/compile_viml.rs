@@ -614,7 +614,7 @@ fn uses_exceptions(stmts: &[(u32, Stmt)]) -> bool {
 ///
 /// printed `5` / `done` in vim (and in `viml` without `--dap`), but only `done`
 /// under `--dap` — the `Add(2, 3)` call resolved to nothing. Markers now come
-/// from [`Compiler::compile_stmts`], the one place every statement is compiled,
+/// from `compile_stmts`, the one place every statement is compiled,
 /// so bodies nested in `:if`/`:while`/`:for` and inside `:function` bodies carry
 /// them too — which is what makes a breakpoint inside a function reachable.
 pub fn compile_program_debug(stmts: &[(u32, Stmt)]) -> Result<CompiledProgram, VimlError> {
