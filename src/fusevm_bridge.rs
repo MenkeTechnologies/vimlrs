@@ -267,7 +267,8 @@ pub const VIML_VAR_LOCKED: u16 = 3612;
 /// message. See [`in_command_error`].
 pub const VIML_RAISE_CMD: u16 = 3613;
 /// `:let [a, b; rest] = expr` — the target-count check, before any name is set.
-/// Stack (top-down): `semicolon, var_count, list`. See [`b_unpack_check`].
+/// Stack (top-down): `semicolon, var_count, list`. Handled by the private
+/// `b_unpack_check`, which transcribes the C's two conditions.
 pub const VIML_UNPACK_CHECK: u16 = 3614;
 /// `:let &opt op= …` — push `Bool(the C would refuse this operator for this
 /// option's type)`, having reported E734 if so.
