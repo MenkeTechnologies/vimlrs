@@ -57,7 +57,16 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
+# The oracle is ONE ABSOLUTE BINARY, resolved once. `command -v vim` re-resolves
+# PATH on every call, so a `brew upgrade` (or a shell that rewrites PATH between
+# the record pass and the check pass) would silently swap reference editors
+# mid-run and report the difference as a vimlrs divergence.
 VIM="${VIM:-$(command -v vim || true)}"
+if [ -n "$VIM" ]; then
+  # `realpath` is not on every macOS; perl's Cwd is.
+  VIM_ABS=$(perl -MCwd=abs_path -e 'print abs_path($ARGV[0])' "$VIM" 2>/dev/null || printf '%s' "$VIM")
+  [ -n "$VIM_ABS" ] && VIM="$VIM_ABS"
+fi
 VIML="${VIML:-}"
 QUIET=0
 RERECORD=
@@ -142,12 +151,30 @@ pinned() {
       LC_ALL=C.UTF-8 LANG=C.UTF-8 LC_MESSAGES=C.UTF-8 LANGUAGE= TZ=UTC "$@"
 }
 
+# THE ENTRY POINT, in one place. Every run of the reference editor in this file
+# goes through `$VIM_FLAGS`, and every report prints it — because the entry point
+# decides the answer as much as the binary does. Measured on vim 9.2 (patches
+# 1-1000) by replaying a driver of bare `&option` reads:
+#
+#   dropping `-N`        14 observables move (`&compatible`, `&fileformats`,
+#                        `&backspace`, `&whichwrap`, `&history`, `&viminfo`,
+#                        `&formatoptions`, `&modeline`, `&shortmess`, `&more`,
+#                        `&ruler`, `&showcmd`, `&hlsearch`, `&cedit`)
+#   dropping `-i NONE`   vim READS and WRITES ~/.viminfo, so one run mutates
+#                        what the next one sees
+#
+# A record taken under one vector and checked under another is not a parity
+# result, so the vector is stamped into `$STAMP` at record time and re-asserted
+# on every run (see "entry-point assertions" below).
+VIM_FLAGS="-es -u NONE -i NONE -N"
+
 # run_vim FILE -> prints "status<NL>output"; the status is vim's, taken before
 # the normaliser runs (a pipeline would otherwise report perl's).
 run_vim() {
   local abs raw st
   abs=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
-  raw=$(pinned "$VIM" -es -u NONE -i NONE -N -c "verbose source $abs" -c 'qa!' 2>&1); st=$?
+  # shellcheck disable=SC2086 — VIM_FLAGS is a deliberate word-split flag vector.
+  raw=$(pinned "$VIM" $VIM_FLAGS -c "verbose source $abs" -c 'qa!' 2>&1); st=$?
   printf '%s\n' "$st"
   printf '%s' "$raw" | norm
 }
@@ -160,11 +187,24 @@ run_viml() {
   printf '%s' "$raw"
 }
 
-# The pin is only worth anything if it took. A locale the C library does not
-# have falls back to "C" *silently*, which is the 9-record latin1 state — so
-# assert the one observable that distinguishes them before recording anything.
-enc=$(pinned "$VIM" -es -u NONE -i NONE -N \
-        -c 'verbose echo &encoding' -c 'qa!' 2>&1 | tr -d '\r\n')
+# ── entry-point assertions ──────────────────────────────────────────────────
+#
+# The pin is only worth anything if it TOOK, and each of these three has broken
+# a run silently before:
+#
+#   encoding    a locale the C library does not have falls back to "C" without
+#               saying so, which is the 9-record latin1 state.
+#   compatible  `-N` is what separates the dialect this crate ports from the one
+#               `-u NONE` leaves behind; without it 14 observables move and the
+#               harness cannot see any of them.
+#   ~/.viminfo  the most damaging failure, because it is invisible in the
+#               output: a nocompatible vim without `-i NONE` reads the
+#               developer's registers and histories and writes its own back, so
+#               run N+1 answers differently from run N.
+probe=$(pinned "$VIM" $VIM_FLAGS \
+          -c 'verbose echo &encoding . "|" . &compatible' -c 'qa!' 2>&1 | tr -d '\r\n')
+enc=${probe%%|*}
+compat=${probe##*|}
 if [ "$enc" != "utf-8" ]; then
   echo "the reference editor came up with encoding=$enc, not utf-8: this C library" >&2
   echo "does not have the C.UTF-8 locale, and every byte-level record would be" >&2
@@ -172,6 +212,57 @@ if [ "$enc" != "utf-8" ]; then
   echo "REF_ENV) before running this harness." >&2
   exit 2
 fi
+if [ "$compat" != "0" ]; then
+  echo "the reference editor came up with compatible=$compat under \`$VIM_FLAGS'." >&2
+  echo "That is not the dialect this crate ports, and 14 observables differ" >&2
+  echo "between the two states. The flag vector did not take." >&2
+  exit 2
+fi
+VI_BEFORE=$(ls -l "$HOME/.viminfo" 2>/dev/null || echo none)
+pinned "$VIM" $VIM_FLAGS -c 'qa!' >/dev/null 2>&1
+if [ "$(ls -l "$HOME/.viminfo" 2>/dev/null || echo none)" != "$VI_BEFORE" ]; then
+  echo "the reference editor WROTE ~/.viminfo under \`$VIM_FLAGS'. \`-i NONE' is not" >&2
+  echo "in effect, so every record would carry the developer's registers and" >&2
+  echo "histories and one probe would mutate what the next one sees." >&2
+  exit 2
+fi
+
+# ── the self-report ─────────────────────────────────────────────────────────
+#
+# A differential harness that cannot NAME its own oracle is not one: a reader
+# who cannot relaunch the exact editor a record came from cannot check it.
+VIM_VERSION=$("$VIM" --version 2>/dev/null | head -1)
+VIM_SHA=$( (shasum -a 256 "$VIM" 2>/dev/null || sha256sum "$VIM" 2>/dev/null) | cut -d' ' -f1)
+STAMP="tests/parity_cases/ORACLE"
+report_oracle() {
+  printf "${C}oracle${N}  %s\n" "$VIM"
+  printf "        %s\n" "$VIM_VERSION"
+  printf "        sha256 %s\n" "$VIM_SHA"
+  printf "        argv:  %s %s -c 'verbose source CASE' -c 'qa!'\n" "$VIM" "$VIM_FLAGS"
+  printf "        env:   LC_ALL=C.UTF-8 LANG=C.UTF-8 LC_MESSAGES=C.UTF-8 LANGUAGE= TZ=UTC (VIM/VIMRUNTIME unset)\n"
+  printf "        state: encoding=%s compatible=%s ~/.viminfo untouched\n" "$enc" "$compat"
+}
+
+# The records were taken through ONE entry point, and this says which. A record
+# checked under a different one is not a parity result — so when the stamp and
+# the live editor disagree, say so loudly rather than blaming the code for the
+# difference.
+check_stamp() {
+  [ -f "$STAMP" ] || return 0
+  local want
+  want=$(grep '^flags:' "$STAMP" | cut -d' ' -f2-)
+  if [ -n "$want" ] && [ "$want" != "$VIM_FLAGS" ]; then
+    printf "${R}ENTRY POINT MOVED${N}  records were taken with \`%s', this run uses \`%s'\n" \
+      "$want" "$VIM_FLAGS" >&2
+    return 1
+  fi
+  local wantv
+  wantv=$(grep '^version:' "$STAMP" | cut -d' ' -f2-)
+  if [ -n "$wantv" ] && [ "$wantv" != "$VIM_VERSION" ]; then
+    printf "${D}note: records were taken from %s; this run uses %s${N}\n" "$wantv" "$VIM_VERSION"
+  fi
+  return 0
+}
 
 # ── re-record ───────────────────────────────────────────────────────────────
 #
@@ -186,12 +277,22 @@ if [ -n "$RERECORD" ]; then
     run_vim "$case" >"${case%.vim}.expected"
     n=$((n + 1))
   done
-  printf 'recorded %d case(s) from %s (%s)\n' "$n" "$("$VIM" --version | head -1)" "$RERECORD"
+  {
+    printf 'binary: %s\n' "$VIM"
+    printf 'sha256: %s\n' "$VIM_SHA"
+    printf 'version: %s\n' "$VIM_VERSION"
+    printf 'flags: %s\n' "$VIM_FLAGS"
+    printf 'command: %s %s -c "verbose source CASE" -c "qa!"\n' "$VIM" "$VIM_FLAGS"
+    printf 'env: LC_ALL=C.UTF-8 LANG=C.UTF-8 LC_MESSAGES=C.UTF-8 LANGUAGE= TZ=UTC (VIM/VIMRUNTIME unset)\n'
+  } >"$STAMP"
+  printf 'recorded %d case(s) into %s\n' "$n" "$RERECORD"
+  report_oracle
   exit 0
 fi
 
 # ── one ad-hoc file ─────────────────────────────────────────────────────────
 if [ -f "$TARGET" ]; then
+  report_oracle
   run_vim  "$TARGET" >"$OUT/vim.txt"
   run_viml "$TARGET" >"$OUT/viml.txt"
   if cmp -s "$OUT/vim.txt" "$OUT/viml.txt"; then
@@ -205,9 +306,11 @@ fi
 # ── the corpus ──────────────────────────────────────────────────────────────
 [ -d "$TARGET" ] || { echo "no such case file or directory: $TARGET" >&2; exit 2; }
 
-REF=$("$VIM" --version | head -1)
 SUB=$("$VIML" --version 2>/dev/null | tail -1)
-say "checking $(find "$TARGET" -name '*.vim' | wc -l | tr -d ' ') case(s) against $REF with $SUB"
+say "checking $(find "$TARGET" -name '*.vim' | wc -l | tr -d ' ') case(s) with $SUB against:"
+report_oracle
+check_stamp || exit 2
+echo
 
 PASS=0 FAIL=0 STALE=0
 : >"$OUT/diverge.txt"

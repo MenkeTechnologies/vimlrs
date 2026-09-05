@@ -233,6 +233,25 @@ impl Class {
     }
 }
 
+/// The capture/`\zs`/`\ze` slots a match fills in: `1..=ngroups` are the groups,
+/// then two working slots for the match-start and match-end marks.
+type Groups = Vec<Option<(usize, usize)>>;
+
+/// A match continuation: given where the piece just matched ended and the group
+/// state it left, either accept (`Some(end)` — the whole match is done) or
+/// reject (`None`) and make the caller offer its next alternative.
+type Cont<'a> = &'a mut dyn FnMut(usize, &mut Groups) -> Option<usize>;
+
+/// What a match is being run against: the subject and the case-folding flag.
+///
+/// Bundled because they are the two things every step of the continuation-passing
+/// matcher needs and neither ever changes during one match.
+#[derive(Clone, Copy)]
+struct Subject<'a> {
+    text: &'a [char],
+    ic: bool,
+}
+
 #[derive(Debug, Clone)]
 enum Node {
     Lit(char),
@@ -260,6 +279,24 @@ enum Node {
     /// Appended after a lookbehind's atom to force it to end exactly at the
     /// assertion position.
     CheckPos(usize),
+    /// `\%^` / `\%$` — zero-width, start / end of the FILE (`:help /\%^`).
+    /// This engine matches a single string, which is the whole "file", so they
+    /// are the ends of the subject. `true` = start.
+    FileEnd(bool),
+    /// `\%23c` / `\%>23c` / `\%<23c` — zero-width, the byte column (1-based)
+    /// the match must be at, before, or after (`:help /\%c`).
+    Col(Cmp, u32),
+}
+
+/// How a `\%…c` atom compares the current column against its number.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Cmp {
+    /// `\%23c` — exactly.
+    Eq,
+    /// `\%>23c` — after.
+    Gt,
+    /// `\%<23c` — before.
+    Lt,
 }
 
 /// Which `\@` operator wraps the atom.
@@ -331,10 +368,20 @@ const INF: u32 = u32::MAX;
 /// multi, so `\M\*` has nothing to repeat and Vim rejects it (E866). Both end up as
 /// a magic `*` after translation, so the parser can no longer tell them apart; this is
 /// the only place that still can.
-fn preprocess_magic(pat: &str) -> (String, Option<String>) {
+/// Returns the translated pattern, a parallel "this character was written in
+/// very magic" map (one entry per translated char), and the diagnostic only the
+/// translation can see.
+///
+/// The map exists because Vim's *diagnostics* quote the pattern in the dialect
+/// it was written in: an unclosed group is `E54: Unmatched \(` in magic and
+/// `E54: Unmatched (` under `\v` (c: `EMSG_M_RET_NULL(e_unmatched_str_open, ...)`,
+/// which formats the message with `""` when `reg_magic == MAGIC_ALL` and `"\\"`
+/// otherwise). Translating everything into magic threw that away, so `\v(` was
+/// reported with a backslash that is not in the user's pattern.
+fn preprocess_magic(pat: &str) -> (String, Vec<bool>, Option<(usize, String)>) {
     // Nothing to do for the default (magic) dialect, which is what the parser reads.
     if !pat.contains("\\v") && !pat.contains("\\M") && !pat.contains("\\V") {
-        return (pat.to_string(), None);
+        return (pat.to_string(), vec![false; pat.chars().count()], None);
     }
     let chars: Vec<char> = pat.chars().collect();
     let mut out = String::new();
@@ -342,10 +389,21 @@ fn preprocess_magic(pat: &str) -> (String, Option<String>) {
     let mut mode = Dialect::Magic;
     // Whether an atom has been emitted in the current branch — a multi needs one.
     let mut atom_before = false;
-    let mut err: Option<String> = None;
+    // The diagnostic AND where in the translated pattern it was seen. Vim reports
+    // the first violation in pattern order, and this one is found in a pre-pass
+    // that runs before the parser — so without a position it always won, and
+    // `\M\1\(\*` reported "E866: Misplaced *" where vim reports the earlier
+    // "E65: Illegal back reference". See `compile_uncached`.
+    let mut err: Option<(usize, String)> = None;
     const OPS: &str = "(){}+?=|<>@";
+    // Filled to `out`'s length after each iteration, with the mode that produced
+    // those characters — cheaper and less error-prone than tagging every push.
+    let mut vm: Vec<bool> = Vec::new();
     while i < chars.len() {
         let c = chars[i];
+        let mark = |vm: &mut Vec<bool>, out: &String, mode: Dialect| {
+            vm.resize(out.chars().count(), mode == Dialect::VeryMagic);
+        };
         // A mode switch can appear anywhere in the pattern and applies from there on.
         if c == '\\' {
             match chars.get(i + 1) {
@@ -401,7 +459,10 @@ fn preprocess_magic(pat: &str) -> (String, Option<String>) {
                             // c: "E866: (NFA regexp) Misplaced *" — the nomagic special
                             // star is a multi, and there is nothing before it to repeat.
                             if n == '*' && !atom_before && err.is_none() {
-                                err = Some("E866: (NFA regexp) Misplaced *".to_string());
+                                err = Some((
+                                    out.chars().count(),
+                                    "E866: (NFA regexp) Misplaced *".to_string(),
+                                ));
                             }
                             if n != '*' {
                                 atom_before = true;
@@ -530,8 +591,9 @@ fn preprocess_magic(pat: &str) -> (String, Option<String>) {
                 }
             }
         }
+        mark(&mut vm, &out, mode);
     }
-    (out, err)
+    (out, vm, err)
 }
 
 /// The four pattern dialects (`:help /magic`). The parser reads [`Dialect::Magic`];
@@ -548,6 +610,9 @@ enum Dialect {
 
 struct Parser {
     p: Vec<char>,
+    /// Per-character "written in very magic", parallel to `p`. Only the
+    /// unmatched-group diagnostics read it; see [`preprocess_magic`].
+    vm: Vec<bool>,
     i: usize,
     ngroups: usize,
     forced_ic: Option<bool>,
@@ -561,6 +626,9 @@ struct Parser {
     /// one raises the error rather than quietly finding nothing, which is what this
     /// engine used to do.
     err: Option<String>,
+    /// Where in `p` the recorded violation was seen. Only used to order the
+    /// parser's first error against the pre-pass one; see `compile_uncached`.
+    err_pos: usize,
 }
 
 impl Parser {
@@ -568,6 +636,7 @@ impl Parser {
     fn fail(&mut self, msg: &str) {
         if self.err.is_none() {
             self.err = Some(msg.to_string());
+            self.err_pos = self.i;
         }
     }
 
@@ -666,7 +735,33 @@ impl Parser {
 
     /// An atom plus an optional quantifier. `at_start` enables `^` as anchor.
     fn quantified(&mut self, at_start: bool) -> Option<Atom> {
+        // doc: `:help /star` — "Exception: When "*" is used at the start of the
+        // pattern or just after "^" it matches the star character."
+        //
+        // The start-of-branch half of that rule already falls out of `atom()`:
+        // with no atom to repeat, `*` reaches the literal arm. The `^` half did
+        // not, and the star was attaching to the anchor as a quantifier — so
+        // `^*` meant "zero or more starts of line", which matches the empty
+        // string everywhere and made `match('ab', '^*a')` answer 0 where vim
+        // answers -1, and `matchstr('*ab', '^*a')` answer 'a' where vim answers
+        // '*a'. Both were found by `fuzz-parity --regex`.
+        //
+        // Only the BARE `^` anchor takes the exception: `\_^*` still repeats
+        // (`match('a', '\_^*')` is 0 in vim), which is why the test is on the
+        // source character rather than on the node that comes back.
+        let bare_bol = at_start && self.peek() == Some('^');
         let node = self.atom(at_start)?;
+        if bare_bol && self.peek() == Some('*') {
+            // Leave the `*` for the next `atom()` call, which reads it as the
+            // literal it is. A `\{2}` or `\+` here is NOT covered by the
+            // exception and still applies to the anchor.
+            return Some(Atom {
+                node,
+                min: 1,
+                max: 1,
+                greedy: true,
+            });
+        }
         // `\@` is a multi too (c: `nfa_regpiece` `case Magic('@')`): it wraps the
         // atom just parsed in a lookaround/atomic node instead of repeating it.
         if self.peek() == Some('\\') && self.peek2() == Some('@') {
@@ -848,6 +943,19 @@ impl Parser {
                 self.i += 1;
                 Some(Node::Class(self.bracket()))
             }
+            // `:help /~` — `~` matches the LAST GIVEN SUBSTITUTE STRING, and with
+            // none it is "E33: No previous substitute regular expression". This
+            // interpreter has no `:s` command, so there is never a previous one:
+            // `match('a', '~')` is E33 in vim 9.2 and was -1 here, and
+            // `substitute()` does NOT set it (verified — E33 still follows a
+            // `substitute()` call in the same process). Under `\M`/`\V` a bare
+            // `~` is a literal and `preprocess_magic` has already escaped it, so
+            // only the magic and very-magic spellings reach this arm.
+            '~' => {
+                self.fail("E33: No previous substitute regular expression");
+                self.i += 1;
+                Some(Node::Lit('~'))
+            }
             '\\' => self.escape(),
             _ => {
                 self.i += 1;
@@ -866,7 +974,13 @@ impl Parser {
 
     fn escape(&mut self) -> Option<Node> {
         self.i += 1; // past '\'
-        let c = self.bump()?;
+                     // A trailing lone backslash escapes nothing, and vim reads it as the
+                     // character itself: `match('a\b', '\')` is 1 and `matchstr('a\b', '\')`
+                     // is "\". Returning `None` here ended the branch instead, so the pattern
+                     // became empty and matched at 0.
+        let Some(c) = self.bump() else {
+            return Some(Node::Lit('\\'));
+        };
         self.escaped(c)
     }
 
@@ -917,17 +1031,21 @@ impl Parser {
                 )
             }
             '(' => {
+                // `escape()` has already consumed the `\(`; the opener starts two
+                // characters back, which is what the diagnostic quotes.
+                let open = self.i.saturating_sub(2);
                 let idx = self.ngroups + 1;
                 self.ngroups = idx;
                 let branches = self.alternation();
-                self.close_group();
+                self.close_group(open, false);
                 self.closed.push(idx);
                 Node::Group(branches, Some(idx))
             }
             '%' if self.peek() == Some('(') => {
+                let open = self.i.saturating_sub(2);
                 self.i += 1; // past '('
                 let branches = self.alternation();
-                self.close_group();
+                self.close_group(open, true);
                 Node::Group(branches, None)
             }
             // Codepoint atoms — `\%d123` (decimal), `\%o40` (octal), `\%xff` /
@@ -958,6 +1076,54 @@ impl Parser {
                 match (got > 0).then(|| char::from_u32(n)).flatten() {
                     Some(c) => Node::Lit(c),
                     None => Node::Lit(kind),
+                }
+            }
+            // `\%^` / `\%$` — the start and end of the FILE. In an engine that
+            // matches one string, that string is the file.
+            '%' if self.peek() == Some('^') => {
+                self.i += 1;
+                Node::FileEnd(true)
+            }
+            '%' if self.peek() == Some('$') => {
+                self.i += 1;
+                Node::FileEnd(false)
+            }
+            // `\%23l` / `\%23c` / `\%23v` and their `>`/`<` forms. Only the
+            // COLUMN family is modelled: a line number and a virtual column are
+            // properties of a buffer, and vim answers -1 for `\%1l` against a
+            // string too (`match('ab', '\%1l')` is -1 in vim 9.2), so a node that
+            // never matches is the faithful answer for those.
+            '%' if matches!(self.peek(), Some('<' | '>' | '0'..='9')) => {
+                let cmp = match self.peek() {
+                    Some('>') => {
+                        self.i += 1;
+                        Cmp::Gt
+                    }
+                    Some('<') => {
+                        self.i += 1;
+                        Cmp::Lt
+                    }
+                    _ => Cmp::Eq,
+                };
+                let mut n: u32 = 0;
+                let mut got = 0;
+                while let Some(d) = self.peek().and_then(|c| c.to_digit(10)) {
+                    n = n.saturating_mul(10).saturating_add(d);
+                    self.i += 1;
+                    got += 1;
+                }
+                match (got > 0).then(|| self.peek()).flatten() {
+                    Some('c') => {
+                        self.i += 1;
+                        Node::Col(cmp, n)
+                    }
+                    // `l` (line) and `v` (virtual column) need a buffer; nothing
+                    // in a one-string match can satisfy them.
+                    Some('l' | 'v') => {
+                        self.i += 1;
+                        Node::CheckPos(usize::MAX)
+                    }
+                    _ => Node::Lit('%'),
                 }
             }
             // `\%[atoms]` — optional-sequence atom (matches a greedy prefix).
@@ -1038,12 +1204,27 @@ impl Parser {
         })
     }
 
-    fn close_group(&mut self) {
+    /// Consume the `\)` that closes a group opened at translated index `open`,
+    /// or report the group as unmatched.
+    ///
+    /// The diagnostic quotes the opener the way the USER wrote it, which is what
+    /// Vim does: `\%(` is its own message and its own E-number (`E53`, not
+    /// `E54`), and under `\v` neither form carries a backslash — `\v(` is
+    /// "E54: Unmatched (" and `\v%(` is "E53: Unmatched %(".
+    fn close_group(&mut self, open: usize, noncapturing: bool) {
         if self.peek() == Some('\\') && self.peek2() == Some(')') {
             self.i += 2;
+            return;
+        }
+        let bs = if self.vm.get(open).copied().unwrap_or(false) {
+            ""
         } else {
-            // c: "E54: Unmatched \(" — the group was never closed.
-            self.fail("E54: Unmatched \\(");
+            "\\"
+        };
+        if noncapturing {
+            self.fail(&format!("E53: Unmatched {bs}%("));
+        } else {
+            self.fail(&format!("E54: Unmatched {bs}("));
         }
     }
 
@@ -1062,6 +1243,27 @@ impl Parser {
             match c {
                 ']' => return true,
                 '\\' => j += 2, // an escaped char inside the collection
+                // `[:alpha:]`, `[=a=]` and `[.a.]` are single ITEMS inside a
+                // collection and carry their own `]`, which does not close the
+                // collection. Counting it as the closer made `[[=a=]` — which
+                // vim reads as literal text, because nothing closes the outer
+                // `[` — into a collection of `[ = a =`, so
+                // `matchstr('aa', '[[=a=]')` answered 'a' where vim answers ''.
+                '[' if matches!(self.p.get(j + 1), Some(':' | '=' | '.')) => {
+                    let kind = self.p[j + 1];
+                    let mut k = j + 2;
+                    while self.p.get(k).is_some()
+                        && !(self.p[k] == kind && self.p.get(k + 1) == Some(&']'))
+                    {
+                        k += 1;
+                    }
+                    // Unterminated item: the `[` is just a character again.
+                    j = if self.p.get(k).is_some() {
+                        k + 2
+                    } else {
+                        j + 1
+                    };
+                }
                 _ => j += 1,
             }
         }
@@ -1089,6 +1291,34 @@ impl Parser {
             if c == '[' && self.peek2() == Some(':') {
                 if let Some(mut posix) = self.posix_class() {
                     items.append(&mut posix);
+                    continue;
+                }
+            }
+            // Equivalence class `[=a=]` and collating element `[.a.]`. Both are a
+            // single ITEM that carries its own `]`, so the collection is not
+            // closed by it — `[[=a=]]` is one collection holding the class, and
+            // reading its `]` as the closer left a stray literal `]` in the
+            // pattern (`matchstr('a]b', '[[=a=]]')` answered 'a]' where vim
+            // answers 'a').
+            //
+            // Only the base characters are collected. Vim's `[=a=]` also matches
+            // the accented forms (`á`, `à`, `â`, `ä` — c: `nfa_emit_equi_class`'s
+            // per-letter table); that table is not ported, and the gap is
+            // recorded in BUGS.md rather than approximated here.
+            if c == '[' && matches!(self.peek2(), Some('=' | '.')) {
+                let kind = self.peek2().expect("peeked above");
+                let close = self.i + 2;
+                let mut k = close;
+                while self.p.get(k).is_some()
+                    && !(self.p[k] == kind && self.p.get(k + 1) == Some(&']'))
+                {
+                    k += 1;
+                }
+                if self.p.get(k).is_some() {
+                    for &ch in &self.p[close..k] {
+                        items.push(ClassItem::Ch(ch));
+                    }
+                    self.i = k + 2;
                     continue;
                 }
             }
@@ -1219,29 +1449,46 @@ impl Regex {
     /// The parse itself, plus the diagnostic it would raise. Split out of
     /// [`Self::compile`] so the cache can hold both and replay the second.
     fn compile_uncached(pat: &str) -> (Regex, Option<String>) {
-        let (pat, pre_err) = preprocess_magic(pat);
+        let (pat, vm, pre_err) = preprocess_magic(pat);
         let mut parser = Parser {
             p: pat.chars().collect(),
+            vm,
             i: 0,
             ngroups: 0,
             forced_ic: None,
             closed: Vec::new(),
             err: None,
+            err_pos: 0,
         };
-        if let Some(e) = pre_err {
-            parser.fail(&e);
-        }
         let branches = parser.alternation();
         // `concat` stops at a `\)`, so anything left over at the top level is a `\)`
         // that never had a `\(` — c: "E55: Unmatched \)".
         if parser.i < parser.p.len() {
-            parser.fail("E55: Unmatched \\)");
+            // Same dialect rule as the opener: `\v)` is "E55: Unmatched )".
+            let bs = if parser.vm.get(parser.i).copied().unwrap_or(false) {
+                ""
+            } else {
+                "\\"
+            };
+            parser.fail(&format!("E55: Unmatched {bs})"));
         }
         // An invalid pattern is an *error* in Vim, raised by every function that
         // takes one (`match()`, `substitute()`, `split()`, …) — not a pattern that
         // quietly matches nothing, which is what this engine used to do. Report it
         // and hand back a regex that matches nothing, so each caller falls through to
         // the result it returns once the error has been raised.
+        // Vim reports the FIRST violation in pattern order. The pre-pass sees one
+        // the parser cannot (a nomagic `\*` with nothing to repeat, which the
+        // translation turns into an ordinary magic `*`), but it is not privileged:
+        // when the parser found something earlier in the pattern, that is the
+        // error Vim raises. `\M\1\(\*` is E65, `\M\*\1` is E866, and
+        // `\M\ze\{2}\(\*` is E888 — all three verified against vim 9.2.
+        if let Some((pos, msg)) = pre_err {
+            if parser.err.is_none() || pos < parser.err_pos {
+                parser.err = Some(msg);
+                parser.err_pos = pos;
+            }
+        }
         if let Some(msg) = parser.err {
             return (
                 Regex {
@@ -1338,57 +1585,170 @@ impl Regex {
         None
     }
 
+    /// Match `atoms` in sequence at `pos`, returning where the whole sequence
+    /// ended — the entry point every caller uses.
+    ///
+    /// The work is done by [`Self::atoms_k`], which is continuation-passing. The
+    /// engine used to be written as "each piece returns ONE end position, the
+    /// next piece starts there", and that shape cannot express backtracking INTO
+    /// a group: `\(\_[a-z]\?\)[a-z]` against "12c3" let the group take the `c`,
+    /// found no letter after it, and gave up — where vim retries with the group
+    /// matching empty and answers `c`. The group's end position is a choice
+    /// point like any other, so the continuation has to be able to reject it and
+    /// ask for the next one.
     fn match_atoms(
         &self,
         atoms: &[Atom],
         text: &[char],
         pos: usize,
-        groups: &mut Vec<Option<(usize, usize)>>,
+        groups: &mut Groups,
         ic: bool,
     ) -> Option<usize> {
+        self.atoms_k(atoms, Subject { text, ic }, pos, groups, &mut |p, _g| {
+            Some(p)
+        })
+    }
+
+    /// `atoms` in sequence, handing each way the sequence can end to `k`.
+    ///
+    /// `k` returns `Some(end)` to accept that way and finish, or `None` to reject
+    /// it and make this function try the next one. The final continuation simply
+    /// accepts, so a plain `match_atoms` still takes the first (leftmost,
+    /// greediest) path — the behaviour every existing case was recorded under.
+    fn atoms_k(
+        &self,
+        atoms: &[Atom],
+        subj: Subject,
+        pos: usize,
+        groups: &mut Groups,
+        k: Cont,
+    ) -> Option<usize> {
         let Some((atom, rest)) = atoms.split_first() else {
-            return Some(pos);
+            return k(pos, groups);
         };
-        // Reachable positions after matching `atom` 0,1,2,… times (greedy run).
-        let mut positions = vec![pos];
-        let mut cur = pos;
-        let mut count = 0u32;
-        while count < atom.max {
-            match self.match_one(&atom.node, text, cur, groups, ic) {
-                Some(next) if next > cur => {
-                    positions.push(next);
-                    cur = next;
-                    count += 1;
-                }
-                // Zero-width match. Repeating it is still legal — an empty match can
-                // be taken as many times as `min` demands, it simply never advances —
-                // so satisfy `min` here and then stop, because iterating further would
-                // loop forever without moving. Counting it only *once* meant a group
-                // that can match empty could never reach a `min` above 1:
-                // `match('aaa', '\%(\.\?\)\{2}')` is 0 in Vim (an empty match at 0)
-                // and was -1 here.
-                Some(next) if next == cur => {
-                    while count < atom.min {
-                        positions.push(cur);
-                        count += 1;
+        self.rep_k(atom, subj, pos, 0, groups, &mut |p, g| {
+            self.atoms_k(rest, subj, p, g, k)
+        })
+    }
+
+    /// One quantified atom: try each legal repetition count, in the order the
+    /// quantifier asks for, handing the position after it to `k`.
+    ///
+    /// Greedy tries "one more" before stopping; non-greedy (`\{-…}`) stops
+    /// before trying one more. That ordering is the whole difference between the
+    /// two, and it is now expressed once, here, instead of by materialising every
+    /// reachable position and walking the list forwards or backwards.
+    fn rep_k(
+        &self,
+        atom: &Atom,
+        subj: Subject,
+        pos: usize,
+        count: u32,
+        groups: &mut Groups,
+        k: Cont,
+    ) -> Option<usize> {
+        // Restoring `groups` around a rejected alternative is what keeps a trial
+        // repetition from leaving its captures (and its `\zs`/`\ze` marks)
+        // behind: `matchend('ng', '\(.\ze=\)\?')` is 0 in vim, and was 1 here
+        // because the failed attempt's `\ze` write outlived it.
+        let tracks = node_writes(&atom.node);
+        let saved = if tracks { Some(groups.clone()) } else { None };
+        let restore = |groups: &mut Groups, saved: &Option<Groups>| {
+            if let Some(s) = saved {
+                groups.clone_from(s);
+            }
+        };
+
+        let stop = |groups: &mut Groups, k: Cont| -> Option<usize> {
+            if count < atom.min {
+                return None;
+            }
+            k(pos, groups)
+        };
+        let more = |groups: &mut Groups, k: Cont| -> Option<usize> {
+            if count >= atom.max {
+                return None;
+            }
+            self.one_k(&atom.node, subj, pos, groups, &mut |np, g| {
+                // A zero-width repetition never advances, so asking for another
+                // one after it would not terminate. It still COUNTS: an empty
+                // match satisfies the minimum, which is why
+                // `match('aaa', '\%(\.\?\)\{2}')` is 0 in vim. So take as many
+                // as `min` demands and then continue, instead of recursing.
+                if np == pos {
+                    let taken = count + 1;
+                    if taken < atom.min {
+                        return self.rep_k(atom, subj, np, taken, g, k);
                     }
-                    break;
+                    return k(np, g);
                 }
-                _ => break,
+                self.rep_k(atom, subj, np, count + 1, g, k)
+            })
+        };
+
+        if atom.greedy {
+            if let Some(end) = more(groups, k) {
+                return Some(end);
+            }
+            restore(groups, &saved);
+            if let Some(end) = stop(groups, k) {
+                return Some(end);
+            }
+        } else {
+            if let Some(end) = stop(groups, k) {
+                return Some(end);
+            }
+            restore(groups, &saved);
+            if let Some(end) = more(groups, k) {
+                return Some(end);
             }
         }
-        let max_k = positions.len() - 1;
-        if (max_k as u32) < atom.min {
-            return None;
-        }
-        let order: Vec<usize> = if atom.greedy {
-            (atom.min as usize..=max_k).rev().collect()
-        } else {
-            (atom.min as usize..=max_k).collect()
+        restore(groups, &saved);
+        None
+    }
+
+    /// One occurrence of one node, handing each end position it can produce to
+    /// `k`.
+    ///
+    /// Only a group has more than one: every other node either matches at
+    /// exactly one place or not at all, so it delegates to [`Self::match_one`]
+    /// and calls `k` once.
+    fn one_k(
+        &self,
+        node: &Node,
+        subj: Subject,
+        pos: usize,
+        groups: &mut Groups,
+        k: Cont,
+    ) -> Option<usize> {
+        let Node::Group(branches, capidx) = node else {
+            let end = self.match_one(node, subj.text, pos, groups, subj.ic)?;
+            return k(end, groups);
         };
-        for k in order {
-            if let Some(end) = self.match_atoms(rest, text, positions[k], groups, ic) {
+        // A group that can write nothing needs no snapshot between branches —
+        // `\%(ab\|cd\)` is a plain alternation, and cloning the slot vector for
+        // every attempt at one was pure overhead.
+        let saved = node_writes(node).then(|| groups.clone());
+        for b in branches {
+            if let Some(end) = self.atoms_k(b, subj, pos, groups, &mut |end, g| {
+                let prev = capidx.map(|i| (i, g[i]));
+                if let Some(i) = capidx {
+                    g[*i] = Some((pos, end));
+                }
+                match k(end, g) {
+                    Some(r) => Some(r),
+                    None => {
+                        if let Some((i, old)) = prev {
+                            g[i] = old;
+                        }
+                        None
+                    }
+                }
+            }) {
                 return Some(end);
+            }
+            if let Some(sv) = &saved {
+                groups.clone_from(sv);
             }
         }
         None
@@ -1547,7 +1907,51 @@ impl Regex {
                 }
             }
             Node::CheckPos(target) => (pos == *target).then_some(pos),
+            Node::FileEnd(start) => {
+                if *start { pos == 0 } else { pos == text.len() }.then_some(pos)
+            }
+            // c: `\%23c` is a BYTE column and 1-based, so the first character of
+            // the subject is column 1 — `match('a', '\%1c')` is 0 in vim.
+            Node::Col(cmp, n) => {
+                let col = text[..pos].iter().map(|c| c.len_utf8()).sum::<usize>() as u64 + 1;
+                let n = *n as u64;
+                match cmp {
+                    Cmp::Eq => col == n,
+                    Cmp::Gt => col > n,
+                    Cmp::Lt => col < n,
+                }
+                .then_some(pos)
+            }
         }
+    }
+}
+
+/// Whether matching this node can WRITE to the group/`\zs`/`\ze` slots.
+///
+/// Only these need the snapshot/restore dance in [`Regex::match_atoms`]; a
+/// literal, a class or `.` cannot record anything, and the overwhelming majority
+/// of quantified atoms are one of those.
+fn node_writes(n: &Node) -> bool {
+    match n {
+        Node::Group(branches, cap) => {
+            cap.is_some()
+                || branches
+                    .iter()
+                    .any(|b| b.iter().any(|a| node_writes(&a.node)))
+        }
+        Node::MatchStart | Node::MatchEnd => true,
+        Node::Look(a, _) => node_writes(&a.node),
+        Node::OptSeq(ns) => ns.iter().any(node_writes),
+        Node::Lit(_)
+        | Node::Any
+        | Node::Bol
+        | Node::Eol
+        | Node::WordB(_)
+        | Node::BackRef(_)
+        | Node::Class(_)
+        | Node::CheckPos(_)
+        | Node::FileEnd(_)
+        | Node::Col(..) => false,
     }
 }
 

@@ -103,6 +103,22 @@ const CHUNK_TIMEOUT: Duration = Duration::from_secs(30);
 /// remainder, not the whole corpus.
 const CHUNK: usize = 250;
 
+/// Candidates evaluated per shrink round. Three process spawns cover the whole
+/// batch, so this is a memory/latency bound rather than a per-case cost.
+const SHRINK_BUDGET: usize = 250;
+
+/// Shrink rounds per finding, before the current best is reported as-is.
+const SHRINK_ROUNDS: usize = 12;
+
+/// Wall-clock ceiling per finding. Reduction is a convenience, not a result: a
+/// finding that will not shrink inside this is reported at whatever size it
+/// reached, rather than holding the whole report hostage.
+const SHRINK_TIME: Duration = Duration::from_secs(25);
+
+/// Distinct findings shrunk per run, largest-first is not worth the machinery —
+/// the report simply stops reducing after this many and says so.
+const SHRINK_MAX_FINDINGS: usize = 40;
+
 /// Allocator that enforces [`MEM_LIMIT`] once armed. The parent runs unarmed
 /// (`LIMIT` = `usize::MAX`); a `--child` arms it before evaluating anything.
 struct Budget;
@@ -146,6 +162,232 @@ fn wait_bounded(child: &mut Child, deadline: Duration) -> bool {
                 return false;
             }
         }
+    }
+}
+
+// ─── Oracle entry points ────────────────────────────────────────────────────
+//
+// THE ENTRY POINT DECIDES THE ANSWER, NOT JUST THE BINARY. `vim` is not one
+// oracle; it is one binary with several dialects selected by the flag vector,
+// and the fuzzer compares vimlrs against whichever one it happened to launch.
+//
+// Measured on this machine (vim 9.2, patches 1-1000), replaying a driver of
+// bare `&option` reads through the two entry points this file used to contain:
+//
+//   -es -u NONE -i NONE     -S DRV   (what run_oracle launched)
+//   -es -u NONE -i NONE -N  -S DRV   (what run_program_vim and parity.sh launch)
+//
+// 14 observables move between them — `&compatible` (1 vs 0), `&fileformats`
+// ('' vs 'unix,dos'), `&backspace`, `&whichwrap`, `&history` (0 vs 200),
+// `&viminfo`, `&formatoptions` ('vt' vs 'tcq'), `&modeline`, `&shortmess`,
+// `&more`, `&ruler`, `&showcmd`, `&hlsearch`, and `&cedit` (which renders the
+// same but is a different byte). The driver's own `set cpo&vim` masked
+// 'cpoptions' and nothing else, so the rest were live the whole time.
+//
+// Two entry points inside one fuzzer is worse than either alone: a finding from
+// the expression modes and a finding from `--dap` were being reported against
+// different reference editors under the same name. Both now come from
+// [`Oracle::vim`], which is also parity.sh's vector.
+//
+// The pin is only worth anything if it is CHECKED, so every oracle is
+// preflighted (see [`Oracle::preflight`]) before a corpus is run through it,
+// and the resolved absolute path, version line and full argv are printed. A
+// harness that cannot name its own oracle is not a differential harness.
+
+/// A reference editor, pinned to one absolute binary and one flag vector.
+struct Oracle {
+    /// `vim` / `nvim` — how findings name it.
+    name: &'static str,
+    /// Absolute, symlink-resolved path. `Command::new("vim")` re-resolves PATH
+    /// per spawn, so a `brew upgrade` mid-run would silently swap oracles.
+    bin: PathBuf,
+    /// First line of `--version`, reported with every finding.
+    version: String,
+    /// Everything before the script path. Printed verbatim; see the note above.
+    flags: &'static [&'static str],
+    /// What `&compatible` must read as under `flags`, or `None` when the editor
+    /// has no such option (Neovim). A mismatch aborts the run.
+    want_compatible: Option<i64>,
+}
+
+/// vim's pinned vector. `-es` is silent Ex mode; `-u NONE` skips every vimrc;
+/// `-i NONE` skips viminfo — WITHOUT it a nocompatible vim also *writes*
+/// `~/.viminfo`, so one fuzz run would mutate what the next one reads; `-N` is
+/// 'nocompatible', the dialect this crate ports.
+const VIM_FLAGS: &[&str] = &["-es", "-u", "NONE", "-i", "NONE", "-N", "-S"];
+
+/// Neovim's. `--clean` is "factory defaults": no user config, no plugins, no
+/// shada. `-i NONE` is redundant with it today and stated anyway, so a change in
+/// what `--clean` covers cannot quietly let the developer's shada file in.
+/// Neovim has no compatible mode, which is why vimlrs targets vim's `-N` state.
+const NVIM_FLAGS: &[&str] = &["--headless", "--clean", "-i", "NONE", "-S"];
+
+/// First executable named `prog` on `PATH`, with symlinks resolved.
+fn which(prog: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|d| d.join(prog))
+        .find(|p| p.is_file())
+        .and_then(|p| std::fs::canonicalize(p).ok())
+}
+
+/// The environment both engines run in, pinned — the same set
+/// `scripts/parity.sh`'s `pinned()` gives them, and for the same reasons.
+///
+/// `LC_CTYPE` decides `&encoding`: a non-UTF-8 locale gives `latin1` and every
+/// byte-level answer in the corpus moves with it. `LC_MESSAGES` decides whether
+/// vim's diagnostics are translated — the E-number survives translation, but
+/// `execute()` output in `--stmts` mode does not. `LANGUAGE` is *cleared*, not
+/// set: gettext reads it before `LC_ALL` and it is a colon-list, not a locale.
+/// `VIM`/`VIMRUNTIME` are removed because a developer who exports `VIM` (a
+/// common habit) hands the editor a path that is not a runtime directory, and
+/// it then stops finding `$VIMRUNTIME/lang` — which looks exactly like a
+/// correctly pinned locale while being a broken reference editor.
+fn pin_env(cmd: &mut Command) {
+    for k in ["LC_CTYPE", "LC_COLLATE", "LC_TIME", "VIM", "VIMRUNTIME"] {
+        cmd.env_remove(k);
+    }
+    cmd.env("LC_ALL", "C.UTF-8")
+        .env("LANG", "C.UTF-8")
+        .env("LC_MESSAGES", "C.UTF-8")
+        .env("LANGUAGE", "")
+        .env("TZ", "UTC");
+}
+
+impl Oracle {
+    /// Resolve one engine, or `None` when it is not installed.
+    ///
+    /// `$FUZZ_VIM` / `$FUZZ_NVIM` override the PATH lookup so a specific build
+    /// can be pinned without reordering PATH; the override is reported like any
+    /// other resolution, so it can never be mistaken for the ambient editor.
+    fn resolve(name: &'static str) -> Option<Oracle> {
+        let env_key = if name == "vim" {
+            "FUZZ_VIM"
+        } else {
+            "FUZZ_NVIM"
+        };
+        let bin = match std::env::var_os(env_key) {
+            Some(p) => std::fs::canonicalize(p).ok()?,
+            None => which(name)?,
+        };
+        let mut cmd = Command::new(&bin);
+        pin_env(&mut cmd);
+        let out = cmd.arg("--version").output().ok()?;
+        let version = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .next()
+            .unwrap_or("?")
+            .to_string();
+        Some(Oracle {
+            name,
+            bin,
+            version,
+            flags: if name == "vim" { VIM_FLAGS } else { NVIM_FLAGS },
+            want_compatible: if name == "vim" { Some(0) } else { None },
+        })
+    }
+
+    /// A `Command` for this oracle: the pinned binary, the pinned environment,
+    /// the pinned flag vector, and `script` last (every vector ends in `-S`).
+    fn command(&self, script: &Path) -> Command {
+        let mut cmd = Command::new(&self.bin);
+        pin_env(&mut cmd);
+        cmd.args(self.flags).arg(script);
+        cmd
+    }
+
+    /// The one-line self-report. Printed before any corpus runs, because a
+    /// finding is only reproducible if the reader can relaunch the exact editor
+    /// that produced it.
+    fn describe(&self, script_placeholder: &str) -> String {
+        format!(
+            "  {:<5} {}\n        {}\n        argv: {} {} {}",
+            self.name,
+            self.bin.display(),
+            self.version,
+            self.bin.display(),
+            self.flags.join(" "),
+            script_placeholder
+        )
+    }
+
+    /// Prove the flag vector took, before a single case is judged against it.
+    ///
+    /// Three things are checked, and each one has silently broken a run before:
+    ///
+    /// * `&encoding` is `utf-8` — a libc without `C.UTF-8` falls back to `C`
+    ///   *silently*, and every byte-level answer would then be latin1.
+    /// * `&compatible` is 0 for vim — the 14-observable split above.
+    /// * `~/.viminfo` is not written. This is the flag vector's most damaging
+    ///   failure mode because it is invisible in the output: dropping `-i NONE`
+    ///   makes the reference editor persist registers and histories to the
+    ///   developer's disk, so run N+1 answers differently from run N and neither
+    ///   is the editor's factory behaviour.
+    fn preflight(&self, tmp: &Path) -> Result<(), String> {
+        let script = tmp.join(format!("preflight_{}.vim", self.name));
+        let out = tmp.join(format!("preflight_{}.txt", self.name));
+        let _ = std::fs::remove_file(&out);
+        let body = format!(
+            "call writefile([&encoding, string(&compatible), string(&loadplugins)], {})\nqa!\n",
+            vim_quote(&out.display().to_string())
+        );
+        std::fs::write(&script, body).map_err(|e| e.to_string())?;
+
+        let viminfo = std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".viminfo"));
+        let before = viminfo.as_ref().and_then(|p| p.metadata().ok()).map(|m| {
+            (
+                m.len(),
+                m.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+            )
+        });
+
+        let mut child = self
+            .command(&script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("{} would not start: {e}", self.name))?;
+        if !wait_bounded(&mut child, CHUNK_TIMEOUT) {
+            return Err(format!("{} hung on the preflight probe", self.name));
+        }
+        let text = std::fs::read_to_string(&out)
+            .map_err(|_| format!("{} wrote no preflight answer", self.name))?;
+        let got: Vec<&str> = text.lines().collect();
+        let enc = got.first().copied().unwrap_or("");
+        if enc != "utf-8" {
+            return Err(format!(
+                "{} came up with encoding={enc}, not utf-8 — this C library has no \
+                 C.UTF-8 locale and every byte-level answer would be recorded in latin1",
+                self.name
+            ));
+        }
+        if let Some(want) = self.want_compatible {
+            let compat: i64 = got.get(1).and_then(|s| s.parse().ok()).unwrap_or(-1);
+            if compat != want {
+                return Err(format!(
+                    "{} came up with compatible={compat}, not {want} — the flag vector \
+                     `{}` did not take, and 14 observables differ between the two states",
+                    self.name,
+                    self.flags.join(" ")
+                ));
+            }
+        }
+        let after = viminfo.as_ref().and_then(|p| p.metadata().ok()).map(|m| {
+            (
+                m.len(),
+                m.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+            )
+        });
+        if before != after {
+            return Err(format!(
+                "{} WROTE ~/.viminfo during the preflight probe — `-i NONE` is not in \
+                 effect, so this run would read the developer's registers and histories \
+                 and leave its own behind",
+                self.name
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -810,11 +1052,34 @@ const RX_SUBJECTS: &[&str] = &[
     "'e\u{0301}combining'",
     "'tab\there'",
     "'AbCdEf'",
+    // Subjects made of the pattern language's own metacharacters. Without these
+    // a "literal `*`" rule (`:help /star`) can only ever be exercised by
+    // accident: every subject above answers -1 for the correct reading AND for
+    // the wrong one, so the bug is invisible. `^*` was found this way.
+    "'*'",
+    "'**'",
+    "'*a'",
+    "'a*b'",
+    "'^caret'",
+    "'dollar$'",
+    "'a\\b'",
+    "'[](){}'",
+    "'~tilde~'",
+    "'a|b'",
+    "'\\zs'",
+    // Long enough that a quantifier's backtracking is observable, and a run
+    // where an off-by-one in a `\{n,m}` bound shows up as a different answer
+    // rather than the same one.
+    "repeat('ab', 12)",
+    "repeat('a', 30)",
+    "'aaab'",
+    "'   '",
+    "'0x1f'",
 ];
 
 /// A regex *atom* — the leaves of the grammar.
 fn rx_atom(rng: &mut Rng) -> String {
-    match rng.below(14) {
+    match rng.below(18) {
         0 => rng
             .pick(&["a", "b", "c", "x", "1", "_", "-", ".", "é"])
             .to_string(),
@@ -850,7 +1115,39 @@ fn rx_atom(rng: &mut Rng) -> String {
         10 => rng.pick(&["\\_.", "\\_s", "\\_a", "\\_[a-z]"]).to_string(),
         11 => format!("\\%[{}]", rng.pick(&["abc", "ab", "xyz"])),
         12 => rng.pick(&["\\1", "\\2"]).to_string(),
-        _ => rng.pick(&["\\.", "\\*", "\\[", "\\\\"]).to_string(),
+        // Collections whose *edges* are the interesting part: a `]` first, a
+        // trailing/leading `-`, a backslash class inside, a negated `]`.
+        13 => rng
+            .pick(&[
+                "[]-]",
+                "[^]]",
+                "[a-]",
+                "[-a]",
+                "[\\d]",
+                "[\\]]",
+                "[[=a=]]",
+                "[\\x41-\\x43]",
+            ])
+            .to_string(),
+        // Buffer-position atoms. They parse everywhere and only ever match at
+        // the ends of a one-line subject, which is exactly why they belong here:
+        // an engine that silently drops an unknown `\%…` atom answers the same
+        // as one that honours it, until the atom is the only thing in the branch.
+        14 => rng
+            .pick(&["\\%^", "\\%$", "\\%V", "\\%1l", "\\%>1c", "\\%<3c"])
+            .to_string(),
+        // The magic `~` (last substitute string) and its nomagic spelling.
+        15 => rng.pick(&["~", "\\~"]).to_string(),
+        // A nested optional sequence, which the flat `\%[abc]` above never
+        // produces.
+        16 => format!(
+            "\\%[{}\\({}\\)]",
+            rng.pick(&["a", "x"]),
+            rng.pick(&["b", "y"])
+        ),
+        _ => rng
+            .pick(&["\\.", "\\*", "\\[", "\\\\", "\\/", "\\$", "\\^"])
+            .to_string(),
     }
 }
 
@@ -861,7 +1158,7 @@ fn rx_piece(rng: &mut Rng, depth: u32) -> String {
     } else {
         rx_atom(rng)
     };
-    match rng.below(9) {
+    match rng.below(14) {
         0 => format!("{atom}*"),
         1 => format!("{atom}\\+"),
         2 => format!("{atom}\\?"),
@@ -870,6 +1167,25 @@ fn rx_piece(rng: &mut Rng, depth: u32) -> String {
         5 => format!("{atom}\\{{1,3}}"),
         6 => format!("{atom}\\{{-}}"),
         7 => format!("{atom}\\{{-1,}}"),
+        // The bounds Vim lets you omit on either side, and the empty one.
+        8 => format!("{atom}\\{{,3}}"),
+        9 => format!("{atom}\\{{2,}}"),
+        10 => format!("{atom}\\{{}}"),
+        // LOOKAROUND — `\@=`, `\@!`, `\@<=`, `\@<!`, `\@>`. The whole family
+        // was missing from this grammar while `viml_regex` carries a hand-written
+        // implementation of it (`Node::Look`, `LookOp`), including the bounded
+        // `\@123<=` form whose limit changes how far back the engine may start.
+        11 | 12 => {
+            let atom = if atom.starts_with("\\(") {
+                atom
+            } else {
+                format!("\\({atom}\\)")
+            };
+            format!(
+                "{atom}{}",
+                rng.pick(&["\\@=", "\\@!", "\\@<=", "\\@<!", "\\@>", "\\@3<=", "\\@2<!"])
+            )
+        }
         _ => atom,
     }
 }
@@ -883,6 +1199,13 @@ fn rx_branch(rng: &mut Rng, depth: u32) -> String {
     }
     if rng.chance(1, 4) {
         out.push_str("\\|");
+        out.push_str(&rx_piece(rng, depth));
+    }
+    // `\&` — all concats must match at the same position and the LAST one is
+    // what gets matched. `viml_regex` compiles the leading ones to zero-width
+    // lookaheads (`and_branch`), a rewrite nothing in this grammar reached.
+    if rng.chance(1, 12) {
+        out.push_str("\\&");
         out.push_str(&rx_piece(rng, depth));
     }
     out
@@ -901,6 +1224,15 @@ fn rx_pattern(rng: &mut Rng) -> String {
         4 => "\\M",
         _ => "",
     };
+    // A magic switch applies from where it appears to the end of the pattern, so
+    // one in the MIDDLE is a different code path from one at the front: the
+    // translation into the parser's dialect has to change modes mid-string and
+    // keep the two halves' escaping straight.
+    if rng.chance(1, 6) {
+        let tail = rx_branch(rng, 0);
+        let mid = rng.pick(&["\\v", "\\V", "\\M", "\\m", "\\c", "\\C"]);
+        return format!("'{prefix}{body}{mid}{tail}'");
+    }
     format!("'{prefix}{body}'")
 }
 
@@ -910,7 +1242,7 @@ fn rx_pattern(rng: &mut Rng) -> String {
 fn gen_regex(rng: &mut Rng) -> String {
     let pat = rx_pattern(rng);
     let subj = rng.pick(RX_SUBJECTS);
-    match rng.below(8) {
+    match rng.below(14) {
         0 => format!("match({subj}, {pat})"),
         1 => format!("matchstr({subj}, {pat})"),
         2 => format!("matchend({subj}, {pat})"),
@@ -918,7 +1250,26 @@ fn gen_regex(rng: &mut Rng) -> String {
         4 => format!("substitute({subj}, {pat}, 'X', '')"),
         5 => format!("substitute({subj}, {pat}, 'X', 'g')"),
         6 => format!("substitute({subj}, {pat}, '[&]', 'g')"),
-        _ => format!("split({subj}, {pat})"),
+        7 => format!("split({subj}, {pat})"),
+        // The start/count arguments: `match(s, p, start, count)` restarts the
+        // search and picks the Nth hit, which is a different traversal from the
+        // first-hit path every case above takes.
+        8 => format!(
+            "match({subj}, {pat}, {})",
+            rng.pick(&["0", "1", "2", "-1", "-3"])
+        ),
+        9 => format!("match({subj}, {pat}, 0, {})", rng.pick(&["1", "2", "3"])),
+        // Byte offsets alongside the text — a different accessor over the same
+        // match, and the one place a char-vs-byte index error shows up.
+        10 => format!("matchstrpos({subj}, {pat})"),
+        // `\=` in the replacement evaluates an expression per match, with
+        // `submatch()` for the groups.
+        11 => format!("substitute({subj}, {pat}, '\\=submatch(0)', 'g')"),
+        // `~` in a replacement is the PREVIOUS replacement, and `\U`/`\l` are
+        // the case-folding escapes.
+        12 => format!("substitute({subj}, {pat}, {}, 'g')", rng.pick(REPLS)),
+        // `keepempty` changes whether a zero-width match yields empty fields.
+        _ => format!("split({subj}, {pat}, {})", rng.pick(&["0", "1"])),
     }
 }
 
@@ -962,6 +1313,48 @@ const STMT_SHAPES: &[&str] = &[
     "let x = %E | echo $'v={x}'",
     // while
     "let i = 0 | while i < 3 | let i += 1 | endwhile | echo i",
+    // ── surfaces the table was blind to ───────────────────────────────────
+    // `:const` and the lock family. A `:const` reassignment is an ERROR, and
+    // "which statement in the line still ran" is exactly what the `|`-line
+    // model gets wrong when it gets it wrong.
+    "const c = %E | echo c",
+    "const c = 1 | try | let c = 2 | catch | echo 'E:' . v:exception[:14] | endtry | echo c",
+    "let l = [1,2] | lockvar l | try | call add(l, 3) | catch | echo 'locked' | endtry | echo l",
+    "let l = [1,2] | lockvar l | unlockvar l | call add(l, 3) | echo l",
+    // `:for` over a locked container, and modifying the list being iterated.
+    "let l = [1,2,3] | for x in l | if x == 2 | call remove(l, 0) | endif | endfor | echo l",
+    // Heredoc assignment, including the trim/eval variants.
+    "let t =<< END\nab\ncd\nEND\necho t",
+    "let t =<< trim END\n  ab\n  cd\n  END\necho t",
+    // Exception flow the shape table never reached: a re-`throw` from a catch,
+    // `:finally` running on both paths, a pattern-matched `:catch`, and the
+    // value `v:exception`/`v:throwpoint` carry.
+    "try | throw 'boom' | catch /^boom$/ | echo 'matched' | finally | echo 'fin' | endtry",
+    "try | try | throw 'inner' | finally | echo 'f1' | endtry | catch | echo 'outer:' . v:exception | endtry",
+    "try | echoerr 'bad' | catch | echo v:exception[:6] | endtry",
+    "function! F() \n try \n return 1 \n finally \n echo 'fin' \n endtry \n endfunction \n echo F()",
+    // `:return` with no value, and a function that falls off the end.
+    "function! F() \n return \n endfunction \n echo F()",
+    "function! F() \n let x = %E \n endfunction \n echo F()",
+    // Recursion and a funcref round-trip.
+    "function! F(n) \n return a:n <= 0 ? 0 : a:n + F(a:n - 1) \n endfunction \n echo F(4)",
+    "function! F(a) \n return a:a * 2 \n endfunction \n let R = function('F') \n echo R(3)",
+    "function! F(a) \n return a:a \n endfunction \n echo call('F', [%E])",
+    // A dict function and `self`.
+    "let d = {'n': 2} | function! d.tw() dict \n return self.n * 2 \n endfunction \n echo d.tw()",
+    // Closures that capture a loop variable — the classic binding question.
+    "let fs = [] | for i in range(3) | let fs += [{-> i}] | endfor | echo map(copy(fs), 'v:val()')",
+    // `:elseif` chains and the empty-block forms.
+    "let x = %E | if x is 0 | echo 'a' | elseif x is 1 | echo 'b' | else | echo 'c' | endif",
+    // Nested `execute`, and `:silent!` swallowing an error mid-line.
+    "execute 'echo ' . string(%E)",
+    "silent! call nosuchfunction() | echo 'after'",
+    // `:let` with a nested target and a slice on the right.
+    "let d = {'a': [1,2,3]} | let d.a[1] = %E | echo d",
+    "let l = [1,2,3,4] | echo l[1:2] | let l[1:2] = [8,9] | echo l",
+    // Compound assignment on containers.
+    "let l = [1] | let l += [2] | echo l",
+    "let d = {'a':1} | let d2 = extend(copy(d), {'b':2}) | echo sort(keys(d2))",
 ];
 
 /// One VimL *command*, for use inside a statement snippet.
@@ -1330,26 +1723,45 @@ fn read_oracle(path: &Path, res: &mut [Outcome]) {
 /// (`range(9223372036854775807)` hangs both of them) stays [`Outcome::Missing`]
 /// and the next process resumes right after it — one pathological case costs
 /// one expression, not the rest of the run.
-fn run_oracle(engine: &str, exprs: &[String], tmp: &Path) -> Vec<Outcome> {
-    let script = tmp.join(format!("drv_{engine}.vim"));
-    let out = tmp.join(format!("out_{engine}.txt"));
+///
+/// The editor is [`Oracle`], not a PATH name: one absolute binary, one flag
+/// vector, one pinned environment, preflighted before it is trusted.
+fn run_oracle(o: &Oracle, exprs: &[String], tmp: &Path) -> Vec<Outcome> {
+    run_oracle_until(o, exprs, tmp, None)
+}
+
+/// [`run_oracle`], but abandoning the corpus once `deadline` passes; whatever is
+/// left stays [`Outcome::Missing`].
+///
+/// The shrinker needs this and the main run must not have it. A pathological
+/// candidate costs a whole [`CHUNK_TIMEOUT`] and the loop then RESTARTS after it,
+/// so a batch holding a handful of them costs minutes — and the shrinker builds
+/// batches out of deliberately mangled patterns, which is exactly where the
+/// editor is most likely to wedge. Unbounded, shrinking 46 findings did not
+/// finish in an hour. A missing answer only means a candidate is not accepted as
+/// a reduction, never that a finding is lost.
+fn run_oracle_until(
+    o: &Oracle,
+    exprs: &[String],
+    tmp: &Path,
+    deadline: Option<Instant>,
+) -> Vec<Outcome> {
+    let script = tmp.join(format!("drv_{}.vim", o.name));
+    let out = tmp.join(format!("out_{}.txt", o.name));
     let _ = std::fs::remove_file(&out);
 
     let mut res = vec![Outcome::Missing; exprs.len()];
     let mut next = 0usize;
 
     while next < exprs.len() {
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            break;
+        }
         let hi = (next + CHUNK).min(exprs.len());
         std::fs::write(&script, driver(exprs, next, hi, &out)).expect("write driver");
 
-        let mut cmd = Command::new(engine);
-        if engine == "nvim" {
-            cmd.args(["--headless", "--clean", "-S"]).arg(&script);
-        } else {
-            cmd.args(["-es", "-u", "NONE", "-i", "NONE", "-S"])
-                .arg(&script);
-        }
-        let spawned = cmd
+        let spawned = o
+            .command(&script)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -1367,6 +1779,22 @@ fn run_oracle(engine: &str, exprs: &[String], tmp: &Path) -> Vec<Outcome> {
         };
     }
     res
+}
+
+/// One distinct finding, keyed in the report by its signature.
+///
+/// The rendered strings are what the report prints; the raw [`Outcome`]s are what
+/// the shrinker compares against, since telling "the same finding, smaller" from
+/// "also broken, differently" needs the E-numbers and value/error shapes rather
+/// than their display form.
+struct Finding {
+    hits: usize,
+    expr: String,
+    shown_mine: String,
+    shown_oracles: String,
+    mine: Outcome,
+    nv: Outcome,
+    vi: Outcome,
 }
 
 // ─── Triage ─────────────────────────────────────────────────────────────────
@@ -1439,6 +1867,203 @@ fn signature(expr: &str, v: &Outcome, o: &Outcome) -> String {
         Outcome::Missing => "none".into(),
     };
     format!("{name} [{} vs {}]", kind(v), kind(o))
+}
+
+// ─── Shrinking ──────────────────────────────────────────────────────────────
+//
+// A grammar that nests produces findings nobody can read. This is a real one,
+// verbatim, from `--regex --seed 11`:
+//
+//   matchlist('a1b2c3', '\(\(\\\{-}\_[a-z]\?.\{-}\)\{1,3}\)\{1,3}\(\l\{-}\_[a-z]\{-1,}.\)\+\(^\{2}\(\**\)\+_\{-1,}\|\[\{-1,}\)\?')
+//
+// Every one of those constructs is a suspect and only one of them is the bug, so
+// the first hour of every finding used to be spent deleting pieces by hand and
+// re-running the oracle. That is a mechanical search, and the harness already
+// owns both engines — so it does the search.
+//
+// The reduction is greedy delta-debugging over the case TEXT, which is the one
+// representation every mode shares (expressions, `execute(...)` statements and
+// regex cases are all just strings by the time they reach the oracle):
+//
+//   * delete a window of characters, at halving widths — the coarse cut that
+//     removes whole alternations and argument lists in one step;
+//   * unwrap one `\(…\)` / `\%(…\)` group, keeping its body;
+//   * drop one `\|branch`;
+//   * drop one quantifier (`*`, `\+`, `\?`, `\=`, `\{…}`).
+//
+// A candidate is KEPT only when it still reproduces — when `classify` still
+// calls it `Gap`, `Panic` or `Neither`. That predicate is the whole safety
+// property: a reduction cannot turn a finding into a passing case and call it
+// progress, and it cannot invent a finding either, because the same three-engine
+// triage judges the reduced case as judged the original.
+//
+// Each round evaluates EVERY candidate in one batch through each engine — the
+// oracle driver already takes a list, so a round costs three process spawns, not
+// three per candidate. That is what makes shrinking affordable enough to leave
+// on by default.
+
+/// Candidate reductions of `s`, shortest first. Every one is strictly shorter.
+fn shrink_candidates(s: &str) -> Vec<String> {
+    let b: Vec<char> = s.chars().collect();
+    let n = b.len();
+    let mut out: Vec<String> = Vec::new();
+    let take = |v: &[char]| -> String { v.iter().collect() };
+
+    // Window deletions at halving widths: the coarse cuts first.
+    let mut w = n / 2;
+    while w >= 1 {
+        let mut i = 0;
+        while i < n {
+            let hi = (i + w).min(n);
+            let mut cand = take(&b[..i]);
+            cand.push_str(&take(&b[hi..]));
+            if cand.len() < s.len() {
+                out.push(cand);
+            }
+            i += w;
+        }
+        if w == 1 {
+            break;
+        }
+        w /= 2;
+    }
+
+    // Structural reductions, expressed on the byte string.
+    for open in ["\\(", "\\%("] {
+        let mut from = 0;
+        while let Some(i) = s[from..].find(open).map(|k| k + from) {
+            if let Some(j) = s[i..].find("\\)").map(|k| k + i) {
+                let inner = &s[i + open.len()..j];
+                out.push(format!("{}{}{}", &s[..i], inner, &s[j + 2..]));
+            }
+            from = i + open.len();
+        }
+    }
+    // `a\|b` → `a` and → `b`, one alternation at a time.
+    let mut from = 0;
+    while let Some(i) = s[from..].find("\\|").map(|k| k + from) {
+        out.push(format!("{}{}", &s[..i], &s[i + 2..]));
+        from = i + 2;
+    }
+    // Quantifiers: the suffix, not the atom.
+    for q in [
+        "\\{-1,}", "\\{1,3}", "\\{-}", "\\{2}", "\\+", "\\?", "\\=", "*",
+    ] {
+        let mut from = 0;
+        while let Some(i) = s[from..].find(q).map(|k| k + from) {
+            out.push(format!("{}{}", &s[..i], &s[i + q.len()..]));
+            from = i + q.len();
+        }
+    }
+
+    out.retain(|c| c.len() < s.len() && !c.is_empty() && !c.contains('\n') && !c.contains('\0'));
+    out.sort_by_key(|c| (c.len(), c.clone()));
+    out.dedup();
+    out
+}
+
+/// Does `cand` reproduce the SAME finding as `orig`, rather than merely being
+/// broken in some other way?
+///
+/// This predicate is the shrinker's only safety property, and a loose version of
+/// it is worse than no shrinking at all. The first cut here kept any candidate
+/// `classify` still called actionable, and it reduced eight distinct regex
+/// findings to the single characters `,` `(` `)` `:` `-` — every one of which is
+/// a *syntax* error in one engine and a different one in the other, i.e. a real
+/// but completely unrelated divergence. The reader is then handed a one-character
+/// "repro" for a bug about `\%[…]` inside an alternation.
+///
+/// So the outcome SHAPE has to survive the reduction, engine by engine:
+///
+/// * an error stays the same error — the same E-number in vimlrs and the same
+///   E-number in each oracle (the numbers are the finding; the prose is not);
+/// * a value stays a value, in every engine, and vimlrs must still disagree
+///   with the oracle (the values themselves change as the case shrinks — that
+///   is the point of shrinking);
+/// * a panic stays a panic.
+fn same_finding(
+    orig: (&Outcome, &Outcome, &Outcome),
+    cand: (&Outcome, &Outcome, &Outcome),
+) -> bool {
+    fn shape(a: &Outcome, b: &Outcome) -> bool {
+        match (a, b) {
+            // Same error means the same E-number, not merely "both errored".
+            (Outcome::Err(x), Outcome::Err(y)) => x == y,
+            (Outcome::Val(_), Outcome::Val(_)) => true,
+            (Outcome::Panic(_), Outcome::Panic(_)) => true,
+            (Outcome::Missing, Outcome::Missing) => true,
+            _ => false,
+        }
+    }
+    matches!(
+        classify(cand.0, cand.1, cand.2),
+        Class::Gap | Class::Panic | Class::Neither
+    ) && shape(orig.0, cand.0)
+        && shape(orig.1, cand.1)
+        && shape(orig.2, cand.2)
+}
+
+/// Reduce one finding to a smaller case that still reproduces it.
+///
+/// `budget` caps the candidates evaluated per round; rounds run to a fixpoint or
+/// `max_rounds`, whichever comes first, so a pathological case costs bounded
+/// time rather than the rest of the run.
+///
+/// Returns the reduced case together with the three outcomes MEASURED for it —
+/// never the original's. Reporting a minimized expression next to the outcomes
+/// of the expression it came from would be a fabricated finding: the two agree
+/// on the bug but not on the values, and the values are what the reader checks
+/// the fix against.
+fn shrink(
+    expr: &str,
+    orig: (&Outcome, &Outcome, &Outcome),
+    oracles: &(Option<Oracle>, Option<Oracle>),
+    tmp: &Path,
+    budget: usize,
+    max_rounds: usize,
+) -> (String, Outcome, Outcome, Outcome) {
+    let mut best = (
+        expr.to_string(),
+        orig.0.clone(),
+        orig.1.clone(),
+        orig.2.clone(),
+    );
+    let deadline = Instant::now() + SHRINK_TIME;
+    for _ in 0..max_rounds {
+        if Instant::now() >= deadline {
+            break;
+        }
+        let mut cands = shrink_candidates(&best.0);
+        cands.truncate(budget);
+        if cands.is_empty() {
+            break;
+        }
+        let mine = run_vimlrs(&cands, tmp);
+        let nv = match &oracles.0 {
+            Some(o) => run_oracle_until(o, &cands, tmp, Some(deadline)),
+            None => vec![Outcome::Missing; cands.len()],
+        };
+        let vi = match &oracles.1 {
+            Some(o) => run_oracle_until(o, &cands, tmp, Some(deadline)),
+            None => vec![Outcome::Missing; cands.len()],
+        };
+        // `cands` is sorted shortest-first, so the first hit is the best of the
+        // round. The comparison is against the ORIGINAL finding, not against the
+        // current best, so a chain of twelve reductions cannot walk the case away
+        // from the bug one acceptable step at a time.
+        match (0..cands.len()).find(|&i| same_finding(orig, (&mine[i], &nv[i], &vi[i]))) {
+            Some(i) => {
+                best = (
+                    cands[i].clone(),
+                    mine[i].clone(),
+                    nv[i].clone(),
+                    vi[i].clone(),
+                )
+            }
+            None => break,
+        }
+    }
+    best
 }
 
 // ─── --dap: whole PROGRAMS through a live debug session ─────────────────────
@@ -1750,11 +2375,18 @@ fn run_program_plain(bin: &Path, path: &str) -> Option<String> {
 
 /// Source a whole program in real `vim` and return what it printed, captured
 /// through `:redir` (the form the DAP tests record their reference output with).
-fn run_program_vim(path: &str, tmp: &Path) -> Option<String> {
+fn run_program_vim(vim: &Oracle, path: &str, tmp: &Path) -> Option<String> {
     let out = tmp.join("dap_oracle.txt");
     let _ = std::fs::remove_file(&out);
-    let mut child = Command::new("vim")
-        .args(["-es", "-u", "NONE", "-i", "NONE", "-N"])
+    // The pinned binary and environment, and the pinned flag vector minus its
+    // trailing `-S` — this mode drives the file with `-c` so it can wrap the
+    // source in `:redir`. Everything that selects the DIALECT (`-u NONE`,
+    // `-i NONE`, `-N`) is the same vector `run_oracle` uses, which is the point:
+    // one fuzzer must not report findings against two different editors.
+    let mut cmd = Command::new(&vim.bin);
+    pin_env(&mut cmd);
+    let mut child = cmd
+        .args(vim.flags.iter().filter(|f| **f != "-S"))
         .arg("-c")
         .arg(format!("redir! > {}", out.display()))
         .arg("-c")
@@ -1816,11 +2448,22 @@ fn dap_mode(args: &Args) -> usize {
     let prog_str = prog_path.display().to_string();
 
     let mut rng = Rng(args.seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+    // Same pinned editor, same preflight, same self-report as the expression
+    // modes — this mode used to build its own `Command::new("vim")` argv.
+    let vim = Oracle::resolve("vim").unwrap_or_else(|| {
+        eprintln!("fuzz-parity --dap: no `vim` on PATH — this mode needs the reference editor");
+        std::process::exit(2);
+    });
+    if let Err(e) = vim.preflight(&tmp) {
+        eprintln!("fuzz-parity: oracle preflight failed: {e}");
+        std::process::exit(2);
+    }
     eprintln!(
-        "fuzz-parity --dap: {} programs, seed {} (binary {})",
+        "fuzz-parity --dap: {} programs, seed {} (binary {})\noracle:\n{}",
         args.count,
         args.seed,
-        bin.display()
+        bin.display(),
+        vim.describe("-c 'redir! > OUT' -c 'source PROG' -c 'redir END' -c 'qa!'")
     );
 
     let mut drift = 0usize;
@@ -1878,7 +2521,7 @@ fn dap_mode(args: &Args) -> usize {
             );
         }
 
-        match run_program_vim(&prog_str, &tmp) {
+        match run_program_vim(&vim, &prog_str, &tmp) {
             Some(vo) if !out_lines(&vo).is_empty() => {
                 if out_lines(&vo) != out_lines(&plain) {
                     gap += 1;
@@ -1953,6 +2596,9 @@ struct Args {
     /// session, checking the debug output against the plain run, the backtrace
     /// against the program, and each step verb against the depth it promised.
     dap: bool,
+    /// Reduce every distinct finding to a minimal reproducing case before
+    /// reporting it (on by default; `--no-shrink` turns it off).
+    shrink: bool,
 }
 
 fn parse_args() -> Args {
@@ -1966,6 +2612,7 @@ fn parse_args() -> Args {
         stmts: false,
         regex: false,
         dap: false,
+        shrink: true,
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -1995,6 +2642,7 @@ fn parse_args() -> Args {
             "--stmts" => a.stmts = true,
             "--regex" => a.regex = true,
             "--dap" => a.dap = true,
+            "--no-shrink" => a.shrink = false,
             "--verbose" | "-v" => a.verbose = true,
             "--help" | "-h" => {
                 println!(
@@ -2010,6 +2658,7 @@ fn parse_args() -> Args {
                      --dap         fuzz the DEBUGGER: whole programs through a live\n\
                      \x20              `viml --dap` session (debug output vs plain run,\n\
                      \x20              backtrace shape, step-verb depth contract)\n\
+                     --no-shrink   report findings as generated, without reducing them\n\
                      --corpus FILE append confirmed gaps as `expr<TAB>expected` lines\n\
                      --verbose     list every case, not just divergences"
                 );
@@ -2085,12 +2734,44 @@ fn main() {
     let tmp = std::env::temp_dir().join("vimlrs-fuzz");
     std::fs::create_dir_all(&tmp).expect("tmp dir");
 
+    // Resolve, preflight and REPORT both oracles before a single case is judged
+    // against them. A finding is only reproducible when the reader can relaunch
+    // the exact editor that produced it, so the absolute path, the version line
+    // and the full argv are printed — not the word "vim".
+    let oracles = (Oracle::resolve("nvim"), Oracle::resolve("vim"));
+    eprintln!("fuzz-parity: oracle entry points");
+    for o in [oracles.0.as_ref(), oracles.1.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        eprintln!("{}", o.describe("DRIVER.vim"));
+        if let Err(e) = o.preflight(&tmp) {
+            eprintln!("fuzz-parity: oracle preflight failed: {e}");
+            std::process::exit(2);
+        }
+        eprintln!(
+            "        preflight: ok (encoding=utf-8, compatible pinned, ~/.viminfo untouched)"
+        );
+    }
+    if oracles.0.is_none() {
+        eprintln!("  nvim  NOT INSTALLED — every case will be judged against vim alone");
+    }
+    if oracles.1.is_none() {
+        eprintln!("  vim   NOT INSTALLED — every case will be judged against nvim alone");
+    }
+
     // vimlrs, in child processes (crash/hang/OOM are findings, not lost runs).
     let mine = run_vimlrs(&exprs, &tmp);
 
     // Oracles, chunked processes with the same guards.
-    let nv = run_oracle("nvim", &exprs, &tmp);
-    let vi = run_oracle("vim", &exprs, &tmp);
+    let nv = match &oracles.0 {
+        Some(o) => run_oracle(o, &exprs, &tmp),
+        None => vec![Outcome::Missing; exprs.len()],
+    };
+    let vi = match &oracles.1 {
+        Some(o) => run_oracle(o, &exprs, &tmp),
+        None => vec![Outcome::Missing; exprs.len()],
+    };
     if nv.iter().all(|o| *o == Outcome::Missing) {
         eprintln!("fuzz-parity: nvim produced no results — is it installed?");
     }
@@ -2099,7 +2780,7 @@ fn main() {
     }
 
     // Triage, deduplicated by signature.
-    let mut buckets: BTreeMap<(u8, String), (usize, String, String, String)> = BTreeMap::new();
+    let mut buckets: BTreeMap<(u8, String), Finding> = BTreeMap::new();
     let mut counts = [0usize; 6];
     let mut corpus_lines: Vec<String> = Vec::new();
 
@@ -2143,15 +2824,46 @@ fn main() {
             }
         }
         let sig = signature(e, &mine[i], &nv[i]);
-        let entry = buckets.entry((slot as u8, sig)).or_insert_with(|| {
-            (
-                0,
-                e.clone(),
-                mine[i].show(),
-                format!("nvim={} vim={}", nv[i].show(), vi[i].show()),
-            )
+        let entry = buckets.entry((slot as u8, sig)).or_insert_with(|| Finding {
+            hits: 0,
+            expr: e.clone(),
+            shown_mine: mine[i].show(),
+            shown_oracles: format!("nvim={} vim={}", nv[i].show(), vi[i].show()),
+            mine: mine[i].clone(),
+            nv: nv[i].clone(),
+            vi: vi[i].clone(),
         });
-        entry.0 += 1;
+        entry.hits += 1;
+    }
+
+    // Reduce each DISTINCT finding to a minimal reproducing case. Only the
+    // bucket representatives are shrunk — one per signature, not one per hit —
+    // so the cost is proportional to the number of real bugs, not to the corpus.
+    if args.shrink && !buckets.is_empty() {
+        let n = buckets.len().min(SHRINK_MAX_FINDINGS);
+        eprintln!(
+            "fuzz-parity: shrinking {n} of {} distinct finding(s), <={}s each…",
+            buckets.len(),
+            SHRINK_TIME.as_secs()
+        );
+        for (_, entry) in buckets.iter_mut().take(SHRINK_MAX_FINDINGS) {
+            let (expr, mine, nv, vi) = shrink(
+                &entry.expr,
+                (&entry.mine, &entry.nv, &entry.vi),
+                &oracles,
+                &tmp,
+                SHRINK_BUDGET,
+                SHRINK_ROUNDS,
+            );
+            if expr.len() < entry.expr.len() {
+                entry.expr = expr;
+                entry.shown_mine = mine.show();
+                entry.shown_oracles = format!("nvim={} vim={}", nv.show(), vi.show());
+                entry.mine = mine;
+                entry.nv = nv;
+                entry.vi = vi;
+            }
+        }
     }
 
     // Report.
@@ -2163,15 +2875,15 @@ fn main() {
         _ => "OTHER",
     };
     let mut last = 0u8;
-    for ((slot, sig), (n, expr, got, want)) in &buckets {
+    for ((slot, sig), f) in &buckets {
         if *slot != last {
             println!("\n══ {} ══", heading(*slot));
             last = *slot;
         }
-        println!("\n  {sig}  ×{n}");
-        println!("    expr:   {expr}");
-        println!("    vimlrs: {got}");
-        println!("    oracle: {want}");
+        println!("\n  {sig}  ×{}", f.hits);
+        println!("    expr:   {}", f.expr);
+        println!("    vimlrs: {}", f.shown_mine);
+        println!("    oracle: {}", f.shown_oracles);
     }
 
     println!(

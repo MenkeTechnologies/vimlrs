@@ -5627,3 +5627,246 @@ engines), `strlen({})` and an unknown function are still caught on one line, and
 Pinned by `tests/parity_cases/execute_error_is_catchable_on_one_line.vim`, whose
 `.expected` was recorded from real vim; it diverges with the change reverted.
 
+
+## R40 — the oracle is an ENTRY POINT, and eight regex divergences it then found
+
+The harness change came first and is why the four below exist. `scripts/parity.sh`
+launched vim as `-es -u NONE -i NONE -N`; `fuzz-parity`'s expression oracle
+launched it as `-es -u NONE -i NONE -S` — no `-N`, i.e. COMPATIBLE mode — while
+its own `--dap` oracle used the `-N` vector. One fuzzer, two reference editors,
+both reported under the name "vim".
+
+Measured on this vim by replaying a driver of bare `&option` reads through both
+vectors: 14 observables move — `&compatible` (1 vs 0), `&fileformats` ('' vs
+'unix,dos'), `&backspace`, `&whichwrap`, `&history` (0 vs 200), `&viminfo`,
+`&formatoptions` ('vt' vs 'tcq'), `&modeline`, `&shortmess`, `&more`, `&ruler`,
+`&showcmd`, `&hlsearch`, and `&cedit` (renders the same, different byte). The
+driver's own `set cpo&vim` masked 'cpoptions' and nothing else.
+
+Both oracles are now resolved to one absolute symlink-free path, launched through
+one named flag vector, run under the pinned environment, PREFLIGHTED (`&encoding`
+is `utf-8`, `&compatible` is 0, `~/.viminfo` is byte-identical after a launch),
+and printed before a single case is judged. `scripts/parity.sh` prints binary,
+sha256, version, argv, env and observed state, and stamps them into
+`tests/parity_cases/ORACLE`; a later run whose flag vector differs from the stamp
+stops rather than blaming the code for the difference.
+
+Findings are also reduced before they are reported (see `docs/FUZZING.md`), which
+is how the eight below are one line each instead of the 120-character generated
+patterns they came from. The regex grammar reached the `\@` lookaround family,
+`\&`, the collection edges, the `\%…` position atoms, the omitted-bound
+quantifiers and mid-pattern magic switches this round, against subjects made of
+the pattern language's own metacharacters — R40-1 is invisible without those,
+because every other subject answers the same for the correct reading and the
+wrong one.
+
+## R40-1. `*` just after `^` was a quantifier, not a literal star — ✅ FIXED
+
+`:help /star`, verbatim: *"Exception: When "*" is used at the start of the pattern
+or just after "^" it matches the star character."* The start-of-branch half fell
+out of the parser already (with nothing to repeat, `*` reaches the literal arm);
+the `^` half did not, so `^*` meant "zero or more starts of line" — which matches
+the empty string everywhere.
+
+```text
+                                    vim 9.2   vimlrs (before)
+match('ab', '^*a')                     -1          0
+match('*ab', '^*a')                     0          1
+matchstr('*ab', '^*a')                '*a'        'a'
+match('', '^*$')                       -1          0
+match('**', '^**')                      0     E871: multi follow a multi
+```
+
+`\_^*` is NOT covered by the exception — `match('a', '\_^*')` is 0 in vim, the
+star repeating the atom — so the test is on the source character (`at_start &&
+peek == '^'`), not on the node that comes back. Pinned by
+`tests/parity_cases/regex_star_after_bol.vim`; it diverges with the change
+reverted.
+
+## R40-2. An unmatched group was reported in the wrong dialect, and `\%(` had the wrong E-number — ✅ FIXED
+
+Vim quotes the opener the way the pattern was WRITTEN (c: the `EMSG_M_RET_NULL`
+macro formats `e_unmatched_str_open` with `""` when `reg_magic == MAGIC_ALL` and
+`"\\"` otherwise), and `\%(` carries `E53`, not `E54`. `preprocess_magic`
+translates every dialect into magic for the parser, which threw that away.
+
+```text
+              vim 9.2                      vimlrs (before)
+'\v('    E54: Unmatched (             E54: Unmatched \(
+'\v)'    E55: Unmatched )             E55: Unmatched \)
+'\%('    E53: Unmatched \%(           E54: Unmatched \(
+'\v%('   E53: Unmatched %(            E54: Unmatched \(
+```
+
+`preprocess_magic` now returns a per-character "written in very magic" map
+alongside the translated pattern, and the three diagnostics read it at the
+offending index. Pinned by `tests/parity_cases/regex_unmatched_group_dialect.vim`.
+
+## R40-3. The nomagic misplaced-star error outranked an EARLIER error — ✅ FIXED
+
+`\M\*`/`\V\*` is a multi with nothing to repeat, and only the magic translation
+can still see that (both spellings end up as a plain `*`). The pre-pass that finds
+it ran before the parser and its verdict was registered first — so it won even
+when the parser's own violation sat earlier in the pattern, which is the one vim
+reports.
+
+```text
+                    vim 9.2                             vimlrs (before)
+'\V\1\(\*'      E65: Illegal back reference        E866: Misplaced *
+'\M\ze\{2}\(\*' E888: cannot repeat \ze            E866: Misplaced *
+'\M\*\1'        E866: Misplaced *                  E866: Misplaced *   (already right)
+```
+
+The pre-pass now records WHERE in the translated pattern it saw the star, the
+parser records where it failed, and the earlier one wins. Pinned by
+`tests/parity_cases/regex_error_precedence_is_positional.vim`.
+
+## R40-4. The matcher could not backtrack into a group — ✅ FIXED
+
+The engine was written as "each piece returns ONE end position, the next piece
+starts there". A group's end is a choice point, and that shape cannot express it:
+once a group matched, the end it produced was final, and a failure after it ended
+the attempt instead of retrying the group shorter.
+
+```text
+matchstr('12c3', '\(\_[a-z]\?\)[a-z]')      vim 'c'   vimlrs ''
+matchlist('12c3', '\(\\\{-}\_[a-z]\?\)[a-z]\(^{}\)\?')
+                                            vim ['c', …]  vimlrs []
+split('faz', '\(\([[:alpha:][[:punct:]]\)*\|.\)\_.\{2}\|\(\,}\)*')
+                                            vim []    vimlrs ['f','a','z']
+```
+
+`match_atoms` is now continuation-passing (`atoms_k` / `rep_k` / `one_k`): each
+piece hands every way it can end to a continuation that may reject it and ask for
+the next. Greedy tries "one more" before stopping and non-greedy stops first,
+which is the whole difference between the two expressed once instead of by
+materialising every reachable position and walking the list in one direction or
+the other.
+
+The same rewrite closed a second leak found alongside it: a repetition that was
+tried and then backed off left its captures and its `\zs`/`\ze` marks behind,
+because the greedy run wrote into the shared slot vector and never restored it.
+
+```text
+matchend('ng', '\(.\ze=\)\?')       vim 0     vimlrs 1
+matchend('n=g', '\(.\ze=\)\{-,}')   vim 0     vimlrs 3
+substitute('ng', '\(.\ze=\)\?', 'X', '')
+                                    vim 'Xng' vimlrs 'Xg'
+```
+
+Snapshots are taken only for atoms that can write (`node_writes`), so a
+`Lit`/`Class` run — `.*` over a long subject, the common case — keeps the
+allocation-free path. Pinned by
+`tests/parity_cases/regex_backtracks_into_group.vim`.
+
+## R40-5. `~` in a pattern answered "no match" instead of `E33` — ✅ FIXED
+
+`:help /~` — `~` matches the **last given substitute string**, and with none it
+is `E33: No previous substitute regular expression`. The atom was falling through
+to the literal arm, so `match('a', '~')` was -1 where vim raises.
+
+`substitute()` does not set one: `match('aXc', '~')` still raises E33 in vim
+after a `substitute()` call in the same process. Only the `:s` command sets it,
+and this interpreter has none — so E33 is the answer in every state it can
+reach. Under `\M`/`\V` a bare `~` is an ordinary character, and
+`preprocess_magic` has already escaped it by the time the parser looks, so only
+the magic and very-magic spellings raise.
+
+This was the largest single cluster in the `--regex` report (`~` reached the
+grammar this round): ~100 of 282 gaps at seed 11.
+
+## R40-6. `\%^`, `\%$` and the `\%23c` family were not implemented — ✅ FIXED
+
+`\%^` and `\%$` are the start and end of the FILE, which for an engine matching
+one string are the ends of the subject. `\%23c` is a **byte** column, 1-based,
+with `\%>23c` and `\%<23c` for after/before.
+
+```text
+                              vim 9.2   vimlrs (before)
+match('ab', '\%^')                 0          -1
+match('ab', '\%$')                 2          -1
+matchstr('ab', 'b\%$')           'b'          ''
+match('a', '\%1c')                 0          -1
+match('ab', '\%3c')                2          -1
+match('ab', '\%>1c')               1          -1
+match('a', '.\{}\%1c')             0          -1
+```
+
+`\%23l` and `\%23v` are properties of a buffer; vim answers -1 for them against
+a string (`match('ab', '\%1l')` is -1 in vim 9.2) and so does this, now
+explicitly rather than by accident.
+
+## R40-7. An item's `]` closed the collection around it — ✅ FIXED
+
+`[:alpha:]`, `[=a=]` and `[.a.]` are single items INSIDE a collection and carry
+their own `]`. Both the "is this collection closed at all" scan and the
+collection parser counted that `]` as the closer, so `[[=a=]` — which vim reads
+as literal text, because nothing closes the outer `[` — became a collection of
+`[ = a =`, and `[[=a=]]` became a collection plus a stray literal `]`.
+
+```text
+matchstr('aa', '[[=a=]')    vim ''    vimlrs 'a'
+matchstr('a]b', '[[=a=]]')  vim 'a'   vimlrs 'a]'
+```
+
+## R40-8. A trailing lone backslash ended the branch — ✅ FIXED
+
+A backslash with nothing after it escapes nothing, and vim reads it as the
+character itself. `escape()` returned `None`, which ended the branch and left an
+empty pattern that matches at 0.
+
+```text
+match('a\b', '\')      vim 1     vimlrs 0
+matchstr('a\b', '\')   vim '\'   vimlrs ''
+matchend('', '\')       vim -1    vimlrs 0
+```
+
+R40-5 through R40-8 are pinned together by
+`tests/parity_cases/regex_position_atoms_and_tilde.vim`, which diverges on ten of
+its fourteen lines with the change reverted.
+
+## R40-O2 (open). `[=a=]` matches only the base letter, not its accented forms
+
+Vim's equivalence class matches the letter and every accented form of it (c:
+`nfa_emit_equi_class`, a per-letter table of Unicode variants). The item is now
+PARSED correctly — `[[=a=]]` is one collection holding one class — but only the
+base characters between the delimiters are collected, so:
+
+```text
+matchstr('xa', '[[=a=]]')       vim 'a'      vimlrs 'a'    (fixed by R40-7)
+matchstr('áb', '[[=a=]]')       vim 'á'      vimlrs ''
+matchstr('àâäb', '[[=a=]]\+')   vim 'àâä'    vimlrs ''
+```
+
+Closing it means porting that table rather than approximating it with a
+decomposition rule, which is why it is recorded instead of guessed at.
+
+## R40-O3 (open). Catastrophic backtracking where vim answers instantly
+
+`fuzz-parity --regex` at seed 11 reports one `PANIC: hung (>30s)`:
+
+```text
+split(repeat('a', 30), '\(\%([[:alnum:]]\{}\)\{-}\(\%u0061\)\@>\)\{2,}\(\%(\(\<\)\@=\\\{,3}\)\{2}')
+" vim and nvim: ['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'] immediately
+```
+
+Nested quantified groups over a 30-character subject. Vim carries two engines and
+falls back to the NFA one for exactly this shape; this port has one backtracking
+matcher, and R40-4's continuation rewrite gave it strictly MORE paths to explore
+(that is what fixed the group backtracking). It is a complexity gap, not a
+correctness one, and closing it needs a second matcher rather than a patch.
+
+## R40-O1 (open). `*` right after `\%(` is `E866` in vim and a literal star here
+
+`\(*a\)`, `x\|*a`, `\&*a`, `\v(*a)` and `\v%(*a)` all read the star as a literal
+in vim; `\%(*a\)` and `\%[*a]` raise `E866: (NFA regexp) Misplaced *`. The
+asymmetry is vim's, not a rule this port can derive from `:help /star`, and the
+magic translation folds `\v%(` into `\%(` before the parser sees either — so
+implementing it in the parser would wrongly reject `\v%(*a)`, which vim accepts.
+Left open rather than guessed at.
+
+```text
+match('*a', '\(*a\)')     vim 0                       vimlrs 0
+match('*a', '\%(*a\)')    vim E866: Misplaced *       vimlrs 0
+match('*a', '\v%(*a)')    vim 0                       vimlrs 0
+```

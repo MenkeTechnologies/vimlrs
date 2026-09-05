@@ -1,0 +1,10 @@
+0
+\M\1\* -> E65: Illegal back reference
+\M\*\1 -> E866: (NFA regexp) Misplaced *
+\V\1\(\* -> E65: Illegal back reference
+\V\(\1\* -> E65: Illegal back reference
+\M\ze\{2}\* -> E888: (NFA regexp) cannot repeat \ze
+\M\*\ze\{2} -> E866: (NFA regexp) Misplaced *
+\M\ze\{2}\(\* -> E888: (NFA regexp) cannot repeat \ze
+\M\)\* -> E55: Unmatched \)
+\M\(\* -> E866: (NFA regexp) Misplaced *

@@ -82,7 +82,9 @@ In active development.
 | `map`/`filter`/`sort`/`reduce`/`call` (lists **and** dicts; string-expr + funcref) | Working |
 | Unit-testing framework — `assert_equal`/`assert_notequal`/`assert_true`/`assert_false`/`assert_match`/`assert_notmatch`/`assert_report`/`assert_inrange`/`assert_exception` → `v:errors`, plus `assert_fails` (run a command, require it to error/match a code) — message wording per `eval.lua`. Every entry carries the `prepare_assert_error()` location stamp (`<script>[N]..function F[N]..G line N: `), values render through `ga_concat_shorten_esc` (C0 controls and `\` escaped, a run of >20 identical characters collapsed to `\[c occurs N times]`), and a Dict/Dict `assert_equal` reports only the differing keys plus `- N equal items omitted` | Working — every `examples/*.vim` is a self-test, run in CI via `tests/examples.rs`; `tests/parity_cases/assert_location.vim`, `assert_escape.vim` and `assert_dict_diff.vim` byte-diff the messages against real vim |
 | `eval()` / `execute()` (run-string metaprogramming) | Working |
-| Regex engine — Vim magic dialect, backing `=~`/`matchstr`/`match`/`substitute`/`split`/`:catch` | Working |
+| Regex engine — Vim magic dialect, backing `=~`/`matchstr`/`match`/`substitute`/`split`/`:catch`. The matcher is continuation-passing, so a group's end is a choice point like any other: when what follows a group fails, the group is retried shorter, and a repetition that is tried and then backed off restores the captures and `\zs`/`\ze` marks it wrote | Working — `tests/parity_cases/regex_backtracks_into_group.vim` |
+| Pattern-dialect edges — `*` just after `^` (or at the start of a branch) is a LITERAL star per `:help /star`; an unmatched group is quoted in the dialect it was written in and `\%(` carries its own `E53`; the nomagic misplaced-star `E866` is ordered against the parser's own violation by POSITION, so an earlier `E65`/`E888` wins | Working — `tests/parity_cases/regex_star_after_bol.vim`, `regex_unmatched_group_dialect.vim`, `regex_error_precedence_is_positional.vim` |
+| Position and history atoms — `\%^`/`\%$` (start/end of the subject), `\%23c`/`\%>23c`/`\%<23c` (1-based BYTE column); `\%23l`/`\%23v` need a buffer and answer no-match, as they do in vim against a string. `~` is the last given substitute string and, with none, `E33` — `substitute()` never sets one. `[:alpha:]`/`[=a=]`/`[.a.]` carry their own `]`, which does not close the collection around them, and a trailing lone backslash matches the character itself | Working — `tests/parity_cases/regex_position_atoms_and_tilde.vim` (`[=a=]` matches the base letter only, not vim's accented equivalents — `BUGS.md` R40-O2) |
 | Regex char-class atoms are ASCII-only per `:help /\a` — `\a`/`\l`/`\u`/`\w`/`\d`/`\x` (+ negations) reject multibyte letters/digits (é, À, Ω, ４); only `\<`/`\>` word boundaries follow multibyte `'iskeyword'` — `examples/regex_classes.vim` self-tests vs nvim/vim | Working |
 | Option-derived regex atoms — `\h`/`\H` head-of-word `[A-Za-z_]`, `\o`/`\O` octal `[0-7]` (true negations), plus `\p`/`\i`/`\k` from default `'isprint'`/`'isident'`/`'iskeyword'` with their `\P`/`\I`/`\K` "excluding-digits" forms (NOT set-complements, per `:help /\P`); `\p` is printable incl. multibyte, `\i` is single-byte only (é yes, Ω no), `\k` is multibyte-aware (é, Ω, 中) — `examples/regex_atoms.vim` self-tests vs nvim/vim. `\f`/`\F` (`'isfname'`) skipped: default is platform-conditional in Vim's C source | Working |
 | POSIX bracket classes inside `[...]` per `:help /[:alpha:]` — the standard set (`[:alnum:]` `[:alpha:]` `[:blank:]` `[:cntrl:]` `[:digit:]` `[:graph:]` `[:lower:]` `[:print:]` `[:punct:]` `[:space:]` `[:upper:]` `[:xdigit:]`) plus Vim extras `[:tab:]`/`[:escape:]`/`[:backspace:]`/`[:return:]`/`[:ident:]`/`[:keyword:]`. ASCII-ness is not uniform: `[:alpha:]`/`[:alnum:]`/`[:digit:]`/`[:graph:]`/`[:punct:]` are ASCII-only, but `[:lower:]`/`[:upper:]` are Unicode-case-aware (é/À/Ω match, unlike ASCII-only `\l`/`\u`), `[:print:]` is multibyte-aware, and `[:space:]` includes vertical-tab (0x0B) which `\s` omits. Classes compose with ranges/literals and negate (`[[:digit:]a-f]`, `[^[:alpha:]]`). `[:fname:]` skipped (`'isfname'` platform-conditional, like `\f`) — `examples/regex_posix.vim` self-tests vs nvim/vim | Working |
@@ -174,9 +176,23 @@ Both engines are run with a pinned environment — `LC_ALL=C.UTF-8`,
 language's answer rather than the shell of whoever re-recorded it. Without it,
 `LC_ALL=C` moves every byte-level record (vim falls back to `encoding=latin1`)
 and any locale vim ships a translation for moves every record containing an
-`E<number>`. The harness verifies the pin took (it refuses to run if vim comes up
-with anything but `encoding=utf-8`) because a locale the C library does not have
-falls back to `C` silently.
+`E<number>`.
+
+The oracle is an **entry point**, not a binary: `vim` is one executable with
+several dialects, selected by the flag vector it is launched with. Dropping `-N`
+moves 14 observables (`&compatible`, `&fileformats`, `&backspace`, `&whichwrap`,
+`&history`, `&viminfo`, `&formatoptions`, `&modeline`, `&shortmess`, `&more`,
+`&ruler`, `&showcmd`, `&hlsearch`, `&cedit`); dropping `-i NONE` makes vim read
+**and write** `~/.viminfo`, so one run mutates what the next one sees. So the
+binary is resolved to one absolute symlink-free path, the vector is named in one
+place, and both harnesses print binary, sha256, version, argv, environment and
+observed state before they judge anything. Each run also *proves* the pin took —
+`&encoding` is `utf-8`, `&compatible` is 0, and `~/.viminfo` is byte-identical
+after a launch — and aborts if not, because a locale the C library does not have
+falls back to `C` silently and a flag that did not take is invisible in the
+output. `parity.sh -r` stamps the vector into `tests/parity_cases/ORACLE`, and a
+later run whose vector differs from the stamp stops rather than reporting the
+difference as a vimlrs bug.
 
 On top of that, `fuzz-parity` is a **differential fuzzer**: it generates random
 VimL expressions and runs each through vimlrs *and* through `nvim` *and* `vim`.
@@ -189,8 +205,17 @@ vimlrs matches one of them" is advisory.
 
 ```sh
 cargo run --bin fuzz-parity -- --count 1500 --seed 11
+cargo run --bin fuzz-parity -- --regex --count 1500 --seed 11
+cargo run --bin fuzz-parity -- --stmts --count 1200 --seed 11
 cargo run --bin fuzz-parity -- --dap --count 60 --seed 11
 ```
+
+Every distinct finding is **shrunk** before it is reported — candidate cuts are
+evaluated a whole round at a time, one process per engine per round — and a
+reduction is kept only when it still reproduces *the same* finding: the same
+E-number where the original errored, a value where it valued. The outcomes printed
+beside a shrunk case are the ones measured for that case, never the original's.
+`--no-shrink` reports findings exactly as generated.
 
 `--dap` fuzzes the **debugger** rather than the language: it generates whole
 programs — nested user functions, branches, loops, `|` groups — and drives each

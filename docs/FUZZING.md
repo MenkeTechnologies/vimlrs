@@ -14,6 +14,72 @@ It needs `nvim` and `vim` on `PATH`, so it is a development tool and **never run
 in CI**. What CI runs is `tests/fuzz_corpus.rs`, which replays the fuzzer's
 findings from `tests/data/fuzz_corpus.txt` in-process, with no editor installed.
 
+## The oracle is an ENTRY POINT, not a binary
+
+`vim` is not one reference editor. It is one binary with several dialects, chosen
+by the flag vector it is launched with, and a harness that names only the binary
+does not know which one it measured. Measured on vim 9.2 (patches 1-1000) by
+replaying a driver of bare `&option` reads through two vectors that differ by one
+flag:
+
+| dropped flag | what moves |
+|---|---|
+| `-N` | 14 observables: `&compatible`, `&fileformats`, `&backspace`, `&whichwrap`, `&history`, `&viminfo`, `&formatoptions`, `&modeline`, `&shortmess`, `&more`, `&ruler`, `&showcmd`, `&hlsearch`, `&cedit` |
+| `-i NONE` | vim READS **and WRITES** `~/.viminfo`, so one run mutates what the next one sees |
+
+So both oracles are pinned, and both are printed before a single case is judged:
+
+```text
+fuzz-parity: oracle entry points
+  nvim  /opt/homebrew/Cellar/neovim/0.12.5_1/bin/nvim
+        NVIM v0.12.5
+        argv: …/nvim --headless --clean -i NONE -S DRIVER.vim
+        preflight: ok (encoding=utf-8, compatible pinned, ~/.viminfo untouched)
+  vim   /opt/homebrew/Cellar/vim/9.2.1000/bin/vim
+        VIM - Vi IMproved 9.2 (2026 Feb 14, compiled Aug 23 2026 19:45:42)
+        argv: …/vim -es -u NONE -i NONE -N -S DRIVER.vim
+        preflight: ok (encoding=utf-8, compatible pinned, ~/.viminfo untouched)
+```
+
+The path is absolute and symlink-resolved (`$FUZZ_VIM` / `$FUZZ_NVIM` override the
+PATH lookup), the environment is pinned the way `scripts/parity.sh` pins it
+(`LC_ALL=C.UTF-8`, `LANGUAGE=` cleared, `VIM`/`VIMRUNTIME` removed), and the
+preflight *proves* the vector took: `&encoding` is `utf-8`, `&compatible` is 0,
+and `~/.viminfo` is byte-for-byte unchanged after a launch. Any of the three
+failing aborts the run rather than producing findings against an editor nobody
+named.
+
+`scripts/parity.sh` prints the same report (binary, sha256, version, argv, env,
+observed state) and stamps it into `tests/parity_cases/ORACLE` when it re-records,
+so a record taken through one entry point is never silently checked against
+another.
+
+## Shrinking
+
+A grammar that nests produces findings nobody can read. Every distinct finding is
+therefore reduced before it is reported: candidate cuts (delete a window of
+characters at halving widths, unwrap one `\(…\)`, drop one `\|` branch, drop one
+quantifier) are evaluated a whole round at a time — one process spawn per engine
+per round, not per candidate — and the shortest one that still reproduces wins.
+
+"Still reproduces" is the safety property, and it is strict: the reduced case must
+still be a `GAP`/`PANIC`/`NEITHER` **and** keep the outcome shape engine by engine
+— the same E-number where the original errored, a value where it valued. A looser
+predicate reduced eight distinct regex findings to the single characters `,` `(`
+`)` `:` `-`, each a real but entirely unrelated divergence. The outcomes printed
+with a shrunk case are the ones measured **for the shrunk case**, never the
+original's.
+
+Shrinking is BOUNDED, because reduction is a convenience and not a result: at
+most 40 distinct findings, at most 12 rounds and 25 seconds each, and the oracle
+batches inside a shrink round abandon the rest of a batch once that deadline
+passes. A pathological candidate costs a whole editor timeout and the batch loop
+then restarts after it, so an unbounded shrinker did not finish 46 findings in an
+hour. A missing oracle answer only means a candidate is not accepted as a
+reduction — never that a finding is lost.
+
+`--no-shrink` reports findings exactly as generated.
+
 ## Two modes
 
 `--stmts` fuzzes **statements** instead of expressions. A snippet is wrapped in
@@ -24,10 +90,26 @@ handling, or output shows up as a plain value mismatch.
 This is not a nicety: the two worst bugs found in this interpreter (`:try` not
 catching runtime errors, and a failed `:let` storing a corrupted value) live at the
 statement level, and the expression-only fuzzer could not see either. The generator
-covers user functions (arguments, defaults, varargs, closures), compound and
-unpacking `:let`, indexed and member assignment, `:unlet`, `:for` over Lists, Dicts,
-Strings and Blobs, `break`/`continue`, `while`, `:silent!`, `|`-separated command
-lines, and both `:try` forms.
+covers user functions (arguments, defaults, varargs, closures, recursion, funcref
+round-trips, dict functions and `self`), compound and unpacking `:let`, indexed and
+member assignment, nested targets, list-slice assignment, `:unlet`, `:const` and
+the `:lockvar`/`:unlockvar` family, heredoc assignment (`=<<`, `=<< trim`), `:for`
+over Lists, Dicts, Strings and Blobs, `break`/`continue`, `while`, `:elseif`
+chains, `:silent!`, nested `execute()`, `|`-separated command lines, both `:try`
+forms, `:finally`, pattern-matched `:catch`, re-throw from a catch, and `:echoerr`.
+
+`--regex` fuzzes **patterns**, built from a grammar rather than a fixed list.
+Alongside the atom/quantifier/alternation core it reaches the `\@` lookaround
+family (`\@=`, `\@!`, `\@<=`, `\@<!`, `\@>`, and the bounded `\@3<=`), `\&`
+branch conjunction, the collection edge cases (`[]-]`, `[^]]`, `[[=a=]]`), the
+`\%…` buffer-position atoms, `~`, nested `\%[…]`, the omitted-bound quantifiers
+(`\{,3}`, `\{2,}`, `\{}`), and magic switches in the MIDDLE of a pattern rather
+than only at its front. Subjects include strings made of the pattern language's own
+metacharacters (`*`, `**`, `a\b`, `[](){}`) — without those, a rule like "`*` just
+after `^` is a literal star" is invisible, because every other subject answers the
+same for the correct reading and the wrong one. Each pattern is checked through
+`match`, `matchstr`, `matchend`, `matchlist`, `matchstrpos`, `substitute` (plain,
+`g`, `&`, `\=submatch()`), and `split` (with and without `keepempty`).
 
 ## How a case is judged
 
