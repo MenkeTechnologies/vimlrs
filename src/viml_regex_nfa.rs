@@ -27,6 +27,15 @@
 //! | [`Matcher::recursive_regmatch`] | `recursive_regmatch` |
 //! | [`Matcher::regtry`] | `nfa_regtry` |
 //! | [`nfa_postprocess`] / [`match_follows`] / [`failure_chance`] / [`nfa_max_width`] | same names |
+//! | [`nfa_get_reganch`] / [`nfa_get_regstart`] / [`nfa_get_match_text`] / [`skip_to_start`] / [`find_match_text`] | same names |
+//! | [`exec`] | `nfa_regexec_both` |
+//!
+//! The last two rows are the search fast paths: they let a pattern whose match
+//! must begin with a known character skip whole runs of the subject instead of
+//! starting a thread list at every position, and they let a pattern that is one
+//! literal string answer without the simulation at all. They are what makes the
+//! NFA engine competitive with the backtracker it replaced — see `R42-O1` in
+//! `BUGS.md` for the measurement — and they change no answer.
 //!
 //! Two deliberate, documented departures — both because this crate matches ONE
 //! string rather than a buffer, which is the `REG_MULTI == FALSE` half of every
@@ -169,9 +178,7 @@ struct State {
     val: i32,
 }
 
-/// A compiled NFA. c: `nfa_regprog_T`, minus the fields that only exist to
-/// speed up a buffer search (`regstart`, `reganch`, `match_text`) — those are
-/// pure optimizations and change no answer.
+/// A compiled NFA. c: `nfa_regprog_T`.
 pub struct Prog {
     states: Vec<State>,
     start: usize,
@@ -180,6 +187,18 @@ pub struct Prog {
     has_backref: bool,
     /// Side table for [`NFA_CLASS_OBJ`]; a state's `val` indexes it.
     classes: Vec<Class>,
+    /// c: `nfa_regprog_T.reganch` — every path out of the start state begins
+    /// with `^`/`\%^`, so a match can only begin at column zero.
+    reganch: bool,
+    /// c: `nfa_regprog_T.regstart` — the character every match must begin
+    /// with, or `NUL` (`0`) when there is none. Held as the C's `int` because
+    /// [`nfa_get_regstart`] reads it straight out of `nfa_state_T.c`, where a
+    /// value `> 0` is a literal character and everything else is an opcode.
+    regstart: i32,
+    /// c: `nfa_regprog_T.match_text` — set only when the whole program is one
+    /// literal string, and then holding that string *minus* its first
+    /// character, which is [`Prog::regstart`].
+    match_text: Option<Vec<char>>,
 }
 
 // ── postfix form (c: re2post / nfa_reg / nfa_regbranch / nfa_regconcat / nfa_regpiece / nfa_regatom) ──
@@ -909,6 +928,189 @@ fn nfa_postprocess(states: &mut [State]) {
     }
 }
 
+/// c: `nfa_get_reganch()` — "figure out if the NFA state list starts with an
+/// anchor, must match at start of the line".
+///
+/// The C's switch also lists `NFA_VISUAL` and the `NFA_ZOPEN` family; neither
+/// is compiled by this port ([`Prog::compile`] returns `None` for `\z(` and for
+/// `\%V`), so those arms would be dead code and are not transcribed.
+fn nfa_get_reganch(states: &[State], start: i32, depth: usize) -> bool {
+    let mut p = start;
+
+    if depth > 4 {
+        return false;
+    }
+
+    while p >= 0 {
+        let st = &states[p as usize];
+        match st.c {
+            NFA_BOL | NFA_BOF => return true, // yes!
+
+            NFA_ZSTART | NFA_ZEND | NFA_CURSOR | NFA_NOPEN => p = st.out,
+
+            NFA_SPLIT => {
+                return nfa_get_reganch(states, st.out, depth + 1)
+                    && nfa_get_reganch(states, st.out1, depth + 1)
+            }
+
+            c if (NFA_MOPEN..=NFA_MOPEN9).contains(&c) => p = st.out,
+
+            _ => return false, // noooo
+        }
+    }
+    false
+}
+
+/// c: `nfa_get_regstart()` — "figure out if the NFA state list starts with a
+/// character which must match at start of the match". `0` is the C's `NUL`,
+/// meaning "no such character".
+///
+/// As in [`nfa_get_reganch`], the `NFA_VISUAL` / `NFA_LNUM` / `NFA_VCOL` /
+/// `NFA_MARK` / `NFA_ZOPEN` arms of the C's switch are omitted because this
+/// port never compiles those opcodes.
+fn nfa_get_regstart(states: &[State], start: i32, depth: usize) -> i32 {
+    let mut p = start;
+
+    if depth > 4 {
+        return 0;
+    }
+
+    while p >= 0 {
+        let st = &states[p as usize];
+        match st.c {
+            // all kinds of zero-width matches
+            NFA_BOL | NFA_BOF | NFA_BOW | NFA_EOW | NFA_ZSTART | NFA_ZEND | NFA_CURSOR
+            | NFA_COL | NFA_COL_GT | NFA_COL_LT | NFA_NOPEN => p = st.out,
+
+            NFA_SPLIT => {
+                let c1 = nfa_get_regstart(states, st.out, depth + 1);
+                let c2 = nfa_get_regstart(states, st.out1, depth + 1);
+
+                if c1 == c2 {
+                    return c1; // yes!
+                }
+                return 0;
+            }
+
+            c if (NFA_MOPEN..=NFA_MOPEN9).contains(&c) => p = st.out,
+
+            c => {
+                if c > 0 {
+                    return c; // yes!
+                }
+                return 0;
+            }
+        }
+    }
+    0
+}
+
+/// c: `nfa_get_match_text()` — "figure out if the NFA state list contains just
+/// literal text and nothing else. If so return a string […] with what must
+/// match after regstart."
+///
+/// The C's `len` accumulator only sizes the `alloc()`, so it has no analogue
+/// here.
+fn nfa_get_match_text(states: &[State], start: usize) -> Option<Vec<char>> {
+    if states[start].c != NFA_MOPEN {
+        return None; // just in case
+    }
+    let mut p = states[start].out;
+    while p >= 0 && states[p as usize].c > 0 {
+        p = states[p as usize].out;
+    }
+    if p < 0 || states[p as usize].c != NFA_MCLOSE {
+        return None;
+    }
+    let after = states[p as usize].out;
+    if after < 0 || states[after as usize].c != NFA_MATCH {
+        return None;
+    }
+
+    // c: "p = start->out->out;  // skip first char, it goes into regstart".
+    // `start->out` is known non-NULL: the walk above dereferenced it.
+    let mut p = states[states[start].out as usize].out;
+    let mut ret = Vec::new();
+    while p >= 0 && states[p as usize].c > 0 {
+        ret.push(char::from_u32(states[p as usize].c as u32).unwrap_or('\0'));
+        p = states[p as usize].out;
+    }
+    Some(ret)
+}
+
+/// c: `skip_to_start()` — "skip until the char `c` we know a match must start
+/// with", returning the new column or `None` for the C's `FAIL`.
+///
+/// The C picks between `vim_strbyte()` and `cstrchr()`; this port has one
+/// subject representation (`&[char]`) and one case-equality rule
+/// ([`super::char_eq`]), and it must be *that* rule so the scan can never skip
+/// a position the character-matching arm of [`Matcher::regmatch`] would have
+/// accepted.
+fn skip_to_start(text: &[char], c: i32, col: usize, ic: bool) -> Option<usize> {
+    let needle = char::from_u32(c as u32)?;
+    text.iter()
+        .skip(col)
+        .position(|&t| super::char_eq(t, needle, ic))
+        .map(|i| col + i)
+}
+
+/// c: `find_match_text()` — "check for a match with match_text. Called after
+/// `skip_to_start()` has found regstart." Returns the match bounds, or `None`
+/// for the C's `0L`; `*startcol` is written through in both cases, as in the C.
+///
+/// Two of the C's concerns do not survive the change of subject representation
+/// and one does not exist in this port:
+///
+/// * `len2` is a byte length in the C, which is why it needs the `utf_fold()`
+///   correction for case-folded text whose folded form is shorter. Here it
+///   counts characters, where `regstart` is always exactly one.
+/// * `cleanup_subexpr()` and the `reg_startp`/`reg_endp` writes become the
+///   returned pair: `match_text` is only ever set for a program that is one
+///   literal string, which has no subexpressions past `\0`.
+/// * `rex.reg_icombine` (`\Z`) is always false — this port has no `\Z`.
+fn find_match_text(
+    text: &[char],
+    startcol: &mut usize,
+    regstart: i32,
+    match_text: &[char],
+    ic: bool,
+) -> Option<(usize, usize)> {
+    let mut col = *startcol;
+
+    loop {
+        let mut is_match = true;
+        // skip regstart
+        let mut len2 = 1usize;
+        for &c1 in match_text {
+            let c2 = text.get(col + len2).copied().unwrap_or('\0');
+            if !super::char_eq(c1, c2, ic) {
+                is_match = false;
+                break;
+            }
+            len2 += 1;
+        }
+        if is_match
+            // check that no composing char follows
+            && !text
+                .get(col + len2)
+                .is_some_and(|&c| utf_iscomposing(c))
+        {
+            *startcol = col;
+            return Some((col, col + len2));
+        }
+
+        // Try finding regstart after the current match.
+        col += 1; // skip regstart
+        match skip_to_start(text, regstart, col, ic) {
+            Some(c) => col = c,
+            None => break,
+        }
+    }
+
+    *startcol = col;
+    None
+}
+
 impl Prog {
     /// c: `nfa_regcomp()`. `None` means the NFA engine bailed and the caller
     /// must use the backtracker — which is exactly what vim's automatic engine
@@ -928,6 +1130,11 @@ impl Prog {
         post.emit(NFA_MOPEN);
         let (mut states, start) = post2nfa(&post.post)?;
         nfa_postprocess(&mut states);
+        // c: the three lines after `nfa_postprocess(prog)` in `nfa_regcomp()`,
+        // in that order.
+        let reganch = nfa_get_reganch(&states, start as i32, 0);
+        let regstart = nfa_get_regstart(&states, start as i32, 0);
+        let match_text = nfa_get_match_text(&states, start);
         Some(Prog {
             states,
             start,
@@ -935,6 +1142,9 @@ impl Prog {
             has_zend: post.has_zend,
             has_backref: post.has_backref,
             classes: post.classes,
+            reganch,
+            regstart,
+            match_text,
         })
     }
 }
@@ -2032,11 +2242,37 @@ impl<'a> Matcher<'a> {
                     && ((toplevel && clen != 0) || self.nfa_endp.is_some_and(|e| self.input < e))
                 {
                     if toplevel {
-                        m.list[0].0 = Pos::at(self.input + clen);
-                        let out = self.prog.states[start].out;
-                        let (next, _) = split_lists(&mut list, nextidx);
-                        if !self.addstate(next, out, m, None, clen as i32) {
-                            return self.expensive();
+                        // Inline optimized code for addstate() if we know the
+                        // state is the first MOPEN.
+                        let mut add = true;
+                        if self.prog.regstart != 0 && clen != 0 {
+                            if list[nextidx].t.is_empty() {
+                                // Nextlist is empty, we can skip ahead to the
+                                // character that must appear at the start.
+                                let col = self.input + clen;
+                                match skip_to_start(self.text, self.prog.regstart, col, self.ic) {
+                                    Some(c) => self.input = c - clen,
+                                    None => break,
+                                }
+                            } else {
+                                // Checking if the required start character
+                                // matches is cheaper than adding a state that
+                                // won't match.
+                                let c = self.text.get(self.input + clen).copied().unwrap_or('\0');
+                                let rs = char::from_u32(self.prog.regstart as u32).unwrap_or('\0');
+                                if !super::char_eq(c, rs, self.ic) {
+                                    add = false;
+                                }
+                            }
+                        }
+
+                        if add {
+                            m.list[0].0 = Pos::at(self.input + clen);
+                            let out = self.prog.states[start].out;
+                            let (next, _) = split_lists(&mut list, nextidx);
+                            if !self.addstate(next, out, m, None, clen as i32) {
+                                return self.expensive();
+                            }
                         }
                     } else {
                         let (next, _) = split_lists(&mut list, nextidx);
@@ -2102,9 +2338,42 @@ pub enum Outcome {
 }
 
 /// Run the compiled NFA over `text`, looking for the leftmost match at or after
-/// `from`. c: `nfa_regexec_both()`, minus the buffer-search fast paths
-/// (`regstart`/`reganch`/`match_text`), which change no answer.
+/// `from`. c: `nfa_regexec_both()`.
 pub fn exec(prog: &Prog, text: &[char], ic: bool, from: usize) -> Outcome {
+    let mut col = from;
+
+    // c: "if (prog->reganch && col > 0) return 0L;" — every path out of the
+    // start state begins with `^`/`\%^`, and `NFA_BOL`/`NFA_BOF` only fire at
+    // index 0 of the subject, so no later start position can match.
+    if prog.reganch && col > 0 {
+        return Outcome::NoMatch;
+    }
+
+    if prog.regstart != 0 {
+        // Skip ahead until a character we know the match must start with.
+        // When there is none there is no match.
+        match skip_to_start(text, prog.regstart, col, ic) {
+            Some(c) => col = c,
+            None => return Outcome::NoMatch,
+        }
+
+        // If match_text is set it contains the full text that must match.
+        // Nothing else to try.
+        if let Some(mt) = &prog.match_text {
+            if !mt.is_empty() {
+                return match find_match_text(text, &mut col, prog.regstart, mt, ic) {
+                    Some((s, e)) => {
+                        let mut subs = vec![None; prog.nsubexp];
+                        subs[0] = Some((s, e));
+                        Outcome::Match(NfaMatch { subs })
+                    }
+                    None => Outcome::NoMatch,
+                };
+            }
+        }
+    }
+
+    let from = col;
     let mut m = Matcher::new(prog, text, ic);
     m.input = from;
     let mut subs = RegSub::default();

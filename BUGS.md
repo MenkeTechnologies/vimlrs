@@ -6246,7 +6246,7 @@ lives in `regexp_bt.c` but `regexp_nfa.c:1493` calls it too, which is why
 `match('a', '\1')` is `E65` even though the NFA engine compiles `NFA_BACKREF1`
 happily. Pinned by `tests/parity_cases/regex_backref_engine_order.vim`.
 
-## R42-O1 (open). The NFA engine is about 2× slower than the backtracker was
+## R42-O1 (open). The NFA engine was about 2× slower than the backtracker was; 6.4% of it is left
 
 Measured by interleaved A/B of two prebuilt debug binaries (`cargo build`, never
 `--release`, per the project rule), 12 rounds each, alternating which binary runs
@@ -6269,3 +6269,32 @@ they change no answer. And `addstate()` in the C writes into a slot the list
 already owns, where this pushes a fresh `Thread`; shrinking the recorded
 positions from `Option<usize>` to a `u32` with a NULL sentinel already took one
 thread from 696 bytes to 216, but the slot reuse itself is not done.
+
+**Round 4: the first lever is pulled and most of the gap is gone.** All four
+fast-path functions are ported (`nfa_get_reganch`, `nfa_get_regstart`,
+`nfa_get_match_text`, `skip_to_start`, `find_match_text`), wired into `exec()`
+where `nfa_regexec_both()` wires them, and the in-loop half — the `if
+(toplevel)` block in `nfa_regmatch()` that skips ahead when the next list is
+empty and suppresses the start state when the required character is absent — is
+ported too. Re-measured on a fresh bench of the same shape (8000 iterations ×
+nine regex calls over a 400-character subject), 10 interleaved rounds each:
+
+```text
+A/A control  base  min=4.200  med=4.430   base(copy)  min=4.360  med=4.540
+A/B          base  min=4.080  med=4.155   NFA(r4)     min=4.340  med=4.395
+A/B          NFA(r3) min=6.690 med=6.765  NFA(r4)     min=4.260  med=4.305
+```
+
+That bench put round 3's engine 1.64× over the backtracker (`min=4.380` vs
+`min=7.220` on the same box). Round 4 is 1.57× faster than round 3 and lands
+6.4% over the backtracker against a control band of 3.8% — outside the band, so
+it is not disowned, but the 2× is gone and what remains is the thread
+simulation's irreducible per-position work.
+
+The second lever stays unpulled, and one attempt at it was measured and thrown
+away: giving both thread lists `Vec::with_capacity(nstate + 1)` — which is
+literally the C's `alloc()` of `l->len` slots — measured 3.2% *slower*
+(`min=4.360` vs `min=4.500`), so it was reverted rather than kept on the theory
+that it matches the C more closely. Writing into an owned slot instead of
+`Vec::push`ing a 216-byte `Thread` needs a different shape than a `Vec<Thread>`
+and is still not done.
