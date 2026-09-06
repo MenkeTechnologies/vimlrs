@@ -1,11 +1,18 @@
 //! ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-//! EXTENSION — implements Vim's regex DIALECT, not a line-by-line port of
-//! `regexp_bt.c`/`regexp_nfa.c` (which compile a pattern to a bytecode program
-//! and match it with a backtracking / NFA VM). This is the vimlrs analogue of
-//! the bytecode-compiler carve-out: a backtracking matcher over a parsed AST
-//! that reproduces Vim's documented pattern behavior (`:help pattern`) in the
-//! default **magic** mode. It backs `=~`/`!~`, `matchstr()`, `match()`,
-//! `substitute()`, pattern `split()`, and `:catch /pat/`.
+//! Vim's regex dialect. The PARSER here is an extension — a recursive-descent
+//! read of `:help pattern` in the default **magic** mode, with the other three
+//! dialects translated into it — while the MATCHER is `viml_regex_nfa.rs`, a
+//! port of `regexp_nfa.c` at vim 9.2 patch 1000 driven by this parser's AST.
+//! It backs `=~`/`!~`, `matchstr()`, `match()`, `substitute()`, pattern
+//! `split()`, and `:catch /pat/`.
+//!
+//! Two engines, because vim has two. `'regexpengine'` defaults to
+//! "automatic": `nfa_regcomp()` is tried first and the backtracker
+//! (`regexp_bt.c`) answers only when it bails out. [`Regex::find_from`] is
+//! that dispatch and [`Regex::find_from_bt`] is the backtracker — a
+//! continuation-passing matcher over the same AST, so a group's end is a
+//! choice point like any other. Several answers are properties of WHICH
+//! engine produced them; see the module docs of `viml_regex_nfa.rs`.
 //!
 //! Supported (magic mode): literals, `.`, `^`, `$`, `[...]`/`[^...]` with
 //! ranges, the class atoms `\d \D \w \W \s \S \a \A \l \u \x \h \H \o \O`
@@ -22,6 +29,12 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+
+/// The ported NFA engine (`regexp_nfa.c`). Declared as a child module rather
+/// than a sibling so it can read the AST types above without widening their
+/// visibility.
+#[path = "viml_regex_nfa.rs"]
+mod nfa;
 
 /// `\=`-replacement expression evaluator hook (`expr -> string`).
 type SubstExprFn = fn(&str) -> String;
@@ -221,6 +234,17 @@ fn is_fname_char(c: char) -> bool {
 }
 
 impl Class {
+    /// c: `wants_nfa`, set by `nfa_regatom()` at `regexp_nfa.c:1858` and
+    /// `:1871` — and only there. `[[:upper:]]` and `[[:lower:]]` do not work
+    /// with characters above 8 bits in the backtracking engine, so a pattern
+    /// containing one must not take the `\{n,m}` bail-out that hands the
+    /// pattern to that engine.
+    fn wants_nfa(&self) -> bool {
+        self.items
+            .iter()
+            .any(|it| matches!(it, ClassItem::LowerU | ClassItem::UpperU))
+    }
+
     fn matches(&self, c: char, ic: bool) -> bool {
         let hit = self.items.iter().any(|it| {
             if ic && it.folds_under_ic() {
@@ -279,6 +303,9 @@ enum Node {
     /// Appended after a lookbehind's atom to force it to end exactly at the
     /// assertion position.
     CheckPos(usize),
+    /// `\%C` — c: `NFA_ANY_COMPOSING`. Skips over a composing character when
+    /// there is one at this position, and matches without consuming otherwise.
+    AnyComposing,
     /// `\%^` / `\%$` — zero-width, start / end of the FILE (`:help /\%^`).
     /// This engine matches a single string, which is the whole "file", so they
     /// are the ends of the subject. `true` = start.
@@ -335,6 +362,10 @@ pub struct Regex {
     /// nothing, so every caller falls back to its no-match result — which is what
     /// Vim's functions return once they have raised the error.
     dead: bool,
+    /// The same pattern compiled for the ported NFA engine, or `None` when
+    /// `nfa::Prog::compile` bailed. c: `vim_regcomp()` under the automatic
+    /// engine — `nfa_regcomp()` first, `bt_regcomp()` when it returns NULL.
+    nfa: Option<nfa::Prog>,
 }
 
 /// A successful match: char-index span plus per-group spans (index 0 = whole).
@@ -369,8 +400,9 @@ const INF: u32 = u32::MAX;
 /// a magic `*` after translation, so the parser can no longer tell them apart; this is
 /// the only place that still can.
 /// Returns the translated pattern, a parallel "this character was written in
-/// very magic" map (one entry per translated char), and the diagnostic only the
-/// translation can see.
+/// very magic" map (one entry per translated char), a parallel map from each
+/// translated character back to the ORIGINAL pattern index that produced it,
+/// and the diagnostic only the translation can see.
 ///
 /// The map exists because Vim's *diagnostics* quote the pattern in the dialect
 /// it was written in: an unclosed group is `E54: Unmatched \(` in magic and
@@ -378,7 +410,7 @@ const INF: u32 = u32::MAX;
 /// which formats the message with `""` when `reg_magic == MAGIC_ALL` and `"\\"`
 /// otherwise). Translating everything into magic threw that away, so `\v(` was
 /// reported with a backslash that is not in the user's pattern.
-fn preprocess_magic(pat: &str) -> (String, Vec<bool>, Option<(usize, String)>) {
+fn preprocess_magic(pat: &str) -> Preprocessed {
     // Nothing to do for the default (magic) dialect, which is what the parser
     // reads — but a `\m` still has to be REMOVED even when it only restores the
     // dialect the pattern already had, or the parser reads it as an atom. It was
@@ -386,7 +418,8 @@ fn preprocess_magic(pat: &str) -> (String, Vec<bool>, Option<(usize, String)>) {
     // literal `m` and answered -1 where vim answers 3.
     if !pat.contains("\\v") && !pat.contains("\\m") && !pat.contains("\\M") && !pat.contains("\\V")
     {
-        return (pat.to_string(), vec![false; pat.chars().count()], None);
+        let n = pat.chars().count();
+        return (pat.to_string(), vec![false; n], (0..n).collect(), None);
     }
     let chars: Vec<char> = pat.chars().collect();
     let mut out = String::new();
@@ -404,8 +437,13 @@ fn preprocess_magic(pat: &str) -> (String, Vec<bool>, Option<(usize, String)>) {
     // Filled to `out`'s length after each iteration, with the mode that produced
     // those characters — cheaper and less error-prone than tagging every push.
     let mut vm: Vec<bool> = Vec::new();
+    // Filled the same way, with the ORIGINAL index of the atom that produced
+    // those translated characters. `seen_endbrace()` scans the pattern the user
+    // wrote, not a translation of it, so the E65 escape hatch needs a way back.
+    let mut omap: Vec<usize> = Vec::new();
     while i < chars.len() {
         let c = chars[i];
+        let start_i = i;
         let mark = |vm: &mut Vec<bool>, out: &String, mode: Dialect| {
             vm.resize(out.chars().count(), mode == Dialect::VeryMagic);
         };
@@ -615,9 +653,16 @@ fn preprocess_magic(pat: &str) -> (String, Vec<bool>, Option<(usize, String)>) {
             }
         }
         mark(&mut vm, &out, mode);
+        omap.resize(out.chars().count(), start_i);
     }
-    (out, vm, err)
+    omap.resize(out.chars().count(), chars.len());
+    (out, vm, omap, err)
 }
+
+/// What [`preprocess_magic`] hands the parser: the translated pattern, the
+/// per-character "written in very magic" map, the translated-index →
+/// original-index map, and the diagnostic only the translation can see.
+type Preprocessed = (String, Vec<bool>, Vec<usize>, Option<(usize, String)>);
 
 /// The four pattern dialects (`:help /magic`). The parser reads [`Dialect::Magic`];
 /// `preprocess_magic` translates the other three into it.
@@ -636,6 +681,10 @@ struct Parser {
     /// Per-character "written in very magic", parallel to `p`. Only the
     /// unmatched-group diagnostics read it; see [`preprocess_magic`].
     vm: Vec<bool>,
+    /// The pattern as the user wrote it, and the translated-index →
+    /// original-index map. Only [`Parser::lookbehind_ahead`] reads them.
+    orig: Vec<char>,
+    omap: Vec<usize>,
     i: usize,
     ngroups: usize,
     forced_ic: Option<bool>,
@@ -851,7 +900,19 @@ impl Parser {
     /// scans `regparse` forward for exactly that byte sequence and, finding it,
     /// lets a backreference precede the group it names.
     fn lookbehind_ahead(&self) -> bool {
-        self.p[self.i..]
+        // c: `seen_endbrace()` scans `regparse`, which points into the pattern
+        // the user WROTE, for the three bytes "@<=" or "@<!". Scanning the
+        // magic translation instead answers differently for a very-magic
+        // pattern, where a real `\@<=` is written `@<=` (three bytes, no
+        // backslash) but translates to `\@\<\=` — no three-byte run — so
+        // `split('', '\v\(\1\(\@<=')` reported E65 where vim answers `[]`.
+        let from = self
+            .omap
+            .get(self.i)
+            .copied()
+            .unwrap_or(self.orig.len())
+            .min(self.orig.len());
+        self.orig[from..]
             .windows(3)
             .any(|w| w[0] == '@' && w[1] == '<' && matches!(w[2], '=' | '!'))
     }
@@ -1138,36 +1199,7 @@ impl Parser {
             '%' if matches!(self.peek(), Some('d' | 'o' | 'x' | 'u' | 'U')) => {
                 let kind = self.peek().expect("peeked above");
                 self.i += 1; // past the radix letter
-                let mut n: u64 = 0;
-                let mut got = 0;
-                loop {
-                    // c: `getoctchrs`'s loop guard is `i < 3 && nr < 040`.
-                    let room = match kind {
-                        'd' => true,
-                        'o' => got < 3 && n < 0o40,
-                        'x' => got < 2,
-                        'u' => got < 4,
-                        _ => got < 8,
-                    };
-                    if !room {
-                        break;
-                    }
-                    let radix = if kind == 'd' {
-                        10
-                    } else if kind == 'o' {
-                        8
-                    } else {
-                        16
-                    };
-                    let Some(d) = self.peek().and_then(|c| c.to_digit(radix)) else {
-                        break;
-                    };
-                    n = n
-                        .saturating_mul(u64::from(radix))
-                        .saturating_add(u64::from(d));
-                    self.i += 1;
-                    got += 1;
-                }
+                let n = self.radix_chrs(kind);
                 // The `%s` is the backslash the user had to type — empty under `\v`.
                 let bs = if self
                     .vm
@@ -1179,9 +1211,10 @@ impl Parser {
                 } else {
                     "\\"
                 };
-                match (got > 0 && n <= u64::from(i32::MAX as u32))
-                    .then(|| u32::try_from(n).ok().and_then(char::from_u32))
-                    .flatten()
+                match n
+                    .filter(|n| *n <= u64::from(i32::MAX as u32))
+                    .and_then(|n| u32::try_from(n).ok())
+                    .and_then(char::from_u32)
                 {
                     Some(c) => Node::Lit(c),
                     None => {
@@ -1190,11 +1223,16 @@ impl Parser {
                     }
                 }
             }
-            // `\%#` (cursor), `\%V` (Visual area) and `\%C` (any composing
-            // characters) are recognized atoms that no string match can satisfy:
-            // there is no cursor, no Visual selection and — since this engine has no
-            // composing-character table — nothing for `\%C` to consume.
-            '%' if matches!(self.peek(), Some('#' | 'V' | 'C')) => {
+            // c: `case 'C': EMIT(NFA_ANY_COMPOSING)` — `\%C` consumes a
+            // composing character when there is one here, so `a\%Cb` matches
+            // the whole of "a" + U+0301 + "b".
+            '%' if self.peek() == Some('C') => {
+                self.i += 1;
+                Node::AnyComposing
+            }
+            // `\%#` (cursor) and `\%V` (Visual area) are recognized atoms that no
+            // string match can satisfy: there is no cursor and no Visual selection.
+            '%' if matches!(self.peek(), Some('#' | 'V')) => {
                 self.i += 1;
                 Node::CheckPos(usize::MAX)
             }
@@ -1463,6 +1501,102 @@ impl Parser {
         false
     }
 
+    /// c: `getdecchrs()` / `getoctchrs()` / `gethexchrs(2|4|8)` (regexp.c) —
+    /// the digit run after a radix letter, with the width each one allows.
+    /// Decimal is UNBOUNDED, octal stops after three digits OR once the value
+    /// reaches `040`, and the hex forms take at most 2 / 4 / 8. All three
+    /// return `-1` — `None` here — on an empty run.
+    fn radix_chrs(&mut self, kind: char) -> Option<u64> {
+        let radix = match kind {
+            'd' => 10,
+            'o' => 8,
+            _ => 16,
+        };
+        let mut n: u64 = 0;
+        let mut got = 0;
+        loop {
+            let room = match kind {
+                'd' => true,
+                'o' => got < 3 && n < 0o40,
+                'x' => got < 2,
+                'u' => got < 4,
+                _ => got < 8,
+            };
+            if !room {
+                break;
+            }
+            let Some(d) = self.peek().and_then(|c| c.to_digit(radix)) else {
+                break;
+            };
+            n = n
+                .saturating_mul(u64::from(radix))
+                .saturating_add(u64::from(d));
+            self.i += 1;
+            got += 1;
+        }
+        (got > 0).then_some(n)
+    }
+
+    /// c: `coll_get_char()` (regexp_bt.c:2660) — "Get a number after a
+    /// backslash that is inside []. When nothing is recognized return a
+    /// backslash", leaving the radix letter unconsumed.
+    fn coll_get_char(&mut self) -> char {
+        let kind = self.p[self.i];
+        self.i += 1;
+        match self.radix_chrs(kind) {
+            None => {
+                self.i -= 1;
+                '\\'
+            }
+            // c: `if (nr > INT_MAX) nr = INT_MAX`, then the caller rejects
+            // INT_MAX as "E1301: Value too large"; a value that is not a
+            // codepoint cannot match any character either way.
+            Some(n) => u32::try_from(n)
+                .ok()
+                .and_then(char::from_u32)
+                .unwrap_or('\u{10fffd}'),
+        }
+    }
+
+    /// One set member written with a backslash. c: the `*regparse == '\\'` arm
+    /// of the collection loop (`regexp_nfa.c:1937`): a backslash is an escape
+    /// inside `[]` only when what follows is in `REGEXP_INRANGE` (`]^-n\`) or
+    /// `REGEXP_ABBR` (`nrtebdoxuU`) — regexp.c:182. Anything else leaves the
+    /// backslash an ordinary member of the set.
+    ///
+    /// Without this, `[1-\x43]` was the range `1` to `\` (0x31..0x5C) plus the
+    /// literal `x`, `4`, `3`, so it matched `[` (0x5B) — `match('[',
+    /// '[1-\x43]')` answered 0 where vim answers -1.
+    fn coll_escape(&mut self) -> Option<char> {
+        if self.peek() != Some('\\') {
+            return None;
+        }
+        let n = self.peek2()?;
+        if !matches!(
+            n,
+            ']' | '^' | '-' | 'n' | '\\' | 'r' | 't' | 'e' | 'b' | 'd' | 'o' | 'x' | 'u' | 'U'
+        ) {
+            return None;
+        }
+        self.i += 1; // past the backslash
+        if matches!(n, 'd' | 'o' | 'x' | 'u' | 'U') {
+            return Some(self.coll_get_char());
+        }
+        self.i += 1;
+        // c: `if (*regparse == 'n') startc = (reg_string || …) ? NL : NFA_NEWL`
+        // — this engine matches a string, so `reg_string` is TRUE and `\n`
+        // inside a collection is the newline character; then
+        // `backslash_trans()` for the rest, which maps `] ^ - \` to themselves.
+        Some(match n {
+            'n' => '\n',
+            'r' => '\r',
+            't' => '\t',
+            'e' => '\x1b',
+            'b' => '\x08',
+            other => other,
+        })
+    }
+
     fn bracket(&mut self) -> Class {
         let mut negated = false;
         if self.peek() == Some('^') {
@@ -1515,18 +1649,29 @@ impl Parser {
                     }
                 }
             }
-            self.i += 1;
-            // Range `a-z` (not when `-` is last before `]`).
+            let lo = match self.coll_escape() {
+                Some(ch) => ch,
+                None => {
+                    self.i += 1;
+                    c
+                }
+            };
+            // Range `a-z` (not when `-` is last before `]`). c: the range test
+            // runs BEFORE the backslash arm, so an escaped `\-` is a member and
+            // never the operator.
             if self.peek() == Some('-') && self.peek2().is_some() && self.peek2() != Some(']') {
                 self.i += 1;
-                let hi = self.bump().unwrap();
+                let hi = match self.coll_escape() {
+                    Some(ch) => ch,
+                    None => self.bump().expect("peek2 above"),
+                };
                 // c: "E944: Reverse range in character class" — `[z-a]`.
-                if hi < c {
+                if hi < lo {
                     self.fail("E944: Reverse range in character class");
                 }
-                items.push(ClassItem::Range(c, hi));
+                items.push(ClassItem::Range(lo, hi));
             } else {
-                items.push(ClassItem::Ch(c));
+                items.push(ClassItem::Ch(lo));
             }
         }
         Class { negated, items }
@@ -1848,10 +1993,12 @@ impl Regex {
     /// The parse itself, plus the diagnostic it would raise. Split out of
     /// [`Self::compile`] so the cache can hold both and replay the second.
     fn compile_uncached(pat: &str) -> (Regex, Option<String>) {
-        let (pat, vm, pre_err) = preprocess_magic(pat);
+        let (tpat, vm, omap, pre_err) = preprocess_magic(pat);
         let mut parser = Parser {
-            p: pat.chars().collect(),
+            p: tpat.chars().collect(),
             vm,
+            orig: pat.chars().collect(),
+            omap,
             i: 0,
             ngroups: 0,
             forced_ic: None,
@@ -1895,16 +2042,19 @@ impl Regex {
                     ngroups: 0,
                     forced_ic: None,
                     dead: true,
+                    nfa: None,
                 },
                 Some(msg),
             );
         }
+        let nfa = nfa::Prog::compile(&branches, parser.ngroups);
         (
             Regex {
                 branches,
                 ngroups: parser.ngroups,
                 forced_ic: parser.forced_ic,
                 dead: false,
+                nfa,
             },
             None,
         )
@@ -1930,7 +2080,32 @@ impl Regex {
             return None;
         }
         let ic = self.effective_ic(ic);
-        let mut start = from.min(text.len());
+        let start = from.min(text.len());
+        // c: `vim_regexec_both()` under `AUTOMATIC_ENGINE` — the NFA engine
+        // answers unless it reports `NFA_TOO_EXPENSIVE`, in which case the
+        // backtracker below is retried with the same pattern.
+        if let Some(prog) = &self.nfa {
+            match nfa::exec(prog, text, ic, start) {
+                nfa::Outcome::Match(m) => {
+                    let mut groups = m.subs;
+                    groups.resize(self.ngroups + 1, None);
+                    return Some(Captures { groups });
+                }
+                nfa::Outcome::NoMatch => return None,
+                // c: `addstate()` raises the message and returns NULL, which
+                // becomes `NFA_TOO_EXPENSIVE` — so vim reports it AND still
+                // answers, from the backtracker.
+                nfa::Outcome::Error(msg) => crate::ported::message::emsg(msg),
+                nfa::Outcome::TooExpensive => {}
+            }
+        }
+        self.find_from_bt(text, ic, start)
+    }
+
+    /// The backtracking engine's leftmost search. c: `bt_regexec_both()`, which
+    /// vim reaches when the NFA engine bailed out.
+    fn find_from_bt(&self, text: &[char], ic: bool, from: usize) -> Option<Captures> {
+        let mut start = from;
         loop {
             // Two extra trailing slots hold the `\zs`/`\ze` positions, if any.
             let mut groups = vec![None; self.ngroups + 3];
@@ -2305,6 +2480,17 @@ impl Regex {
                     LookOp::Atomic => self.match_atoms(one, text, pos, groups, ic),
                 }
             }
+            // c: `case NFA_ANY_COMPOSING` in `nfa_regmatch()` — "On a composing
+            // character skip over it.  Otherwise do nothing.  Always matches."
+            Node::AnyComposing => Some(
+                match text
+                    .get(pos)
+                    .is_some_and(|c| crate::ported::strings::utf_iscomposing(*c))
+                {
+                    true => pos + 1,
+                    false => pos,
+                },
+            ),
             Node::CheckPos(target) => (pos == *target).then_some(pos),
             Node::FileEnd(start) => {
                 if *start { pos == 0 } else { pos == text.len() }.then_some(pos)
@@ -2348,6 +2534,7 @@ fn node_writes(n: &Node) -> bool {
         | Node::WordB(_)
         | Node::BackRef(_)
         | Node::Class(_)
+        | Node::AnyComposing
         | Node::CheckPos(_)
         | Node::FileEnd(_)
         | Node::Col(..) => false,
@@ -2386,7 +2573,14 @@ fn char_eq(a: char, b: char, ic: bool) -> bool {
 /// letters/digits (é, Ω, ４, ñ) as keyword chars — verified against nvim/vim:
 /// `matchstr('!é', '\<.')` == 'é'. So this stays Unicode-aware on purpose.
 fn is_word(c: char) -> bool {
-    c.is_alphanumeric() || c == '_'
+    // c: `utf_class_buf()` (mbyte.c) ends with "most other characters are
+    // 'word' characters" — `return 2` — for every codepoint at or above 0x100
+    // that is not in its `classes[]` punctuation table. Combining marks are not
+    // in that table, so U+0301 is a WORD character to vim's classifier: `\<`
+    // matches at index 0 of "\u0301b" (verified against vim 9.2.1000, which
+    // answers 0 where this answered 2), and `split("\u0301b", '\<')` therefore
+    // does not split.
+    c.is_alphanumeric() || c == '_' || crate::ported::strings::utf_iscomposing(c)
 }
 
 // ── high-level entry points (used by ops.rs / builtins) ──
@@ -2540,49 +2734,17 @@ pub fn regex_substitute(subject: &str, pat: &str, sub: &str, flags: &str) -> Str
     // `substitute("aaa","a*","X","g")` is `X`, not `XX`.
     let mut tail = 0usize;
     let mut zero_width: Option<usize> = None;
-    loop {
-        // Find the next match at or after `tail`.
-        let mut found = None;
-        // The scan advances one whole character at a time, composing marks
-        // included — see the note in `Regex::find_from`.
-        let mut start = tail.min(chars.len());
-        loop {
-            // Two extra trailing slots hold the `\zs`/`\ze` positions (see
-            // `find_from`): `\zs` moves the replaced region's start, `\ze` its end.
-            // Without them the `MatchStart`/`MatchEnd` writes land out of bounds and
-            // the region is mis-narrowed (`substitute('foobar','foo\zsbar','X','')`
-            // wrongly replaced 'foobar' instead of just 'bar').
-            let mut groups = vec![None; re.ngroups + 3];
-            if let Some(end) = re.match_alt(
-                &re.branches,
-                &chars,
-                start,
-                &mut groups,
-                re.effective_ic(ic),
-            ) {
-                let s = match groups[re.ngroups + 1] {
-                    Some((zp, _)) => zp,
-                    None => start,
-                };
-                let e = match groups[re.ngroups + 2] {
-                    Some((ep, _)) => ep,
-                    None => end,
-                };
-                groups[0] = Some((s, e));
-                // Drop the working `\zs`/`\ze` slots so `expand_sub`/`submatch()`
-                // see only the real capture groups.
-                groups.truncate(re.ngroups + 1);
-                found = Some((s, e, groups));
-                break;
-            }
-            if start >= chars.len() {
-                break;
-            }
-            start = cluster_end(&chars, start);
-        }
-        let Some((s, e, groups)) = found else {
-            break;
-        };
+    while let Some(caps) = re.find_from(&chars, ic, tail.min(chars.len())) {
+        // Find the next match at or after `tail`. This goes through the same
+        // entry point every other caller uses, so `substitute()` gets whichever
+        // engine answered for `match()` — it used to run its own copy of the
+        // scan against the backtracker, which is how
+        // `substitute('a', '\]\@!\~\{-}\|\h\{,3}', 'X', '')` came out
+        // `'Xa'` while `matchstr()` on the same pattern already said `'a'`.
+        // `find_from` also applies the `\zs`/`\ze` adjustment, which is why
+        // the two working slots are no longer handled here.
+        let (s, e) = caps.whole();
+        let groups = caps.groups;
         // c: `if (regmatch.startp[0] == regmatch.endp[0])` — empty match. Skip it
         // only when it lands on the same position as the previous empty match.
         if s == e {
@@ -2738,23 +2900,12 @@ pub fn regex_split(subject: &str, pat: &str, ic: bool, keepempty: bool) -> Vec<S
     let re = Regex::compile(pat);
     let eic = re.effective_ic(ic);
 
-    // Find the first match at or after `from` (match_alt is anchored, so scan).
-    // Returns the separator span (`\zs`/`\ze`-adjusted, like Vim's startp/endp).
+    // Find the first match at or after `from`, through the same entry point
+    // every other caller uses so `split()` gets whichever engine answered for
+    // `match()`. Returns the separator span, `\zs`/`\ze`-adjusted like Vim's
+    // startp/endp.
     let find_from = |from: usize| -> Option<(usize, usize)> {
-        let mut p = from.min(n);
-        loop {
-            let mut groups = vec![None; re.ngroups + 3];
-            if let Some(end) = re.match_alt(&re.branches, &chars, p, &mut groups, eic) {
-                let startp = groups[re.ngroups + 1].map_or(p, |(zp, _)| zp);
-                let endp = groups[re.ngroups + 2].map_or(end, |(ep, _)| ep);
-                return Some((startp, endp));
-            }
-            if p >= n {
-                return None;
-            }
-            // One whole character — see the note in `Regex::find_from`.
-            p = cluster_end(&chars, p);
-        }
+        re.find_from(&chars, eic, from.min(n)).map(|c| c.whole())
     };
 
     let mut out: Vec<String> = Vec::new();
@@ -2796,6 +2947,85 @@ pub fn regex_split(subject: &str, pat: &str, ic: bool, keepempty: bool) -> Vec<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every value here is the answer of vim 9.2 patch 1000, measured through
+    /// `scripts/parity.sh`'s pinned entry point; the corresponding parity cases
+    /// are `regex_nfa_thread_order`, `regex_composing_atoms`,
+    /// `regex_backref_engine_order` and `regex_collection_escapes`.
+    #[test]
+    fn nfa_thread_order_decides_alternation_priority() {
+        // A zero-width ANCHOR branch loses to a longer branch at the same
+        // start, because `^`/`\<` compile to a transition added to the CURRENT
+        // thread list while `a*` is still running.
+        assert_eq!(regex_matchstr("^\\|a*", "aa", false), "aa");
+        assert_eq!(regex_matchstr("\\<\\|a*", "aa", false), "aa");
+        assert_eq!(regex_matchstr("$\\|a*", "aa", false), "aa");
+        // An empty GROUP does not: it reaches NFA_MATCH at column 0.
+        assert_eq!(regex_matchstr("\\%(\\)\\|a*", "aa", false), "");
+        assert_eq!(regex_matchstr("a\\{0}\\|a*", "aa", false), "");
+        // And it is not "longest wins" either.
+        assert_eq!(regex_matchstr("a\\|ab", "ab", false), "a");
+        // The same rule seen through substitute() and split(), which now go
+        // through the same engine entry as matchstr().
+        assert_eq!(
+            regex_substitute("a", "\\]\\@!\\~\\{-}\\|\\h\\{,3}", "X", ""),
+            "X"
+        );
+        assert_eq!(
+            regex_split("aXa", "X\\|a*", false, false),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn composing_characters_are_word_chars_and_percent_c_consumes_them() {
+        // c: `utf_class_buf()` returns 2 ("word") for any codepoint >= 0x100
+        // that is not in its punctuation table, combining marks included.
+        assert_eq!(regex_match_index("\\<", "\u{301}b", false), 0);
+        assert_eq!(
+            regex_split("\u{301}b", "\\<", false, false),
+            vec!["\u{301}b"]
+        );
+        // c: `NFA_ANY_COMPOSING` — `\%C` skips one composing character when
+        // there is one here and matches without consuming otherwise.
+        assert_eq!(regex_matchstr("a\\%Cb", "a\u{301}b", false), "a\u{301}b");
+        assert_eq!(regex_matchstr("a\\%C", "a\u{301}b", false), "a\u{301}");
+        // `\%C` at a position with no composing character matches without
+        // consuming; the `a` that follows then cannot end the match in front
+        // of U+0301, so there is no match at all.
+        assert_eq!(regex_matchstr("\\%Ca", "a\u{301}b", false), "");
+        // A literal consumes only the base character, and NFA_MATCH refuses to
+        // end in front of a composing mark — so `a` alone cannot match "a" +
+        // U+0301, while `.` takes the whole cluster.
+        assert_eq!(regex_matchstr("a", "a\u{301}b", false), "");
+        assert_eq!(regex_matchstr(".", "a\u{301}b", false), "a\u{301}");
+    }
+
+    #[test]
+    fn collection_backslash_escapes() {
+        // c: REGEXP_INRANGE "]^-n\" + REGEXP_ABBR "nrtebdoxuU" (regexp.c:182).
+        // `[1-\x43]` is the range 1..C, NOT 1..'\' — `[` (0x5B) is outside it.
+        assert!(!regex_match("[1-\\x43]", "[", false));
+        assert!(regex_match("[1-\\x43]", "A", false));
+        assert!(regex_match("[1-\\x5b]", "[", false));
+        assert!(regex_match("[\\d97]", "a", false));
+        assert!(regex_match("[\\o141]", "a", false));
+        assert!(regex_match("[\\x61-\\x63]", "a", false));
+        assert!(!regex_match("[\\x61-\\x63]", "z", false));
+        assert!(regex_match("[\\t]", "\t", false));
+        assert!(regex_match("[\\r]", "\r", false));
+        assert!(!regex_match("[\\r]", "r", false));
+        // An escaped `-` is a member, never the range operator.
+        assert!(regex_match("[a\\-z]", "-", false));
+        assert!(!regex_match("[a\\-z]", "b", false));
+        // c: `coll_get_char()` — "When nothing is recognized return a
+        // backslash", leaving the radix letter unconsumed, so `[1-\xzz]`
+        // is the range 1..'\' plus the literals `z`, `z`.
+        assert!(regex_match("[1-\\xzz]", "\\", false));
+        // A backslash before anything outside those two sets is not an escape.
+        assert!(regex_match("[\\q]", "q", false));
+        assert!(regex_match("[\\q]", "\\", false));
+    }
 
     #[test]
     fn basic_atoms_and_anchors() {

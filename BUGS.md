@@ -5830,27 +5830,20 @@ its fourteen lines with the change reverted.
 Closed by R41-4: `nfa_emit_equi_class`'s table is ported verbatim, 52 groups
 transcribed one per `case … return OK` arm of its `switch (c)`.
 
-## R40-O3 (open, re-confirmed in R41). Catastrophic backtracking where vim answers instantly
+## R40-O3. Catastrophic backtracking where vim answers instantly — ✅ CLOSED in R42
 
-`fuzz-parity --regex` at seed 11 reports one `PANIC: hung (>30s)`:
+The recorded repro does not reproduce, and never could have: the pattern it
+quotes has six group openers (`\(` ×4, `\%(` ×2) and five `\)`, so vim rejects
+it with `E54: Unmatched \(` and this engine does too — measured at v9.2.1000,
+both print `E54` and neither hangs (0.25s user for the whole script). The line
+that was recorded as vim's answer, `['aaaa…']`, is what THIS engine prints after
+raising `E54`; vim aborts the sourced script on the error instead, so the two
+outputs were never the same run.
 
-```text
-split(repeat('a', 30), '\(\%([[:alnum:]]\{}\)\{-}\(\%u0061\)\@>\)\{2,}\(\%(\(\<\)\@=\\\{,3}\)\{2}')
-" vim and nvim: ['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'] immediately
-```
-
-Nested quantified groups over a 30-character subject. Vim carries two engines and
-falls back to the NFA one for exactly this shape; this port has one backtracking
-matcher, and R40-4's continuation rewrite gave it strictly MORE paths to explore
-(that is what fixed the group backtracking). It is a complexity gap, not a
-correctness one, and closing it needs a second matcher rather than a patch.
-
-Scoped honestly in R41 rather than patched: `regexp_nfa.c` is 7,848 lines at
-v9.2.1000 and the port has to be faithful, so it is its own round's work, not a
-line in one. A step budget or a memo table would change answers rather than
-speeds — vim reports `E363` (`'maxmempattern'`) on some of these shapes and a
-value on others, and which one it reports is a property of the engine that
-produced it. R41-9 below is the same gap seen from the correctness side.
+What the entry was pointing at is real and is closed: `regexp_nfa.c` is ported
+(R42-1), so this crate now has vim's two engines rather than one backtracker,
+including the `'maxmempattern'` accounting that raises `E363` — which is the
+answer vim gives on the shapes this entry was reaching for. See R42-1.
 
 ## R40-O1. `*` right after `\%(` is `E866` in vim and was a literal star here — ✅ FIXED in R41
 
@@ -6054,7 +6047,7 @@ c: `regexp_nfa.c:2525` — `if (regnpar >= NSUBEXP) EMSG_RET_FAIL(...)`, with
 engine numbered groups without bound. Non-capturing groups are not counted.
 Pinned in `tests/parity_cases/regex_percent_atom_errors.vim`.
 
-## R41-O1 (open). Alternation priority when the first branch is a zero-width ANCHOR
+## R41-O1. Alternation priority when the first branch is a zero-width ANCHOR — ✅ FIXED in R42
 
 Vim's NFA is a thread simulation with priority ordering, and the two disagree
 about which alternative wins when the first one is an anchor that matches empty:
@@ -6074,7 +6067,11 @@ them loses to a longer one at the same start while an empty GROUP does not. That
 is a property of the engine that produced it, and reproducing it in a
 backtracker means emulating vim's thread ordering — the same port R40-O3 needs.
 
-## R41-O2 (open). `\%C` matches a run of composing characters
+Closed by R42-1: `matchstr('aa', '^\|a*')` is `'aa'` and `matchstr('aa',
+'\%(\)\|a*')` is `''`, both from `addstate()`'s ordering rather than from any
+rule about branches. Pinned by `tests/parity_cases/regex_nfa_thread_order.vim`.
+
+## R41-O2. `\%C` matches a run of composing characters — ✅ FIXED in R42
 
 `\%C` is `NFA_ANY_COMPOSING`: it consumes zero or more composing characters, so
 `matchstr('a<U+0301>b', 'a\%Cb')` is the whole string in vim and `''` here (the
@@ -6082,6 +6079,26 @@ atom is recognized, and never matches). The predicate is `utf_iscomposing`, whic
 in the vendored Neovim source is `utf8proc_grapheme_break` — a whole Unicode
 library, not a table this port can transcribe. The same gap shows up as
 `split('<U+0301>b', '\<')` splitting where vim does not.
+
+Both halves closed in R42, and the "whole Unicode library" was already in the
+tree: `crate::ported::strings::utf_iscomposing`. `\%C` had never reached the
+matcher — the parser folded it into the same never-matching node as `\%#` and
+`\%V` — so it became `NFA_ANY_COMPOSING`, whose runtime is "skip over a
+composing character when there is one here, match without consuming otherwise".
+The `\<` half is not a composing question at all: `utf_class_buf()` (mbyte.c)
+ends with "most other characters are word characters" — `return 2` — for every
+codepoint at or above 0x100 that is not in its `classes[]` punctuation table,
+and the combining marks are not in that table. `is_word` said otherwise.
+
+```text
+                                vim 9.2   vimlrs (before)
+match("<U+0301>b", '\<')            0            2
+split("<U+0301>b", '\<')       ['<U+0301>b']  ['<U+0301>', 'b']
+matchstr("a<U+0301>b", 'a\%Cb')  'a<U+0301>b'     ''
+matchstr("a<U+0301>b", 'a\%C')   'a<U+0301>'      ''
+```
+
+Pinned by `tests/parity_cases/regex_composing_atoms.vim`.
 
 ## R41-O3 (open). `match()` with a `{start}` inside a multi-byte character
 
@@ -6095,3 +6112,160 @@ boundary.
 match('é', ']\{}', 1)    1        2
 match('é', '', 1)        1        2
 ```
+
+Still open after R42, with the two places that would have to change named:
+`byte_to_char` at `src/ported/eval/funcs.rs` rounds the byte `{start}` up to a
+character boundary and the chopped suffix is then rebuilt with `chars().skip()`,
+and below that both engines match over a `&[char]`. Reproducing `str += start`
+needs a byte-oriented subject all the way down, not a fix at the call site: the
+suffix vim matches against opens with the trailing bytes of a character, which
+is not a `str` at all.
+
+## R42-1. `regexp_nfa.c` is ported — vim's two engines, not one backtracker
+
+Oracle for this round: `/opt/homebrew/Cellar/vim/9.2.1000/bin/vim`, sha256
+`06bf4b5ff09dc129d8ba0087529340967540f0d11b11a5eeec69d41e445662b0`, "Included
+patches: 1-1000" — unchanged from the vector stamped in
+`tests/parity_cases/ORACLE`, and the C was fetched at tag `v9.2.1000` to match.
+
+`src/viml_regex_nfa.rs` is the port. It is driven by the existing parser's AST
+rather than by `nfa_regatom()`'s own character reader, because rounds 40 and 41
+already ported that reader's diagnostics; what is ported here is everything from
+the postfix stream down.
+
+| Rust | c: `regexp_nfa.c` |
+|---|---|
+| `Post::emit_alt` / `emit_branch` / `emit_piece` / `emit_atom` | `nfa_reg` / `nfa_regbranch` / `nfa_regconcat` / `nfa_regpiece` / `nfa_regatom` (emission order, incl. `\{n,m}`'s expansion to `maxval` copies and the `RE_AUTO` bail-out) |
+| `post2nfa` with `Frag` / `patch` / `append` / `list1` | `post2nfa`, `frag`, `patch`, `append`, `list1`, `alloc_state` |
+| `nfa_max_width` / `match_follows` / `failure_chance` / `nfa_postprocess` | same names |
+| `Matcher::addstate` / `addstate_here` | `addstate` / `addstate_here`, including the `'maxmempattern'` accounting |
+| `Matcher::regmatch` / `recursive_regmatch` / `match_backref` | `nfa_regmatch` / `recursive_regmatch` / `match_backref` |
+| `exec` | `nfa_regtry` + `nfa_regexec_both` |
+
+`Regex::find_from` is `vim_regexec_both()` under `AUTOMATIC_ENGINE`: the NFA
+answers unless it bails at compile time or returns `NFA_TOO_EXPENSIVE`, and the
+old continuation-passing matcher — now `Regex::find_from_bt` — is the
+`regexp_bt.c` half. `substitute()` and `split()` had each been running their own
+copy of the leftmost scan against the backtracker; both now go through
+`find_from`, which is why `substitute('a', '\]\@!\~\{-}\|\h\{,3}', 'X', '')` was
+`'Xa'` while `matchstr()` on the same pattern already said `'a'`.
+
+Two departures, both because this crate matches ONE string — the
+`REG_MULTI == FALSE` half of every `if (REG_MULTI)` in the C:
+
+1. Positions are `char` indices, not `char_u *`. Everything the C measures in
+   bytes (a backreference's `bytelen`, the `\@<=` distance, `NFA_SKIP`'s count)
+   is measured in characters, consistently. `NFA_COL` (`\%23c`) stays a byte
+   column, because that is what it is in vim.
+2. One added opcode, `NFA_CLASS_OBJ`, placed below `NFA_SPLIT` so it cannot
+   collide. It replaces the `NFA_START_COLL` … `NFA_END_COLL` chain and the
+   `NFA_DIGIT`/`NFA_KWORD`/… atoms with one state carrying an index into a side
+   table of the parser's `Class` values, whose membership rules earlier rounds
+   pinned against vim. It is behaviourally the chain it replaces: a collection
+   consumes exactly one character and adds `out` with `add_off = clen`.
+
+Not ported, so the compile bails and the backtracker answers exactly as vim's
+does: `\z(`/`\z1` (`FEAT_SYN_HL`, which this crate has no consumer for),
+`NFA_COMPOSING` (a pattern literal carrying its own combining marks), and the
+buffer atoms `NFA_LNUM`/`NFA_VCOL`/`NFA_MARK`/`NFA_VISUAL`. The buffer-search
+fast paths (`regstart`, `reganch`, `match_text`, `skip_to_start`) are also
+unported; they are pure optimizations and change no answer.
+
+What it closed: R41-O1 (alternation priority), R41-O2 (composing characters),
+R40-O3, and `E363`:
+
+```text
+                                              vim 9.2   vimlrs (before)
+matchstr('aa', '^\|a*')                          'aa'         ''
+matchstr('aa', '\<\|a*')                         'aa'         ''
+matchstr('aa', '$\|a*')                          'aa'         ''
+matchstr('aa', '\%(\)\|a*')                       ''          ''   (agreed)
+substitute('a', '\]\@!\~\{-}\|\h\{,3}', 'X', '')  'X'        'Xa'
+substitute('a', '\M\(\.\|\%1c\)\{}', '', '')     E363        (silent)
+```
+
+`E363` needs the C's arithmetic to fire at the same point: `addstate()` grows
+the thread list by `len * 3 / 2 + 50` and raises when
+`(newlen * sizeof(nfa_thread_T)) >> 10 >= p_mmp`. `sizeof(nfa_thread_T)` is
+transcribed as 1072 for a 64-bit `FEAT_SYN_HL` build (the field-by-field
+derivation is in the constant's doc comment) and `p_mmp` is vim's default 1000.
+Vim then reports the message and answers from the backtracker, and so does this.
+
+Verified: 417 lib tests, 93/93 parity cases byte-identical against the pinned
+oracle, and `fuzz-parity --regex` at seeds 3, 7, 11 and 23 × 400 cases reports
+**0 gaps** — seed 11 was 8 gaps (6 distinct) before this round.
+
+## R42-2. A backslash inside `[]` was never an escape — ✅ FIXED
+
+`bracket()` had no backslash handling at all, so `[1-\x43]` was the range `1` to
+`\` (0x31..0x5C) plus the literals `x`, `4`, `3` — and 0x5C covers `[` (0x5B).
+
+c: the `*regparse == '\\'` arm of the collection loop (`regexp_nfa.c:1937`). A
+backslash is an escape inside `[]` only in front of `REGEXP_INRANGE` (`]^-n\`)
+or `REGEXP_ABBR` (`nrtebdoxuU`) — `regexp.c:182` — where `\d`/`\o`/`\x`/`\u`/`\U`
+read a number through `coll_get_char()` and the rest go through
+`backslash_trans()`. `coll_get_char()` is "when nothing is recognized return a
+backslash", leaving the radix letter unconsumed, so `[1-\xzz]` really is the
+range `1`..`\` plus two literal `z`.
+
+```text
+                        vim 9.2   vimlrs (before)
+match('[', '[1-\x43]')     -1            0
+match('a', '[\d97]')        0           -1
+match("\t", '[\t]')         0           -1
+match('-', '[a\-z]')        0            0   (agreed)
+match('r', '[\r]')         -1            0
+```
+
+The digit-run reader is now one function, `Parser::radix_chrs`, shared with the
+`\%d97`/`\%o40`/`\%x2f` atom that R41-5 added — it was the same `getdecchrs` /
+`getoctchrs` / `gethexchrs` budget written out twice. Pinned by
+`tests/parity_cases/regex_collection_escapes.vim`.
+
+## R42-3. `seen_endbrace()` scans the pattern the USER wrote — ✅ FIXED
+
+R41-7 ported the `E65` escape hatch ("Trick: check if `@<=` or `@<!` follows")
+as a forward scan for those three bytes, but scanned the MAGIC TRANSLATION of
+the pattern. In very magic a real lookbehind is written `@<=` — three bytes, no
+backslash — and translates to `\@\<\=`, which has no three-byte run; while a
+literal `\@` followed by `<` translates the other way. `seen_endbrace()` reads
+`regparse`, which points into the original.
+
+`preprocess_magic` now returns a translated-index → original-index map beside
+the very-magic provenance map it already built, and the scan uses it.
+
+```text
+                                     vim 9.2   vimlrs (before)
+split('', '\v\(\1\(\@<=')               []          E65
+substitute('', '\v,3(\2\@<=', '', 'g')  E54         E65
+match('a', '\1')                        E65         E65   (agreed)
+```
+
+`E65` is NOT the backtracker's alone, contrary to R41-7's note: `seen_endbrace()`
+lives in `regexp_bt.c` but `regexp_nfa.c:1493` calls it too, which is why
+`match('a', '\1')` is `E65` even though the NFA engine compiles `NFA_BACKREF1`
+happily. Pinned by `tests/parity_cases/regex_backref_engine_order.vim`.
+
+## R42-O1 (open). The NFA engine is about 2× slower than the backtracker was
+
+Measured by interleaved A/B of two prebuilt debug binaries (`cargo build`, never
+`--release`, per the project rule), 12 rounds each, alternating which binary runs
+first, on a loop of 6000 iterations × nine regex calls:
+
+```text
+A/A control  base   min=4.860  med=5.900     base(copy)  min=4.630  med=5.930
+A/B          base   min=4.120  med=5.130     NFA         min=9.000  med=10.370
+```
+
+The control's spread is 4.7% on minimums and 0.5% on medians; the A/B difference
+is 2.18× on minimums and 2.02× on medians, so it is far outside the noise and is
+not disowned. It is the expected shape: a thread simulation does work at every
+position where a backtracker often returns early, and this is a debug build.
+
+Two levers are named and unpulled. The buffer-search fast paths the port
+skipped (`nfa_get_regstart` + `skip_to_start`, `nfa_get_reganch`,
+`nfa_get_match_text` + `find_match_text`) are exactly vim's answer to this, and
+they change no answer. And `addstate()` in the C writes into a slot the list
+already owns, where this pushes a fresh `Thread`; shrinking the recorded
+positions from `Option<usize>` to a `u32` with a NULL sentinel already took one
+thread from 696 bytes to 216, but the slot reuse itself is not done.
