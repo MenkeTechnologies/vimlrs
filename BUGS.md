@@ -6298,3 +6298,71 @@ literally the C's `alloc()` of `l->len` slots — measured 3.2% *slower*
 that it matches the C more closely. Writing into an owned slot instead of
 `Vec::push`ing a 216-byte `Thread` needs a different shape than a `Vec<Thread>`
 and is still not done.
+
+## R43 — counting the fuzz grammar's class atoms, and the three that were never generated
+
+The method that has found a bug on the first run of every new fuzz mode in this
+fleet is *counting*: grep the generator for constructs whose count is ZERO. The
+regex grammar's class-atom list held fifteen entries. Vim's own list is
+`regexp_bt.c:256` `classchars = ".iIkKfFpPsSdDxXoOwWhHaAlLuU"` — twenty-seven
+characters, twenty-six of them letters. Eleven had a count of zero, and three of
+those eleven were not implemented at all.
+
+The POSIX bracket classes counted the same way: six of `viml_regex`'s seventeen
+names were generated, and `[[:lower:]]` — one of exactly two atoms that set
+`wants_nfa`, which suppresses `Prog::compile`'s `\{n,m}` bail-out — was not one
+of them. `\3`..`\9`, `[[.a.]]` and the both-bounded non-greedy `\{-n,m}` were
+also at zero. All are generated now.
+
+## R43-1. `\L`, `\U` and `\X` were read as literal letters — ✅ FIXED
+
+`classchars` pairs every lowercase class atom with an uppercase one, and
+`nfa_classcodes` maps the pair to a code and its negation: `l`/`L` to
+`NFA_LOWER`/`NFA_NLOWER`, `u`/`U` to `NFA_UPPER`/`NFA_NUPPER`, `x`/`X` to
+`NFA_HEX`/`NFA_NHEX`. The runtime arms are plain complements that still require
+a character — `regexp_nfa.c:6781` `result = curc != NUL && !ri_lower(curc)`,
+and `:6731` the same for hex. `Parser::atom` had the three lowercase spellings
+and not the uppercase ones, so each fell through to the literal-character arm
+and matched the letter itself.
+
+```text
+                                  vim 9.2.1000   vimlrs (before)
+match('A', '\L')                       0              -1
+match('a', '\U')                       0              -1
+matchstr('aB3', '\U\+')               'a'              ''
+matchstr('aB3', '\L\+')               'B3'             ''
+matchstr('\zs', '\X')                 '\'             ''
+```
+
+The last line is how the fuzzer reported it, at seed 3 inside a nine-atom
+pattern; the subject is the three characters `\`, `z`, `s` and a backslash is
+not a hex digit. With the three added, every letter in `classchars` is now an
+arm of `Parser::atom`. Pinned by `viml_regex::tests::negated_case_class_atoms`.
+
+## R43-O1 (open). `\<` fires at a CHANGE OF CHARACTER CLASS, not at a non-word→word edge
+
+The widened grammar's other finding, and the only regex gap left besides
+`R41-O3`:
+
+```text
+                                        vim 9.2.1000    vimlrs
+substitute('日本語abc', '\<', 'X', 'g')  'X日本語Xabc'  'X日本語abc'
+```
+
+c: `regexp_nfa.c:6321` `NFA_BOW` does not ask "is this a word character and was
+the last one not"; it asks for the character's *class* and compares it with the
+previous character's — `this_class = mb_get_class_buf(...); if (this_class <= 1)
+result = FALSE; else if (reg_prev_class() == this_class) result = FALSE`. The
+classes come from `utf_class_buf()` (`mbyte.c:3026`), whose `classes[]` table of
+about seventy sorted intervals gives CJK ideographs `0x4e00`, hiragana
+`0x3040`, katakana `0x30a0`, Hangul `0xac00` and so on their own class numbers,
+with `2` ("word") only as the fallback for everything not in the table. So the
+boundary between 語 and `a` is a class change and `\<` matches there.
+
+`is_word` in `viml_regex.rs` is a single boolean predicate, which is why R42
+could close the composing-mark half of this (marks fall through to `return 2`,
+so they ARE word characters) without noticing the script-change half. Closing
+it means porting `classes[]` and the `emoji_all` table it consults first, then
+rewriting `\<`/`\>` in terms of classes rather than a predicate — which changes
+`split()` on `'\<'` and every other word-boundary answer, so it is its own round
+with its own fuzz run, not a patch on this one.

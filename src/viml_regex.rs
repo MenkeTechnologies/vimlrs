@@ -1384,8 +1384,15 @@ impl Parser {
             'a' => class_atom(false, ClassItem::Alpha),
             'A' => class_atom(true, ClassItem::Alpha),
             'l' => class_atom(false, ClassItem::Lower),
+            // c: `classchars` pairs `l`/`L` and `u`/`U` with `NFA_LOWER`/
+            // `NFA_NLOWER` and `NFA_UPPER`/`NFA_NUPPER`, and the runtime arm is
+            // a plain complement — `result = curc != NUL && !ri_lower(curc)` —
+            // so these two ARE negations, unlike the `\P \I \K` forms above.
+            'L' => class_atom(true, ClassItem::Lower),
             'u' => class_atom(false, ClassItem::Upper),
+            'U' => class_atom(true, ClassItem::Upper),
             'x' => class_atom(false, ClassItem::Hex),
+            'X' => class_atom(true, ClassItem::Hex),
             'h' => class_atom(false, ClassItem::Head),
             'H' => class_atom(true, ClassItem::Head),
             'o' => class_atom(false, ClassItem::Octal),
@@ -3034,6 +3041,56 @@ mod tests {
         assert!(!regex_match("^foo", "a foo", false));
         assert!(regex_match("bar$", "foobar", false));
         assert!(regex_match("f.o", "fxo", false));
+    }
+
+    /// `\L`, `\U` and `\X` are the NEGATED forms of `\l`, `\u` and `\x`, not
+    /// missing atoms. c: `regexp_bt.c:256`
+    /// `classchars = ".iIkKfFpPsSdDxXoOwWhHaAlLuU"` pairs each lowercase
+    /// spelling with the uppercase one, and `nfa_classcodes` maps those three
+    /// pairs to `NFA_LOWER`/`NFA_NLOWER`, `NFA_UPPER`/`NFA_NUPPER` and
+    /// `NFA_HEX`/`NFA_NHEX`, whose runtime arms are plain complements that
+    /// still require a character — `result = curc != NUL && !ri_lower(curc)`
+    /// (`regexp_nfa.c:6781`, `:6731`). All three used to fall through to the
+    /// literal-character arm, so `match('A', '\L')` answered `-1` where
+    /// vim 9.2.1000 answers `0`.
+    ///
+    /// Every expectation was read off vim 9.2.1000. Found by counting: the
+    /// fuzz grammar's class-atom list held fifteen of `classchars`' twenty-six
+    /// entries, and these three were among the eleven with a count of zero.
+    /// With them added the table is complete — every letter in `classchars` is
+    /// now an arm of `Parser::atom`.
+    #[test]
+    fn negated_case_class_atoms() {
+        // Non-lowercase / non-uppercase, one character wide.
+        assert_eq!(regex_matchstr("\\L", "A", false), "A");
+        assert_eq!(regex_matchstr("\\L", "a", false), "");
+        assert_eq!(regex_matchstr("\\U", "a", false), "a");
+        assert_eq!(regex_matchstr("\\U", "A", false), "");
+        // Digits are neither, so both accept them.
+        assert_eq!(regex_matchstr("\\L\\+", "aB3", false), "B3");
+        assert_eq!(regex_matchstr("\\U\\+", "aB3", false), "a");
+        // `curc != NUL`: an empty subject matches neither, unlike a `\%^`-style
+        // zero-width atom.
+        assert!(!regex_match("\\L", "", false));
+        assert!(!regex_match("\\U", "", false));
+        // The complement is over the same predicate `\l`/`\u` use, so a
+        // non-ASCII letter that is neither is accepted by both.
+        assert_eq!(regex_matchstr("\\L\\+", "éA", false), "éA");
+        assert_eq!(regex_matchstr("\\U\\+", "éa", false), "éa");
+        // Very-magic spells them the same way — the class atoms keep their
+        // backslash under `\v`.
+        assert_eq!(regex_matchstr("\\v\\U+", "aBc", false), "a");
+        assert_eq!(regex_matchstr("\\v\\L+", "aBc", false), "B");
+        // And they reach `substitute()` like any other atom.
+        assert_eq!(regex_substitute("aB", "\\L", "X", "g"), "aX");
+        assert_eq!(regex_substitute("aB", "\\U", "Y", "g"), "YB");
+        // `\X` — non-hex-digit, the third pair `classchars` names and the one
+        // the fuzzer hit first, as `match('\zs', '\X')` (the subject is the
+        // three characters `\`, `z`, `s`; the backslash is not a hex digit).
+        assert_eq!(regex_matchstr("\\X", "\\zs", false), "\\");
+        assert_eq!(regex_matchstr("\\X", "abcdef0", false), "");
+        assert_eq!(regex_matchstr("\\X\\+", "0aFzy1", false), "zy");
+        assert!(!regex_match("\\X", "", false));
     }
 
     #[test]

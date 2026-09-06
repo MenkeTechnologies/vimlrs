@@ -1084,10 +1084,17 @@ fn rx_atom(rng: &mut Rng) -> String {
             .pick(&["a", "b", "c", "x", "1", "_", "-", ".", "é"])
             .to_string(),
         1 => ".".into(),
+        // The class atoms, ALL of them: vim's `classchars` is
+        // `".iIkKfFpPsSdDxXoOwWhHaAlLuU"` and this list used to hold fifteen of
+        // its twenty-seven entries. Counting the absentees is what found
+        // `R43-1` — `\L` and `\U` were unimplemented and answered as the
+        // literal letters — so the whole table is generated now, uppercase
+        // forms included.
         2 => rng
             .pick(&[
-                "\\d", "\\D", "\\w", "\\W", "\\s", "\\S", "\\a", "\\l", "\\u", "\\x", "\\o", "\\h",
-                "\\k", "\\p", "\\i",
+                "\\d", "\\D", "\\w", "\\W", "\\s", "\\S", "\\a", "\\A", "\\l", "\\L", "\\u", "\\U",
+                "\\x", "\\X", "\\o", "\\O", "\\h", "\\H", "\\k", "\\K", "\\p", "\\P", "\\i", "\\I",
+                "\\f", "\\F",
             ])
             .to_string(),
         3 => rng
@@ -1095,6 +1102,12 @@ fn rx_atom(rng: &mut Rng) -> String {
                 "[abc]", "[^abc]", "[a-z]", "[A-Z0-9]", "[^0-9]", "[.*]", "[]a]",
             ])
             .to_string(),
+        // The POSIX bracket classes, all seventeen `viml_regex` names — the six
+        // that used to be here left `lower`, `blank`, `cntrl`, `graph`,
+        // `print`, `xdigit`, `tab`, `escape`, `backspace`, `return`, `ident`
+        // and `keyword` at a count of zero. `[[:lower:]]` matters twice over:
+        // it and `[[:upper:]]` are the only two atoms that set `wants_nfa`,
+        // which suppresses `Prog::compile`'s `\{n,m}` bail-out.
         4 => rng
             .pick(&[
                 "[[:alpha:]]",
@@ -1102,7 +1115,19 @@ fn rx_atom(rng: &mut Rng) -> String {
                 "[[:space:]]",
                 "[[:punct:]]",
                 "[[:upper:]]",
+                "[[:lower:]]",
                 "[[:alnum:]]",
+                "[[:blank:]]",
+                "[[:cntrl:]]",
+                "[[:graph:]]",
+                "[[:print:]]",
+                "[[:xdigit:]]",
+                "[[:tab:]]",
+                "[[:escape:]]",
+                "[[:backspace:]]",
+                "[[:return:]]",
+                "[[:ident:]]",
+                "[[:keyword:]]",
             ])
             .to_string(),
         5 => format!("\\({}\\)", rx_branch(rng, 0)),
@@ -1114,7 +1139,12 @@ fn rx_atom(rng: &mut Rng) -> String {
             .to_string(),
         10 => rng.pick(&["\\_.", "\\_s", "\\_a", "\\_[a-z]"]).to_string(),
         11 => format!("\\%[{}]", rng.pick(&["abc", "ab", "xyz"])),
-        12 => rng.pick(&["\\1", "\\2"]).to_string(),
+        // `\3`..`\9` had a count of zero: the grammar can open more than two
+        // groups, so a backreference past the second is reachable and was never
+        // generated.
+        12 => rng
+            .pick(&["\\1", "\\2", "\\3", "\\4", "\\5", "\\9"])
+            .to_string(),
         // Collections whose *edges* are the interesting part: a `]` first, a
         // trailing/leading `-`, a backslash class inside, a negated `]`.
         13 => rng
@@ -1126,6 +1156,9 @@ fn rx_atom(rng: &mut Rng) -> String {
                 "[\\d]",
                 "[\\]]",
                 "[[=a=]]",
+                // The collating-element form, sibling of `[[=a=]]` and `[[:…:]]`
+                // and the only one of the three with a count of zero.
+                "[[.a.]]",
                 "[\\x41-\\x43]",
             ])
             .to_string(),
@@ -1158,7 +1191,7 @@ fn rx_piece(rng: &mut Rng, depth: u32) -> String {
     } else {
         rx_atom(rng)
     };
-    match rng.below(14) {
+    match rng.below(16) {
         0 => format!("{atom}*"),
         1 => format!("{atom}\\+"),
         2 => format!("{atom}\\?"),
@@ -1171,6 +1204,9 @@ fn rx_piece(rng: &mut Rng, depth: u32) -> String {
         8 => format!("{atom}\\{{,3}}"),
         9 => format!("{atom}\\{{2,}}"),
         10 => format!("{atom}\\{{}}"),
+        // The non-greedy `\{-` with BOTH bounds, and with only an upper one:
+        // `\{-}` and `\{-1,}` were here, `\{-n,m}` and `\{-,m}` were not.
+        13 => format!("{atom}{}", rng.pick(&["\\{-1,3}", "\\{-,3}", "\\{-2,}"])),
         // LOOKAROUND — `\@=`, `\@!`, `\@<=`, `\@<!`, `\@>`. The whole family
         // was missing from this grammar while `viml_regex` carries a hand-written
         // implementation of it (`Node::Look`, `LookOp`), including the bounded
