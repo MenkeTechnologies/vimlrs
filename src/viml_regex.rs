@@ -379,8 +379,13 @@ const INF: u32 = u32::MAX;
 /// otherwise). Translating everything into magic threw that away, so `\v(` was
 /// reported with a backslash that is not in the user's pattern.
 fn preprocess_magic(pat: &str) -> (String, Vec<bool>, Option<(usize, String)>) {
-    // Nothing to do for the default (magic) dialect, which is what the parser reads.
-    if !pat.contains("\\v") && !pat.contains("\\M") && !pat.contains("\\V") {
+    // Nothing to do for the default (magic) dialect, which is what the parser
+    // reads — but a `\m` still has to be REMOVED even when it only restores the
+    // dialect the pattern already had, or the parser reads it as an atom. It was
+    // missing from this guard, so `matchend('X', '.\m\%[ab]')` looked for a
+    // literal `m` and answered -1 where vim answers 3.
+    if !pat.contains("\\v") && !pat.contains("\\m") && !pat.contains("\\M") && !pat.contains("\\V")
+    {
         return (pat.to_string(), vec![false; pat.chars().count()], None);
     }
     let chars: Vec<char> = pat.chars().collect();
@@ -472,7 +477,7 @@ fn preprocess_magic(pat: &str) -> (String, Vec<bool>, Option<(usize, String)>) {
                         }
                         Some(&n) => {
                             // `\|` and `\(` open a new branch: the multi rule restarts.
-                            atom_before = !matches!(n, '|' | '(');
+                            atom_before = !matches!(n, '|' | '(' | '&');
                             out.push('\\');
                             out.push(n);
                             i += 2;
@@ -513,7 +518,7 @@ fn preprocess_magic(pat: &str) -> (String, Vec<bool>, Option<(usize, String)>) {
                 match c {
                     '\\' => {
                         if let Some(&n) = chars.get(i + 1) {
-                            if OPS.contains(n) {
+                            if OPS.contains(n) || n == '%' {
                                 out.push(n); // `\(` → literal '(' (bare in magic)
                             } else {
                                 out.push('\\'); // keep `\d`, `\zs`, `\1`, `\\`, …
@@ -552,9 +557,27 @@ fn preprocess_magic(pat: &str) -> (String, Vec<bool>, Option<(usize, String)>) {
                             i += 1;
                         }
                     }
-                    '%' if chars.get(i + 1) == Some(&'(') => {
-                        out.push_str("\\%("); // non-capturing group
-                        i += 2;
+                    // A bare `%` is Magic('%') under `\v` (c: `peekchr()` lists `%`
+                    // among the chars that are "magic only after \v"), so the WHOLE
+                    // `\%…` atom family is spelled without the backslash: `%(`, `%[`,
+                    // `%d97`, `%^`, `%$`, `%23c`, `%V`, `%#`. Only `%(` was being
+                    // translated, so `\v%[ab]` was read as a literal `%` followed by a
+                    // collection and `\v%d97` as a literal `%d97`.
+                    //
+                    // The character that follows belongs to the atom, and the ones the
+                    // generic OPS rule below would rewrite (`(`, `<`, `>`) must be
+                    // copied raw — `\v%<2c` must not become `\%\<2c`. Everything
+                    // deeper (a `%(`'s branches, a `%[`'s atoms) is still very magic
+                    // and is left to the loop.
+                    '%' => {
+                        out.push_str("\\%");
+                        i += 1;
+                        if let Some(&n) = chars.get(i) {
+                            if OPS.contains(n) {
+                                out.push(n);
+                                i += 1;
+                            }
+                        }
                     }
                     // `\v(foo)@<=bar` — a bare `@` is the lookaround operator in
                     // very magic. Its optional decimal limit and operator chars
@@ -655,11 +678,15 @@ impl Parser {
     }
 
     /// `branch \| branch \| …`.
-    fn alternation(&mut self) -> Vec<Branch> {
-        let mut branches = vec![self.and_branch()];
+    /// `star_lit` is c: `peekchr()`'s "`*` is not magic … after `\\(`, `\\|`, `\\&`"
+    /// exception, carried in from whatever opened this branch. It holds for the
+    /// first branch only when the opener made `prevchr` a MAGIC `(`; every later
+    /// branch is preceded by a magic `\\|` or `\\&`, so it always holds there.
+    fn alternation(&mut self, star_lit: bool) -> Vec<Branch> {
+        let mut branches = vec![self.and_branch(star_lit)];
         while self.peek() == Some('\\') && self.peek2() == Some('|') {
             self.i += 2;
-            branches.push(self.and_branch());
+            branches.push(self.and_branch(true));
         }
         branches
     }
@@ -669,15 +696,15 @@ impl Parser {
     /// leading concat is compiled to a zero-width positive lookahead
     /// (`\(concat\)\@=`) and the last concat is inlined as the consuming match, so
     /// `foo\&...` == `\(foo\)\@=...` (matchstr → 'foo').
-    fn and_branch(&mut self) -> Branch {
-        let first = self.concat();
+    fn and_branch(&mut self, star_lit: bool) -> Branch {
+        let first = self.concat(star_lit);
         if !(self.peek() == Some('\\') && self.peek2() == Some('&')) {
             return first;
         }
         let mut concats = vec![first];
         while self.peek() == Some('\\') && self.peek2() == Some('&') {
             self.i += 2;
-            concats.push(self.concat());
+            concats.push(self.concat(true));
         }
         // The last concat consumes; the earlier ones are zero-width AND assertions.
         let last = concats.pop().unwrap_or_default();
@@ -701,7 +728,7 @@ impl Parser {
     }
 
     /// A sequence of quantified atoms, stopping at `\|`, `\)`, or end.
-    fn concat(&mut self) -> Branch {
+    fn concat(&mut self, star_lit: bool) -> Branch {
         let mut atoms = Vec::new();
         loop {
             match (self.peek(), self.peek2()) {
@@ -724,6 +751,17 @@ impl Parser {
                         break;
                     }
                 }
+            }
+            // c: `peekchr()` `case '*'` — a bare `*` is a literal at the start of a
+            // branch only when `prevchr` is a MAGIC `(`, `&` or `|`. `\(`, `\|`,
+            // `\&` and (very magic) `(` all produce one; `\%(` does NOT, because
+            // its `(` is read by `getchr()` in a dialect where `(` is not magic, so
+            // `\%(*a\)` is "E866: Misplaced *" while `\(*a\)` and `\v%(*a)` keep a
+            // literal star. `preprocess_magic` folds `\v%(` into `\%(`, so the two
+            // are told apart by the per-character very-magic provenance in `vm`.
+            if atoms.is_empty() && !star_lit && self.peek() == Some('*') {
+                self.fail("E866: (NFA regexp) Misplaced *");
+                break;
             }
             match self.quantified(atoms.is_empty()) {
                 Some(a) => atoms.push(a),
@@ -806,6 +844,34 @@ impl Parser {
             max,
             greedy,
         })
+    }
+
+    /// Whether the literal text `@<=` or `@<!` appears anywhere from the cursor to
+    /// the end of the pattern — c: `regexp_bt.c` `seen_endbrace`'s "Trick", which
+    /// scans `regparse` forward for exactly that byte sequence and, finding it,
+    /// lets a backreference precede the group it names.
+    fn lookbehind_ahead(&self) -> bool {
+        self.p[self.i..]
+            .windows(3)
+            .any(|w| w[0] == '@' && w[1] == '<' && matches!(w[2], '=' | '!'))
+    }
+
+    /// The character c: `nfa_regatom` reports as "Misplaced" at the cursor: the
+    /// multis `*` `\+` `\?` `\=` `\{` `\@`, plus `\|` `\&` `\)`, which are branch
+    /// and group operators and equally cannot form an atom. Used where the C calls
+    /// `nfa_regatom()` directly rather than through `nfa_regpiece`.
+    fn misplaced_here(&self) -> Option<char> {
+        if self.peek() == Some('*') {
+            return Some('*');
+        }
+        if self.peek() == Some('\\') {
+            if let Some(m) = self.peek2() {
+                if matches!(m, '+' | '?' | '=' | '{' | '@' | '|' | '&' | ')') {
+                    return Some(m);
+                }
+            }
+        }
+        None
     }
 
     /// Whether the cursor sits on another multi — `*`, `\+`, `\?`, `\=`, `\{`,
@@ -1034,9 +1100,16 @@ impl Parser {
                 // `escape()` has already consumed the `\(`; the opener starts two
                 // characters back, which is what the diagnostic quotes.
                 let open = self.i.saturating_sub(2);
+                // c: `nfa_reg` `if (regnpar >= NSUBEXP) EMSG_RET_FAIL(...)`, with
+                // `regnpar` starting at 1 and `NSUBEXP` 10 — nine capture groups
+                // are the limit, and the tenth `\(` is rejected outright. This
+                // engine numbered them without bound.
+                if self.ngroups >= 9 {
+                    self.fail("E872: (NFA regexp) Too many '('");
+                }
                 let idx = self.ngroups + 1;
                 self.ngroups = idx;
-                let branches = self.alternation();
+                let branches = self.alternation(true);
                 self.close_group(open, false);
                 self.closed.push(idx);
                 Node::Group(branches, Some(idx))
@@ -1044,7 +1117,8 @@ impl Parser {
             '%' if self.peek() == Some('(') => {
                 let open = self.i.saturating_sub(2);
                 self.i += 1; // past '('
-                let branches = self.alternation();
+                             // Only the very-magic spelling `\v%(` makes that `(` magic.
+                let branches = self.alternation(self.vm.get(open).copied().unwrap_or(false));
                 self.close_group(open, true);
                 Node::Group(branches, None)
             }
@@ -1053,30 +1127,76 @@ impl Parser {
             // with that code, so `\%d97` is the literal `a`. The digit run is
             // capped at the width Vim allows for the radix, so `\%d97x` is `a`
             // followed by a literal `x`.
+            // Codepoint atoms — c: `nfa_regatom` `case 'd'/'o'/'x'/'u'/'U'` under
+            // `Magic('%')`, reading through `getdecchrs`/`getoctchrs`/`gethexchrs`.
+            // Each accepts a different digit run: decimal is UNBOUNDED, octal stops
+            // after three digits OR once the value reaches 040 (so `\%o1011` is `A`
+            // then a literal `1`, and `\%o401` is a space then `1`), and the hex
+            // forms take at most 2/4/8. All three fail on an empty run, and the
+            // caller rejects a value above INT_MAX — both are E678, where the atom
+            // used to fall back to the literal radix letter.
             '%' if matches!(self.peek(), Some('d' | 'o' | 'x' | 'u' | 'U')) => {
                 let kind = self.peek().expect("peeked above");
                 self.i += 1; // past the radix letter
-                let (radix, maxlen) = match kind {
-                    'd' => (10, 10),
-                    'o' => (8, 4),
-                    'x' => (16, 2),
-                    'u' => (16, 4),
-                    _ => (16, 8),
-                };
-                let mut n: u32 = 0;
+                let mut n: u64 = 0;
                 let mut got = 0;
-                while got < maxlen {
-                    let Some(c) = self.peek() else { break };
-                    let Some(d) = c.to_digit(radix) else { break };
-                    n = n.saturating_mul(radix).saturating_add(d);
+                loop {
+                    // c: `getoctchrs`'s loop guard is `i < 3 && nr < 040`.
+                    let room = match kind {
+                        'd' => true,
+                        'o' => got < 3 && n < 0o40,
+                        'x' => got < 2,
+                        'u' => got < 4,
+                        _ => got < 8,
+                    };
+                    if !room {
+                        break;
+                    }
+                    let radix = if kind == 'd' {
+                        10
+                    } else if kind == 'o' {
+                        8
+                    } else {
+                        16
+                    };
+                    let Some(d) = self.peek().and_then(|c| c.to_digit(radix)) else {
+                        break;
+                    };
+                    n = n
+                        .saturating_mul(u64::from(radix))
+                        .saturating_add(u64::from(d));
                     self.i += 1;
                     got += 1;
                 }
-                // No digits at all: Vim treats the atom as the literal letter.
-                match (got > 0).then(|| char::from_u32(n)).flatten() {
+                // The `%s` is the backslash the user had to type — empty under `\v`.
+                let bs = if self
+                    .vm
+                    .get(self.i.saturating_sub(3))
+                    .copied()
+                    .unwrap_or(false)
+                {
+                    ""
+                } else {
+                    "\\"
+                };
+                match (got > 0 && n <= u64::from(i32::MAX as u32))
+                    .then(|| u32::try_from(n).ok().and_then(char::from_u32))
+                    .flatten()
+                {
                     Some(c) => Node::Lit(c),
-                    None => Node::Lit(kind),
+                    None => {
+                        self.fail(&format!("E678: Invalid character after {bs}%[dxouU]"));
+                        Node::Lit(kind)
+                    }
                 }
+            }
+            // `\%#` (cursor), `\%V` (Visual area) and `\%C` (any composing
+            // characters) are recognized atoms that no string match can satisfy:
+            // there is no cursor, no Visual selection and — since this engine has no
+            // composing-character table — nothing for `\%C` to consume.
+            '%' if matches!(self.peek(), Some('#' | 'V' | 'C')) => {
+                self.i += 1;
+                Node::CheckPos(usize::MAX)
             }
             // `\%^` / `\%$` — the start and end of the FILE. In an engine that
             // matches one string, that string is the file.
@@ -1088,12 +1208,50 @@ impl Parser {
                 self.i += 1;
                 Node::FileEnd(false)
             }
-            // `\%23l` / `\%23c` / `\%23v` and their `>`/`<` forms. Only the
-            // COLUMN family is modelled: a line number and a virtual column are
-            // properties of a buffer, and vim answers -1 for `\%1l` against a
-            // string too (`match('ab', '\%1l')` is -1 in vim 9.2), so a node that
-            // never matches is the faithful answer for those.
-            '%' if matches!(self.peek(), Some('<' | '>' | '0'..='9')) => {
+            '%' if self.peek() == Some('[') => {
+                // c: `nfa_regatom` `case '['` under `Magic('%')` — the body is a
+                // `for (n = 0; (c = peekchr()) != ']'; ++n) nfa_regatom()` loop,
+                // NOT `nfa_regpiece`, so a multi inside is never a quantifier and
+                // always reaches nfa_regatom's "these should follow an atom" arm:
+                // `\%[a*]`, `\%[a\+b]`, `\%[a\|b]` and `\%[a\)b]` are all E866.
+                let open = self.i.saturating_sub(2);
+                // The `%s` in E69/E70 is the backslash the user had to type, empty
+                // under `\v` — the same dialect rule `close_group` applies.
+                let bs = if self.vm.get(open).copied().unwrap_or(false) {
+                    ""
+                } else {
+                    "\\"
+                };
+                self.i += 1; // past '['
+                let mut nodes = Vec::new();
+                while self.peek().is_some() && self.peek() != Some(']') {
+                    if let Some(m) = self.misplaced_here() {
+                        self.fail(&format!("E866: (NFA regexp) Misplaced {m}"));
+                        break;
+                    }
+                    match self.atom(false) {
+                        Some(n) => nodes.push(n),
+                        None => break,
+                    }
+                }
+                if self.peek() == Some(']') {
+                    self.i += 1; // past ']'
+                                 // c: "E70: Empty %s%%[]" — the `n == 0` check runs after the `]`.
+                    if nodes.is_empty() {
+                        self.fail(&format!("E70: Empty {bs}%[]"));
+                    }
+                } else if self.err.is_none() {
+                    // c: "E69: Missing ] after %s%%[" — the loop ran off the end.
+                    self.fail(&format!("E69: Missing ] after {bs}%["));
+                }
+                Node::OptSeq(nodes)
+            }
+            // c: `nfa_regatom` `case Magic('%')` `default:` — the position family
+            // `\%23l` / `\%<23c` / `\%>23v`, its cursor-relative `\%.c` form, the
+            // mark forms `\%'m` / `\%<'m`, and the E867 that catches everything
+            // else. Only the `\%23c`/`\%<`/`\%>` spelling used to be read at all;
+            // an unrecognized `\%x` quietly became a literal `%`.
+            '%' => {
                 let cmp = match self.peek() {
                     Some('>') => {
                         self.i += 1;
@@ -1105,42 +1263,69 @@ impl Parser {
                     }
                     _ => Cmp::Eq,
                 };
-                let mut n: u32 = 0;
-                let mut got = 0;
-                while let Some(d) = self.peek().and_then(|c| c.to_digit(10)) {
-                    n = n.saturating_mul(10).saturating_add(d);
+                // `\%.c` is "the cursor's column"; a number may not follow it.
+                let cur = self.peek() == Some('.');
+                if cur {
                     self.i += 1;
-                    got += 1;
                 }
-                match (got > 0).then(|| self.peek()).flatten() {
-                    Some('c') => {
-                        self.i += 1;
-                        Node::Col(cmp, n)
+                let mut n: u64 = 0;
+                let mut got_digit = false;
+                while let Some(d) = self.peek().and_then(|c| c.to_digit(10)) {
+                    if cur {
+                        let c = self.peek().expect("peeked above");
+                        self.fail(&format!("E1204: No Number allowed after .: '\\%{c}'"));
+                        break;
                     }
-                    // `l` (line) and `v` (virtual column) need a buffer; nothing
-                    // in a one-string match can satisfy them.
-                    Some('l' | 'v') => {
+                    n = n.saturating_mul(10).saturating_add(u64::from(d));
+                    self.i += 1;
+                    got_digit = true;
+                }
+                let c = self.peek();
+                match c {
+                    Some(k @ ('l' | 'c' | 'v')) => {
                         self.i += 1;
+                        if !cur && !got_digit {
+                            self.fail(&format!("E1273: (NFA regexp) missing value in '\\%{k}'"));
+                        }
+                        // c: `limit` is INT_MAX, or INT_MAX / MB_MAXBYTES for `v`.
+                        let limit = if k == 'v' {
+                            u64::from(i32::MAX as u32) / 21
+                        } else {
+                            u64::from(i32::MAX as u32)
+                        };
+                        if n >= limit {
+                            self.fail("E951: \\% value too large");
+                        }
+                        // A line number and a virtual column are properties of a
+                        // BUFFER, and the cursor-relative forms of a cursor; vim
+                        // answers -1 for `\%1l` against a string too, so a node that
+                        // never matches is the faithful answer for those.
+                        if k == 'c' && !cur {
+                            Node::Col(cmp, u32::try_from(n).unwrap_or(u32::MAX))
+                        } else {
+                            Node::CheckPos(usize::MAX)
+                        }
+                    }
+                    // `\%'m` / `\%<'m` — a mark, which a string match has none of.
+                    Some('\'') if n == 0 && !got_digit => {
+                        self.i += 1;
+                        self.bump(); // the mark name belongs to the atom
                         Node::CheckPos(usize::MAX)
                     }
-                    _ => Node::Lit('%'),
+                    _ => {
+                        // c: `semsg(e_nfa_regexp_unknown_operator_percent_chr,
+                        // no_Magic(c))`. At the end of the pattern `c` is NUL, and
+                        // the `%c` writes it into the middle of the message — so
+                        // what vim prints stops there, WITHOUT the closing quote.
+                        self.fail(&match c {
+                            Some(c) => format!("E867: (NFA regexp) Unknown operator '\\%{c}'"),
+                            None => "E867: (NFA regexp) Unknown operator '\\%".to_string(),
+                        });
+                        Node::Lit('%')
+                    }
                 }
             }
             // `\%[atoms]` — optional-sequence atom (matches a greedy prefix).
-            '%' if self.peek() == Some('[') => {
-                self.i += 1; // past '['
-                let mut nodes = Vec::new();
-                while self.peek().is_some() && self.peek() != Some(']') {
-                    match self.atom(false) {
-                        Some(n) => nodes.push(n),
-                        None => break,
-                    }
-                }
-                if self.peek() == Some(']') {
-                    self.i += 1; // past ']'
-                }
-                Node::OptSeq(nodes)
-            }
             '<' => Node::WordB(true),
             '>' => Node::WordB(false),
             // `\zs` / `\ze` — set the start / end of the matched text.
@@ -1191,7 +1376,15 @@ impl Parser {
                 let n = d as usize - '0' as usize;
                 // c: the group must be COMPLETE — `\(a\1\)` refers to a group that is
                 // still open, which Vim rejects, and so is a forward reference.
-                if !self.closed.contains(&n) {
+                //
+                // E65 is raised by the BACKTRACKING engine (`regexp_bt.c`
+                // `seen_endbrace`), which the automatic engine falls back to when
+                // the NFA compile fails — and that function carries an explicit
+                // escape hatch: "Trick: check if \"@<=\" or \"@<!\" follows, in which
+                // case the \1 can appear before the referenced match". It is a plain
+                // forward scan of the remaining pattern TEXT, not a parse, so
+                // `match('', '\1@<=')` is -1 in vim where this reported E65.
+                if !self.closed.contains(&n) && !self.lookbehind_ahead() {
                     self.fail("E65: Illegal back reference");
                 }
                 Node::BackRef(n)
@@ -1301,25 +1494,25 @@ impl Parser {
             // pattern (`matchstr('a]b', '[[=a=]]')` answered 'a]' where vim
             // answers 'a').
             //
-            // Only the base characters are collected. Vim's `[=a=]` also matches
-            // the accented forms (`á`, `à`, `â`, `ä` — c: `nfa_emit_equi_class`'s
-            // per-letter table); that table is not ported, and the gap is
-            // recorded in BUGS.md rather than approximated here.
+            // c: `get_equi_class` / `get_coll_element` accept EXACTLY ONE
+            // character between the delimiters — `if (p[l + 2] == '=' && p[l + 3]
+            // == ']')` — so `[[=ab=]]` is no class at all and its `[` falls through
+            // to a literal (`match('a', '[[=ab=]]')` is -1 in vim and was 0 here).
+            // An equivalence class then expands through `nfa_emit_equi_class`'s
+            // per-letter table, so `[[=a=]]` matches `á` `à` `â` `ä` as well as
+            // `a`; a collating element `[.a.]` is just the character itself.
             if c == '[' && matches!(self.peek2(), Some('=' | '.')) {
                 let kind = self.peek2().expect("peeked above");
-                let close = self.i + 2;
-                let mut k = close;
-                while self.p.get(k).is_some()
-                    && !(self.p[k] == kind && self.p.get(k + 1) == Some(&']'))
-                {
-                    k += 1;
-                }
-                if self.p.get(k).is_some() {
-                    for &ch in &self.p[close..k] {
-                        items.push(ClassItem::Ch(ch));
+                if let Some(&ch) = self.p.get(self.i + 2) {
+                    if self.p.get(self.i + 3) == Some(&kind) && self.p.get(self.i + 4) == Some(&']')
+                    {
+                        match (kind == '=').then(|| equi_class(ch)).flatten() {
+                            Some(set) => items.extend(set.iter().copied().map(ClassItem::Ch)),
+                            None => items.push(ClassItem::Ch(ch)),
+                        }
+                        self.i += 5;
+                        continue;
                     }
-                    self.i = k + 2;
-                    continue;
                 }
             }
             self.i += 1;
@@ -1396,6 +1589,212 @@ fn posix_class_items(name: &str) -> Option<Vec<ClassItem>> {
     Some(vec![item])
 }
 
+/// The characters an equivalence class `[=c=]` matches, or `None` when `c` has no
+/// equivalents and stands for itself — c: `nfa_emit_equi_class` (`regexp_nfa.c`),
+/// one entry per `case … return OK` arm of its `switch (c)`. In the C the `case`
+/// labels of an arm and its `EMIT2` list are the same set of code points, so one
+/// list serves both roles: `c` selects the group it appears in, and that whole
+/// group is what the class matches. The C's fall-through `EMIT2(c)` is the `None`
+/// here.
+///
+/// The C guards the table with `enc_utf8 || 'latin1' || 'iso-8859-15'`; this
+/// engine is always UTF-8, so the guard always holds.
+fn equi_class(c: char) -> Option<&'static [char]> {
+    static GROUPS: &[&[char]] = &[
+        &[
+            'A', '\u{c0}', '\u{c1}', '\u{c2}', '\u{c3}', '\u{c4}', '\u{c5}', '\u{100}', '\u{102}',
+            '\u{104}', '\u{1cd}', '\u{1de}', '\u{1e0}', '\u{1fa}', '\u{200}', '\u{202}', '\u{226}',
+            '\u{23a}', '\u{1e00}', '\u{1ea0}', '\u{1ea2}', '\u{1ea4}', '\u{1ea6}', '\u{1ea8}',
+            '\u{1eaa}', '\u{1eac}', '\u{1eae}', '\u{1eb0}', '\u{1eb2}', '\u{1eb4}', '\u{1eb6}',
+        ],
+        &[
+            'B', '\u{181}', '\u{243}', '\u{1e02}', '\u{1e04}', '\u{1e06}',
+        ],
+        &[
+            'C', '\u{c7}', '\u{106}', '\u{108}', '\u{10a}', '\u{10c}', '\u{187}', '\u{23b}',
+            '\u{1e08}', '\u{a792}',
+        ],
+        &[
+            'D', '\u{10e}', '\u{110}', '\u{18a}', '\u{1e0a}', '\u{1e0c}', '\u{1e0e}', '\u{1e10}',
+            '\u{1e12}',
+        ],
+        &[
+            'E', '\u{c8}', '\u{c9}', '\u{ca}', '\u{cb}', '\u{112}', '\u{114}', '\u{116}',
+            '\u{118}', '\u{11a}', '\u{204}', '\u{206}', '\u{228}', '\u{246}', '\u{1e14}',
+            '\u{1e16}', '\u{1e18}', '\u{1e1a}', '\u{1e1c}', '\u{1eb8}', '\u{1eba}', '\u{1ebc}',
+            '\u{1ebe}', '\u{1ec0}', '\u{1ec2}', '\u{1ec4}', '\u{1ec6}',
+        ],
+        &['F', '\u{191}', '\u{1e1e}', '\u{a798}'],
+        &[
+            'G', '\u{11c}', '\u{11e}', '\u{120}', '\u{122}', '\u{193}', '\u{1e4}', '\u{1e6}',
+            '\u{1f4}', '\u{1e20}', '\u{a7a0}',
+        ],
+        &[
+            'H', '\u{124}', '\u{126}', '\u{21e}', '\u{1e22}', '\u{1e24}', '\u{1e26}', '\u{1e28}',
+            '\u{1e2a}', '\u{2c67}',
+        ],
+        &[
+            'I', '\u{cc}', '\u{cd}', '\u{ce}', '\u{cf}', '\u{128}', '\u{12a}', '\u{12c}',
+            '\u{12e}', '\u{130}', '\u{197}', '\u{1cf}', '\u{208}', '\u{20a}', '\u{1e2c}',
+            '\u{1e2e}', '\u{1ec8}', '\u{1eca}',
+        ],
+        &['J', '\u{134}', '\u{248}'],
+        &[
+            'K', '\u{136}', '\u{198}', '\u{1e8}', '\u{1e30}', '\u{1e32}', '\u{1e34}', '\u{2c69}',
+            '\u{a740}',
+        ],
+        &[
+            'L', '\u{139}', '\u{13b}', '\u{13d}', '\u{13f}', '\u{141}', '\u{23d}', '\u{1e36}',
+            '\u{1e38}', '\u{1e3a}', '\u{1e3c}', '\u{2c60}',
+        ],
+        &['M', '\u{1e3e}', '\u{1e40}', '\u{1e42}'],
+        &[
+            'N', '\u{d1}', '\u{143}', '\u{145}', '\u{147}', '\u{1f8}', '\u{1e44}', '\u{1e46}',
+            '\u{1e48}', '\u{1e4a}', '\u{a7a4}',
+        ],
+        &[
+            'O', '\u{d2}', '\u{d3}', '\u{d4}', '\u{d5}', '\u{d6}', '\u{d8}', '\u{14c}', '\u{14e}',
+            '\u{150}', '\u{19f}', '\u{1a0}', '\u{1d1}', '\u{1ea}', '\u{1ec}', '\u{1fe}', '\u{20c}',
+            '\u{20e}', '\u{22a}', '\u{22c}', '\u{22e}', '\u{230}', '\u{1e4c}', '\u{1e4e}',
+            '\u{1e50}', '\u{1e52}', '\u{1ecc}', '\u{1ece}', '\u{1ed0}', '\u{1ed2}', '\u{1ed4}',
+            '\u{1ed6}', '\u{1ed8}', '\u{1eda}', '\u{1edc}', '\u{1ede}', '\u{1ee0}', '\u{1ee2}',
+        ],
+        &['P', '\u{1a4}', '\u{1e54}', '\u{1e56}', '\u{2c63}'],
+        &['Q', '\u{24a}'],
+        &[
+            'R', '\u{154}', '\u{156}', '\u{158}', '\u{210}', '\u{212}', '\u{24c}', '\u{1e58}',
+            '\u{1e5a}', '\u{1e5c}', '\u{1e5e}', '\u{2c64}', '\u{a7a6}',
+        ],
+        &[
+            'S', '\u{15a}', '\u{15c}', '\u{15e}', '\u{160}', '\u{218}', '\u{1e60}', '\u{1e62}',
+            '\u{1e64}', '\u{1e66}', '\u{1e68}', '\u{2c7e}', '\u{a7a8}',
+        ],
+        &[
+            'T', '\u{162}', '\u{164}', '\u{166}', '\u{1ac}', '\u{1ae}', '\u{21a}', '\u{23e}',
+            '\u{1e6a}', '\u{1e6c}', '\u{1e6e}', '\u{1e70}',
+        ],
+        &[
+            'U', '\u{d9}', '\u{da}', '\u{dc}', '\u{db}', '\u{168}', '\u{16a}', '\u{16c}',
+            '\u{16e}', '\u{170}', '\u{172}', '\u{1af}', '\u{1d3}', '\u{1d5}', '\u{1d7}', '\u{1d9}',
+            '\u{1db}', '\u{214}', '\u{216}', '\u{244}', '\u{1e72}', '\u{1e74}', '\u{1e76}',
+            '\u{1e78}', '\u{1e7a}', '\u{1ee4}', '\u{1ee6}', '\u{1ee8}', '\u{1eea}', '\u{1eec}',
+            '\u{1eee}', '\u{1ef0}',
+        ],
+        &['V', '\u{1b2}', '\u{1e7c}', '\u{1e7e}'],
+        &[
+            'W', '\u{174}', '\u{1e80}', '\u{1e82}', '\u{1e84}', '\u{1e86}', '\u{1e88}',
+        ],
+        &['X', '\u{1e8a}', '\u{1e8c}'],
+        &[
+            'Y', '\u{dd}', '\u{176}', '\u{178}', '\u{1b3}', '\u{232}', '\u{24e}', '\u{1e8e}',
+            '\u{1ef2}', '\u{1ef4}', '\u{1ef6}', '\u{1ef8}',
+        ],
+        &[
+            'Z', '\u{179}', '\u{17b}', '\u{17d}', '\u{1b5}', '\u{1e90}', '\u{1e92}', '\u{1e94}',
+            '\u{2c6b}',
+        ],
+        &[
+            'a', '\u{e0}', '\u{e1}', '\u{e2}', '\u{e3}', '\u{e4}', '\u{e5}', '\u{101}', '\u{103}',
+            '\u{105}', '\u{1ce}', '\u{1df}', '\u{1e1}', '\u{1fb}', '\u{201}', '\u{203}', '\u{227}',
+            '\u{1d8f}', '\u{1e01}', '\u{1e9a}', '\u{1ea1}', '\u{1ea3}', '\u{1ea5}', '\u{1ea7}',
+            '\u{1ea9}', '\u{1eab}', '\u{1ead}', '\u{1eaf}', '\u{1eb1}', '\u{1eb3}', '\u{1eb5}',
+            '\u{1eb7}', '\u{2c65}',
+        ],
+        &[
+            'b', '\u{180}', '\u{253}', '\u{1d6c}', '\u{1d80}', '\u{1e03}', '\u{1e05}', '\u{1e07}',
+        ],
+        &[
+            'c', '\u{e7}', '\u{107}', '\u{109}', '\u{10b}', '\u{10d}', '\u{188}', '\u{23c}',
+            '\u{1e09}', '\u{a793}', '\u{a794}',
+        ],
+        &[
+            'd', '\u{10f}', '\u{111}', '\u{257}', '\u{1d6d}', '\u{1d81}', '\u{1d91}', '\u{1e0b}',
+            '\u{1e0d}', '\u{1e0f}', '\u{1e11}', '\u{1e13}',
+        ],
+        &[
+            'e', '\u{e8}', '\u{e9}', '\u{ea}', '\u{eb}', '\u{113}', '\u{115}', '\u{117}',
+            '\u{119}', '\u{11b}', '\u{205}', '\u{207}', '\u{229}', '\u{247}', '\u{1d92}',
+            '\u{1e15}', '\u{1e17}', '\u{1e19}', '\u{1e1b}', '\u{1e1d}', '\u{1eb9}', '\u{1ebb}',
+            '\u{1ebd}', '\u{1ebf}', '\u{1ec1}', '\u{1ec3}', '\u{1ec5}', '\u{1ec7}',
+        ],
+        &[
+            'f', '\u{192}', '\u{1d6e}', '\u{1d82}', '\u{1e1f}', '\u{a799}',
+        ],
+        &[
+            'g', '\u{11d}', '\u{11f}', '\u{121}', '\u{123}', '\u{1e5}', '\u{1e7}', '\u{1f5}',
+            '\u{260}', '\u{1d83}', '\u{1e21}', '\u{a7a1}',
+        ],
+        &[
+            'h', '\u{125}', '\u{127}', '\u{21f}', '\u{1e23}', '\u{1e25}', '\u{1e27}', '\u{1e29}',
+            '\u{1e2b}', '\u{1e96}', '\u{2c68}', '\u{a795}',
+        ],
+        &[
+            'i', '\u{ec}', '\u{ed}', '\u{ee}', '\u{ef}', '\u{129}', '\u{12b}', '\u{12d}',
+            '\u{12f}', '\u{1d0}', '\u{209}', '\u{20b}', '\u{268}', '\u{1d96}', '\u{1e2d}',
+            '\u{1e2f}', '\u{1ec9}', '\u{1ecb}',
+        ],
+        &['j', '\u{135}', '\u{1f0}', '\u{249}'],
+        &[
+            'k', '\u{137}', '\u{199}', '\u{1e9}', '\u{1d84}', '\u{1e31}', '\u{1e33}', '\u{1e35}',
+            '\u{2c6a}', '\u{a741}',
+        ],
+        &[
+            'l', '\u{13a}', '\u{13c}', '\u{13e}', '\u{140}', '\u{142}', '\u{19a}', '\u{1e37}',
+            '\u{1e39}', '\u{1e3b}', '\u{1e3d}', '\u{2c61}',
+        ],
+        &['m', '\u{1d6f}', '\u{1e3f}', '\u{1e41}', '\u{1e43}'],
+        &[
+            'n', '\u{f1}', '\u{144}', '\u{146}', '\u{148}', '\u{149}', '\u{1f9}', '\u{1d70}',
+            '\u{1d87}', '\u{1e45}', '\u{1e47}', '\u{1e49}', '\u{1e4b}', '\u{a7a5}',
+        ],
+        &[
+            'o', '\u{f2}', '\u{f3}', '\u{f4}', '\u{f5}', '\u{f6}', '\u{f8}', '\u{14d}', '\u{14f}',
+            '\u{151}', '\u{1a1}', '\u{1d2}', '\u{1eb}', '\u{1ed}', '\u{1ff}', '\u{20d}', '\u{20f}',
+            '\u{22b}', '\u{22d}', '\u{22f}', '\u{231}', '\u{275}', '\u{1e4d}', '\u{1e4f}',
+            '\u{1e51}', '\u{1e53}', '\u{1ecd}', '\u{1ecf}', '\u{1ed1}', '\u{1ed3}', '\u{1ed5}',
+            '\u{1ed7}', '\u{1ed9}', '\u{1edb}', '\u{1edd}', '\u{1edf}', '\u{1ee1}', '\u{1ee3}',
+        ],
+        &[
+            'p', '\u{1a5}', '\u{1d71}', '\u{1d7d}', '\u{1d88}', '\u{1e55}', '\u{1e57}',
+        ],
+        &['q', '\u{24b}', '\u{2a0}'],
+        &[
+            'r', '\u{155}', '\u{157}', '\u{159}', '\u{211}', '\u{213}', '\u{24d}', '\u{27d}',
+            '\u{1d72}', '\u{1d73}', '\u{1d89}', '\u{1e59}', '\u{1e5b}', '\u{1e5d}', '\u{1e5f}',
+            '\u{a7a7}',
+        ],
+        &[
+            's', '\u{15b}', '\u{15d}', '\u{15f}', '\u{161}', '\u{219}', '\u{23f}', '\u{1d74}',
+            '\u{1d8a}', '\u{1e61}', '\u{1e63}', '\u{1e65}', '\u{1e67}', '\u{1e69}', '\u{a7a9}',
+        ],
+        &[
+            't', '\u{163}', '\u{165}', '\u{167}', '\u{1ab}', '\u{1ad}', '\u{21b}', '\u{288}',
+            '\u{1d75}', '\u{1e6b}', '\u{1e6d}', '\u{1e6f}', '\u{1e71}', '\u{1e97}', '\u{2c66}',
+        ],
+        &[
+            'u', '\u{f9}', '\u{fa}', '\u{fb}', '\u{fc}', '\u{169}', '\u{16b}', '\u{16d}',
+            '\u{16f}', '\u{171}', '\u{173}', '\u{1b0}', '\u{1d4}', '\u{1d6}', '\u{1d8}', '\u{1da}',
+            '\u{1dc}', '\u{215}', '\u{217}', '\u{289}', '\u{1d7e}', '\u{1d99}', '\u{1e73}',
+            '\u{1e75}', '\u{1e77}', '\u{1e79}', '\u{1e7b}', '\u{1ee5}', '\u{1ee7}', '\u{1ee9}',
+            '\u{1eeb}', '\u{1eed}', '\u{1eef}', '\u{1ef1}',
+        ],
+        &['v', '\u{28b}', '\u{1d8c}', '\u{1e7d}', '\u{1e7f}'],
+        &[
+            'w', '\u{175}', '\u{1e81}', '\u{1e83}', '\u{1e85}', '\u{1e87}', '\u{1e89}', '\u{1e98}',
+        ],
+        &['x', '\u{1e8b}', '\u{1e8d}'],
+        &[
+            'y', '\u{fd}', '\u{ff}', '\u{177}', '\u{1b4}', '\u{233}', '\u{24f}', '\u{1e8f}',
+            '\u{1e99}', '\u{1ef3}', '\u{1ef5}', '\u{1ef7}', '\u{1ef9}',
+        ],
+        &[
+            'z', '\u{17a}', '\u{17c}', '\u{17e}', '\u{1b6}', '\u{1d76}', '\u{1d8e}', '\u{1e91}',
+            '\u{1e93}', '\u{1e95}', '\u{2c6c}',
+        ],
+    ];
+    GROUPS.iter().copied().find(|g| g.contains(&c))
+}
+
 fn class_atom(negated: bool, item: ClassItem) -> Node {
     Node::Class(Class {
         negated,
@@ -1460,7 +1859,7 @@ impl Regex {
             err: None,
             err_pos: 0,
         };
-        let branches = parser.alternation();
+        let branches = parser.alternation(true);
         // `concat` stops at a `\)`, so anything left over at the top level is a `\)`
         // that never had a `\(` — c: "E55: Unmatched \)".
         if parser.i < parser.p.len() {

@@ -5825,23 +5825,12 @@ R40-5 through R40-8 are pinned together by
 `tests/parity_cases/regex_position_atoms_and_tilde.vim`, which diverges on ten of
 its fourteen lines with the change reverted.
 
-## R40-O2 (open). `[=a=]` matches only the base letter, not its accented forms
+## R40-O2. `[=a=]` matched only the base letter, not its accented forms — ✅ FIXED in R41
 
-Vim's equivalence class matches the letter and every accented form of it (c:
-`nfa_emit_equi_class`, a per-letter table of Unicode variants). The item is now
-PARSED correctly — `[[=a=]]` is one collection holding one class — but only the
-base characters between the delimiters are collected, so:
+Closed by R41-4: `nfa_emit_equi_class`'s table is ported verbatim, 52 groups
+transcribed one per `case … return OK` arm of its `switch (c)`.
 
-```text
-matchstr('xa', '[[=a=]]')       vim 'a'      vimlrs 'a'    (fixed by R40-7)
-matchstr('áb', '[[=a=]]')       vim 'á'      vimlrs ''
-matchstr('àâäb', '[[=a=]]\+')   vim 'àâä'    vimlrs ''
-```
-
-Closing it means porting that table rather than approximating it with a
-decomposition rule, which is why it is recorded instead of guessed at.
-
-## R40-O3 (open). Catastrophic backtracking where vim answers instantly
+## R40-O3 (open, re-confirmed in R41). Catastrophic backtracking where vim answers instantly
 
 `fuzz-parity --regex` at seed 11 reports one `PANIC: hung (>30s)`:
 
@@ -5856,17 +5845,253 @@ matcher, and R40-4's continuation rewrite gave it strictly MORE paths to explore
 (that is what fixed the group backtracking). It is a complexity gap, not a
 correctness one, and closing it needs a second matcher rather than a patch.
 
-## R40-O1 (open). `*` right after `\%(` is `E866` in vim and a literal star here
+Scoped honestly in R41 rather than patched: `regexp_nfa.c` is 7,848 lines at
+v9.2.1000 and the port has to be faithful, so it is its own round's work, not a
+line in one. A step budget or a memo table would change answers rather than
+speeds — vim reports `E363` (`'maxmempattern'`) on some of these shapes and a
+value on others, and which one it reports is a property of the engine that
+produced it. R41-9 below is the same gap seen from the correctness side.
 
-`\(*a\)`, `x\|*a`, `\&*a`, `\v(*a)` and `\v%(*a)` all read the star as a literal
-in vim; `\%(*a\)` and `\%[*a]` raise `E866: (NFA regexp) Misplaced *`. The
-asymmetry is vim's, not a rule this port can derive from `:help /star`, and the
-magic translation folds `\v%(` into `\%(` before the parser sees either — so
-implementing it in the parser would wrongly reject `\v%(*a)`, which vim accepts.
-Left open rather than guessed at.
+## R40-O1. `*` right after `\%(` is `E866` in vim and was a literal star here — ✅ FIXED in R41
+
+Closed by R41-1. The asymmetry is not an asymmetry once you read `peekchr()`:
+the exception is on `prevchr` being a MAGIC `(`, which `\%(` does not produce in
+magic and `\v%(` does. The provenance map R40-2 already added is what tells the
+two apart after the fold.
+
+## R41 — the `\%…` atom family, and what `peekchr()` actually says about `*`
+
+R40 left three findings open and ~40 untriaged E-number differences in the seed-11
+report. Every entry below was found by EXECUTION against the pinned oracle
+(`/opt/homebrew/Cellar/vim/9.2.1000/bin/vim`, sha256
+`06bf4b5f…5662b0`, the binary `tests/parity_cases/ORACLE` names) — a probe driver
+run through both interpreters and byte-diffed, never by reading code and deciding
+it looked wrong.
+
+Two of the three open findings closed, and the third's cost was measured rather
+than guessed at. The untriaged E-number bucket turned out to be almost entirely
+ONE thing: `\%` is `Magic('%')` under `\v`, and only `%(` was ever translated.
+
+## R41-1. `*` at a branch start: the rule is `prevchr`, not the opener's spelling — ✅ FIXED
+
+c: `regexp.c:783` `peekchr()` `case '*'` — a `*` is left literal when
+`!at_start && !(prev_at_start && prevchr == Magic('^')) &&
+(after_slash || (prevchr != Magic('(') && prevchr != Magic('&') && prevchr != Magic('|')))`
+fails. What matters is that `prevchr` is a MAGIC `(`. `\(` and `\v(` produce one;
+`\%(` in magic does not, because its `(` is read by `getchr()` in a dialect where
+`(` is not magic — and `\%[` never does, in any dialect, because `[` is magic
+whenever `*` is.
 
 ```text
-match('*a', '\(*a\)')     vim 0                       vimlrs 0
-match('*a', '\%(*a\)')    vim E866: Misplaced *       vimlrs 0
-match('*a', '\v%(*a)')    vim 0                       vimlrs 0
+                        vim 9.2                  vimlrs (before)
+match('*ab', '\(*a\)')     0                        0
+match('*ab', '\v%(*a)')    0                        0
+match('*ab', '\%(*a\)')    E866: Misplaced *        0
+match('*ab', '\%[*a]')     E866: Misplaced *        0
+match('*ab', '\v%[*a]')    E866: Misplaced *       -1
+match('*ab', '\M\&\*a')    E866: Misplaced *        0
+```
+
+`alternation`/`and_branch`/`concat` now carry the exception as a parameter set by
+whoever opened the branch: `\(` and a later `\|`/`\&` set it, `\%(` sets it only
+when the very-magic provenance map says the `(` was written `\v%(`. The nomagic
+pre-pass gained `\&` alongside `\|` and `\(` as a branch opener.
+Pinned by `tests/parity_cases/regex_star_after_group_opener.vim`.
+
+## R41-2. `\%[…]` accepted multis, an empty body and a missing `]` — ✅ FIXED
+
+c: `regexp_nfa.c:1616` — the body is
+`for (n = 0; (c = peekchr()) != ']'; ++n) nfa_regatom()`. It calls `nfa_regatom`
+DIRECTLY, not `nfa_regpiece`, so nothing inside can be a quantifier and every
+multi reaches nfa_regatom's "these should follow an atom" arm. `n == 0` after the
+`]` is `E70`, and running off the end is `E69`; both quote the backslash the
+dialect required.
+
+```text
+                        vim 9.2                    vimlrs (before)
+match('*ab', '\%[a*]')     E866: Misplaced *          0
+match('*ab', '\%[a\+b]')   E866: Misplaced +          0
+match('*ab', '\%[a\|b]')   E866: Misplaced |          0
+match('*ab', '\%[a\)b]')   E866: Misplaced )          0
+match('*ab', '\%[a\@=]')   E866: Misplaced @          0
+match('*ab', '\%[]')       E70: Empty \%[]            0
+match('*ab', '\v%[]')      E70: Empty %[]            -1
+match('*ab', '\%[ab')      E69: Missing ] after \%[   0
+```
+
+Pinned by `tests/parity_cases/regex_optional_sequence.vim`.
+
+## R41-3. Under `\v`, only `%(` was translated — the rest of the `\%` family was literal text — ✅ FIXED
+
+c: `regexp.c:760` — `%` is in the list of characters that become magic "only
+after `\v`", so under `\v` the WHOLE `\%…` family drops its backslash: `%(`,
+`%[`, `%d97`, `%^`, `%$`, `%23c`, `%V`, `%#`. `preprocess_magic` translated `%(`
+and nothing else, so `\v%[ab]` was read as a literal `%` followed by a
+collection. The converse holds too: `%` is in META, so `\v\%` is the LITERAL
+percent.
+
+```text
+                          vim 9.2      vimlrs (before)
+matchstr('ab', '\v%[ab]')   'ab'          ''
+matchstr('ab', '\v%d97')    'a'           ''
+matchstr('ab', '\v%u0061')  'a'           ''
+match('ab', '\v%$')          2           -1
+match('ab', '\v%1c')         0           -1
+match('ab', '\v%<2c')        0           -1
+```
+
+The character after `%` belongs to the atom, so the ones the generic very-magic
+operator rule would rewrite (`(`, `<`, `>`) are copied raw — `\v%<2c` must not
+become `\%\<2c`. Anything deeper (a `%(`'s branches, a `%[`'s atoms) is still
+very magic and is left to the translation loop. Pinned by
+`tests/parity_cases/regex_very_magic_percent.vim`.
+
+## R41-4. `[=a=]` matched only the base letter, and `[=ab=]` was a class at all — ✅ FIXED (closes R40-O2)
+
+Two bugs in one item. c: `regexp.c:464` `get_equi_class` accepts EXACTLY ONE
+character between the delimiters (`if (p[l + 2] == '=' && p[l + 3] == ']')`), so
+`[[=ab=]]` is no class and its `[` falls through to a literal; the same holds for
+`get_coll_element` and `[[.ab.]]`. And a real class expands through
+`nfa_emit_equi_class` (`regexp_nfa.c:696`), a 52-arm `switch` whose `case` labels
+and `EMIT2` list are the same set of code points in every arm — which is why one
+list per group serves both roles in the port.
+
+```text
+                         vim 9.2   vimlrs (before)
+match('á', '[[=a=]]')       0          -1
+match('ä', '[[=a=]]')       0          -1
+match('ñ', '[[=n=]]')       0          -1
+match('ž', '[[=z=]]')       0          -1
+match('Ä', '[[=A=]]')       0          -1
+match('ä', '[[=A=]]')      -1          -1   (case is not folded by the class)
+match('a', '[[=ab=]]')     -1           0
+match('a', '[[.ab.]]')     -1           0
+```
+
+Pinned by `tests/parity_cases/regex_equivalence_class.vim`.
+
+## R41-5. The codepoint atoms read the wrong number of digits and never failed — ✅ FIXED
+
+c: `regexp.c:986` `gethexchrs` / `1012` `getdecchrs` / `1043` `getoctchrs`. Each
+has its own budget: decimal is UNBOUNDED, octal's loop guard is
+`i < 3 && nr < 040`, hex takes 2/4/8. All three return `-1` on an empty run, and
+`nfa_regatom` turns that — and a value above `INT_MAX` — into `E678`, where this
+engine fell back to the literal radix letter and matched nothing quietly.
+
+```text
+                              vim 9.2                          vimlrs (before)
+matchstr('A1', '\%o1011')       'A1'                              ''
+matchstr(' 1', '\%o401')        ' 1'                              ''
+match('a', 'a\%d')              E678: Invalid character after \%[dxouU]   -1
+match('a', 'a\%o9')             E678: …                                   -1
+match('a', '\%d999999999999')   E678: …                                   -1
+```
+
+## R41-6. `\%q`, `\%V`, `\%#`, `\%'m` and the `\%.c` forms were unread — ✅ FIXED
+
+The `\%…` default arm is c: `regexp_nfa.c:1648` — an optional `<`/`>`, an
+optional `.` (cursor-relative, after which a number is `E1204`), a digit run,
+then `l`/`c`/`v` (missing value is `E1273`, `n >= limit` is `E951`) or a mark
+`'m`, and `E867` for everything else. Only the `\%23c` spelling was read at all;
+every other form quietly became a literal `%`.
+
+```text
+                       vim 9.2                                       vimlrs (before)
+match('abc', 'a\%q')     E867: (NFA regexp) Unknown operator '\%q'       -1
+match('abc', 'a\%')      E867: … '\%                                      0
+match('abc', 'a\%23x')   E867: … '\%x'                                   -1
+match('abc', 'a\%l')     E1273: (NFA regexp) missing value in '\%l'      -1
+match('abc', 'a\%.5c')   E1204: No Number allowed after .: '\%5'         -1
+match('abc', 'a\%2147483648c')  E951: \% value too large                 -1
+```
+
+At the end of the pattern the `%c` in `e_nfa_regexp_unknown_operator_percent_chr`
+formats a NUL into the middle of the message, so what vim PRINTS stops there,
+without the closing quote — the port reproduces that. `\%#` (cursor), `\%V`
+(Visual area) and `\%C` (composing characters) are recognized atoms that no
+string match can satisfy. R41-5 and R41-6 are pinned together by
+`tests/parity_cases/regex_percent_atom_errors.vim`.
+
+## R41-7. `E65` is the BACKTRACKING engine's, and it has an `@<=` escape hatch — ✅ FIXED
+
+The largest single bucket in the seed-11 report (60+ generated cases across
+`match`/`matchend`/`matchlist`/`matchstr`/`split`/`substitute`) was one rule.
+`E65` does not exist in `regexp_nfa.c` at all: it is raised by
+`regexp_bt.c:1215` `seen_endbrace`, which the automatic engine reaches only after
+the NFA compile has failed — and that function carries, verbatim,
+
+> `// Trick: check if "@<=" or "@<!" follows, in which case`
+> `// the \1 can appear before the referenced match.`
+
+a plain forward scan of the remaining pattern TEXT for those three bytes.
+
+```text
+                    vim 9.2   vimlrs (before)
+match('a', '\1@<=')   -1      E65: Illegal back reference
+match('a', '\1x\@<=') -1      E65: Illegal back reference
+match('a', '\1')      E65     E65   (unchanged)
+match('a', '\1a')     E65     E65   (unchanged)
+```
+
+Pinned by `tests/parity_cases/regex_backref_lookbehind_trick.vim`.
+
+## R41-8. `\m` was an atom unless the pattern also held `\v`, `\M` or `\V` — ✅ FIXED
+
+`preprocess_magic` returns early for a pattern with no dialect switch in it, and
+`\m` was missing from that test — so a `\m` that only RESTORES the dialect the
+pattern already had was never removed and reached the parser as an escape.
+
+```text
+                             vim 9.2   vimlrs (before)
+matchend('日', '.\m\%[ab]')      3        -1
+matchstr('amb', 'a\mb')         ''        'amb'
+```
+
+## R41-9. Nine capture groups is the limit — ✅ FIXED
+
+c: `regexp_nfa.c:2525` — `if (regnpar >= NSUBEXP) EMSG_RET_FAIL(...)`, with
+`regnpar` starting at 1 and `NSUBEXP` 10. The tenth `\(` is `E872`, where this
+engine numbered groups without bound. Non-capturing groups are not counted.
+Pinned in `tests/parity_cases/regex_percent_atom_errors.vim`.
+
+## R41-O1 (open). Alternation priority when the first branch is a zero-width ANCHOR
+
+Vim's NFA is a thread simulation with priority ordering, and the two disagree
+about which alternative wins when the first one is an anchor that matches empty:
+
+```text
+                            vim 9.2   vimlrs
+matchstr('aa', '^\|a*')      'aa'      ''
+matchstr('aa', '\<\|a*')     'aa'      ''
+matchstr('aa', '\%(\)\|a*')   ''       ''     (agree)
+matchstr('aa', 'a\{0}\|a*')   ''       ''     (agree)
+matchstr('ab', 'a\|ab')      'a'      'a'     (agree — NOT leftmost-longest)
+```
+
+So it is neither "first branch wins" nor "longest wins": `^` and `\<` compile to
+state transitions rather than to a zero-width match, and the thread that carries
+them loses to a longer one at the same start while an empty GROUP does not. That
+is a property of the engine that produced it, and reproducing it in a
+backtracker means emulating vim's thread ordering — the same port R40-O3 needs.
+
+## R41-O2 (open). `\%C` matches a run of composing characters
+
+`\%C` is `NFA_ANY_COMPOSING`: it consumes zero or more composing characters, so
+`matchstr('a<U+0301>b', 'a\%Cb')` is the whole string in vim and `''` here (the
+atom is recognized, and never matches). The predicate is `utf_iscomposing`, which
+in the vendored Neovim source is `utf8proc_grapheme_break` — a whole Unicode
+library, not a table this port can transcribe. The same gap shows up as
+`split('<U+0301>b', '\<')` splitting where vim does not.
+
+## R41-O3 (open). `match()` with a `{start}` inside a multi-byte character
+
+c: `funcs.c` `f_match` does `str += start` on the raw bytes, so a `{start}` that
+lands mid-character leaves the trailing bytes of that character at the head of
+the subject. This engine matches over `char`s and can only round up to the next
+boundary.
+
+```text
+                     vim 9.2   vimlrs
+match('é', ']\{}', 1)    1        2
+match('é', '', 1)        1        2
 ```

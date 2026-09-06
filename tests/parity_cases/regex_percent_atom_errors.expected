@@ -1,0 +1,42 @@
+0
+\%o101 'A'
+\%o1011 'A1'
+\%o40 ' '
+\%o401 ' 1'
+\%d0000000097 'a'
+\%u00610 'a0'
+\%x610 'a0'
+a\%d Vim(echo):E678: Invalid character after \%[dxouU]
+a\%da Vim(echo):E678: Invalid character after \%[dxouU]
+a\%xzz Vim(echo):E678: Invalid character after \%[dxouU]
+a\%o9 Vim(echo):E678: Invalid character after \%[dxouU]
+\%d999999999999 Vim(echo):E678: Invalid character after \%[dxouU]
+\v%d Vim(echo):E678: Invalid character after %[dxouU]
+a\%q Vim(echo):E867: (NFA regexp) Unknown operator '\%q'
+a\% Vim(echo):E867: (NFA regexp) Unknown operator '\%
+a\%23x Vim(echo):E867: (NFA regexp) Unknown operator '\%x'
+a\%<2 Vim(echo):E867: (NFA regexp) Unknown operator '\%
+a\%2 Vim(echo):E867: (NFA regexp) Unknown operator '\%
+a\%l Vim(echo):E1273: (NFA regexp) missing value in '\%l'
+a\%c Vim(echo):E1273: (NFA regexp) missing value in '\%c'
+a\%v Vim(echo):E1273: (NFA regexp) missing value in '\%v'
+a\%.5c Vim(echo):E1204: No Number allowed after .: '\%5'
+a\%2'z Vim(echo):E867: (NFA regexp) Unknown operator '\%''
+a\%2147483648c Vim(echo):E951: \% value too large
+a\%#b -1
+a\%Vb -1
+a\%.c -1
+a\%<.c -1
+a\%'mb -1
+a\%<'m -1
+a\%1lb -1
+8 0
+9 0
+10 Vim(echo):E872: (NFA regexp) Too many '('
+11 Vim(echo):E872: (NFA regexp) Too many '('
+nc10 0
+nest Vim(echo):E872: (NFA regexp) Too many '('
+3
+3
+''
+'ab'

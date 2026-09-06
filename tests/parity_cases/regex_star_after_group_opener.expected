@@ -1,0 +1,24 @@
+0
+\(*a\) 0
+\|*a 0
+\&*a 0
+\v(*a) 0
+\v%(*a) 0
+\v(%(*a)) 0
+\%(a\|*b\) 1
+\%(\&*a\) 0
+^\(*a\) 0
+\%(*a\) Vim(echo):E866: (NFA regexp) Misplaced *
+\%[*a] Vim(echo):E866: (NFA regexp) Misplaced *
+\v%[*a] Vim(echo):E866: (NFA regexp) Misplaced *
+\%(\%(*a\)\) Vim(echo):E866: (NFA regexp) Misplaced *
+\M\(\*a\) Vim(echo):E866: (NFA regexp) Misplaced *
+\M\|\*a Vim(echo):E866: (NFA regexp) Misplaced *
+\M\&\*a Vim(echo):E866: (NFA regexp) Misplaced *
+\M\%(\*a\) Vim(echo):E866: (NFA regexp) Misplaced *
+\V\(\*a\) Vim(echo):E866: (NFA regexp) Misplaced *
+\%(\*a\) 0
+\(\*a\) 0
+\v(\*a) 0
+\%[\*a] 0
+\M\(*a\) 0

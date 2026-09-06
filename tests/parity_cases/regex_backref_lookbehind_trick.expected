@@ -1,0 +1,17 @@
+0
+\1@<= -1
+\2@<! -1
+\1 Vim(echo):E65: Illegal back reference
+\1a Vim(echo):E65: Illegal back reference
+\2 Vim(echo):E65: Illegal back reference
+\9 Vim(echo):E65: Illegal back reference
+\v\1 Vim(echo):E65: Illegal back reference
+\M\1 Vim(echo):E65: Illegal back reference
+\(a\1\) Vim(echo):E65: Illegal back reference
+\%(a\)\1 Vim(echo):E65: Illegal back reference
+\(a\)\1 -1
+\(\(a\)\2\) -1
+\(a\)\|\1 0
+\(a\)\2 Vim(echo):E65: Illegal back reference
+-1
+-1

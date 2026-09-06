@@ -8,10 +8,12 @@
 //!
 //! `docs/nvim_c_functions.txt` (produced by `scripts/gen_c_functions.sh`) is a
 //! FALLBACK, consulted only when `vendor/` is missing — and it is not in the
-//! repository, because `docs/` is gitignored. On a normal checkout the scan of
-//! `vendor/` is the whole answer, which is what makes the gate work on a fresh
-//! clone and in CI with no generation step. This block used to name that file
-//! as the primary source, which inverted the two.
+//! repository: `.gitignore` holds only `target/`, so `docs/` IS tracked (its
+//! seven files are the published HUD site), but that generated listing was
+//! never committed. On a normal checkout the scan of `vendor/` is the whole
+//! answer, which is what makes the gate work on a fresh clone and in CI with no
+//! generation step. This block used to name that file as the primary source,
+//! which inverted the two.
 //!
 //! This is the immune system against porting drift: an invented helper name
 //! (`make_helper`, `parse_v2`, a bag-of-globals accessor) that doesn't exist in

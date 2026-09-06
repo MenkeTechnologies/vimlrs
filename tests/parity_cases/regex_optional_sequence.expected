@@ -1,0 +1,19 @@
+0
+\%[a*] Vim(echo):E866: (NFA regexp) Misplaced *
+\%[a\+b] Vim(echo):E866: (NFA regexp) Misplaced +
+\%[a\|b] Vim(echo):E866: (NFA regexp) Misplaced |
+\%[a\{2}] Vim(echo):E866: (NFA regexp) Misplaced {
+\%[a\)b] Vim(echo):E866: (NFA regexp) Misplaced )
+\%[a\@=] Vim(echo):E866: (NFA regexp) Misplaced @
+\v%[a*] Vim(echo):E866: (NFA regexp) Misplaced *
+\%[*] Vim(echo):E866: (NFA regexp) Misplaced *
+a\%[*b] Vim(echo):E866: (NFA regexp) Misplaced *
+\%[] Vim(echo):E70: Empty \%[]
+\v%[] Vim(echo):E70: Empty %[]
+\M\%[] Vim(echo):E70: Empty \%[]
+\%[ab Vim(echo):E69: Missing ] after \%[
+\v%[ab Vim(echo):E69: Missing ] after %[
+\%[a\*] a
+\%[a\%[bc]] abc
+\v%[ab] ab
+\%[ab] ab
