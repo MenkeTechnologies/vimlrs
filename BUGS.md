@@ -6100,7 +6100,7 @@ matchstr("a<U+0301>b", 'a\%C')   'a<U+0301>'      ''
 
 Pinned by `tests/parity_cases/regex_composing_atoms.vim`.
 
-## R41-O3 (open). `match()` with a `{start}` inside a multi-byte character
+## R41-O3 (CLOSED in R44). `match()` with a `{start}` inside a multi-byte character
 
 c: `funcs.c` `f_match` does `str += start` on the raw bytes, so a `{start}` that
 lands mid-character leaves the trailing bytes of that character at the head of
@@ -6339,7 +6339,7 @@ pattern; the subject is the three characters `\`, `z`, `s` and a backslash is
 not a hex digit. With the three added, every letter in `classchars` is now an
 arm of `Parser::atom`. Pinned by `viml_regex::tests::negated_case_class_atoms`.
 
-## R43-O1 (open). `\<` fires at a CHANGE OF CHARACTER CLASS, not at a non-word→word edge
+## R43-O1 (CLOSED in R44). `\<` fires at a CHANGE OF CHARACTER CLASS, not at a non-word→word edge
 
 The widened grammar's other finding, and the only regex gap left besides
 `R41-O3`:
@@ -6366,3 +6366,114 @@ it means porting `classes[]` and the `emoji_all` table it consults first, then
 rewriting `\<`/`\>` in terms of classes rather than a predicate — which changes
 `split()` on `'\<'` and every other word-boundary answer, so it is its own round
 with its own fuzz run, not a patch on this one.
+
+## R44 — the character-class table lands, and `\<` stops asking a yes/no question
+
+Oracle for this round: `/opt/homebrew/Cellar/vim/9.2.1000/bin/vim`, sha256
+`06bf4b5ff09dc129d8ba0087529340967540f0d11b11a5eeec69d41e445662b0`, "Included
+patches: 1-1000" — re-measured and unchanged from the vector stamped in
+`tests/parity_cases/ORACLE`, and the C was fetched at tag `v9.2.1000` to match.
+
+### R43-O1 is CLOSED — `classes[]`, `emoji_all` and `vim_iswordc_tab` are ported
+
+`utf_class_tab()` (`src/ported/mbyte.rs`) is the port: the seventy-one-interval
+`classes[]` table, the binary search over it, the `c < 0x100` arm that defers to
+`'iskeyword'`, and the emoji check that runs before the table. `\<` and `\>` are
+rewritten as `bow_matches`/`eow_matches` in `src/viml_regex.rs` and both engines
+call the same pair, because `regexp_bt.c:3517` and `regexp_nfa.c:6321` are the
+same three lines.
+
+```text
+                                        vim 9.2.1000   before        after
+substitute('日本語abc', '\<', 'X', 'g')  'X日本語Xabc'  'X日本語abc'  'X日本語Xabc'
+substitute('あアa漢한', '\<', 'X', 'g')  'XあXアXaX漢X한' 'Xあアa漢한' 'XあXアXaX漢X한'
+substitute('a😀b', '\<', 'X', 'g')       'XaX😀Xb'      'Xa😀b'       'XaX😀Xb'
+substitute('x₂y', '\<', 'X', 'g')        'XxX₂Xy'       'Xx₂y'        'XxX₂Xy'
+split('日本語abc', '\<')                 ['日本語','abc'] ['日本語abc'] ['日本語','abc']
+```
+
+Two ports here come from vim rather than from `vendor/`, and deliberately:
+
+* `emoji_all[]` (vim `mbyte.c:2863`, 146 intervals). Neovim replaced the table
+  with a utf8proc property query (`prop_is_emojilike()`, `vendor/mbyte.c:444`)
+  and utf8proc is not a dependency of this crate. The parity oracle is vim, so
+  vim's table is the spec.
+* `parse_isopt()`'s `p_isk` arm, for the default `'iskeyword'`
+  (`@,48-57,_,192-255`). The `@` shorthand is "1 through 255, but only where
+  `mb_islower()` or `mb_isupper()` says so", which is why `µ` (0xb5) is a
+  keyword character while `ª` (0xaa) is not.
+
+The whole table was verified codepoint by codepoint against the oracle's own
+`charclass()` over `1..=0x2fb00` — 193,280 codepoints, zero mismatches.
+
+### R41-O3 is CLOSED — `{start}` is a byte offset all the way down
+
+`find_some_match()` no longer rounds a `{start}` up to a character boundary. It
+decodes the subject the way the engines read a line — `utf_ptr2char()` per
+character, `utf_ptr2len()` for its byte length, kept in parallel — so the orphan
+trailing bytes of a chopped multi-byte character are characters of the subject
+with a byte length of 1, which is exactly what `str += start` leaves the C.
+
+```text
+                       vim 9.2   before   after
+match('é', ']\{}', 1)     1        2        1
+match('é', '', 1)         1        2        1
+```
+
+`regex_search_nth_chars()` is the new entry point: it reports CHAR SPANS rather
+than rebuilt text, because a caller in this position has to slice the ORIGINAL
+bytes — an orphan continuation byte decodes to a codepoint whose UTF-8 form is
+two bytes and vim writes the one byte it read. `SomeMatch::groups` is therefore
+`Vec<VimStr>`, and `tv_list_append_string()` takes `impl Into<VimStr>`.
+
+### R44-1. `\_b` matched the letter `b`; vim rejects it
+
+Found by counting, the method that found `\L`/`\U`/`\X` in round 4. `nfa_regatom`
+accepts `\_` followed by `^`, `$`, `[` or one of `classchars`
+(`".iIkKfFpPsSdDxXoOwWhHaAlLuU"`) and NOTHING else: every other character falls
+into the `classchars` switch's `p == NULL` arm, which with `extra == NFA_ADD_NL`
+is `semsg(e_nfa_regexp_invalid_character_class_nr, c)`. The grammar generated
+four of the twenty-nine shapes and never a rejected one.
+
+```text
+                          vim 9.2.1000                                     before
+matchstr('abc', '\_b')    E877: (NFA regexp) Invalid character class: 98    'b'
+matchstr('abc', '\_z')    E877: (NFA regexp) Invalid character class: 122   ''
+matchstr('abc', '\_1')    E877: (NFA regexp) Invalid character class: 49    E65: Illegal back reference
+matchstr('abc', '\_(a\)') E877: (NFA regexp) Invalid character class: 40    'a'
+matchstr('abc', '\_é')    E877: (NFA regexp) Invalid character class: 233   ''
+matchstr('abc', '\_')     E865: (NFA) Regexp end encountered prematurely    'a'
+```
+
+`\_^` and `\_$` also lost their newline alternation: the C `break`s out of the
+`case Magic('_')` arm before `extra = NFA_ADD_NL` is set, so they are plain
+`NFA_BOL`/`NFA_EOL`. This engine wrapped them as "the literal, or a newline",
+which happened to answer the same on a one-line subject.
+
+### R44-O1 (open). `\%v` is a VIRTUAL column and this engine has no cell widths
+
+The other thing counting found. `nfa_regatom()`'s `case Magic('%')` has twelve
+arms plus a numeric default; the grammar generated seven of them. `\%#`, `\%C`,
+`\%'m` and `\%U` all turned out to be right. `\%v` is not.
+
+```text
+                                       vim 9.2.1000   vimlrs
+match('abc', '\%2v')                        1           -1
+substitute('abcd', '\%>2v.', 'X', 'g')   'abXX'       'abcd'
+substitute('abcd', '\%<3v.', 'X', 'g')   'XXcd'       'abcd'
+substitute('a\tbc', '\%3v.', 'X', 'g')   'a\Xbc'      'a\tbc'
+```
+
+c: `regexp_nfa.c:6926` `NFA_VCOL`/`NFA_VCOL_GT`/`NFA_VCOL_LT` compare against
+`win_linetabsize(wp, lnum, rex.line, col) + 1` — the SCREEN CELL width of the
+line up to that byte. A tab is `'tabstop'` cells and a CJK ideograph is two, so
+this is a different question from `\%c`'s byte column (which is `NFA_COL`,
+already ported and correct) and from `\%l`'s line number. Closing it means
+porting `win_linetabsize()` and the `utf_char2cells()` family underneath it,
+which `src/ported/mbyte.rs` states outright it does not port — its data is the
+East Asian width tables. That is its own round: cell width is also what
+`strdisplaywidth()`, `:echo`'s column model and every alignment answer are
+defined in terms of, so it moves more than one atom.
+
+`match('日本語', '\%4v')` is `-1` in both, which is the cell model agreeing by
+accident: 日 is two cells wide, so no character starts at virtual column 4.

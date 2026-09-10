@@ -1,0 +1,18 @@
+0
+Vim(echo):E877: (NFA regexp) Invalid character class: 98
+Vim(echo):E877: (NFA regexp) Invalid character class: 122
+Vim(echo):E877: (NFA regexp) Invalid character class: 49
+Vim(echo):E877: (NFA regexp) Invalid character class: 40
+Vim(echo):E877: (NFA regexp) Invalid character class: 233
+Vim(echo):E865: (NFA) Regexp end encountered prematurely
+'a
+b'
+'
+'
+'a
+b'
+''
+'a'
+'c'
+''
+['a', 'b']

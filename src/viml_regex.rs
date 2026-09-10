@@ -26,6 +26,7 @@
 //! control `\c`/`\C` plus the caller's ignore-case flag.
 //! ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+use crate::ported::mbyte::mb_get_class;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -1111,6 +1112,12 @@ impl Parser {
         self.escaped(c)
     }
 
+    /// c: `classchars` (`regexp_bt.c:256`) — `".iIkKfFpPsSdDxXoOwWhHaAlLuU"`, the
+    /// characters that spell a character class after a backslash. `\_x` is legal
+    /// for exactly these (plus `^`, `$` and `[`, handled before the fallthrough);
+    /// anything else is `E877`.
+    const CLASSCHARS: &str = ".iIkKfFpPsSdDxXoOwWhHaAlLuU";
+
     /// The atom denoted by the character *after* a backslash (already consumed).
     /// Split out from [`Self::escape`] so `\_x` can ask for the same atom `\x`
     /// would produce and then wrap it (see the `'_'` arm).
@@ -1124,20 +1131,58 @@ impl Parser {
             // exclude it. Model it as what it is: an alternation of the atom and a
             // literal newline.
             '_' => {
+                // c: `nfa_regatom()`'s `case Magic('_')` accepts exactly four
+                // shapes and rejects everything else. `\_^` and `\_$` are the
+                // line anchors and get NO newline alternation — they `break`
+                // before `extra = NFA_ADD_NL` is set. `\_[` jumps to the
+                // collection label, and every other character falls through into
+                // the `classchars` switch, whose `p == NULL` arm with
+                // `extra == NFA_ADD_NL` is
+                // `semsg(e_nfa_regexp_invalid_character_class_nr, c)`. `\_b`,
+                // `\_z` and `\_(` are that error, not the letters they used to
+                // match here.
                 let inner = match self.peek() {
-                    // `\_.` — the `.` atom does not reach `escape()`, so take it here.
+                    // c: `if (c == '^') { EMIT(NFA_BOL); break; }` — no `\n` arm.
+                    Some('^') => {
+                        self.i += 1;
+                        return Some(Node::Bol);
+                    }
+                    // c: `if (c == '$') { EMIT(NFA_EOL); break; }`
+                    Some('$') => {
+                        self.i += 1;
+                        return Some(Node::Eol);
+                    }
+                    // `\_[…]` — a bracket collection.
+                    Some('[') => self.atom(false)?,
+                    // `\_.` — the `.` atom does not reach `escape()`, so take it
+                    // here. It is `classchars`' first entry.
                     Some('.') => {
                         self.i += 1;
                         Node::Any
                     }
-                    // `\_[…]` — a bracket collection.
-                    Some('[') => self.atom(false)?,
-                    // `\_s`, `\_d`, `\_S`, … — the escaped class atom that follows.
-                    Some(_) => {
-                        let c = self.bump()?;
+                    // `\_s`, `\_d`, `\_S`, … — the escaped class atom that
+                    // follows, but ONLY when it is one of `classchars`.
+                    Some(c) if Self::CLASSCHARS.contains(c) => {
+                        self.i += 1;
                         self.escaped(c)?
                     }
-                    None => return None,
+                    Some(c) => {
+                        // c: `e_nfa_regexp_invalid_character_class_nr` prints the
+                        // character's numeric value, not the character.
+                        self.i += 1;
+                        self.fail(&format!(
+                            "E877: (NFA regexp) Invalid character class: {}",
+                            c as u32
+                        ));
+                        return Some(Node::Lit(c));
+                    }
+                    // c: `c = no_Magic(getchr()); if (c == NUL)
+                    // EMSG_RET_FAIL(_(e_nfa_regexp_end_encountered_prematurely));`
+                    // — a trailing `\_` is an error, not an empty atom.
+                    None => {
+                        self.fail("E865: (NFA) Regexp end encountered prematurely");
+                        return None;
+                    }
                 };
                 Node::Group(
                     vec![
@@ -2388,12 +2433,12 @@ impl Regex {
                 Some(pos)
             }
             Node::WordB(start) => {
-                let before = pos > 0 && is_word(text[pos - 1]);
-                let after = pos < text.len() && is_word(text[pos]);
+                // c: `case BOW:` / `case EOW:` in `regmatch()`, regexp_bt.c:3517
+                // and :3539 — both engines share these two predicates.
                 let ok = if *start {
-                    !before && after
+                    bow_matches(text, pos)
                 } else {
-                    before && !after
+                    eow_matches(text, pos)
                 };
                 ok.then_some(pos)
             }
@@ -2574,20 +2619,73 @@ fn char_eq(a: char, b: char, ic: bool) -> bool {
     }
 }
 
-/// Word-character test for `\<`/`\>` boundaries. Unlike the `\w` class atom
-/// (ASCII-only), Vim's word boundaries follow `'iskeyword'`, whose default
-/// (`@,48-57,_,192-255`) plus `utf_class` classification treats multibyte
-/// letters/digits (é, Ω, ４, ñ) as keyword chars — verified against nvim/vim:
-/// `matchstr('!é', '\<.')` == 'é'. So this stays Unicode-aware on purpose.
-fn is_word(c: char) -> bool {
-    // c: `utf_class_buf()` (mbyte.c) ends with "most other characters are
-    // 'word' characters" — `return 2` — for every codepoint at or above 0x100
-    // that is not in its `classes[]` punctuation table. Combining marks are not
-    // in that table, so U+0301 is a WORD character to vim's classifier: `\<`
-    // matches at index 0 of "\u0301b" (verified against vim 9.2.1000, which
-    // answers 0 where this answered 2), and `split("\u0301b", '\<')` therefore
-    // does not split.
-    c.is_alphanumeric() || c == '_' || crate::ported::strings::utf_iscomposing(c)
+/// Port of `reg_prev_class()` from `regexp.c:1349` (vim 9.2.1000) — the
+/// character class of the character *before* `input`, or `-1` at the start of
+/// the line.
+///
+/// RUST-PORT NOTE: the C is `mb_get_class_buf(rex.input - 1 - mb_head_off(...))`
+/// — the byte arithmetic that steps a `char_u *` back one whole character.
+/// Both engines here index a decoded `&[char]`, so the previous character is
+/// `text[input - 1]`.
+fn reg_prev_class(text: &[char], input: usize) -> i32 {
+    if input > 0 {
+        mb_get_class(text[input - 1])
+    } else {
+        -1
+    }
+}
+
+/// The class of the character at `input`, or `0` past the end of the subject —
+/// the C reads the line's NUL terminator there, and `mb_get_class_buf()`
+/// answers `0` for NUL.
+fn reg_this_class(text: &[char], input: usize) -> i32 {
+    text.get(input).copied().map_or(0, mb_get_class)
+}
+
+/// `\<` — port of the `has_mbyte` arm of `case BOW:` (regexp_bt.c:3517, and
+/// `case NFA_BOW:` at regexp_nfa.c:6321, which is the same test).
+///
+/// A word begins where the character under the cursor is a word character
+/// (class 2 or more) and the character before it is in a *different* class.
+/// That is not the same question as "the previous character is not a word
+/// character": `mb_get_class_buf()` gives CJK ideographs, Hiragana, Katakana,
+/// Hangul, braille, superscripts and subscripts each their own class number, so
+/// `\<` fires between `語` and `a` in `日本語abc` — vim's
+/// `substitute('日本語abc', '\<', 'X', 'g')` is `X日本語Xabc`. A single
+/// is-word boolean cannot see that boundary.
+fn bow_matches(text: &[char], input: usize) -> bool {
+    // c: if (curc == NUL) result = FALSE;
+    if input >= text.len() {
+        return false;
+    }
+    // c: this_class = mb_get_class_buf(rex.input, rex.reg_buf);
+    let this_class = reg_this_class(text, input);
+    // c: if (this_class <= 1) result = FALSE;  // not on a word at all
+    if this_class <= 1 {
+        return false;
+    }
+    // c: else if (reg_prev_class() == this_class) result = FALSE;
+    //    // previous char is in same word
+    reg_prev_class(text, input) != this_class
+}
+
+/// `\>` — port of the `has_mbyte` arm of `case EOW:` (regexp_bt.c:3539, and
+/// `case NFA_EOW:` at regexp_nfa.c:6348).
+///
+/// A word ends where the preceding character is a word character and the
+/// character under the cursor — the line's NUL at end of subject, whose class
+/// is `0` — is in a different class. See [`bow_matches`] for why the test is
+/// class equality rather than a boolean.
+fn eow_matches(text: &[char], input: usize) -> bool {
+    // c: if (rex.input == rex.line) result = FALSE;  // can't match at start
+    if input == 0 {
+        return false;
+    }
+    let this_class = reg_this_class(text, input);
+    let prev_class = reg_prev_class(text, input);
+    // c: if (this_class == prev_class || prev_class == 0 || prev_class == 1)
+    //        result = FALSE;
+    this_class != prev_class && prev_class != 0 && prev_class != 1
 }
 
 // ── high-level entry points (used by ops.rs / builtins) ──
@@ -2622,15 +2720,45 @@ pub fn regex_search_nth(
     nth: i64,
 ) -> Option<(i64, i64, Vec<String>)> {
     let chars: Vec<char> = subject.chars().collect();
+    let (s, e, spans) = regex_search_nth_chars(pat, &chars, ic, from, nth)?;
+    let groups = spans
+        .iter()
+        .map(|g| match g {
+            Some((gs, ge)) => chars[*gs..*ge].iter().collect(),
+            None => String::new(),
+        })
+        .collect();
+    Some((s, e, groups))
+}
+
+/// `(start, end, [whole, \1..\9])` in char indices — [`regex_search_nth_chars`]'s
+/// result. A group that did not participate is `None`.
+pub type CharSpans = (i64, i64, Vec<Option<(usize, usize)>>);
+
+/// [`regex_search_nth`] over an already-decoded subject, reporting CHAR SPANS
+/// rather than materialised group text.
+///
+/// The span form is what a caller needs when the subject's characters do not
+/// map one-for-one onto the bytes they came from — `find_some_match()`'s
+/// `{start}` chop, whose first "character" can be the orphan trailing byte of a
+/// multi-byte sequence. Such a caller has to slice the ORIGINAL bytes, so it
+/// cannot use text this function rebuilt from `char`s.
+pub fn regex_search_nth_chars(
+    pat: &str,
+    chars: &[char],
+    ic: bool,
+    from: usize,
+    nth: i64,
+) -> Option<CharSpans> {
     let re = Regex::compile(pat);
     let mut pos = from.min(chars.len());
     let mut remaining = nth.max(1);
     loop {
-        let caps = re.find_from(&chars, ic, pos)?;
+        let caps = re.find_from(chars, ic, pos)?;
         let (s, e) = caps.whole();
         remaining -= 1;
         if remaining <= 0 {
-            let mut groups: Vec<String> = caps
+            let mut groups: Vec<Option<(usize, usize)>> = caps
                 .groups
                 .iter()
                 .map(|g| match g {
@@ -2638,11 +2766,11 @@ pub fn regex_search_nth(
                     // the match start past where the group closed — Vim rejects such a
                     // pattern outright (E888), but the matcher must not panic on the
                     // slice while getting there.
-                    Some((gs, ge)) if gs <= ge => chars[*gs..*ge].iter().collect(),
-                    _ => String::new(),
+                    Some((gs, ge)) if gs <= ge => Some((*gs, *ge)),
+                    _ => None,
                 })
                 .collect();
-            groups.resize(10, String::new());
+            groups.resize(10, None);
             return Some((s as i64, e as i64, groups));
         }
         // c (funcs.c:4190): the next {count} search starts ONE CHARACTER past the
@@ -2652,7 +2780,7 @@ pub fn regex_search_nth(
         // `utfc_ptr2len` is a base codepoint plus its composing marks, so the
         // step is the whole cluster, not `s + 1`; that also covers the
         // zero-width case (a cluster is at least one char, so it progresses).
-        pos = cluster_end(&chars, s);
+        pos = cluster_end(chars, s);
         if pos > chars.len() {
             return None;
         }
@@ -3278,5 +3406,80 @@ mod tests {
         assert_eq!(regex_match_index("a\\@x", "x", false), -1);
         assert_eq!(regex_match_index("a\\@<x", "x", false), -1);
         assert_eq!(regex_match_index("\\(a\\)\\@=\\{2}", "x", false), -1);
+    }
+
+    /// `\<` compares CHARACTER CLASSES, not a yes/no word predicate: a boundary
+    /// falls wherever two adjacent characters have different non-punctuation
+    /// classes. Every expectation is vim 9.2.1000's own answer.
+    #[test]
+    fn word_boundaries_follow_character_class() {
+        // The case that opened R43-O1: 語 is class 0x4e00 and `a` is class 2, so
+        // the script change IS a word start.
+        assert_eq!(
+            regex_substitute("日本語abc", "\\<", "X", "g"),
+            "X日本語Xabc"
+        );
+        assert_eq!(
+            regex_substitute("abc日本語", "\\<", "X", "g"),
+            "XabcX日本語"
+        );
+        // Hiragana, katakana, CJK and Hangul are four DIFFERENT classes, so a
+        // boundary falls between each pair.
+        assert_eq!(
+            regex_substitute("あアa漢한", "\\<", "X", "g"),
+            "XあXアXaX漢X한"
+        );
+        assert_eq!(
+            regex_substitute("あアa漢한", "\\>", "X", "g"),
+            "あXアXaX漢X한X"
+        );
+        // Emoji are class 3 — `emoji_all`, checked before the interval table.
+        assert_eq!(regex_substitute("a😀b", "\\<", "X", "g"), "XaX😀Xb");
+        // Subscripts are class 0x2080, but SUPERSCRIPT TWO is U+00B2 — below
+        // 0x100, so it is `'iskeyword'`'s answer (punctuation), not the table's.
+        assert_eq!(regex_substitute("x₂y", "\\<", "X", "g"), "XxX₂Xy");
+        assert_eq!(regex_substitute("x²y", "\\<", "X", "g"), "Xx²Xy");
+        // Latin-1 letters share class 2 with ASCII, so no boundary inside a word.
+        assert_eq!(regex_substitute("áb", "\\<", "X", "g"), "Xáb");
+        // µ (0xb5) is a keyword character via the `@` alpha class; ª (0xaa) is not.
+        assert_eq!(regex_substitute("µa", "\\<", "X", "g"), "Xµa");
+        assert_eq!(regex_substitute("ªa", "\\<", "X", "g"), "ªXa");
+        // ASCII words are unchanged by all of this.
+        assert_eq!(regex_substitute("foo bar", "\\<", "X", "g"), "Xfoo Xbar");
+        assert_eq!(regex_substitute("foo bar", "\\>", "X", "g"), "fooX barX");
+        // `\>` cannot match at position 0 (`rex.input == rex.line`), and `\<`
+        // cannot match at end of subject (`curc == NUL`).
+        assert_eq!(regex_substitute("", "\\<", "X", "g"), "");
+        assert_eq!(regex_substitute("", "\\>", "X", "g"), "");
+        // split() rides on the same predicate.
+        assert_eq!(
+            regex_split("日本語abc", "\\<", false, false),
+            vec!["日本語", "abc"]
+        );
+    }
+
+    /// `\_x` is legal for `classchars`, `^`, `$` and `[` — and an error for
+    /// everything else. A rejected pattern matches nothing here.
+    #[test]
+    fn underscore_atom_rejects_non_class_chars() {
+        // c: `e_nfa_regexp_invalid_character_class_nr` — `\_b` used to match `b`.
+        assert_eq!(regex_match_index("\\_b", "abc", false), -1);
+        assert_eq!(regex_match_index("\\_z", "abc", false), -1);
+        assert_eq!(regex_match_index("\\_1", "abc", false), -1);
+        assert_eq!(regex_match_index("\\_(a\\)", "abc", false), -1);
+        assert_eq!(regex_match_index("\\_é", "abc", false), -1);
+        // c: `if (c == NUL) EMSG_RET_FAIL(e_nfa_regexp_end_encountered_prematurely)`
+        assert_eq!(regex_match_index("\\_", "abc", false), -1);
+        // The legal shapes still work: a class plus newline, and a collection.
+        assert_eq!(regex_matchstr("\\_.\\+", "a\nb", false), "a\nb");
+        assert_eq!(regex_matchstr("\\_s", "a\nb", false), "\n");
+        assert_eq!(regex_matchstr("\\_[ab]\\+", "a\nb", false), "a\nb");
+        assert_eq!(regex_matchstr("\\_W", "abc", false), "");
+        // `\_^` and `\_$` are the plain anchors — the C breaks out before
+        // `extra = NFA_ADD_NL`, so they carry NO newline alternation and cannot
+        // match in the middle of a one-line subject.
+        assert_eq!(regex_matchstr("\\_^a", "abc", false), "a");
+        assert_eq!(regex_matchstr("c\\_$", "abc", false), "c");
+        assert_eq!(regex_matchstr("a\\_^b", "abc", false), "");
     }
 }

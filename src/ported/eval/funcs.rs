@@ -522,7 +522,7 @@ pub fn f_matchstr(argvars: &[typval_T], rettv: &mut typval_T) {
         Some(m) if m.list_idx.is_some() => *rettv = m.item,
         Some(m) => {
             rettv.v_type = VAR_STRING;
-            rettv.vval = v_string(m.groups.into_iter().next().unwrap_or_default().into());
+            rettv.vval = v_string(m.groups.into_iter().next().unwrap_or_default());
         }
         None => {
             rettv.v_type = VAR_STRING;
@@ -894,8 +894,11 @@ struct SomeMatch {
     /// Match start / end char index (a column within the item for a List).
     start: i64,
     end: i64,
-    /// `[whole, \1..\9]` group strings (padded to 10).
-    groups: Vec<String>,
+    /// `[whole, \1..\9]` group strings (padded to 10). `VimStr` rather than
+    /// `String` because a `{start}` that lands inside a multi-byte character
+    /// leaves that character's trailing BYTES at the head of the subject, and
+    /// vim reports them as-is (see `find_some_match`).
+    groups: Vec<VimStr>,
     /// The matching List item (List subject only) — `matchstr()` returns it.
     item: typval_T,
 }
@@ -922,19 +925,6 @@ fn find_some_match(argvars: &[typval_T]) -> Option<SomeMatch> {
             .char_indices()
             .nth(ci as usize)
             .map_or(subject.len() as i64, |(b, _)| b as i64)
-    };
-    // c:4111/4137/4146 `{start}` is a BYTE offset too — `len = strlen(str)`,
-    // `if (start > len) goto theend`, `str += start`. The matcher here indexes
-    // by char, so convert. A `{start}` that lands inside a multi-byte sequence
-    // has no char index: the C hands the regex the orphan continuation bytes
-    // and matches them one byte at a time, which a `char`-indexed matcher
-    // cannot express, so the search begins at the next whole character (see
-    // BUGS.md R26-O1 for the measured residue).
-    let byte_to_char = |subject: &str, bi: i64| -> i64 {
-        subject
-            .char_indices()
-            .position(|(b, _)| b as i64 >= bi)
-            .map_or(subject.chars().count() as i64, |ci| ci as i64)
     };
     let has_count = argvars.len() > 3 && argvars[3].v_type != VAR_UNKNOWN;
     let count = if has_count {
@@ -978,7 +968,7 @@ fn find_some_match(argvars: &[typval_T]) -> Option<SomeMatch> {
                         list_idx: Some(idx),
                         start: char_to_byte(&str, s),
                         end: char_to_byte(&str, e),
-                        groups,
+                        groups: groups.into_iter().map(VimStr::from).collect(),
                         item: items[idx as usize].clone(),
                     });
                 }
@@ -989,34 +979,95 @@ fn find_some_match(argvars: &[typval_T]) -> Option<SomeMatch> {
 
     // String subject.
     let s = tv_get_string(&argvars[0]);
-    let hit = match argvars.get(2).filter(|t| t.v_type != VAR_UNKNOWN) {
-        // c: no {start} — search from the head for the nth match.
-        None => crate::viml_regex::regex_search_nth(&pat, &s, ic, 0, count),
+    let start_arg = argvars.get(2).filter(|t| t.v_type != VAR_UNKNOWN);
+
+    // c:4134 `if (start < 0) start = 0;` c:4137 `if (start > len) goto theend`
+    // — `len` is `strlen(str)`, so `{start}` is a BYTE offset.
+    let st_byte = match start_arg {
+        None => 0i64,
         Some(t) => {
-            // c:4134 if (start < 0) start = 0; c:4137 if (start > len) goto
-            // theend — `len` is `strlen(str)`, so the bound is in bytes.
-            let st_byte = tv_get_number(t).max(0);
-            if st_byte > s.len() as i64 {
+            let st = tv_get_number(t).max(0);
+            if st > s.len() as i64 {
                 return None;
             }
-            let st = byte_to_char(&s, st_byte);
-            if has_count {
-                // c: with {count}, {start} is a startcol — `^`/`\<` anchor to 0.
-                crate::viml_regex::regex_search_nth(&pat, &s, ic, st as usize, count)
-            } else {
-                // c: without {count}, the subject is chopped at {start} (str +=
-                // start; len -= start), so `^` matches at the chop; add {start}
-                // back to the reported indices.
-                let suffix: String = s.chars().skip(st as usize).collect();
-                crate::viml_regex::regex_search_nth(&pat, &suffix, ic, 0, count)
-                    .map(|(a, b, g)| (a + st, b + st, g))
-            }
+            st
         }
     };
-    hit.map(|(start, end, groups)| SomeMatch {
+
+    // c: with {count}, `{start}` is a startcol handed to `vim_regexec_multi()`
+    // and the WHOLE string stays the subject, so `^`/`\<` still anchor to 0.
+    // Without it the C does `str += start; len -= start` — the subject really
+    // is the byte suffix — and `^` matches at the chop.
+    let chopped = start_arg.is_some() && !has_count;
+    // Decode the subject the way vim's regex engines read a line:
+    // `utf_ptr2char()` per character, `utf_ptr2len()` for its byte length, kept
+    // in parallel. That differs from `str::chars()` / `char::len_utf8()` in
+    // exactly one situation, which is why it is spelled out: when the chop
+    // lands inside a multi-byte sequence the leading orphan continuation bytes
+    // are not a `str` at all. `utf_ptr2char()` returns such a byte unchanged —
+    // vim matches U+00A9 against the stray `0xa9` of a chopped `é` — while its
+    // length stays 1 byte, so a match at character 0 is still byte `st_byte`.
+    let (chars, blens) = {
+        let bytes = &s.as_bytes()[if chopped { st_byte as usize } else { 0 }..];
+        let mut chars: Vec<char> = Vec::with_capacity(bytes.len());
+        let mut blens: Vec<u8> = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            let c = crate::ported::mbyte::utf_ptr2char(&bytes[i..]);
+            // c: `utf_ptr2len()` answers 0 for a leading NUL, which cannot
+            // advance; an embedded NUL is one byte of subject here.
+            let n = (crate::ported::mbyte::utf_ptr2len(&bytes[i..]).max(1) as usize)
+                .min(bytes.len() - i);
+            chars.push(char::from_u32(c as u32).unwrap_or(char::REPLACEMENT_CHARACTER));
+            blens.push(n as u8);
+            i += n;
+        }
+        (chars, blens)
+    };
+    let from = if chopped {
+        0
+    } else {
+        // The startcol is a byte offset into the whole subject; the matcher
+        // indexes by char. A startcol inside a multi-byte character has no char
+        // index, and `vim_regexec_multi()` would not accept one either.
+        blens
+            .iter()
+            .scan(0i64, |b, n| {
+                let at = *b;
+                *b += *n as i64;
+                Some(at)
+            })
+            .position(|b| b >= st_byte)
+            .unwrap_or(chars.len())
+    };
+
+    let (ms, me, spans) = crate::viml_regex::regex_search_nth_chars(&pat, &chars, ic, from, count)?;
+
+    // Char index within `chars` → byte offset within the original `s`.
+    let to_byte = |ci: i64| -> i64 {
+        let ci = (ci.max(0) as usize).min(blens.len());
+        let base = if chopped { st_byte } else { 0 };
+        base + blens[..ci].iter().map(|n| *n as i64).sum::<i64>()
+    };
+    // The group text is sliced out of the ORIGINAL bytes, not rebuilt from the
+    // decoded `char`s: an orphan continuation byte decodes to a codepoint whose
+    // UTF-8 form is two bytes, and vim writes the one byte it read.
+    let bytes = s.as_bytes();
+    let mut groups: Vec<VimStr> = spans
+        .iter()
+        .map(|g| match g {
+            Some((gs, ge)) => {
+                VimStr::from(&bytes[to_byte(*gs as i64) as usize..to_byte(*ge as i64) as usize])
+            }
+            None => VimStr::new(),
+        })
+        .collect();
+    groups.resize(10, VimStr::new());
+
+    Some(SomeMatch {
         list_idx: None,
-        start: char_to_byte(&s, start),
-        end: char_to_byte(&s, end),
+        start: to_byte(ms),
+        end: to_byte(me),
         groups,
         item: typval_T::default(),
     })
@@ -2993,7 +3044,7 @@ pub fn f_matchlist(argvars: &[typval_T], rettv: &mut typval_T) {
             let l = tv_list_alloc_ret(rettv, m.groups.len() as isize);
             let mut lb = l.borrow_mut();
             for g in &m.groups {
-                tv_list_append_string(&mut lb, g);
+                tv_list_append_string(&mut lb, g.clone());
             }
         }
         None => {
@@ -3272,7 +3323,7 @@ pub fn f_matchstrpos(argvars: &[typval_T], rettv: &mut typval_T) {
     match find_some_match(argvars) {
         Some(m) => {
             let sub = m.groups.into_iter().next().unwrap_or_default();
-            tv_list_append_string(&mut lb, &sub);
+            tv_list_append_string(&mut lb, sub);
             // The List form inserts the matching item index before start/end.
             if let Some(idx) = m.list_idx {
                 tv_list_append_number(&mut lb, idx);

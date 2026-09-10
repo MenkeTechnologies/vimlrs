@@ -15,7 +15,9 @@
 #![allow(non_upper_case_globals)]
 
 use crate::ported::eval::typval_defs_h::{varnumber_T, VARNUMBER_MAX, VARNUMBER_MIN};
-use crate::ported::mbyte::{utf_printable, utf_ptr2char, utf_ptr2len, utfc_ptr2len};
+use crate::ported::mbyte::{
+    mb_islower, mb_isupper, utf_class_tab, utf_printable, utf_ptr2char, utf_ptr2len, utfc_ptr2len,
+};
 use crate::vimstr::VimStr;
 
 /// `STR2NR_BIN` — recognize a `0b`/`0B` binary prefix. (charset.h)
@@ -238,6 +240,88 @@ fn buf_init_chartab() -> [u8; 256] {
 /// `g_chartab[256]` (`vendor/charset.c:48`). The C fills it from
 /// `init_chartab()` at startup; here it is the constant the defaults produce.
 static G_CHARTAB: std::sync::LazyLock<[u8; 256]> = std::sync::LazyLock::new(buf_init_chartab);
+
+/// `'iskeyword'`'s default value for a normal buffer (`option_vars.h`'s
+/// `p_isk` initialiser): the `@` alpha class, the digits, `_`, and the Latin-1
+/// letters.
+const P_ISK_DEFAULT: &str = "@,48-57,_,192-255";
+
+/// Port of the `p_isk` arm of `parse_isopt()` (`vendor/charset.c:157`) —
+/// `b_chartab[]`, the per-byte "is this a keyword character" bitmap that
+/// `'iskeyword'` fills.
+///
+/// The C parses `var` into single characters, ranges (`192-255`) and the
+/// `@` shorthand, which stands for "1 through 255, but only where
+/// `mb_islower()` or `mb_isupper()` says the byte is a letter" — the `@` is
+/// why `µ` (0xb5) is a keyword character while `ª` (0xaa) is not, even though
+/// neither is in the `192-255` range. The `^` negation prefix, the other three
+/// option arms (`p_isi`/`p_isp`/`p_isf`) and the error returns are not reached
+/// by the default value and are not ported here; vimlrs has no `:set
+/// iskeyword` to re-run this with.
+fn parse_isopt(var: &str) -> [bool; 256] {
+    let mut tab = [false; 256];
+    for part in var.split(',') {
+        let mut chars = part.chars();
+        let Some(c) = chars.next() else { continue };
+        // c: the `c == '@'` arm — a single '@' (not "@-@").
+        let (mut c, c2, do_isalpha) = if part == "@" {
+            (1u32, 255u32, true)
+        } else {
+            let first = c as u32;
+            match part.split_once('-') {
+                // c: `c2` is read the same way as `c`; both are decimal when
+                // they start with a digit.
+                Some((lo, hi)) if !lo.is_empty() && !hi.is_empty() => (
+                    lo.parse::<u32>().unwrap_or(first),
+                    hi.parse::<u32>()
+                        .unwrap_or_else(|_| hi.chars().next().map_or(first, |ch| ch as u32)),
+                    false,
+                ),
+                _ => {
+                    let n = part.parse::<u32>().unwrap_or(first);
+                    (n, n, false)
+                }
+            }
+        };
+
+        while c <= c2 && c < 256 {
+            // c: use the MB_ functions here, because isalpha() doesn't work
+            // properly when 'encoding' is "latin1" and the locale is "C".
+            let ch = char::from_u32(c).unwrap_or('\0');
+            if !do_isalpha || mb_islower(ch) || mb_isupper(ch) {
+                // c: (var == p_isk) — SET_CHARTAB(buf, c).
+                tab[c as usize] = true;
+            }
+            c += 1;
+        }
+    }
+    tab
+}
+
+/// `b_chartab[]` (`vendor/buffer_defs.h`) for the one buffer vimlrs has, filled
+/// from the default `'iskeyword'`.
+static B_CHARTAB: std::sync::LazyLock<[bool; 256]> =
+    std::sync::LazyLock::new(|| parse_isopt(P_ISK_DEFAULT));
+
+/// Port of `vim_iswordc_tab()` from `vendor/charset.c:804` — is `c` a keyword
+/// character?
+///
+/// Below `0x100` this is `'iskeyword'`; at or above it the answer is
+/// [`crate::ported::mbyte::utf_class_tab`]'s built-in rules, where any class of
+/// `2` or more is a word character.
+pub fn vim_iswordc_tab(c: i32) -> bool {
+    if c >= 0x100 {
+        utf_class_tab(c) >= 2
+    } else {
+        c > 0 && B_CHARTAB[c as usize]
+    }
+}
+
+/// Port of `vim_iswordc()` from `vendor/charset.c:792` — [`vim_iswordc_tab`]
+/// for the current buffer.
+pub fn vim_iswordc(c: i32) -> bool {
+    vim_iswordc_tab(c)
+}
 
 /// Port of `vim_isprintc()` from `vendor/charset.c:891` — is `c` a character
 /// that can be shown as itself?

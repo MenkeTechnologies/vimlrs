@@ -289,13 +289,18 @@ pub fn tv_list_append_tv(l: &mut list_T, tv: typval_T) {
 
 /// Port of `tv_list_append_string()` from `Src/eval/typval.c` — append a
 /// `VAR_STRING` item.
-pub fn tv_list_append_string(l: &mut list_T, s: &str) {
+pub fn tv_list_append_string(l: &mut list_T, s: impl Into<VimStr>) {
+    // RUST-PORT NOTE: the C takes `const char *str` plus a length and copies the
+    // bytes; `impl Into<VimStr>` is that signature's Rust shape. It accepts
+    // `&str` (every caller that has text) AND `VimStr` (the callers that have
+    // raw bytes, such as `find_some_match()`'s group slices, which can hold the
+    // orphan trailing byte of a chopped multi-byte character).
     tv_list_append_tv(
         l,
         typval_T {
             v_type: VAR_STRING,
             v_lock: VarLockStatus::VAR_UNLOCKED,
-            vval: v_string(s.to_string().into()),
+            vval: v_string(s.into()),
         },
     );
 }

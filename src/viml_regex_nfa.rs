@@ -2030,20 +2030,19 @@ impl<'a> Matcher<'a> {
                         }
                     }
                     NFA_BOW => {
-                        // c: `result` starts TRUE and is cleared by any of the
-                        // three tests; they are one disjunction here.
-                        result = curc != '\0'
-                            && super::is_word(curc)
-                            && !(self.input > 0 && super::is_word(self.text[self.input - 1]));
+                        // c: `result` starts TRUE and is cleared by each of the
+                        // `has_mbyte` arm's tests; `bow_matches` is that arm,
+                        // shared with the backtracking engine's `case BOW:`
+                        // because regexp_nfa.c:6321 and regexp_bt.c:3517 are
+                        // the same three lines.
+                        result = super::bow_matches(self.text, self.input);
                         if result {
                             add_here = true;
                             add_state = st.out;
                         }
                     }
                     NFA_EOW => {
-                        result = self.input > 0
-                            && super::is_word(self.text[self.input - 1])
-                            && !(curc != '\0' && super::is_word(curc));
+                        result = super::eow_matches(self.text, self.input);
                         if result {
                             add_here = true;
                             add_state = st.out;
