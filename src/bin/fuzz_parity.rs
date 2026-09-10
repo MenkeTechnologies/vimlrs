@@ -398,6 +398,29 @@ impl Oracle {
 struct Rng(u64);
 
 impl Rng {
+    /// Seed the generator so that two seeds give INDEPENDENT streams.
+    ///
+    /// This is SplitMix64: the state advances by the golden-ratio gamma
+    /// `0x9E3779B97F4A7C15` on every draw and the output is a mix of the state.
+    /// Seeding with `seed * gamma` therefore placed every seed on the SAME
+    /// ORBIT — the state for seed `s+k` is the state for seed `s` advanced by
+    /// exactly `k` steps, so the two streams are one stream with a phase shift.
+    /// Seeds 3, 7, 11, 23 and 41 (the ones the round gates run) sat 4, 4, 12
+    /// and 18 draws apart, and `--regex --seed 3/7/11 --count 6` printed the
+    /// same expressions offset by a few entries. Nominal coverage of five seeds
+    /// × 400 cases was ~400 distinct cases, not 2000.
+    ///
+    /// Running the seed through the FINALIZER instead — the same avalanche the
+    /// output uses — puts unrelated seeds at unrelated points of the orbit. The
+    /// `| 1` keeps a seed of 0 from starting at the state a seed of 0 would
+    /// otherwise share with the un-advanced generator.
+    fn seeded(seed: u64) -> Rng {
+        let mut z = seed;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        Rng((z ^ (z >> 31)) | 1)
+    }
+
     fn next(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut z = self.0;
@@ -2513,7 +2536,7 @@ fn dap_mode(args: &Args) -> usize {
     let prog_path = tmp.join("prog.vim");
     let prog_str = prog_path.display().to_string();
 
-    let mut rng = Rng(args.seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+    let mut rng = Rng::seeded(args.seed);
     // Same pinned editor, same preflight, same self-report as the expression
     // modes — this mode used to build its own `Command::new("vim")` argv.
     let vim = Oracle::resolve("vim").unwrap_or_else(|| {
@@ -2773,7 +2796,7 @@ fn main() {
     }
 
     // Generate.
-    let mut rng = Rng(args.seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+    let mut rng = Rng::seeded(args.seed);
     let mut exprs: Vec<String> = Vec::with_capacity(args.count);
     while exprs.len() < args.count {
         let e = if args.regex {
