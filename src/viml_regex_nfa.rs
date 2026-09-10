@@ -1296,7 +1296,7 @@ impl Pim {
 }
 
 /// c: `nfa_thread_T`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 struct Thread {
     state: usize,
     count: i32,
@@ -1306,12 +1306,43 @@ struct Thread {
 
 /// c: `nfa_list_T`.
 struct ThreadList {
+    /// c: `l->t` — the slots. Its length is how many have EVER been used at
+    /// once, not how many are live now; `n` is that. Clearing the list for the
+    /// next subject position resets `n` and keeps the slots, so a `Thread` (and
+    /// the `RegSub` array inside it) is written over rather than rebuilt.
     t: Vec<Thread>,
-    /// c: `l->len` — tracked separately from `t.len()` because the
-    /// `'maxmempattern'` check keys off the *capacity* growth, not the count.
+    /// c: `l->n` — the number of live threads.
+    n: usize,
+    /// c: `l->len` — tracked separately because the `'maxmempattern'` check
+    /// keys off the *capacity* growth, not the count.
     len: usize,
     id: u32,
     has_pim: bool,
+}
+
+impl ThreadList {
+    /// c: `t = &l->t[l->n++];` — the slot `addstate()` writes into.
+    ///
+    /// The C allocates `l->len` slots up front and hands back a pointer into
+    /// them; the fields are then assigned one by one and `copy_sub()` writes
+    /// only `subs->in_use` positions of an array that is already there. Pushing
+    /// a fresh `Thread` instead meant building a whole `RegSub` — `NSUBEXP`
+    /// pairs set to `NO_POS` — and then overwriting the used prefix of it. This
+    /// grows the vector only the first time a given depth is reached; after
+    /// that the slot is reused, across positions and across matches.
+    fn slot(&mut self) -> &mut Thread {
+        if self.n == self.t.len() {
+            self.t.push(Thread::default());
+        }
+        let i = self.n;
+        self.n += 1;
+        &mut self.t[i]
+    }
+
+    /// The live prefix — `l->t[0 .. l->n]`.
+    fn live(&self) -> &[Thread] {
+        &self.t[..self.n]
+    }
 }
 
 /// The submatch positions a successful match produced, in char indices.
@@ -1393,7 +1424,7 @@ impl<'a> Matcher<'a> {
         subs: &RegSub,
         pim: Option<&Pim>,
     ) -> bool {
-        l.t.iter().any(|th| {
+        l.live().iter().any(|th| {
             th.state == state
                 && th.subs.equal(subs, self.prog.has_backref)
                 && Pim::equal(Some(&th.pim), pim)
@@ -1472,7 +1503,7 @@ impl<'a> Matcher<'a> {
                 if !self.prog.has_backref && pim.is_none() && !l.has_pim && c != NFA_MATCH {
                     let mut found = false;
                     if add_here {
-                        for k in 0..l.t.len().min(listindex) {
+                        for k in 0..l.n.min(listindex) {
                             if l.t[k].state == state {
                                 found = true;
                                 break;
@@ -1492,7 +1523,7 @@ impl<'a> Matcher<'a> {
 
             // When there are backreferences or PIMs the number of states may be
             // (a lot) bigger than anticipated.
-            if l.t.len() == l.len {
+            if l.n == l.len {
                 let newlen = l.len * 3 / 2 + 50;
                 let newsize = newlen * SIZEOF_NFA_THREAD_T;
                 if (newsize >> 10) >= P_MMP {
@@ -1504,21 +1535,23 @@ impl<'a> Matcher<'a> {
 
             // add the state to the list
             self.lastlist[state][self.nfa_ll_index] = l.id;
-            let mut th = Thread {
-                state,
-                count: 0,
-                pim: Pim::default(),
-                subs: RegSub::default(),
-            };
-            match pim {
-                None => th.pim.result = PimResult::Unused,
-                Some(p) => {
-                    th.pim = p.clone();
-                    l.has_pim = true;
+            let has_pim = pim.is_some();
+            {
+                // c: `t = &l->t[l->n++]; t->state = state; t->count = count;`
+                // — an owned slot, whose `RegSub` array `copy_sub()` then
+                // writes `subs->in_use` positions of.
+                let th = l.slot();
+                th.state = state;
+                th.count = 0;
+                match pim {
+                    None => th.pim.result = PimResult::Unused,
+                    Some(p) => th.pim.clone_from(p),
                 }
+                th.subs.copy_from(subs);
             }
-            th.subs.copy_from(subs);
-            l.t.push(th);
+            if has_pim {
+                l.has_pim = true;
+            }
         }
 
         match c {
@@ -1621,7 +1654,7 @@ impl<'a> Matcher<'a> {
         pim: Option<&Pim>,
         ip: &mut usize,
     ) -> bool {
-        let tlen = l.t.len();
+        let tlen = l.n;
         let listidx = *ip;
         if !self.addstate(
             l,
@@ -1636,26 +1669,21 @@ impl<'a> Matcher<'a> {
         if listidx + 1 == tlen {
             return true;
         }
-        let count = l.t.len() - tlen;
+        let count = l.n - tlen;
         if count == 0 {
             return true; // no state got added
         }
-        if count == 1 {
-            // overwrite the current state
-            let last = l.t.len() - 1;
-            l.t[listidx] = l.t[last].clone();
-        } else {
-            // make space for new states, then move them from the end to the
-            // current position
-            let moved: Vec<Thread> = l.t[l.t.len() - count..].to_vec();
-            l.t.truncate(l.t.len() - count);
-            l.t.splice(listidx..listidx + 1, moved);
-            return {
-                *ip = listidx.wrapping_sub(1);
-                true
-            };
-        }
-        l.t.pop();
+        // c: "make space for new states, then move them from the end to the
+        // current position" — `mch_memmove` over `l->t`, and for `count == 1`
+        // the C's own shortcut of overwriting the current state with the last.
+        // Two rotations do both without a temporary vector and without
+        // dropping the displaced slot: the `count` new threads move down to
+        // `listidx`, the state they replace is rotated out to the end, and
+        // `n` then drops it — leaving its allocation for the next `slot()`.
+        let m = l.n;
+        l.t[listidx..m].rotate_right(count);
+        l.t[listidx + count..m].rotate_left(1);
+        l.n = m - 1;
         *ip = listidx.wrapping_sub(1);
         true
     }
@@ -1785,12 +1813,14 @@ impl<'a> Matcher<'a> {
         let mut list = [
             ThreadList {
                 t: Vec::new(),
+                n: 0,
                 len: cap,
                 id: 0,
                 has_pim: false,
             },
             ThreadList {
                 t: Vec::new(),
+                n: 0,
                 len: cap,
                 id: 0,
                 has_pim: false,
@@ -1826,7 +1856,7 @@ impl<'a> Matcher<'a> {
             let thisidx = flag;
             flag ^= 1;
             let nextidx = flag;
-            list[nextidx].t.clear();
+            list[nextidx].n = 0;
             list[nextidx].has_pim = false;
             self.nfa_listid += 1;
             if self.nfa_listid >= NFA_MAX_STATES {
@@ -1837,13 +1867,13 @@ impl<'a> Matcher<'a> {
             list[nextidx].id = self.nfa_listid + 1;
 
             // If the state lists are empty we can stop.
-            if list[thisidx].t.is_empty() {
+            if list[thisidx].n == 0 {
                 break;
             }
 
             let mut listidx = 0usize;
             let mut goto_nextchar = false;
-            while listidx < list[thisidx].t.len() {
+            while listidx < list[thisidx].n {
                 // The C keeps a POINTER into the list here (`t = &thislist->t[listidx]`).
                 // Rust cannot, because the arms below hand the list to
                 // `addstate()`, so the fields are read out instead — the
@@ -2219,10 +2249,10 @@ impl<'a> Matcher<'a> {
                         let (next, _) = split_lists(&mut list, nextidx);
                         let ok =
                             self.addstate(next, add_state, &mut subs, pim_owned.as_ref(), add_off);
-                        if ok && add_count > 0 {
-                            if let Some(last) = next.t.last_mut() {
-                                last.count = add_count;
-                            }
+                        if ok && add_count > 0 && next.n > 0 {
+                            // c: `l->t[l->n - 1].count = count;` — the thread
+                            // `addstate()` just wrote into.
+                            next.t[next.n - 1].count = add_count;
                         }
                         ok
                     };
@@ -2245,7 +2275,7 @@ impl<'a> Matcher<'a> {
                         // state is the first MOPEN.
                         let mut add = true;
                         if self.prog.regstart != 0 && clen != 0 {
-                            if list[nextidx].t.is_empty() {
+                            if list[nextidx].n == 0 {
                                 // Nextlist is empty, we can skip ahead to the
                                 // character that must appear at the start.
                                 let col = self.input + clen;

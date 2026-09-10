@@ -6246,7 +6246,7 @@ lives in `regexp_bt.c` but `regexp_nfa.c:1493` calls it too, which is why
 `match('a', '\1')` is `E65` even though the NFA engine compiles `NFA_BACKREF1`
 happily. Pinned by `tests/parity_cases/regex_backref_engine_order.vim`.
 
-## R42-O1 (open). The NFA engine was about 2× slower than the backtracker was; 6.4% of it is left
+## R42-O1 (CLOSED in R44). The NFA engine was about 2x slower than the backtracker was
 
 Measured by interleaved A/B of two prebuilt debug binaries (`cargo build`, never
 `--release`, per the project rule), 12 rounds each, alternating which binary runs
@@ -6477,3 +6477,74 @@ defined in terms of, so it moves more than one atom.
 
 `match('日本語', '\%4v')` is `-1` in both, which is the cell model agreeing by
 accident: 日 is two cells wide, so no character starts at virtual column 4.
+
+### R42-O1 is CLOSED — `addstate()` writes into an owned slot
+
+The second lever, pulled. `ThreadList` gains `n`, the C's `l->n`, so `l.t` is
+the SLOTS and `n` is how many are live. `addstate()` calls `l.slot()`
+(c: `t = &l->t[l->n++]`) and assigns the fields, where it used to build a whole
+`Thread` — `RegSub`'s `NSUBEXP` pairs set to `NO_POS` — and push it, only for
+`copy_sub()` to overwrite the used prefix. Clearing a list for the next subject
+position is `n = 0`, so the slot and its array survive across positions and
+across matches. `addstate_here()`'s splice becomes two `rotate`s, which is the
+C's `mch_memmove` and its `count == 1` shortcut in one path and drops the
+`Vec<Thread>` temporary and the `clone()`.
+
+Measured by INSTRUCTIONS RETIRED (`/usr/bin/time -l`), interleaved, alternating
+which runs first, minimum of 8 rounds, on a bench of nine regex calls over a
+400-character subject. The box was under a load average of ~150 from unrelated
+work for the whole session, which is why the instrument is instructions and not
+wall clock: the A/A control below is 0.155%, where round 4's wall-clock control
+band was 3.8%.
+
+```text
+A/A control   base 2,103,159,842   base(copy) 2,106,415,716    0.155%
+A/B  N=200    base 2,089,652,435   slot-reuse 1,956,483,808   -6.37%
+A/B  N=800    base 6,773,388,111   slot-reuse 6,230,302,746   -8.02%
+```
+
+Per-op, not a fixed cost: quadrupling the workload multiplies the saving by
+4.08x (133,168,627 -> 543,085,365 instructions). The percentage rises with N
+because process startup is a smaller share of the larger run.
+
+And the residual the lever was aimed at is gone. Both engines were measured in
+ONE binary, switched at run time, so no build difference is in the number:
+
+```text
+                        NFA             backtracker       NFA vs bt
+before the lever   2,205,463,811      2,096,304,621        +5.21%
+after the lever    2,061,494,859      2,090,843,724        -1.40%
+```
+
+The backtracker's two figures agree to 0.26% across the two binaries, which is a
+second control on the instrument. Round 4 left the NFA engine 6.4% over the
+backtracker on a wall-clock bench; this reproduces that as 5.2% on a different
+bench and a different instrument, and closes it — the NFA engine is now the
+faster of the two here.
+
+## R44-O2 (open). Three shapes the widened grammar found once the seeds were independent
+
+`fuzz-parity --regex` at seeds 3/7/11/23/41 × 400 reports 18 gaps, 13 distinct.
+Ten are R44-O1's `\%v`. The other three are separate:
+
+```text
+                                    vim 9.2.1000              vimlrs
+match('ab', ')\=\V\*')              E866: Misplaced *         E871: Can't have a multi follow a multi
+match('', '\V\$\{1}')               0                         -1
+match('a', '\V\$\{1}')              1                         -1
+split('01', '\%>1c', 1)             ['0', '1', '']            ['0', '', '1', '']
+split('012', '\%>2c', 1)            ['01', '2']               ['01', '', '2', '']
+```
+
+1. The E-number for a multi with no atom in front of it, when a complete piece
+   precedes it. `match('ab', '\V\*')` alone is E866 in both, so the divergence
+   is in which violation this parser reports FIRST, not in whether it reports
+   one.
+2. Under `\V`, `\$` is the end-of-line anchor and stays one even with a multi
+   after it — the backslash reaches `peekchr()`'s `'\\'` arm, which does
+   `curchr = toggle_Magic(c)` with none of the "only as the very last char"
+   test the bare `$` gets. This engine reads `\V\$\{1}` as a literal `$`.
+3. `\%>Nc` (a byte column, `NFA_COL_GT`, which `match()` answers correctly —
+   `match('012','\%>1c')` is 1 in both) produces one zero-width split point too
+   many under `split()`. Both a `keepempty` question and a zero-width-advance
+   question, and it is the only one of the three that is not in the parser.
