@@ -1134,10 +1134,25 @@ fn rx_atom(rng: &mut Rng) -> String {
         6 => format!("\\%({}\\)", rx_branch(rng, 0)),
         7 => rng.pick(&["\\<", "\\>", "^", "$"]).to_string(),
         8 => rng.pick(&["\\zs", "\\ze"]).to_string(),
+        // `nfa_regatom()`'s `case Magic('%')` has twelve arms plus a numeric
+        // default. `\%U` — the eight-digit form — was the one codepoint
+        // spelling with a count of ZERO.
         9 => rng
-            .pick(&["\\%d97", "\\%x62", "\\%o143", "\\%u0061"])
+            .pick(&["\\%d97", "\\%x62", "\\%o143", "\\%u0061", "\\%U00000061"])
             .to_string(),
-        10 => rng.pick(&["\\_.", "\\_s", "\\_a", "\\_[a-z]"]).to_string(),
+        // `\_x` is "x, or a newline", legal for `classchars` and for `^`/`$`/`[`
+        // and an `E877` for anything else. This list held four of the
+        // twenty-nine shapes; `\_^`, `\_$` and every uppercase class were never
+        // generated, and neither was a REJECTED one — which is how `\_b`
+        // matching the letter `b` survived to round 5.
+        10 => rng
+            .pick(&[
+                "\\_.", "\\_s", "\\_S", "\\_a", "\\_A", "\\_d", "\\_D", "\\_w", "\\_W", "\\_l",
+                "\\_L", "\\_u", "\\_U", "\\_x", "\\_X", "\\_o", "\\_O", "\\_h", "\\_H", "\\_i",
+                "\\_I", "\\_k", "\\_K", "\\_f", "\\_F", "\\_p", "\\_P", "\\_[a-z]", "\\_^", "\\_$",
+                "\\_b", "\\_z", "\\_(a\\)",
+            ])
+            .to_string(),
         11 => format!("\\%[{}]", rng.pick(&["abc", "ab", "xyz"])),
         // `\3`..`\9` had a count of zero: the grammar can open more than two
         // groups, so a backreference past the second is reachable and was never
@@ -1167,7 +1182,22 @@ fn rx_atom(rng: &mut Rng) -> String {
         // an engine that silently drops an unknown `\%…` atom answers the same
         // as one that honours it, until the atom is the only thing in the branch.
         14 => rng
-            .pick(&["\\%^", "\\%$", "\\%V", "\\%1l", "\\%>1c", "\\%<3c"])
+            .pick(&[
+                "\\%^", "\\%$", "\\%V", "\\%1l", "\\%>1c", "\\%<3c",
+                // Counted at ZERO before round 5: the cursor atom, the
+                // any-composing atom, the mark atom, and the whole VIRTUAL
+                // column family. `\%v` is `win_linetabsize()` — a tab is
+                // 'tabstop' cells wide and a CJK ideograph is two — which is a
+                // different question from `\%c`'s byte column and is the one
+                // this engine still answers wrong (BUGS.md R44-O1).
+                "\\%#", "\\%C",
+                // `rx_pattern` wraps the body in a SINGLE-quoted VimL string, in
+                // which a literal `'` is written `''`. Spelled with one quote
+                // this atom closed the string and the generated line stopped
+                // being VimL at all (`h(''m` — E15 here, E116 in both oracles),
+                // which is a transport artifact and not an engine answer.
+                "\\%''m", "\\%2v", "\\%>1v", "\\%<3v",
+            ])
             .to_string(),
         // The magic `~` (last substitute string) and its nomagic spelling.
         15 => rng.pick(&["~", "\\~"]).to_string(),
