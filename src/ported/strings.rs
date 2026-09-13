@@ -18,7 +18,6 @@ use crate::ported::eval::typval::{
 use crate::ported::eval::typval_defs_h::{typval_T, typval_vval_union::*, varnumber_T, VarType::*};
 use crate::ported::eval_h::{FAIL, OK};
 use crate::ported::message::{emsg, semsg};
-use crate::ported::option::get_option_value;
 use crate::vimstr::VimStr;
 
 /// "string(expr)" function — the `string()` rendering of `expr`.
@@ -767,36 +766,6 @@ pub fn f_slice(argvars: &[typval_T], rettv: &mut typval_T) {
     }
 }
 
-/// Port of `utf_char2cells()` (Neovim mbyte.c) — the display width of a single
-/// character: 0 for a composing mark, 2 for an East-Asian-wide / emoji
-/// character (the standard wide ranges), otherwise 1.
-fn utf_char2cells(c: char) -> usize {
-    if utf_iscomposing(c) {
-        return 0;
-    }
-    let u = c as u32;
-    // c: a `setcellwidths()` override (cw_value()) takes precedence over the
-    // built-in width tables (Neovim mbyte.c).
-    if let Some(w) = cw_value(u) {
-        return w;
-    }
-    // c: an unprintable C1 character has no glyph and is shown as `<80>` — four
-    // cells, and `strwidth()` counts them (`strwidth(nr2char(0x80))` is 4).
-    if (0x80..=0x9f).contains(&u) {
-        return 4;
-    }
-    let wide = matches!(u,
-        0x1100..=0x115F | 0x2329 | 0x232A | 0x2E80..=0x303E | 0x3041..=0x33FF
-        | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xA000..=0xA4CF | 0xAC00..=0xD7A3
-        | 0xF900..=0xFAFF | 0xFE30..=0xFE4F | 0xFF00..=0xFF60 | 0xFFE0..=0xFFE6
-        | 0x1F300..=0x1FAFF | 0x20000..=0x3FFFD);
-    if wide {
-        2
-    } else {
-        1
-    }
-}
-
 // ── setcellwidths()/getcellwidths() — `vendor/mbyte.c:2847`.
 // The user-defined cell-width override table installed by `setcellwidths()`.
 // Each tuple is `(first, last, width)`: codepoints in `first..=last` display in
@@ -830,7 +799,7 @@ const e_only_values_of_0x80_and_higher_supported: &str =
 /// RUST-PORT NOTE: the C binary-searches a sorted array; this scans the same
 /// sorted `Vec` linearly. Both answer identically because `f_setcellwidths`
 /// rejects overlapping ranges, so at most one entry can match.
-fn cw_value(c: u32) -> Option<usize> {
+pub(crate) fn cw_value(c: u32) -> Option<usize> {
     let c = c as varnumber_T;
     CW_TABLE.with(|t| {
         t.borrow()
@@ -970,7 +939,9 @@ pub fn f_getcellwidths(_argvars: &[typval_T], rettv: &mut typval_T) {
 /// Port of `f_strwidth()` from `Src/strings.c` — the number of display cells
 /// `{string}` occupies (composing marks add 0, wide characters add 2).
 pub fn f_strwidth(argvars: &[typval_T], rettv: &mut typval_T) {
-    let w: usize = tv_get_string(&argvars[0]).chars().map(utf_char2cells).sum();
+    // c: `mb_string2cells(s, -1)` — `mb_ptr2len` is `utfc_ptr2len` under utf-8,
+    // so a composing mark is stepped over with its base character.
+    let w = crate::ported::mbyte::mb_string2cells(tv_get_string(&argvars[0]).as_bytes());
     rettv.vval = v_number(w as varnumber_T);
 }
 
@@ -986,41 +957,9 @@ pub fn f_strdisplaywidth(argvars: &[typval_T], rettv: &mut typval_T) {
     } else {
         0
     };
-    let ts: i64 = {
-        let t = tv_get_number_chk(&get_option_value("tabstop"), None);
-        if t > 0 {
-            t
-        } else {
-            8
-        }
-    };
-    // c: `linetabsize_col(col, s) - col`, where `linesize_fast` accumulates an
-    // int64 `vcol` and CLAMPS the returned int at MAXCOL (0x7fffffff): a huge
-    // starting {col} saturates immediately and the result is 0.
-    const MAXCOL: i64 = 0x7fffffff; // enum { MAXCOL } — Src/pos_defs.h:19
-    let mut vcol: i64 = col0 as i64;
-    let mut vcol_arg: i64 = vcol;
-    for c in s.chars() {
-        let width: i64 = if c == '\t' {
-            // c: tabstop_padding — `ts - (col % ts)`; Rust `%` truncates toward
-            // zero exactly like the C's, negative columns included.
-            ts - vcol_arg % ts
-        } else if (c as u32) < 0x20 || c == '\x7f' {
-            // c: a control character has no glyph — it *displays* as `^X` (`^J`,
-            // `^?`), which is two cells. `strdisplaywidth` measures the display,
-            // so it counts 2 where `strwidth` (which measures the text) counts 1.
-            2
-        } else {
-            utf_char2cells(c) as i64
-        };
-        vcol += width;
-        if vcol > MAXCOL {
-            vcol_arg = MAXCOL;
-            break;
-        }
-        vcol_arg = vcol;
-    }
-    rettv.vval = v_number(vcol_arg - col0 as i64);
+    // c: `linetabsize_col(col, s) - col`.
+    let w = crate::ported::charset::linetabsize_col(i64::from(col0), s.as_bytes());
+    rettv.vval = v_number(w - i64::from(col0));
 }
 
 /// Port of `f_charclass()` from `Src/strings.c` — the character class of the

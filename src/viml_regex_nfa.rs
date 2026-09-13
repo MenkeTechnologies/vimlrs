@@ -123,10 +123,18 @@ pub const NFA_CURSOR: i32 = -855;
 pub const NFA_COL: i32 = -851;
 pub const NFA_COL_GT: i32 = -850;
 pub const NFA_COL_LT: i32 = -849;
+pub const NFA_VCOL: i32 = -848;
+pub const NFA_VCOL_GT: i32 = -847;
+pub const NFA_VCOL_LT: i32 = -846;
 
 /// This port's one added opcode — see the module docs. Placed below
 /// `NFA_SPLIT` (the lowest C value) so it can never collide with one.
 pub const NFA_CLASS_OBJ: i32 = -2048;
+
+/// c: `vim.h` `#define MB_MAXBYTES 21` — the longest byte sequence one
+/// character (with its composing marks) can take. `NFA_VCOL`'s bail-out uses it
+/// as the worst-case bytes-per-cell ratio.
+const MB_MAXBYTES: i64 = 21;
 
 /// c: `regexp.h:22` `#define NSUBEXP 10` — `\0` plus `\1`..`\9`.
 const NSUBEXP: usize = 10;
@@ -434,6 +442,14 @@ impl Post {
                 });
                 self.emit(i32::try_from(*n).unwrap_or(i32::MAX));
             }
+            Node::Vcol(cmp, n) => {
+                self.emit(match cmp {
+                    Cmp::Eq => NFA_VCOL,
+                    Cmp::Gt => NFA_VCOL_GT,
+                    Cmp::Lt => NFA_VCOL_LT,
+                });
+                self.emit(i32::try_from(*n).unwrap_or(i32::MAX));
+            }
             // `\%#` / `\%V` / `\%1l` / `\%'m` all parse to a node that can never
             // match a string. `NFA_CURSOR` is the faithful spelling: its
             // runtime test is `rex.reg_win != NULL && …`, and a string match
@@ -692,7 +708,8 @@ fn post2nfa(postfix: &[i32]) -> Option<(Vec<State>, usize)> {
             // c: the `NFA_LNUM … NFA_MARK_LT` arm — an operand follows in the
             // postfix stream and becomes the state's `val`. `NFA_CLASS_OBJ`
             // (this port's own) carries its class index the same way.
-            NFA_COL | NFA_COL_GT | NFA_COL_LT | NFA_CLASS_OBJ => {
+            NFA_COL | NFA_COL_GT | NFA_COL_LT | NFA_VCOL | NFA_VCOL_GT | NFA_VCOL_LT
+            | NFA_CLASS_OBJ => {
                 p += 1;
                 let n = *postfix.get(p)?;
                 let s = b.alloc_state(op, -1, -1);
@@ -762,7 +779,8 @@ fn nfa_max_width(states: &[State], startstate: i32, depth: usize) -> i32 {
             NFA_BACKREF1..=NFA_BACKREF9 | NFA_SKIP => return -1,
             NFA_BOL | NFA_EOL | NFA_BOF | NFA_EOF | NFA_BOW | NFA_EOW | NFA_NOPEN | NFA_NCLOSE
             | NFA_ZSTART | NFA_ZEND | NFA_OPT_CHARS | NFA_EMPTY | NFA_START_PATTERN
-            | NFA_END_PATTERN | NFA_CURSOR | NFA_COL | NFA_COL_GT | NFA_COL_LT => {}
+            | NFA_END_PATTERN | NFA_CURSOR | NFA_COL | NFA_COL_GT | NFA_COL_LT | NFA_VCOL
+            | NFA_VCOL_GT | NFA_VCOL_LT => {}
             c if (NFA_MOPEN..=NFA_MOPEN9).contains(&c) => {}
             c if (NFA_MCLOSE..=NFA_MCLOSE9).contains(&c) => {}
             c if c < 0 => return -1,
@@ -868,9 +886,9 @@ fn failure_chance(states: &[State], state: i32, depth: usize) -> i32 {
         // backreferences don't match in many places
         NFA_BACKREF1..=NFA_BACKREF9 => 94,
         // before/after positions don't match very often
-        NFA_COL_GT | NFA_COL_LT => 85,
+        NFA_COL_GT | NFA_COL_LT | NFA_VCOL_GT | NFA_VCOL_LT => 85,
         // specific positions rarely match
-        NFA_CURSOR | NFA_COL => 98,
+        NFA_CURSOR | NFA_COL | NFA_VCOL => 98,
         c if (NFA_MOPEN..=NFA_MOPEN9).contains(&c) => failure_chance(states, s.out, depth + 1),
         c if (NFA_MCLOSE + 1..=NFA_MCLOSE9).contains(&c) => {
             failure_chance(states, s.out, depth + 1)
@@ -980,7 +998,8 @@ fn nfa_get_regstart(states: &[State], start: i32, depth: usize) -> i32 {
         match st.c {
             // all kinds of zero-width matches
             NFA_BOL | NFA_BOF | NFA_BOW | NFA_EOW | NFA_ZSTART | NFA_ZEND | NFA_CURSOR
-            | NFA_COL | NFA_COL_GT | NFA_COL_LT | NFA_NOPEN => p = st.out,
+            | NFA_COL | NFA_COL_GT | NFA_COL_LT | NFA_VCOL | NFA_VCOL_GT | NFA_VCOL_LT
+            | NFA_NOPEN => p = st.out,
 
             NFA_SPLIT => {
                 let c1 = nfa_get_regstart(states, st.out, depth + 1);
@@ -2165,6 +2184,53 @@ impl<'a> Matcher<'a> {
                             .sum::<usize>() as u32
                             + 1;
                         result = nfa_re_num_cmp(st.val as u32, st.c - NFA_COL, col);
+                        if result {
+                            add_here = true;
+                            add_state = st.out;
+                        }
+                    }
+                    NFA_VCOL | NFA_VCOL_GT | NFA_VCOL_LT => {
+                        // c: `\%23v` is a SCREEN CELL column — a Tab is
+                        // `'tabstop'` cells wide and a CJK ideograph is two.
+                        let op = st.c - NFA_VCOL;
+                        // c: `colnr_T col = rex.input - rex.line` — bytes, not
+                        // cells, and it is the byte count the fast paths below
+                        // reason about.
+                        let prefix: String = self.text[..self.input].iter().collect();
+                        let col = prefix.len() as i64;
+                        // c: "Bail out quickly when there can't be a match,
+                        // avoid the overhead of win_linetabsize() on long
+                        // lines." A character is at least one cell, so more
+                        // than `val * MB_MAXBYTES` bytes cannot be at or below
+                        // virtual column `val`.
+                        result = if op != 1 && col > i64::from(st.val) * MB_MAXBYTES {
+                            // c: `break` out of the case, leaving result FALSE.
+                            false
+                        } else {
+                            // c: "Guess that a character won't use more columns
+                            // than 'tabstop', with a minimum of 4."
+                            let guess = op == 1
+                                && col - 1 > i64::from(st.val)
+                                && col > 100
+                                && col
+                                    > i64::from(st.val)
+                                        * crate::ported::eval::typval::tv_get_number_chk(
+                                            &crate::ported::option::get_option_value("tabstop"),
+                                            None,
+                                        )
+                                        .max(4);
+                            guess || {
+                                let vcol = crate::ported::charset::win_linetabsize(
+                                    prefix.as_bytes(),
+                                    prefix.len(),
+                                );
+                                nfa_re_num_cmp(
+                                    st.val as u32,
+                                    op,
+                                    u32::try_from(vcol + 1).unwrap_or(u32::MAX),
+                                )
+                            }
+                        };
                         if result {
                             add_here = true;
                             add_state = st.out;

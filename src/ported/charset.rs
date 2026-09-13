@@ -16,7 +16,8 @@
 
 use crate::ported::eval::typval_defs_h::{varnumber_T, VARNUMBER_MAX, VARNUMBER_MIN};
 use crate::ported::mbyte::{
-    mb_islower, mb_isupper, utf_class_tab, utf_printable, utf_ptr2char, utf_ptr2len, utfc_ptr2len,
+    mb_islower, mb_isupper, utf_char2cells, utf_class_tab, utf_printable, utf_ptr2cells,
+    utf_ptr2char, utf_ptr2len, utfc_ptr2len,
 };
 use crate::vimstr::VimStr;
 
@@ -344,6 +345,107 @@ pub fn byte2cells(b: i32) -> i32 {
         return 0;
     }
     (G_CHARTAB[b as usize] & CT_CELL_MASK) as i32
+}
+
+/// Port of `char2cells()` from `vendor/charset.c:711` — display cells for one
+/// character. Below 0x80 the answer is `g_chartab[]` (a control character is two
+/// cells, `^X`); at or above it, [`utf_char2cells`].
+///
+/// The C's leading `IS_SPECIAL(c)` arm is for the negative `K_*` key codes that
+/// only the terminal input layer produces; nothing in this crate passes one.
+pub fn char2cells(c: i32) -> i32 {
+    if c >= 0x80 {
+        // c: UTF-8: above 0x80 need to check the value
+        return utf_char2cells(c);
+    }
+    (G_CHARTAB[(c & 0xff) as usize] & CT_CELL_MASK) as i32
+}
+
+/// Port of `ptr2cells()` from `vendor/charset.c:730` — display cells for the
+/// character at the start of `p`. A TAB counts as the two cells of `^I`; it is
+/// [`win_chartabsize`] that knows a TAB pads to the next `'tabstop'`.
+pub fn ptr2cells(p: &[u8]) -> i32 {
+    let b = p.first().copied().unwrap_or(0);
+    // c: For UTF-8 we need to look at more bytes if the first byte is >= 0x80.
+    if b >= 0x80 {
+        return utf_ptr2cells(p);
+    }
+    (G_CHARTAB[b as usize] & CT_CELL_MASK) as i32
+}
+
+/// Port of `tabstop_padding()` (vim `indent.c`) for the no-`'vartabstop'` case
+/// the C's `RET_WIN_BUF_CHARTABSIZE` macro spells out: `ts - (col % ts)`, the
+/// cells a TAB at virtual column `col` takes to reach the next tab stop.
+fn tabstop_padding(col: i64, ts: i64) -> i64 {
+    let ts = if ts <= 0 { 8 } else { ts };
+    ts - col % ts
+}
+
+/// Port of `win_chartabsize()` from `vendor/plines.c:48` — the cells the
+/// character at `p` takes when it starts at virtual column `col`.
+///
+/// The window is the C's `wp`; a string match has none, and every option the
+/// macro consults (`'list'`, `'listchars'`) is at its default, so the TAB arm is
+/// taken and the padding comes from `'tabstop'`.
+pub fn win_chartabsize(p: &[u8], col: i64) -> i64 {
+    // c: if (*p == TAB && (!wp->w_p_list || wp->w_p_lcs_chars.tab1))
+    if p.first() == Some(&b'\t') {
+        // c: `buf->b_p_ts` — read through the option table on every call, so
+        // `:set ts=4` takes effect at once.
+        let ts = crate::ported::eval::typval::tv_get_number_chk(
+            &crate::ported::option::get_option_value("tabstop"),
+            None,
+        );
+        return tabstop_padding(col, ts);
+    }
+    ptr2cells(p) as i64
+}
+
+/// Port of `linesize_fast()` from `vendor/plines.c:473` (vim's
+/// `win_linetabsize_cts()`, `charset.c:913`) — the shared loop under every
+/// "how wide is this line" question: walk the clusters, adding
+/// [`win_chartabsize`] of each, and stop at byte `len` or at `MAXCOL`.
+///
+/// The `vcol`/`vcol_arg` pair is the C's: `vcol` is an `int64_t` that may
+/// overflow past `MAXCOL`, `vcol_arg` is the clamped `int` that is returned and
+/// that the next character's tab stop is measured from.
+fn linesize_fast(line: &[u8], vcol_arg: i64, len: usize) -> i64 {
+    const MAXCOL: i64 = 0x7fff_ffff; // c: enum { MAXCOL } — `vendor/pos_defs.h:19`
+    let mut vcol_arg = vcol_arg;
+    let mut vcol: i64 = vcol_arg;
+    let mut p = 0usize;
+    while p < len && p < line.len() {
+        vcol += win_chartabsize(&line[p..], vcol_arg);
+        p += crate::ported::mbyte::utfc_ptr2len(&line[p..]).max(1) as usize;
+        if vcol > MAXCOL {
+            vcol_arg = MAXCOL;
+            break;
+        }
+        vcol_arg = vcol;
+    }
+    vcol_arg
+}
+
+/// Port of `linetabsize_col()` from `vendor/plines.c:63` — the screen width of
+/// `s` when it starts at virtual column `startvcol`. This is what
+/// `strdisplaywidth({string}, {col})` measures, minus `{col}`.
+pub fn linetabsize_col(startvcol: i64, s: &[u8]) -> i64 {
+    linesize_fast(s, startvcol, usize::MAX)
+}
+
+/// Port of `win_linetabsize()` from vim `charset.c:841` (`vendor/plines.c:79`
+/// names it at the call site) — the screen width of the first `len` bytes of
+/// `line`, which is what `\%23v` compares against.
+///
+/// RUST-PORT NOTE: the C reaches `win_lbr_chartabsize()`, which for a window
+/// with `'linebreak'`, `'breakindent'` and `'showbreak'` all off reduces to
+/// `win_nolbr_chartabsize()`, and that in turn to [`win_chartabsize`] plus one
+/// cell for a double-width character sitting in the window's last column
+/// (`in_win_border()`). A string match has no window, `w_width` is 0, and
+/// `in_win_border()` answers FALSE for such a window by its own first test — so
+/// the border arm is unreachable here, not skipped.
+pub fn win_linetabsize(line: &[u8], len: usize) -> i64 {
+    linesize_fast(line, 0, len)
 }
 
 /// Port of `nr2hex()` from `vendor/charset.c:674` — the lower 4 bits of `n` as a

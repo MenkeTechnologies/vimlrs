@@ -314,6 +314,10 @@ enum Node {
     /// `\%23c` / `\%>23c` / `\%<23c` — zero-width, the byte column (1-based)
     /// the match must be at, before, or after (`:help /\%c`).
     Col(Cmp, u32),
+    /// `\%23v` / `\%>23v` / `\%<23v` — the same three tests against the
+    /// VIRTUAL column (`:help /\%v`): the screen cell the match must sit at,
+    /// counting a Tab as `'tabstop'` cells and a double-width character as two.
+    Vcol(Cmp, u32),
 }
 
 /// How a `\%…c` atom compares the current column against its number.
@@ -1385,6 +1389,8 @@ impl Parser {
                         // never matches is the faithful answer for those.
                         if k == 'c' && !cur {
                             Node::Col(cmp, u32::try_from(n).unwrap_or(u32::MAX))
+                        } else if k == 'v' && !cur {
+                            Node::Vcol(cmp, u32::try_from(n).unwrap_or(u32::MAX))
                         } else {
                             Node::CheckPos(usize::MAX)
                         }
@@ -2559,6 +2565,21 @@ impl Regex {
                 }
                 .then_some(pos)
             }
+            // c: `\%23v` is a SCREEN CELL column — `win_linetabsize()` of the
+            // text before this position, plus one.
+            Node::Vcol(cmp, n) => {
+                let prefix: String = text[..pos].iter().collect();
+                let vcol = crate::ported::charset::win_linetabsize(prefix.as_bytes(), prefix.len())
+                    as u64
+                    + 1;
+                let n = *n as u64;
+                match cmp {
+                    Cmp::Eq => vcol == n,
+                    Cmp::Gt => vcol > n,
+                    Cmp::Lt => vcol < n,
+                }
+                .then_some(pos)
+            }
         }
     }
 }
@@ -2589,7 +2610,8 @@ fn node_writes(n: &Node) -> bool {
         | Node::AnyComposing
         | Node::CheckPos(_)
         | Node::FileEnd(_)
-        | Node::Col(..) => false,
+        | Node::Col(..)
+        | Node::Vcol(..) => false,
     }
 }
 
@@ -3035,12 +3057,18 @@ pub fn regex_split(subject: &str, pat: &str, ic: bool, keepempty: bool) -> Vec<S
     let re = Regex::compile(pat);
     let eic = re.effective_ic(ic);
 
-    // Find the first match at or after `from`, through the same entry point
-    // every other caller uses so `split()` gets whichever engine answered for
-    // `match()`. Returns the separator span, `\zs`/`\ze`-adjusted like Vim's
-    // startp/endp.
-    let find_from = |from: usize| -> Option<(usize, usize)> {
-        re.find_from(&chars, eic, from.min(n)).map(|c| c.whole())
+    // c: `vim_regexec_nl(&regmatch, str, col)` — `str`, the REMAINDER, is the
+    // LINE the match runs against, and `col` is an offset into it. That is not a
+    // detail: every position atom is measured from `str`, so `\%2v` fires once
+    // per remaining item rather than once in the whole subject, and `^` anchors
+    // at each item's start. Returns the separator span in subject coordinates,
+    // `\zs`/`\ze`-adjusted like Vim's startp/endp.
+    let find_from = |str: usize, col: usize| -> Option<(usize, usize)> {
+        let line = &chars[str.min(n)..];
+        re.find_from(line, eic, col.min(line.len())).map(|c| {
+            let (a, b) = c.whole();
+            (a + str, b + str)
+        })
     };
 
     let mut out: Vec<String> = Vec::new();
@@ -3054,7 +3082,7 @@ pub fn regex_split(subject: &str, pat: &str, ic: bool, keepempty: bool) -> Vec<S
             break;
         }
         // c: match = (*str == NUL) ? false : vim_regexec_nl(..., str, col).
-        let m = if at_end { None } else { find_from(str + col) };
+        let m = if at_end { None } else { find_from(str, col) };
         let (startp, endp) = m.unwrap_or((n, n));
         let end = if m.is_some() { startp } else { n };
         // c: keep this item unless it is an omitted leading/trailing empty; an
