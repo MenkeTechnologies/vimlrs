@@ -6450,7 +6450,7 @@ matchstr('abc', '\_')     E865: (NFA) Regexp end encountered prematurely    'a'
 `NFA_BOL`/`NFA_EOL`. This engine wrapped them as "the literal, or a newline",
 which happened to answer the same on a one-line subject.
 
-### R44-O1 (open). `\%v` is a VIRTUAL column and this engine has no cell widths
+### R44-O1 (CLOSED in R45). `\%v` is a VIRTUAL column and this engine has no cell widths
 
 The other thing counting found. `nfa_regatom()`'s `case Magic('%')` has twelve
 arms plus a numeric default; the grammar generated seven of them. `\%#`, `\%C`,
@@ -6522,7 +6522,7 @@ backtracker on a wall-clock bench; this reproduces that as 5.2% on a different
 bench and a different instrument, and closes it — the NFA engine is now the
 faster of the two here.
 
-## R44-O2 (open). Three shapes the widened grammar found once the seeds were independent
+## R44-O2 (CLOSED in R45). Three shapes the widened grammar found once the seeds were independent
 
 `fuzz-parity --regex` at seeds 3/7/11/23/41 × 400 reports 18 gaps, 13 distinct.
 Ten are R44-O1's `\%v`. The other three are separate:
@@ -6548,3 +6548,239 @@ split('012', '\%>2c', 1)            ['01', '2']               ['01', '', '2', ''
    `match('012','\%>1c')` is 1 in both) produces one zero-width split point too
    many under `split()`. Both a `keepempty` question and a zero-width-advance
    question, and it is the only one of the three that is not in the parser.
+
+---
+
+## R45 — cell width lands, and seven tokens turn out to end a piece
+
+Oracle for this round: `/opt/homebrew/Cellar/vim/9.2.1050/bin/vim`, sha256
+`7c51b78e4d2d383d531171dd0a7b959114ffcbc2209d0462bbf36ad00555ec7d`, "Included
+patches: 1-1050", compiled 2026-09-08. The 9.2.1000 binary the previous rounds
+measured is GONE from the Cellar — Homebrew replaced it, so the vector
+`tests/parity_cases/ORACLE` pinned can no longer be run by anyone. All 96 parity
+records were re-verified byte-identical against 1050 before the pin was
+re-stamped, and the C was fetched at tag `v9.2.1050` to match.
+
+### R44-O1 is CLOSED — `utf_char2cells` and `win_linetabsize` are ported
+
+Ten of round 4's eighteen gaps were this one atom. `NFA_VCOL` compares
+`win_linetabsize(wp, lnum, rex.line, col) + 1` (`regexp_nfa.c:6969`), a SCREEN
+CELL count, and `src/ported/mbyte.rs` said outright that it did not port
+`utf_char2cells` or the East Asian width tables.
+
+It does now, from vim 9.2.1050's `mbyte.c`: `doublewidth[]` (121 intervals),
+`emoji_wide[]` (54, plus the `#ifdef MACOS_X` SF Symbols range, which is a `cfg`
+here for the same reason it is an `#ifdef` there) and `ambiguous[]` (179), with
+`utf_char2cells`, `utf_ptr2cells` and `mb_string2cells`. Those tables come from
+VIM rather than from `vendor/mbyte.c` for the reason `emoji_all[]` did in round
+4: Neovim replaced them with a utf8proc property query and utf8proc is not a
+dependency of this crate.
+
+Verified against the oracle rather than assumed. `strwidth(nr2char(c))` for
+every `c` from 0x80 to 0x10FFFF, emitted as change-of-width ranges by both
+engines and byte-diffed:
+
+```text
+                     ranges   differ
+default                 299        1   (R45-O1, below)
+ambiwidth=double        590        0
+noemoji                 263        1   (the same one)
+```
+
+`src/ported/charset.rs` gained `char2cells`, `ptr2cells`, `win_chartabsize`,
+`linetabsize_col` and `win_linetabsize` over one shared `linesize_fast` loop —
+the C's own arrangement, where `win_linetabsize()` and `linetabsize_col()` both
+run `win_linetabsize_cts()`. The C reaches that loop through
+`win_lbr_chartabsize()`, which with `'linebreak'`, `'breakindent'` and
+`'showbreak'` all off reduces to `win_nolbr_chartabsize()`. That function's one
+extra arm — a cell for a double-width character in the window's last column —
+needs `in_win_border()`, and a string match has no window: `w_width` is 0 and
+`in_win_border()` answers FALSE for such a window by its own first test. Probed
+anyway, with a double-width character at cell 79 of a 99-cell subject: vim and
+vimlrs agree.
+
+`src/ported/strings.rs` had carried its own `utf_char2cells` — nine hard-coded
+block ranges with a `0x80..=0x9f → 4` special case — which `strwidth()` and
+`strdisplaywidth()` ran on. It is gone.
+
+```text
+                            before   after (= vim)
+strwidth(nr2char(0x26cf))        1       2
+strwidth(nr2char(0x200b))        1       6
+match('abc','\%2v')             -1       1
+substitute('abcd','\%>2v.','X','g')   'abcd'  ->  'abXX'
+substitute('abcd','\%<3v.','X','g')   'abcd'  ->  'XXcd'
+```
+
+`\%v` itself is `Node::Vcol` in the backtracker and `NFA_VCOL`/`_GT`/`_LT`
+(-848/-847/-846, the enum's own offsets from `NFA_COL`) in the NFA engine, added
+to the four opcode lists the C lists them in. Both of the C's bail-outs are
+ported: the `val * MB_MAXBYTES` byte bound, and the `'tabstop'` guess above
+column 100 (probed with `match(repeat("\t",30).'q', '\%241v')`, which takes it).
+
+### R44-O2 is CLOSED — all three, and fifteen more by counting outward
+
+**Third first, because it was found by the `\%v` battery rather than reasoned
+about.** `f_split()` calls `vim_regexec_nl(&regmatch, str, col)` where `str` is
+the REMAINDER of the subject (`evalfunc.c:12241`). `str` is therefore the LINE,
+and every position atom is measured from it — `\%2v` fires once per remaining
+item, not once in the whole subject. `regex_split` searched the whole subject
+from `str + col`. Over 19 patterns × 9 subjects × `keepempty`, 341 cases, 69
+diverged; 0 do now.
+
+```text
+split('aaa','\%2v')      ['a', 'aa']         ->  ['a', 'a', 'a']
+split('01','\%>1c',1)    ['0', '', '1', '']  ->  ['0', '1', '']
+split('aXX b','\%2v')    ['a', 'XX b']       ->  ['a', 'X', 'X', ' ', 'b']
+```
+
+The first two are one bug. `nfa_regconcat()` consumes SEVEN tokens itself before
+it ever calls `nfa_regpiece()`: `\v`, `\m`, `\M`, `\V`, `\c`, `\C` and `\Z`
+(`regexp_nfa.c:2410-2441`). Each of them is therefore a PIECE BOUNDARY.
+
+`nfa_regpiece()`'s "can't have a multi follow a multi" test (`c:2376`) runs at
+its own end, BEFORE `nfa_regconcat()` consumes the next token — so a switch
+between two multis is not a multi-following-a-multi at all. The second multi
+opens a new piece with no atom in front of it and `nfa_regatom()` answers E866.
+And the same holds with no multi in front: the boundary alone is enough, which
+is where the other fifteen came from.
+
+```text
+match('ab', ')\=\V\*')     E871  ->  E866: (NFA regexp) Misplaced *
+match('ab', 'a\=\m*')      E871  ->  E866
+match('ab', 'a\=\V\{1}')   E871  ->  E866: Misplaced {
+match('aab', 'a\m*')         -1  ->  E866      match('aab', '\V\c\*')  -1 -> E866
+match('aab', 'a\v*')         -1  ->  E866      match('aab', '\V\C\*')  -1 -> E866
+match('aab', 'a\V\{1}')      -1  ->  E866      match('aab', 'a\c\+')   -1 -> E866
+match('aab', 'a\V\+')        -1  ->  E866      match('aab', 'a\c\@=')  -1 -> E866
+match('aab', 'a\V\@=')       -1  ->  E866      match('aab', '\c\+')    -1 -> E866
+match('aab', 'a\m\@=')       -1  ->  E866      match('aab', '\Va\Z\*')  0 -> E866
+match('ab',  'a\Zb')         -1  ->  1
+```
+
+`\c` and `\C` had been arms of `escaped()` that set the flag and then RECURSED
+into the next atom — the one shape that cannot produce a boundary — and `\Z` was
+not handled at all, so it matched a literal `Z`. All three now live in
+`concat()`, where the C has them.
+
+The bare `*` keeps its exception, because all seven use `skipchr_keepstart()`
+and `peekchr()`'s `case '*'` reads `prevchr`: `\c*` and `\m*` at the start of a
+pattern are still the literal star vim says they are, while `a\c*` and `a\m*`
+are E866. An intermediate revision had those two wrong in the other direction;
+the probe battery caught it.
+
+Telling them apart needs one fact the magic translation was destroying: nomagic
+and very nomagic spell the multi `\*`, which reaches `peekchr()`'s BACKSLASH arm
+and is `Magic('*')` unconditionally, with none of the `prevchr` test. Translation
+drops that backslash. `Preprocessed` — a struct now, not a 4-tuple — carries
+`forced_multi` for those positions and `switched` for where one of the four
+magic-level switches was erased, which together replace the pre-pass's
+`atom_before` tracker and the positional error tie-break in `compile_uncached`:
+the parser finds these itself now, in pattern order, so there is nothing left to
+order against. `\M\1\(\*` is still E65, `\M\*\1` still E866, `\M\ze\{2}\(\*`
+still E888.
+
+And the second shape: under very nomagic `\$` reaches the same backslash arm and
+is `Magic('$')` with none of the "`'$'` is only magic as the very last char"
+test the bare `$` gets, so the anchor survives a following multi.
+`Preprocessed::forced_eol` marks it.
+
+```text
+match('ab', '\V\$\{1}')   -1  ->  2        (match('ab', '$\{1}') stays -1)
+```
+
+Verified by probe batteries run through both engines and diffed: 28 star/`\Z`
+shapes, 21 `\c`/`\C`/`\Z` shapes, 21 anchor shapes, 22 switch-boundary shapes
+and 19 E866/E871 shapes — 111 cases, all byte-identical to vim 9.2.1050.
+
+### Fuzz: 18 gaps / 13 distinct at the start of the round, 0 at the end
+
+`fuzz-parity --regex --count 400`, run SERIALLY — two of these at once share
+`$TMPDIR/vimlrs-fuzz/corpus.txt` and produce nonsense (a concurrent pair
+reported 277 gaps / 77 distinct where each alone reports none).
+
+```text
+seed    3    7   11   23   41   59   97  131  257
+ok    400  400  400  400  400  400  400  399  400
+gaps    0    0    0    0    0    0    0    0    0
+```
+
+The five pinned seeds opened the round at 2 / 8 / 4 / 3 / 1 gaps (18 total, 13
+distinct). 59, 97, 131 and 257 are new this round; 97 found
+`matchstrpos('','\V\c\*')` while the fix for it was being written. Seed 131's
+one non-`ok` is a crash finding, and it is R45-O3 below rather than a divergence.
+
+### Perf: flat, and a fixed cost at that
+
+Measured by INSTRUCTIONS RETIRED (`/usr/bin/time -l`), interleaved, alternating
+which binary runs first, minimum of 8 rounds (6 at N=1600), on a bench of nine
+regex calls × 40 over an N-character subject. Binaries copied aside before the
+rebuild rather than built from a second worktree, because the volume was at 160
+MiB free when the round opened.
+
+```text
+A/A control  N=400    base 1,080,038,803   base(copy) 1,080,082,237   +0.004%
+A/B          N=400    base 1,080,991,727   round 6    1,080,238,251   -0.070%
+A/B          N=1600   base 2,556,772,634   round 6    2,555,293,112   -0.058%
+```
+
+The signal is above the control band but is not a speedup worth the name: 4x the
+workload moves the absolute saving by 2x (753,476 -> 1,479,522), which is the
+shape of a per-COMPILE cost, not a per-match one — consistent with what actually
+left, the pre-pass's `atom_before` walk and the error tie-break. No regression
+from `\%v`: it allocates a prefix `String` per test where the C walks the line,
+and nothing in this bench uses it.
+
+### R45-O1 (open). A lone surrogate loses its width, because it loses its bytes
+
+The one range the width dump disagrees on, and it predates this round — the
+BASELINE binary answers the same 3.
+
+```text
+                            vim 9.2.1050   vimlrs
+strwidth(nr2char(0xd800))        6            3
+str2list(nr2char(0xd800))     [55296]      [55296]
+strlen(nr2char(0xd800))          3            3
+```
+
+`nr2char` produces the three bytes and `str2list`/`strlen` read them back, so
+the value survives its own round trip. It does not survive the `String` the width
+walk reads: `utf_char2cells(0xd800)` would answer 6 (`utf_printable()`'s
+`0xd800-0xdfff` interval), but what arrives is three U+FFFD, one cell each. A
+string-representation gap, not a width gap, and the whole `d800-dfff` range is
+its only visible symptom in 1,114,000 codepoints.
+
+### R45-O2 (open). `\Z` is consumed and then ignored
+
+`\Z` sets `regflags |= RF_ICOMBINE` (`regexp_nfa.c:2411`) — "ignore differences
+in composing characters". The flag is now consumed where the C consumes it,
+which is what every E866 answer above turns on and what makes
+`match('ab','a\Zb')` 1 rather than -1. The EFFECT is not implemented: a pattern
+under `\Z` still compares composing characters. Nothing in the fuzz grammar
+generates a subject where that shows, which is exactly why this note exists
+rather than a number.
+
+### R45-O3 (open). After `E363`, the fallback backtracker does not come back
+
+Found by watching seed 131 take forty minutes where its neighbours take two: the
+fuzzer restarts a child after every expression that hangs one, and this seed's
+corpus holds several.
+
+```text
+substitute(repeat('a', 30),
+  '\(\%[a\(y\)]\{1,3}\_a\{-}\|\(\%(\%[a\(b\)]\)\)\@!\)\{}$\{2}[a-z]\{}\&\(\<\)\@=',
+  '[&]', 'g')
+
+vim 9.2.1050   0.04s   E363, "Switching to backtracking RE engine", then answers
+vimlrs         >30s    E363, then the backtracker never returns (16s CPU at 30s wall)
+```
+
+Both engines agree on the E363 and on the handover; what differs is what happens
+after it. The pattern is a `\{}` (i.e. `*`) over an alternation whose second
+branch is a zero-width `\@!`, which is the classic shape for unbounded
+backtracking, and this engine has no equivalent of whatever bounds vim's.
+
+NOT a round-5 regression: the binary from before this round's first commit hangs
+identically, to within 0.03s of CPU. It is recorded here because it is the
+reason a fuzz seed can appear to hang, which cost most of an hour to rule out as
+a new bug.
