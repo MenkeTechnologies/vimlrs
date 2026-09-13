@@ -424,20 +424,19 @@ fn preprocess_magic(pat: &str) -> Preprocessed {
     if !pat.contains("\\v") && !pat.contains("\\m") && !pat.contains("\\M") && !pat.contains("\\V")
     {
         let n = pat.chars().count();
-        return (pat.to_string(), vec![false; n], (0..n).collect(), None);
+        return Preprocessed {
+            pat: pat.to_string(),
+            vm: vec![false; n],
+            omap: (0..n).collect(),
+            switched: vec![false; n + 1],
+            forced_eol: vec![false; n],
+            forced_multi: vec![false; n],
+        };
     }
     let chars: Vec<char> = pat.chars().collect();
     let mut out = String::new();
     let mut i = 0;
     let mut mode = Dialect::Magic;
-    // Whether an atom has been emitted in the current branch — a multi needs one.
-    let mut atom_before = false;
-    // The diagnostic AND where in the translated pattern it was seen. Vim reports
-    // the first violation in pattern order, and this one is found in a pre-pass
-    // that runs before the parser — so without a position it always won, and
-    // `\M\1\(\*` reported "E866: Misplaced *" where vim reports the earlier
-    // "E65: Illegal back reference". See `compile_uncached`.
-    let mut err: Option<(usize, String)> = None;
     const OPS: &str = "(){}+?=|<>@";
     // Filled to `out`'s length after each iteration, with the mode that produced
     // those characters — cheaper and less error-prone than tagging every push.
@@ -446,6 +445,10 @@ fn preprocess_magic(pat: &str) -> Preprocessed {
     // those translated characters. `seen_endbrace()` scans the pattern the user
     // wrote, not a translation of it, so the E65 escape hatch needs a way back.
     let mut omap: Vec<usize> = Vec::new();
+    // See `Preprocessed::switched` / `Preprocessed::forced_eol`.
+    let mut switched: Vec<bool> = Vec::new();
+    let mut forced_eol: Vec<bool> = Vec::new();
+    let mut forced_multi: Vec<bool> = Vec::new();
     while i < chars.len() {
         let c = chars[i];
         let start_i = i;
@@ -458,21 +461,29 @@ fn preprocess_magic(pat: &str) -> Preprocessed {
                 Some('v') => {
                     mode = Dialect::VeryMagic;
                     i += 2;
+                    switched.resize(out.chars().count() + 1, false);
+                    switched[out.chars().count()] = true;
                     continue;
                 }
                 Some('m') => {
                     mode = Dialect::Magic;
                     i += 2;
+                    switched.resize(out.chars().count() + 1, false);
+                    switched[out.chars().count()] = true;
                     continue;
                 }
                 Some('M') => {
                     mode = Dialect::NoMagic;
                     i += 2;
+                    switched.resize(out.chars().count() + 1, false);
+                    switched[out.chars().count()] = true;
                     continue;
                 }
                 Some('V') => {
                     mode = Dialect::VeryNoMagic;
                     i += 2;
+                    switched.resize(out.chars().count() + 1, false);
+                    switched[out.chars().count()] = true;
                     continue;
                 }
                 _ => {}
@@ -504,23 +515,27 @@ fn preprocess_magic(pat: &str) -> Preprocessed {
                 if c == '\\' {
                     match chars.get(i + 1) {
                         Some(&n) if swapped.contains(n) => {
-                            // c: "E866: (NFA regexp) Misplaced *" — the nomagic special
-                            // star is a multi, and there is nothing before it to repeat.
-                            if n == '*' && !atom_before && err.is_none() {
-                                err = Some((
-                                    out.chars().count(),
-                                    "E866: (NFA regexp) Misplaced *".to_string(),
-                                ));
+                            // c: the nomagic special star IS the multi — see
+                            // `Preprocessed::forced_multi`.
+                            if n == '*' {
+                                forced_multi.resize(out.chars().count() + 1, false);
+                                forced_multi[out.chars().count()] = true;
                             }
-                            if n != '*' {
-                                atom_before = true;
+                            // c: very nomagic's `\$` is Magic('$') straight from
+                            // `peekchr()`'s backslash arm, with no "only as the
+                            // very last char" test — see `Preprocessed::
+                            // forced_eol`. (`\^` needs no mark: the parser's
+                            // `^` is already unconditional at a branch start,
+                            // and vim's `\V\^` mid-branch answers the same -1
+                            // this engine's literal caret does.)
+                            if n == '$' && mode == Dialect::VeryNoMagic {
+                                forced_eol.resize(out.chars().count() + 1, false);
+                                forced_eol[out.chars().count()] = true;
                             }
                             out.push(n); // `\.` in nomagic IS the magic `.`
                             i += 2;
                         }
                         Some(&n) => {
-                            // `\|` and `\(` open a new branch: the multi rule restarts.
-                            atom_before = !matches!(n, '|' | '(' | '&');
                             out.push('\\');
                             out.push(n);
                             i += 2;
@@ -531,11 +546,6 @@ fn preprocess_magic(pat: &str) -> Preprocessed {
                             // which matched nothing.
                             if n == '%' || n == '_' {
                                 if let Some(&after) = chars.get(i) {
-                                    // `\%(` opens a group — a new branch, so a multi
-                                    // right after it again has nothing to repeat.
-                                    if n == '%' {
-                                        atom_before = after != '(';
-                                    }
                                     out.push(after);
                                     i += 1;
                                 }
@@ -547,12 +557,10 @@ fn preprocess_magic(pat: &str) -> Preprocessed {
                         }
                     }
                 } else if swapped.contains(c) {
-                    atom_before = true;
                     out.push('\\'); // a bare `.` in nomagic is a literal dot
                     out.push(c);
                     i += 1;
                 } else {
-                    atom_before = true;
                     out.push(c);
                     i += 1;
                 }
@@ -661,13 +669,54 @@ fn preprocess_magic(pat: &str) -> Preprocessed {
         omap.resize(out.chars().count(), start_i);
     }
     omap.resize(out.chars().count(), chars.len());
-    (out, vm, omap, err)
+    switched.resize(out.chars().count() + 1, false);
+    forced_eol.resize(out.chars().count(), false);
+    forced_multi.resize(out.chars().count(), false);
+    Preprocessed {
+        pat: out,
+        vm,
+        omap,
+        switched,
+        forced_eol,
+        forced_multi,
+    }
 }
 
-/// What [`preprocess_magic`] hands the parser: the translated pattern, the
-/// per-character "written in very magic" map, the translated-index →
-/// original-index map, and the diagnostic only the translation can see.
-type Preprocessed = (String, Vec<bool>, Vec<usize>, Option<(usize, String)>);
+/// What [`preprocess_magic`] hands the parser.
+struct Preprocessed {
+    /// The pattern rewritten into the magic dialect the parser reads.
+    pat: String,
+    /// Per translated character: was it written in very magic?
+    vm: Vec<bool>,
+    /// Translated index → the original index of the atom that produced it.
+    omap: Vec<usize>,
+    /// Per translated position (one longer than `pat`): was a magic-level switch
+    /// (`\v`, `\m`, `\M`, `\V`) erased immediately before it?
+    ///
+    /// c: `nfa_regconcat()` consumes those four itself (`regexp_nfa.c:2422`) and
+    /// `nfa_regpiece()`'s "multi follows a multi" test runs BEFORE it, so a
+    /// switch ENDS the piece: a multi after one has no atom in front of it and
+    /// is E866 from `nfa_regatom()`, never E871. Erasing the switch during
+    /// translation loses that boundary, and this is where it is kept.
+    switched: Vec<bool>,
+    /// Per translated character: is this `$` the end-of-line anchor no matter
+    /// what follows?
+    ///
+    /// c: very nomagic's `\$` reaches `peekchr()`'s `'\\'` arm, which is a bare
+    /// `curchr = toggle_Magic(c)` — none of the "only as the very last char"
+    /// test the bare `$` gets a few lines above it. So `\V\$\{1}` still anchors
+    /// where `$\{1}` does not.
+    forced_eol: Vec<bool>,
+    /// Per translated character: is this `*` a multi no matter what precedes it?
+    ///
+    /// c: nomagic and very nomagic spell the multi `\*`, which reaches
+    /// `peekchr()`'s backslash arm and is Magic('*') unconditionally — none of
+    /// the "not magic as the very first character, after `^`, `\(`, `\|` or
+    /// `\&`" test the bare `*` gets. Translation drops that backslash, so the
+    /// distinction is kept here: `\M\*` is E866 where a bare `*` in the same
+    /// place is a literal star.
+    forced_multi: Vec<bool>,
+}
 
 /// The four pattern dialects (`:help /magic`). The parser reads [`Dialect::Magic`];
 /// `preprocess_magic` translates the other three into it.
@@ -690,6 +739,16 @@ struct Parser {
     /// original-index map. Only [`Parser::lookbehind_ahead`] reads them.
     orig: Vec<char>,
     omap: Vec<usize>,
+    /// A magic-level switch was erased just before this position, and a
+    /// multi here therefore has nothing to repeat. See
+    /// [`Preprocessed::switched`].
+    switched: Vec<bool>,
+    /// This `$` is the end-of-line anchor no matter what follows. See
+    /// [`Preprocessed::forced_eol`].
+    forced_eol: Vec<bool>,
+    /// This `*` is a multi whatever precedes it. See
+    /// [`Preprocessed::forced_multi`].
+    forced_multi: Vec<bool>,
     i: usize,
     ngroups: usize,
     forced_ic: Option<bool>,
@@ -715,6 +774,12 @@ impl Parser {
             self.err = Some(msg.to_string());
             self.err_pos = self.i;
         }
+    }
+
+    /// Was a magic-level switch erased just before the cursor? c: `\v`, `\m`,
+    /// `\M` and `\V` are consumed by `nfa_regconcat()`, so they END a piece.
+    fn after_magic_switch(&self) -> bool {
+        self.switched.get(self.i).copied().unwrap_or(false)
     }
 
     fn peek(&self) -> Option<char> {
@@ -784,6 +849,14 @@ impl Parser {
     /// A sequence of quantified atoms, stopping at `\|`, `\)`, or end.
     fn concat(&mut self, star_lit: bool) -> Branch {
         let mut atoms = Vec::new();
+        // Whether the previous token ENDED a piece without being an atom: one of
+        // the magic-level switches the translation erased, or one of the three
+        // flags below. c: `nfa_regconcat()` handles all seven itself, so a multi
+        // after one is the first thing in a new piece and `nfa_regatom()` rejects
+        // it (E866). All seven use `skipchr_keepstart()`, which leaves `prevchr`
+        // alone — which is why a BARE `*` there is still the literal star it
+        // would have been in their absence.
+        let mut flag_before = false;
         loop {
             match (self.peek(), self.peek2()) {
                 (None, _) => break,
@@ -792,13 +865,42 @@ impl Parser {
                 }
                 _ => {}
             }
+            flag_before |= self.after_magic_switch();
+            // c: `nfa_regconcat()` `case Magic('c')` / `Magic('C')` /
+            // `Magic('Z')` — `'ignorecase'` on, off, and RF_ICOMBINE. They are
+            // consumed HERE, not inside an atom, which is what ends the piece.
+            if self.peek() == Some('\\') {
+                match self.peek2() {
+                    Some('c') => {
+                        self.forced_ic = Some(true);
+                        self.i += 2;
+                        flag_before = true;
+                        continue;
+                    }
+                    Some('C') => {
+                        self.forced_ic = Some(false);
+                        self.i += 2;
+                        flag_before = true;
+                        continue;
+                    }
+                    // c: `regflags |= RF_ICOMBINE`. The flag is consumed and its
+                    // effect — matching without regard to composing characters —
+                    // is not implemented; see BUGS.md R45-O2.
+                    Some('Z') => {
+                        self.i += 2;
+                        flag_before = true;
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
             // c: "E866: (NFA regexp) Misplaced +" — a multi at the start of a branch has
             // nothing to repeat. (A bare `*` there is NOT an error: magic treats a
             // leading star as a literal, which is why `match('a*b', '*')` finds it.
             // The nomagic special star `\*` IS a multi and is caught in
             // `preprocess_magic`, which is the only place that can still tell them
             // apart.)
-            if atoms.is_empty() && self.peek() == Some('\\') {
+            if (atoms.is_empty() || flag_before) && self.peek() == Some('\\') {
                 if let Some(m) = self.peek2() {
                     if matches!(m, '+' | '=' | '?' | '{' | '@') {
                         self.fail(&format!("E866: (NFA regexp) Misplaced {m}"));
@@ -813,12 +915,25 @@ impl Parser {
             // `\%(*a\)` is "E866: Misplaced *" while `\(*a\)` and `\v%(*a)` keep a
             // literal star. `preprocess_magic` folds `\v%(` into `\%(`, so the two
             // are told apart by the per-character very-magic provenance in `vm`.
-            if atoms.is_empty() && !star_lit && self.peek() == Some('*') {
+            // c: `peekchr()` `case '*'` decides whether a bare `*` is Magic at
+            // all — it is not "as the very first character, after `^`, `\(`,
+            // `\|` or `\&`", which is `star_lit` with no atom yet. A nomagic
+            // `\*` skips that arm entirely (`forced_multi`). Once it IS a multi,
+            // it needs an atom in the current PIECE: none yet, or the piece just
+            // ended at a flag, and `nfa_regatom()` answers E866.
+            let star_is_multi = self.peek() == Some('*')
+                && (self.forced_multi.get(self.i).copied().unwrap_or(false)
+                    || !atoms.is_empty()
+                    || !star_lit);
+            if star_is_multi && (atoms.is_empty() || flag_before) {
                 self.fail("E866: (NFA regexp) Misplaced *");
                 break;
             }
             match self.quantified(atoms.is_empty()) {
-                Some(a) => atoms.push(a),
+                Some(a) => {
+                    atoms.push(a);
+                    flag_before = false;
+                }
                 None => break,
             }
         }
@@ -855,8 +970,10 @@ impl Parser {
             });
         }
         // `\@` is a multi too (c: `nfa_regpiece` `case Magic('@')`): it wraps the
-        // atom just parsed in a lookaround/atomic node instead of repeating it.
-        if self.peek() == Some('\\') && self.peek2() == Some('@') {
+        // atom just parsed in a lookaround/atomic node instead of repeating it —
+        // and, being a multi, it too belongs to the next piece when a
+        // magic-level switch stands between (`a\V\@=` is E866).
+        if !self.after_magic_switch() && self.peek() == Some('\\') && self.peek2() == Some('@') {
             self.i += 2;
             let node = self.look(node);
             // c: "E871: (NFA regexp) Can't have a multi follow a multi" — `a\@!*`.
@@ -943,6 +1060,13 @@ impl Parser {
     /// Whether the cursor sits on another multi — `*`, `\+`, `\?`, `\=`, `\{`,
     /// or `\@` (c: `re_multi_type(peekchr()) != NOT_MULTI` after a piece).
     fn multi_follows(&self) -> bool {
+        // c: the "multi follows a multi" test runs in `nfa_regpiece()` BEFORE
+        // `nfa_regconcat()` consumes a magic-level switch, so a switch between
+        // the two makes this question answer no — and the second multi is then
+        // E866 at the start of the next piece, not E871.
+        if self.after_magic_switch() {
+            return false;
+        }
         self.peek() == Some('*')
             || (self.peek() == Some('\\')
                 && matches!(self.peek2(), Some('+' | '?' | '=' | '{' | '@')))
@@ -986,6 +1110,12 @@ impl Parser {
     }
 
     fn quantifier(&mut self) -> (u32, u32, bool) {
+        // c: a magic-level switch ENDS the piece in `nfa_regconcat()`, so a
+        // multi on the far side of one belongs to the NEXT piece and has
+        // nothing to repeat — `a\V\*` is E866, not `a*`.
+        if self.after_magic_switch() {
+            return (1, 1, true);
+        }
         match (self.peek(), self.peek2()) {
             (Some('*'), _) => {
                 self.i += 1;
@@ -1063,7 +1193,7 @@ impl Parser {
                 self.i += 1;
                 Some(Node::Bol)
             }
-            '$' if self.is_eol_pos() => {
+            '$' if self.is_eol_pos() || self.forced_eol.get(self.i).copied().unwrap_or(false) => {
                 self.i += 1;
                 Some(Node::Eol)
             }
@@ -1458,14 +1588,6 @@ impl Parser {
             'K' => class_atom(false, ClassItem::KeywordNoDigit),
             'f' => class_atom(false, ClassItem::Fname),
             'F' => class_atom(false, ClassItem::FnameNoDigit),
-            'c' => {
-                self.forced_ic = Some(true);
-                return self.atom(false);
-            }
-            'C' => {
-                self.forced_ic = Some(false);
-                return self.atom(false);
-            }
             // `\1`..`\9` — backreference to a group that must already be open.
             // c: Vim rejects `\1` with no group, and a *forward* reference too.
             d @ '1'..='9' => {
@@ -2051,12 +2173,15 @@ impl Regex {
     /// The parse itself, plus the diagnostic it would raise. Split out of
     /// [`Self::compile`] so the cache can hold both and replay the second.
     fn compile_uncached(pat: &str) -> (Regex, Option<String>) {
-        let (tpat, vm, omap, pre_err) = preprocess_magic(pat);
+        let pre = preprocess_magic(pat);
         let mut parser = Parser {
-            p: tpat.chars().collect(),
-            vm,
+            p: pre.pat.chars().collect(),
+            vm: pre.vm,
             orig: pat.chars().collect(),
-            omap,
+            omap: pre.omap,
+            switched: pre.switched,
+            forced_eol: pre.forced_eol,
+            forced_multi: pre.forced_multi,
             i: 0,
             ngroups: 0,
             forced_ic: None,
@@ -2081,18 +2206,6 @@ impl Regex {
         // quietly matches nothing, which is what this engine used to do. Report it
         // and hand back a regex that matches nothing, so each caller falls through to
         // the result it returns once the error has been raised.
-        // Vim reports the FIRST violation in pattern order. The pre-pass sees one
-        // the parser cannot (a nomagic `\*` with nothing to repeat, which the
-        // translation turns into an ordinary magic `*`), but it is not privileged:
-        // when the parser found something earlier in the pattern, that is the
-        // error Vim raises. `\M\1\(\*` is E65, `\M\*\1` is E866, and
-        // `\M\ze\{2}\(\*` is E888 — all three verified against vim 9.2.
-        if let Some((pos, msg)) = pre_err {
-            if parser.err.is_none() || pos < parser.err_pos {
-                parser.err = Some(msg);
-                parser.err_pos = pos;
-            }
-        }
         if let Some(msg) = parser.err {
             return (
                 Regex {
