@@ -2314,8 +2314,9 @@ fn parse_let(rest: &str) -> Result<Stmt, VimlError> {
         // and the whole-scope forms (`:let g:`) list a hashtable in its
         // iteration order, which is not modelled — those stay a no-op, as does
         // anything this reader does not recognise as a variable name.
-        return Ok(let_list(strip_legacy_trailing_comment(rest))
-            .unwrap_or(Stmt::Expr(Expr::Number(0))));
+        return Ok(
+            let_list(strip_legacy_trailing_comment(rest)).unwrap_or(Stmt::Expr(Expr::Number(0)))
+        );
     };
     // Compound assignment (`+= -= *= /= %= .=`, ex_let's `tv_op`): the char just
     // before `=` is the operator. A `:let` target never ends in one of these, so

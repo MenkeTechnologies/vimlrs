@@ -3255,8 +3255,7 @@ fn b_let_list_one(vm: &mut VM, _: u8) -> Value {
     let mut body = crate::vimstr::VimStr::new();
     body.push_str(&name); // c:2707 msg_puts_len(name, …)
     body.push_str(" "); // c:2709 msg_putchar(' ')
-    // c:2710 msg_advance(22): pad with spaces up to screen column 22.
-    let col = crate::ported::mbyte::mb_string2cells(&body);
+    let col = crate::ported::mbyte::mb_string2cells(&body); // c:2710 msg_advance(22)
     for _ in col..22 {
         body.push_str(" ");
     }
@@ -4505,8 +4504,7 @@ fn run_nested(
     }
     CMD_RECURSE.with(|c| c.set(depth + 1));
     let r = (|| {
-        let prog =
-            crate::compile_viml::compile_program_nested(&parse(src)?)?;
+        let prog = crate::compile_viml::compile_program_nested(&parse(src)?)?;
         register_prog_funcs(&mut prog.funcs.into_iter());
         stage_deferred_funcs(prog.deferred_funcs);
         run_chunk_nested(prog.main);
