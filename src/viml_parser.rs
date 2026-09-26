@@ -24,6 +24,15 @@ thread_local! {
     /// keys (`{a: 1}` → key `"a"`), not the legacy expression-keyed form where the
     /// key is evaluated. Set for the parse duration by [`Vim9Guard`].
     static VIM9: Cell<bool> = const { Cell::new(false) };
+    /// Whether the text being parsed is a COMMAND LINE (`:execute`, `execute()`,
+    /// an autocommand or user-command body) rather than a sourced file. c:
+    /// `do_cmdline()` (`ex_docmd.c:832-849`) reports `E600`/`E170`/`E171` for a
+    /// conditional left open only when the lines came from `getsourceline` or
+    /// `get_func_line`; for any other getline it rewinds the condition stack
+    /// silently. So on a command line an unclosed `:if`/`:try` simply ends
+    /// there, and an unclosed `:while`/`:for` runs its body once — nothing
+    /// reaches the `:endwhile` that would jump back. Set by [`parse_cmdline`].
+    static CMDLINE_EOF: Cell<bool> = const { Cell::new(false) };
 }
 
 /// True when the parser is in a vim9 region (see [`VIM9`]).
@@ -795,6 +804,30 @@ pub fn parse_program(src: &str) -> Result<Block, VimlError> {
     Ok(group_by_line(out))
 }
 
+/// Parse a COMMAND LINE — the text `:execute` / `execute()` run — where end of
+/// input closes any conditional still open instead of erroring (see
+/// [`CMDLINE_EOF`]). Otherwise identical to [`parse_program`].
+pub fn parse_cmdline(src: &str) -> Result<Block, VimlError> {
+    let saved = CMDLINE_EOF.with(|f| f.replace(true));
+    let r = parse_program(src);
+    CMDLINE_EOF.with(|f| f.set(saved));
+    r
+}
+
+/// True when end of input legitimately closes an open conditional: a command
+/// line, not a sourced file (see [`CMDLINE_EOF`]).
+fn eof_closes_block() -> bool {
+    CMDLINE_EOF.with(|f| f.get())
+}
+
+/// The body of a `:while`/`:for` that a command line left open. It runs once,
+/// because nothing reaches the `:endwhile`/`:endfor` that loops back; modelled
+/// as the body followed by `:break`.
+fn run_once(mut body: Block, line: u32) -> Block {
+    body.push((line, Stmt::Break));
+    body
+}
+
 /// Wrap each run of statements that share a source line — i.e. the `|`-separated
 /// commands of one command line — in [`Stmt::LineGroup`], so the compiler can
 /// abandon the rest of the line when one of them errors, as Vim does. Runs of one
@@ -1490,12 +1523,13 @@ fn parse_if(cur: &mut Lines, cond_str: &str) -> Result<Stmt, VimlError> {
             Some((ref c, _)) if c == "else" => {
                 let (b, t) = parse_block(cur, &["endif"])?;
                 else_body = Some(b);
-                if t.is_none() {
+                if t.is_none() && !eof_closes_block() {
                     return Err(VimlError::msg("E171: Missing :endif"));
                 }
                 break;
             }
             Some((ref c, _)) if c == "endif" => break,
+            None if eof_closes_block() => break,
             None => return Err(VimlError::msg("E171: Missing :endif")),
             Some((ref c, ref rest)) => return Err(e_unmatched_block(c, &format!("{c} {rest}"))),
         }
@@ -1507,6 +1541,10 @@ fn parse_while(cur: &mut Lines, cond_str: &str) -> Result<Stmt, VimlError> {
     let cond = parse_expr(strip_legacy_trailing_comment(cond_str))?;
     let (body, term) = parse_block(cur, &["endwhile"])?;
     if term.is_none() {
+        if eof_closes_block() {
+            let body = run_once(body, cur.prev_line_no());
+            return Ok(Stmt::While { cond, body });
+        }
         return Err(VimlError::msg("E170: Missing :endwhile"));
     }
     Ok(Stmt::While { cond, body })
@@ -1532,6 +1570,10 @@ fn parse_for(cur: &mut Lines, header: &str) -> Result<Stmt, VimlError> {
     let iter = parse_expr(strip_legacy_trailing_comment(header[idx + 4..].trim()))?;
     let (body, term) = parse_block(cur, &["endfor"])?;
     if term.is_none() {
+        if eof_closes_block() {
+            let body = run_once(body, cur.prev_line_no());
+            return Ok(Stmt::For { vars, iter, body });
+        }
         return Err(VimlError::msg("E170: Missing :endfor"));
     }
     Ok(Stmt::For { vars, iter, body })
@@ -2205,12 +2247,13 @@ fn parse_try(cur: &mut Lines) -> Result<Stmt, VimlError> {
             Some((ref c, _)) if c == "finally" => {
                 let (b, t) = parse_block(cur, &["endtry"])?;
                 finally = Some(b);
-                if t.is_none() {
+                if t.is_none() && !eof_closes_block() {
                     return Err(VimlError::msg("E600: Missing :endtry"));
                 }
                 break;
             }
             Some((ref c, _)) if c == "endtry" => break,
+            None if eof_closes_block() => break,
             None => return Err(VimlError::msg("E600: Missing :endtry")),
             Some((ref c, ref rest)) => return Err(e_unmatched_block(c, &format!("{c} {rest}"))),
         }

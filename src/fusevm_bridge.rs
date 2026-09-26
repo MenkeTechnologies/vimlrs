@@ -4328,6 +4328,23 @@ fn compile_expr_chunk(src: &str) -> Result<fusevm::Chunk, VimlError> {
 /// `execute()`, which runs commands mid-outer-run). Functions defined by the
 /// source register globally.
 fn run_source_nested(src: &str) -> Result<(), VimlError> {
+    run_nested(src, crate::viml_parser::parse_program)
+}
+
+/// [`run_source_nested`] for a COMMAND LINE — the text `:execute`, `execute()`,
+/// an autocommand, a user command or an assert runs through `do_cmdline_cmd`.
+/// c: `do_cmdline()` (`ex_docmd.c:832-849`) only reports an unclosed
+/// `:if`/`:while`/`:for`/`:try` for a sourced file or a function body; a command
+/// line rewinds the condition stack silently, so `execute('try | throw "x"')`
+/// throws `x` out to the caller rather than failing to parse.
+fn run_cmdline_nested(src: &str) -> Result<(), VimlError> {
+    run_nested(src, crate::viml_parser::parse_cmdline)
+}
+
+fn run_nested(
+    src: &str,
+    parse: fn(&str) -> Result<crate::viml_ast::Block, VimlError>,
+) -> Result<(), VimlError> {
     // Shared `do_cmdline` recursion guard: Vim raises E169 at depth 200 for
     // nested `:source`/`:execute`. Depth is checked before compiling so a
     // self-sourcing script (`source thisfile`) or nested `execute` string errors
@@ -4347,7 +4364,7 @@ fn run_source_nested(src: &str) -> Result<(), VimlError> {
     CMD_RECURSE.with(|c| c.set(depth + 1));
     let r = (|| {
         let prog =
-            crate::compile_viml::compile_program_nested(&crate::viml_parser::parse_program(src)?)?;
+            crate::compile_viml::compile_program_nested(&parse(src)?)?;
         register_prog_funcs(&mut prog.funcs.into_iter());
         stage_deferred_funcs(prog.deferred_funcs);
         run_chunk_nested(prog.main);
@@ -4498,8 +4515,17 @@ fn b_execute(vm: &mut VM, argc: u8) -> Value {
     // `in_callee` does the same rollback for a user function, but only when no
     // exception is pending, which is precisely the case that matters here.
     let saved_hard = HARD_ERR.with(|h| h.get());
-    for cmd in cmds {
-        let _ = run_source_nested(&cmd);
+    // c: a List runs as ONE command sequence — `do_cmdline(NULL, get_list_line,
+    // …)` (funcs.c:1330) reads it an item per line — so a `:while`/`:if`/`:try`
+    // opened on one item is closed by a later one. The C parses each line as it
+    // reaches it, so a line that does not parse costs only that line; this port
+    // parses the sequence up front, and when that fails (nothing has run yet —
+    // `run_nested` returns `Err` before executing) it falls back to one item at
+    // a time, which is what every item that stands alone needs.
+    if cmds.len() < 2 || run_cmdline_nested(&cmds.join("\n")).is_err() {
+        for cmd in &cmds {
+            let _ = run_cmdline_nested(cmd);
+        }
     }
     HARD_ERR.with(|h| h.set(saved_hard));
     EXECUTE_DEPTH.with(|d| d.set(d.get() - 1));
@@ -4544,7 +4570,7 @@ fn b_assert_fails(vm: &mut VM, argc: u8) -> Value {
     let before = message::did_emsg.with(|d| d.get());
     let saved_exc = V_EXCEPTION.with(|e| e.borrow().clone());
     message::capture_errors_begin();
-    let parse_err = run_source_nested(&cmd).err();
+    let parse_err = run_cmdline_nested(&cmd).err();
     // A throw that unwound to the nested top level is reported + cleared there,
     // and one raised inside a user function called by `{cmd}` unwinds PAST it
     // and is still pending here. Take it rather than merely clearing it: the
@@ -4626,7 +4652,7 @@ fn assert_beeps_run(cmd: &str) -> bool {
     // `call_func()` follows for a callee's body. Without the rollback, an
     // `assert_beeps()` that saw its beep left the evaluator marked as failed, and
     // the `assert_equal(0, assert_beeps(…))` around it reported E116.
-    let parse_err = in_callee(|| run_source_nested(cmd).err());
+    let parse_err = in_callee(|| run_cmdline_nested(cmd).err());
     PENDING_EXC.with(|p| *p.borrow_mut() = None);
     let _ = message::capture_errors_take();
     let beeped = parse_err.is_some() || message::did_emsg.with(|d| d.get()) > before;
@@ -4858,7 +4884,7 @@ fn filter_map_eval(expr: &typval_T, key: &typval_T, val: &typval_T) -> Option<ty
 fn filter_map_cmd(cmd: &str, key: &typval_T, val: &typval_T) -> bool {
     V_VAL.with(|v| *v.borrow_mut() = Some(val.clone()));
     V_KEY.with(|v| *v.borrow_mut() = Some(key.clone()));
-    run_source_nested(cmd).is_ok()
+    run_cmdline_nested(cmd).is_ok()
 }
 
 /// Call a Funcref/Partial typval with `extra` args. A Partial prepends its bound
