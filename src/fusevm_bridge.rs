@@ -270,6 +270,9 @@ pub const VIML_RAISE_CMD: u16 = 3613;
 /// Stack (top-down): `semicolon, var_count, list`. Handled by the private
 /// `b_unpack_check`, which transcribes the C's two conditions.
 pub const VIML_UNPACK_CHECK: u16 = 3614;
+/// `:let {var-name}` — print one variable the way `list_one_var_a()`
+/// (`vars.c:2693`) does. Stack (bottom→top): value, name as written.
+pub const VIML_LET_LIST_ONE: u16 = 3615;
 /// `:let &opt op= …` — push `Bool(the C would refuse this operator for this
 /// option's type)`, having reported E734 if so.
 ///
@@ -3166,6 +3169,66 @@ fn b_echo_arg(vm: &mut VM, _: u8) -> Value {
 }
 
 /// c: the tail of `ex_echo` (`vendor/eval.c:6191-6203`).
+/// Port of `list_one_var_a()` (`vendor/eval/vars.c:2693`), reached from
+/// `list_arg_vars()` for `:let {var-name}`: the name, one space, padding to
+/// column 22 (`msg_advance(22)`), a type marker — `#` Number, `*` Funcref,
+/// `[`/`{` List/Dict (the value's own leading bracket is then skipped), a
+/// space otherwise — the value through `msg_outtrans()`, and `()` after a
+/// Funcref. Each variable is its own message line, which is what the C's
+/// `msg_start()` / `msg_putchar('\n')` pair amounts to, so it is written the
+/// way one `:echo` is: a leading newline inside `execute()`, a line of its own
+/// on the screen.
+fn b_let_list_one(vm: &mut VM, _: u8) -> Value {
+    let name = tv_get_string(&pop_tv(vm));
+    let tv = pop_tv(vm);
+    let shown = encode_tv2echo(&tv);
+    let mut string = shown.as_bytes();
+    let mut body = crate::vimstr::VimStr::new();
+    body.push_str(&name); // c:2707 msg_puts_len(name, …)
+    body.push_str(" "); // c:2709 msg_putchar(' ')
+    // c:2710 msg_advance(22): pad with spaces up to screen column 22.
+    let col = crate::ported::mbyte::mb_string2cells(&body);
+    for _ in col..22 {
+        body.push_str(" ");
+    }
+    match tv.v_type {
+        VAR_NUMBER => body.push_str("#"),
+        VAR_FUNC | VAR_PARTIAL => body.push_str("*"),
+        VAR_LIST => {
+            body.push_str("[");
+            if string.first() == Some(&b'[') {
+                string = &string[1..];
+            }
+        }
+        VAR_DICT => {
+            body.push_str("{");
+            if string.first() == Some(&b'{') {
+                string = &string[1..];
+            }
+        }
+        _ => body.push_str(" "),
+    }
+    message::msg_outtrans(string, &mut body); // c:2729
+    if matches!(tv.v_type, VAR_FUNC | VAR_PARTIAL) {
+        body.push_str("()"); // c:2732
+    }
+    if ECHO_SINK.with(|s| s.borrow().is_some()) {
+        let exec_capture = EXECUTE_DEPTH.with(|d| d.get()) > 0;
+        let mut line = crate::vimstr::VimStr::new();
+        if exec_capture {
+            line.push_char('\n');
+        }
+        line.push_bytes(&body);
+        if !exec_capture {
+            line.push_char('\n');
+        }
+        echo_write(&line);
+    } else {
+        msg_put(&body, true);
+    }
+    Value::Undef
+}
+
 fn b_echo_end(vm: &mut VM, _: u8) -> Value {
     let newline = tv_get_number_chk(&pop_tv(vm), None) != 0;
     let Some(body) = ECHO_BUF.with(|b| b.borrow_mut().take()) else {
@@ -6256,6 +6319,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_ARGS_E116, b_args_e116);
     vm.register_builtin(VIML_ECHO_ARG, b_echo_arg);
     vm.register_builtin(VIML_ECHO_END, b_echo_end);
+    vm.register_builtin(VIML_LET_LIST_ONE, b_let_list_one);
     vm.register_builtin(VIML_ECHO, b_echo);
     vm.register_builtin(VIML_ECHON, b_echon);
     vm.register_builtin(VIML_SET_RESULT, b_set_result);

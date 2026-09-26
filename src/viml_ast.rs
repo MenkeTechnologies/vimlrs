@@ -325,6 +325,10 @@ pub enum Stmt {
     Echo(Vec<Expr>),
     /// `:echon expr …`.
     Echon(Vec<Expr>),
+    /// `:let {var-name} …` with no `=`: list each named variable, one line per
+    /// name — `list_arg_vars()` (`vars.c:1210`). Each entry is the name as the
+    /// script wrote it (what the listing prints) and the expression that reads it.
+    LetList(Vec<(String, Expr)>),
     /// `:let target = expr`.
     Let {
         /// Assignment target.

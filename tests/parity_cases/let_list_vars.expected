@@ -1,0 +1,25 @@
+1
+n                     #42
+s                      text
+f                      1.5
+l                     [1, 'two', [3]]
+d                     {'k': 'v'}
+F                     *len()
+P                     *function('get', [{}])()
+b                      v:true
+e                     []
+g:glob                #-7
+l[1]                   two
+d.k                    v
+d['k']                 v
+averyveryverylongname_x  x
+s                      text
+
+n                     #42
+s                      text
+loc                   #10
+a:a                   #5
+n                     #42
+E121: Undefined variable: nosuch
+after
+Vim(let):E121: Undefined variable: nosuch2

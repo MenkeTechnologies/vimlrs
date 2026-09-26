@@ -883,6 +883,7 @@ fn slot_plan(stmts: &[(u32, Stmt)], in_function: bool) -> SlotPlan {
                 // which a slot has no name for — keep everything in `g:`.
                 Stmt::LockVar { .. } => *cx.bail = true,
                 Stmt::Echo(es) | Stmt::Echon(es) => es.iter().for_each(|e| walk_expr(e, cx)),
+                Stmt::LetList(vs) => vs.iter().for_each(|(_, e)| walk_expr(e, cx)),
                 // `:defer`'s arguments are evaluated where they are written, so
                 // they are walked like any other statement's expression.
                 Stmt::Call(e) | Stmt::Expr(e) | Stmt::Throw(e) | Stmt::Defer(e) => walk_expr(e, cx),
@@ -1058,6 +1059,7 @@ fn slot_plan(stmts: &[(u32, Stmt)], in_function: bool) -> SlotPlan {
                 Stmt::Echo(es) | Stmt::Echon(es) => {
                     es.iter().for_each(|e| scoped_e(e, in_function, out))
                 }
+                Stmt::LetList(vs) => vs.iter().for_each(|(_, e)| scoped_e(e, in_function, out)),
                 Stmt::Call(e) | Stmt::Expr(e) | Stmt::Throw(e) | Stmt::Defer(e) => {
                     scoped_e(e, in_function, out)
                 }
@@ -1148,6 +1150,7 @@ impl Compiler {
     fn stmt_cmdname(s: &Stmt) -> Option<&'static str> {
         Some(match s {
             Stmt::Echo(_) => "echo",
+            Stmt::LetList(_) => "let",
             Stmt::Echon(_) => "echon",
             Stmt::Let { .. } => "let",
             Stmt::Call(_) => "call",
@@ -1289,6 +1292,7 @@ impl Compiler {
         match s {
             Stmt::Echo(args) => self.echo(args, h::VIML_ECHO),
             Stmt::Echon(args) => self.echo(args, h::VIML_ECHON),
+            Stmt::LetList(vars) => self.let_list(vars),
             Stmt::Let { target, expr } => self.let_stmt(target, expr),
             Stmt::Call(e) => {
                 // Mark the error count first, exactly as `Stmt::Expr` and `:echo`
@@ -2234,6 +2238,32 @@ impl Compiler {
         self.emit(Op::LoadInt(newline));
         self.emit(Op::CallBuiltin(h::VIML_ECHO_END, 1));
         self.emit(Op::Pop);
+        Ok(())
+    }
+
+    /// `:let {var-name} …` — `list_arg_vars()` (`vars.c:1210`): read each name
+    /// and list it. The first name that fails to evaluate sets `error`, and every
+    /// later one is then only skipped over (c:1219), so nothing after it prints.
+    fn let_list(&mut self, vars: &[(String, Expr)]) -> Result<(), VimlError> {
+        let mut to_end = Vec::new();
+        for (name, e) in vars {
+            self.emit(Op::CallBuiltin(h::VIML_ERR_MARK, 0));
+            self.emit(Op::Pop);
+            self.expr(e)?;
+            self.emit(Op::CallBuiltin(h::VIML_ERR_SINCE, 0));
+            let ok = self.emit(Op::JumpIfFalse(0));
+            self.emit(Op::Pop); // drop the recovered value the failed read left
+            to_end.push(self.emit(Op::Jump(0)));
+            let here = self.b.current_pos();
+            self.b.patch_jump(ok, here);
+            self.load_str(name);
+            self.emit(Op::CallBuiltin(h::VIML_LET_LIST_ONE, 2));
+            self.emit(Op::Pop);
+        }
+        let end = self.b.current_pos();
+        for j in to_end {
+            self.b.patch_jump(j, end);
+        }
         Ok(())
     }
 

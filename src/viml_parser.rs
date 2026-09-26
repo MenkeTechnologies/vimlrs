@@ -2269,13 +2269,57 @@ fn parse_try(cur: &mut Lines) -> Result<Stmt, VimlError> {
     })
 }
 
+/// The names of a `:let {var-name} …` listing (`list_arg_vars()`,
+/// `vars.c:1210`), each paired with the expression that reads it. `None` when
+/// there is nothing to list by name: no argument, a bare scope (`g:`), or an
+/// argument that is not a variable name (`$ENV`, `&opt`, `@r`, `[a, b]`).
+fn let_list(rest: &str) -> Option<Stmt> {
+    // Split on whitespace outside brackets, so `l[0]` and `d['k']` stay whole.
+    let mut names = Vec::new();
+    let (mut depth, mut start, mut quote) = (0i32, None::<usize>, None::<u8>);
+    for (i, &b) in rest.as_bytes().iter().enumerate() {
+        match (quote, b) {
+            (Some(q), _) if b == q => quote = None,
+            (Some(_), _) => {}
+            (None, b'\'' | b'"') => quote = Some(b),
+            (None, b'[' | b'(' | b'{') => depth += 1,
+            (None, b']' | b')' | b'}') => depth -= 1,
+            (None, b' ' | b'\t') if depth == 0 => {
+                if let Some(s) = start.take() {
+                    names.push(&rest[s..i]);
+                }
+                continue;
+            }
+            _ => {}
+        }
+        start.get_or_insert(i);
+    }
+    if let Some(s) = start {
+        names.push(&rest[s..]);
+    }
+    if names.is_empty() {
+        return None;
+    }
+    let mut out = Vec::with_capacity(names.len());
+    for name in names {
+        let first = *name.as_bytes().first()?;
+        let bare_scope = name.len() == 2 && name.as_bytes()[1] == b':';
+        if bare_scope || !(first.is_ascii_alphabetic() || first == b'_') {
+            return None;
+        }
+        out.push((name.to_string(), parse_expr(name).ok()?));
+    }
+    Some(Stmt::LetList(out))
+}
+
 fn parse_let(rest: &str) -> Result<Stmt, VimlError> {
     let Some(eq) = rest.find('=') else {
-        // No `=`: `:let` (list all variables) or `:let {var}` (show one) — a
-        // listing/show command, not an assignment. Editor-less it has no
-        // observable output, so it is a no-op; erroring here would abort an
-        // enclosing `:function` whose body lists variables (`silent let`).
-        return Ok(Stmt::Expr(Expr::Number(0)));
+        // No `=`: `:let {var-name} …` lists the named variables. `:let` alone
+        // and the whole-scope forms (`:let g:`) list a hashtable in its
+        // iteration order, which is not modelled — those stay a no-op, as does
+        // anything this reader does not recognise as a variable name.
+        return Ok(let_list(strip_legacy_trailing_comment(rest))
+            .unwrap_or(Stmt::Expr(Expr::Number(0))));
     };
     // Compound assignment (`+= -= *= /= %= .=`, ex_let's `tv_op`): the char just
     // before `=` is the operator. A `:let` target never ends in one of these, so
