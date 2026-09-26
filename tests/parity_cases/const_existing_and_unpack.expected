@@ -1,0 +1,16 @@
+0
+Vim(const):E995: Cannot modify existing variable
+1
+Vim(const):E117: Unknown function: Nope
+1 2 [3, 4]
+Vim(let):E741: Value is locked: a
+Vim(call):E741: Value is locked: add() argument
+Vim(const):E995: Cannot modify existing variable
+7 1
+Vim(const):E688: More targets than List items
+0
+Vim(call):E741: Value is locked: add() argument
+Vim(const):E995: Cannot modify existing variable
+3
+c                     #1
+bar

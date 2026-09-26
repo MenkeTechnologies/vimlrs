@@ -884,6 +884,8 @@ fn slot_plan(stmts: &[(u32, Stmt)], in_function: bool) -> SlotPlan {
                 // `:lockvar`/`:unlockvar` names a variable by string at run time,
                 // which a slot has no name for — keep everything in `g:`.
                 Stmt::LockVar { .. } => *cx.bail = true,
+                // `:const` locks what it assigns, by name, at run time.
+                Stmt::Const { .. } => *cx.bail = true,
                 Stmt::Echo(es) | Stmt::Echon(es) => es.iter().for_each(|e| walk_expr(e, cx)),
                 Stmt::LetList(vs) => vs.iter().for_each(|(_, e)| walk_expr(e, cx)),
                 // `:defer`'s arguments are evaluated where they are written, so
@@ -1155,6 +1157,7 @@ impl Compiler {
             Stmt::LetList(_) => "let",
             Stmt::Echon(_) => "echon",
             Stmt::Let { .. } => "let",
+            Stmt::Const { .. } => "const",
             Stmt::Call(_) => "call",
             Stmt::Defer(_) => "defer",
             Stmt::Return(_) => "return",
@@ -1296,6 +1299,7 @@ impl Compiler {
             Stmt::Echon(args) => self.echo(args, h::VIML_ECHON),
             Stmt::LetList(vars) => self.let_list(vars),
             Stmt::Let { target, expr } => self.let_stmt(target, expr),
+            Stmt::Const { target, expr } => self.const_stmt(target, expr),
             Stmt::Call(e) => {
                 // Mark the error count first, exactly as `Stmt::Expr` and `:echo`
                 // do: `:call` is its own ex-command, so a deferred `VIML_RAISE`
@@ -2371,6 +2375,79 @@ impl Compiler {
         } else {
             self.expr(expr)?;
             self.set_var(name);
+        }
+        Ok(())
+    }
+
+    /// `:const` — `ex_let` with `is_const` (`vendor/eval/vars.c:916`). The value is
+    /// evaluated once; a failed evaluation assigns nothing, as for `:let`. Then
+    /// each target, in order, goes through `set_var_const` (c:2848): a name that
+    /// already exists is E995 and stops the assignment there, a new one is
+    /// bound and locked (`tv_item_lock(…, DICT_MAXNEST, …)`, i.e. `:lockvar!`).
+    fn const_stmt(&mut self, target: &LetTarget, expr: &Expr) -> Result<(), VimlError> {
+        let n = self.hidden;
+        self.hidden += 1;
+        let tmp = format!("\u{1}const_{n}");
+        self.emit(Op::CallBuiltin(h::VIML_ERR_MARK, 0));
+        self.emit(Op::Pop);
+        self.expr(expr)?;
+        self.emit(Op::CallBuiltin(h::VIML_ERR_SINCE, 0));
+        let j_failed = self.emit(Op::JumpIfTrue(0));
+        self.set_var(&tmp);
+        let mut to_end = Vec::new();
+        // (name, how to read its value out of `tmp`)
+        let mut binds: Vec<(&str, Option<(i64, bool)>)> = Vec::new();
+        match target {
+            LetTarget::Var(name) => binds.push((name, None)),
+            LetTarget::List { names, rest } => {
+                // c: `ex_let_vars` checks the target count before binding.
+                self.get_var(&tmp);
+                self.emit(Op::LoadInt(names.len() as i64 + i64::from(rest.is_some())));
+                self.emit(Op::LoadInt(i64::from(rest.is_some())));
+                self.emit(Op::CallBuiltin(h::VIML_UNPACK_CHECK, 3));
+                to_end.push(self.emit(Op::JumpIfFalse(0)));
+                for (i, name) in names.iter().enumerate() {
+                    binds.push((name, Some((i as i64, false))));
+                }
+                if let Some(r) = rest {
+                    binds.push((r, Some((names.len() as i64, true))));
+                }
+            }
+            _ => unreachable!("the parser builds Stmt::Const only for a name or a list"),
+        }
+        for (name, part) in binds {
+            self.load_str(name);
+            self.emit(Op::CallBuiltin(h::VIML_CONST_FREE, 1));
+            to_end.push(self.emit(Op::JumpIfFalse(0)));
+            self.get_var(&tmp);
+            match part {
+                None => {}
+                Some((i, false)) => {
+                    self.emit(Op::LoadInt(i));
+                    self.emit(Op::CallBuiltin(h::VIML_INDEX, 2));
+                }
+                Some((from, true)) => {
+                    self.emit(Op::LoadInt(from));
+                    self.emit(Op::LoadUndef);
+                    self.emit(Op::CallBuiltin(h::VIML_SLICE, 3));
+                }
+            }
+            self.set_var(name);
+            self.stmt(&Stmt::LockVar {
+                arg: name.to_string(),
+                bang: true,
+                lock: true,
+            })?;
+        }
+        let j_done = self.emit(Op::Jump(0));
+        // Failed evaluation: drop the recovered value, bind nothing.
+        let failed = self.b.current_pos();
+        self.b.patch_jump(j_failed, failed);
+        self.emit(Op::Pop);
+        let end = self.b.current_pos();
+        self.b.patch_jump(j_done, end);
+        for j in to_end {
+            self.b.patch_jump(j, end);
         }
         Ok(())
     }

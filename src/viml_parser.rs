@@ -184,29 +184,19 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
         {
             Ok(Stmt::Expr(Expr::Number(0)))
         }
-        // `:const {name} = {expr}` assigns like `:let` and then locks the result
-        // (`ex_let_const` passes `is_const`, and `set_var_const` locks with
-        // `DICT_MAXNEST` depth) — reassigning a `:const` is E741 in vim. Modelled
-        // as the assignment followed by the `:lockvar!` it implies.
-        "const" | "cons" => {
-            let assign = parse_let(&strip_vim9_type(rest))?;
-            match &assign {
-                Stmt::Let {
-                    target: LetTarget::Var(name),
-                    ..
-                } => {
-                    let lock = Stmt::LockVar {
-                        arg: name.clone(),
-                        bang: true,
-                        lock: true,
-                    };
-                    Ok(Stmt::LineGroup(vec![assign, lock]))
-                }
-                // A destructuring or element target: assign without the lock
-                // rather than guess which names it bound.
-                _ => Ok(assign),
+        // `:const {name} = {expr}` / `:const [a, b; rest] = {expr}` — `ex_let`
+        // with `is_const`. `set_var_const` refuses a name that already exists
+        // (E995) and locks a new one with `DICT_MAXNEST` depth, which is why a
+        // later `:let` of it is E741. Any other target shape is left to `:let`.
+        "const" | "cons" => match parse_let(&strip_vim9_type(rest))? {
+            Stmt::Let {
+                target: target @ (LetTarget::Var(_) | LetTarget::List { .. }),
+                expr,
+            } if !matches!(expr, Expr::Arith { mod_op: true, .. }) => {
+                Ok(Stmt::Const { target, expr })
             }
-        }
+            other => Ok(other),
+        },
         // c: `ex_call` resolves the name with `trans_function_name`, which hands
         // `get_func_tv` an allocated, NUL-TERMINATED copy — so the E116 it may
         // report names the function and nothing else, unlike the same call written

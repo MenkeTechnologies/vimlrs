@@ -342,6 +342,16 @@ pub enum Stmt {
         /// Value expression.
         expr: Expr,
     },
+    /// `:const target = expr` — `ex_let` with `is_const`: the value is
+    /// evaluated, then each target name that already exists is E995, and each
+    /// that does not is assigned and locked (`set_var_const`, vars.c:2848).
+    /// `target` is only ever a plain name or a `[a, b; rest]` list.
+    Const {
+        /// Assignment target.
+        target: LetTarget,
+        /// Value expression.
+        expr: Expr,
+    },
     /// `:call funcref(args)`.
     Call(Expr),
     /// `:defer Func(args)` — call `Func` when the current function is done.

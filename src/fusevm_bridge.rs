@@ -280,6 +280,12 @@ pub const VIML_LET_LIST_ONE: u16 = 3615;
 /// Blob is walked as it is, and anything else is `E1098` with nothing to walk.
 /// Stack: the object.
 pub const VIML_FOR_ITEMS: u16 = 3616;
+/// `:const` — push `Bool(NAME may be bound)`, having reported E995 if a
+/// variable of that name already exists. c: `set_var_const`'s `if (di != NULL)
+/// { if (is_const) { emsg(_(e_cannot_mod)); return; } }` (`vendor/eval/vars.c:2847`),
+/// which looks in the target scope and then the enclosing closure scopes.
+/// Stack: the name as written.
+pub const VIML_CONST_FREE: u16 = 3617;
 /// `:let &opt op= …` — push `Bool(the C would refuse this operator for this
 /// option's type)`, having reported E734 if so.
 ///
@@ -2845,6 +2851,16 @@ fn b_unpack_check(vm: &mut VM, _: u8) -> Value {
     }
     if var_count - semicolon > len as i64 {
         crate::ported::message::emsg("E688: More targets than List items"); // c:1048
+        return Value::Bool(false);
+    }
+    Value::Bool(true)
+}
+
+/// See [`VIML_CONST_FREE`].
+fn b_const_free(vm: &mut VM, _: u8) -> Value {
+    let name = tv_get_string(&pop_tv(vm));
+    if crate::ported::eval::vars::find_var(&name, true).is_some() {
+        crate::ported::message::emsg("E995: Cannot modify existing variable");
         return Value::Bool(false);
     }
     Value::Bool(true)
@@ -6355,6 +6371,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_INDEX, b_index);
     vm.register_builtin(VIML_UNPACK_CHECK, b_unpack_check);
     vm.register_builtin(VIML_FOR_ITEMS, b_for_items);
+    vm.register_builtin(VIML_CONST_FREE, b_const_free);
     vm.register_builtin(VIML_IS_DICT, b_is_dict);
     vm.register_builtin(VIML_SLICE, b_slice);
     vm.register_builtin(VIML_SETINDEX, b_setindex);
