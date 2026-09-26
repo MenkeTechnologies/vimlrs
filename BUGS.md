@@ -6784,3 +6784,88 @@ NOT a round-5 regression: the binary from before this round's first commit hangs
 identically, to within 0.03s of CPU. It is recorded here because it is the
 reason a fuzz seed can appear to hang, which cost most of an hour to rule out as
 a new bug.
+
+## R46 — how a String is walked, `:for`'s unpack, `:const`, and `v:val()`
+
+Oracle: vim 9.2.1100 (`tests/parity_cases/ORACLE`), with Neovim 0.12.5 as the
+second opinion where the two word an error differently. Found by
+`fuzz-parity` (expression mode, seed 20260926; statement mode, seed 926) and by
+probing outward from each finding.
+
+### R46-1. A String was walked by BYTE in `:for` and by code point in `filter()`/`map()` — ✅ FIXED
+
+`:for` lowered to `len()` / `[idx]` over whatever the object was, so
+`for c in "aéb"` bound `a`, `e`, then the two raw bytes of U+0301. Both
+C walkers step by `utfc_ptr2len` — a base character plus its composing marks is
+ONE item (`next_for_item`, `vendor/eval.c:1527-1536`; `filter_map_string`,
+`vendor/eval/list.c:229`). The fuzzer's finding was
+`filter('é', {i -> i})`: `''` in both engines, the orphaned combining mark
+here. `VIML_FOR_ITEMS` now does `eval_for_line`'s type switch once, and
+`filter_map_string` steps by `utfc_ptr2len`. Parity case:
+`string_walk_clusters.vim`.
+
+The same type switch closed two more: `for x in 5` ran the body once with `5`
+as the item, and `for x in {}` / `1.5` / `v:null` / a Funcref failed as
+`E701: Invalid type for len()`. The C reports E1098 and walks nothing
+(`tests/for_loop_object_types.rs` — vim 9.2 words it
+`E1523: String, List, Tuple or Blob required`, so it cannot be a recorded case).
+
+### R46-2. `:for [a, b]` did not unpack the way `:let [a, b] =` does — ✅ FIXED
+
+`next_for_item` is `ex_let_vars(...) == OK`, so the loop takes the `; rest`
+target, runs the same count check, and ENDS when it fails. The port indexed each
+target blindly: `for [a, b] in [[1]]` bound `b` to nothing after an E684, a
+three-item row was accepted, a `'xy'` row unpacked as characters, and
+`[a; r]` was not parsed at all.
+
+| probe | vim | before |
+|---|---|---|
+| `for [a, b] in [[1,2,3]]` | `E687: Less targets than List items` | `1 2` |
+| `for [a, b] in [[1]]` | `E688: More targets than List items` | `E684`, then `1 v:null` |
+| `for [a; r] in [[1,2,3],[4]]` | `1 [2, 3]`, `4 []` | `E121: Undefined variable: r` |
+| `for [a, b] in [[1,2], 5, [3,4]]` | `1 2`, then the error, loop ends | `1 2`, `5 `, `3 4` |
+
+Parity case: `for_unpack_targets.vim`. The non-List item is `E714` in the
+vendored C and `E1535: List or Tuple required` in vim 9.2; the E714 half is in
+`tests/for_loop_object_types.rs`.
+
+### R46-3. `:const` over an existing name was E741 under `Vim(let):` — ✅ FIXED
+
+`:const` was `:let` followed by `:lockvar!`, so declaring a name twice reached
+the lock check. `set_var_const` refuses first (`vendor/eval/vars.c:2847`,
+`e_cannot_mod`), and the tag is the command's own: vim reports
+`Vim(const):E995: Cannot modify existing variable`. A `[a, b; rest]` target
+was assigned with no lock at all. `Stmt::Const` evaluates once, runs the list
+count check, then binds and locks name by name, stopping at the first that
+exists. Parity case: `const_existing_and_unpack.vim`.
+
+### R46-4. `v:val()` was `E117: Unknown function: v:val` — ✅ FIXED
+
+A call by name falls back to a variable holding a Funcref, and that fallback
+used `eval_variable()`, which does not see `v:val`/`v:key` — they live in the
+callback state. `map([{-> 1}, {-> 2}], 'v:val()')` is `[1, 2]` in both
+engines. Parity case: `callback_vval_funcref_call.vim`.
+
+### R46-O1 (open). A lambda at script level captures globals
+
+```vim
+let x = 5
+let G = {-> x}
+echo G()
+```
+
+vim and Neovim both report `E121: Undefined variable: x` (a lambda is a
+function, so a bare name in its body is local, and there is no enclosing
+function to close over) and the call yields -1; this port prints `5`, because
+`Expr::Lambda` captures every free bare name by value wherever the lambda is
+written. Restricting capture to lambdas written inside a function is the shape
+of the fix, but `execute()`, `eval()` and a string `map()` expression are
+compiled at run time with no knowledge of whether they run inside a function,
+and today all three rely on that capture. Not changed this round.
+
+### R46-O2 (open). `:const` locks a value that is not a literal
+
+`set_var_const` locks with `tv_item_lock(…, check_refcount = true)`, which
+"locks only literal values": `let l = [1] | const m = l | call add(l, 2)` works
+in vim. This port does not maintain `lv_refcount`, so the lock reaches the
+shared List and the `add()` is E741. Unchanged from before R46-3.
