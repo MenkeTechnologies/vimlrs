@@ -1,0 +1,10 @@
+0
+A plain
+B inner
+C open-try
+D list
+E excmd
+F Vim(call):E741: Value is locked: add() argument
+
+caught x
+end

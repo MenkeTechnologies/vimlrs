@@ -2372,6 +2372,15 @@ fn b_catch_match(vm: &mut VM, _: u8) -> Value {
 }
 
 fn b_report_uncaught(_vm: &mut VM, _: u8) -> Value {
+    // c: `do_cmdline()` reports an exception only "when being thrown out of the
+    // outermost try conditional" — `if (trylevel == 0) { if (did_throw)
+    // handle_did_throw(); … }` (`ex_docmd.c:873-879`). A nested command line
+    // (`execute()`, `:execute`, `:source`) run inside the caller's `:try` leaves
+    // it pending, so the caller's `:catch` sees the original value rather than
+    // an `E605` wrapper.
+    if crate::ported::ex_eval::trylevel.with(|t| t.get()) > 0 {
+        return Value::Undef;
+    }
     if let Some(exc) = PENDING_EXC.with(|p| p.borrow_mut().take()) {
         // c: E605 is for an uncaught `:throw`. An uncaught exception that *began* as
         // an error is reported as the error itself — Vim shows `E730: Using a List
