@@ -1557,13 +1557,19 @@ fn parse_for(cur: &mut Lines, header: &str) -> Result<Stmt, VimlError> {
         .ok_or_else(|| VimlError::msg("E690: Missing \"in\" after :for"))?;
     let var = header[..idx].trim();
     let vars = if let Some(inner) = var.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
-        ForVars::List(
-            inner
+        // c: `skip_var_list` — the same `[a, b; rest]` shape `:let` takes.
+        let (head, rest) = match inner.split_once(';') {
+            Some((h, r)) => (h, Some(r.trim().to_string())),
+            None => (inner, None),
+        };
+        ForVars::List {
+            names: head
                 .split(',')
                 .map(|n| n.trim().to_string())
                 .filter(|n| !n.is_empty())
                 .collect(),
-        )
+            rest,
+        }
     } else {
         ForVars::One(var.to_string())
     };

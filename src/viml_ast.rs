@@ -304,8 +304,14 @@ pub enum UnletArg {
 pub enum ForVars {
     /// `:for x in …`.
     One(String),
-    /// `:for [a, b] in …` — each item is unpacked into these names.
-    List(Vec<String>),
+    /// `:for [a, b] in …` / `:for [a, b; rest] in …` — each item is unpacked
+    /// into these names, with `rest` taking what is left, as `:let` does.
+    List {
+        /// The positional targets.
+        names: Vec<String>,
+        /// The `; rest` target, if any.
+        rest: Option<String>,
+    },
 }
 
 /// A block body: each statement paired with its 1-based source line.

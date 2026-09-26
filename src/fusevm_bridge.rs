@@ -273,6 +273,13 @@ pub const VIML_UNPACK_CHECK: u16 = 3614;
 /// `:let {var-name}` — print one variable the way `list_one_var_a()`
 /// (`vars.c:2693`) does. Stack (bottom→top): value, name as written.
 pub const VIML_LET_LIST_ONE: u16 = 3615;
+/// `:for` — the value the loop walks, computed once from `{object}`. Port of
+/// `eval_for_line()`'s type switch plus `next_for_item()`'s String step
+/// (`vendor/eval.c:1466-1497`, `1527-1536`): a String becomes the List of its
+/// `utfc_ptr2len` pieces (a base character with its composing marks), a List or
+/// Blob is walked as it is, and anything else is `E1098` with nothing to walk.
+/// Stack: the object.
+pub const VIML_FOR_ITEMS: u16 = 3616;
 /// `:let &opt op= …` — push `Bool(the C would refuse this operator for this
 /// option's type)`, having reported E734 if so.
 ///
@@ -2841,6 +2848,48 @@ fn b_unpack_check(vm: &mut VM, _: u8) -> Value {
         return Value::Bool(false);
     }
     Value::Bool(true)
+}
+
+/// See [`VIML_FOR_ITEMS`].
+fn b_for_items(vm: &mut VM, _: u8) -> Value {
+    let tv = pop_tv(vm);
+    match (tv.v_type, &tv.vval) {
+        (VAR_LIST | VAR_BLOB, _) => tv_to_value(tv),
+        (VAR_STRING, v_string(s)) => {
+            let bytes = s.as_bytes();
+            let l = tv_list_alloc(-1);
+            let mut p = 0;
+            while p < bytes.len() {
+                // c:1528 `len = utfc_ptr2len(fi->fi_string + fi->fi_byte_idx)`
+                let len = (crate::ported::mbyte::utfc_ptr2len(&bytes[p..]).max(1) as usize)
+                    .min(bytes.len() - p);
+                crate::ported::eval::typval::tv_list_append_string(
+                    &mut l.borrow_mut(),
+                    &bytes[p..p + len],
+                );
+                p += len;
+            }
+            tv_to_value(typval_T {
+                v_type: VAR_LIST,
+                v_lock: VAR_UNLOCKED,
+                vval: v_list(Some(l)),
+            })
+        }
+        // c:1486-1491 a NULL string walks as "".
+        (VAR_STRING, _) => tv_to_value(typval_T {
+            v_type: VAR_LIST,
+            v_lock: VAR_UNLOCKED,
+            vval: v_list(Some(tv_list_alloc(0))),
+        }),
+        _ => {
+            crate::ported::message::emsg("E1098: String, List or Blob required"); // c:1494
+            tv_to_value(typval_T {
+                v_type: VAR_LIST,
+                v_lock: VAR_UNLOCKED,
+                vval: v_list(Some(tv_list_alloc(0))),
+            })
+        }
+    }
 }
 
 fn b_index(vm: &mut VM, _: u8) -> Value {
@@ -6305,6 +6354,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_MAKE_DICT, b_make_dict);
     vm.register_builtin(VIML_INDEX, b_index);
     vm.register_builtin(VIML_UNPACK_CHECK, b_unpack_check);
+    vm.register_builtin(VIML_FOR_ITEMS, b_for_items);
     vm.register_builtin(VIML_IS_DICT, b_is_dict);
     vm.register_builtin(VIML_SLICE, b_slice);
     vm.register_builtin(VIML_SETINDEX, b_setindex);

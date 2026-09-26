@@ -862,7 +862,9 @@ fn slot_plan(stmts: &[(u32, Stmt)], in_function: bool) -> SlotPlan {
                     };
                     match vars {
                         ForVars::One(n) => disq_var(n),
-                        ForVars::List(ns) => ns.iter().for_each(|n| disq_var(n)),
+                        ForVars::List { names, rest } => {
+                            names.iter().chain(rest).for_each(|n| disq_var(n))
+                        }
                     }
                     walk(body, cx);
                 }
@@ -1982,6 +1984,10 @@ impl Compiler {
         // list = <iter>;  idx = 0
         let calls_before = self.calls;
         self.expr(iter)?;
+        // c: `eval_for_line`'s type switch — a String is walked one character
+        // (with its composing marks) at a time, not one byte; any other type
+        // than String/List/Blob is E1098 and leaves nothing to walk.
+        self.emit(Op::CallBuiltin(h::VIML_FOR_ITEMS, 1));
         // c: `ex_while`'s `:for` arm calls `eval_for_line` and then only advances
         // when `!error && fi != NULL && !skip` (`vendor/ex_eval.c:1021-1030`) —
         // an error while evaluating the list leaves the loop inactive. vim
@@ -2009,16 +2015,33 @@ impl Compiler {
         self.get_var(&list_var);
         self.get_var(&idx_var);
         self.emit(Op::CallBuiltin(h::VIML_INDEX, 2));
+        let mut unpack_failed = None;
         match vars {
             ForVars::One(name) => self.set_var(name),
-            ForVars::List(names) => {
-                // Unpack each item (itself a list) into the names.
+            ForVars::List { names, rest } => {
+                // c: `next_for_item` is `ex_let_vars(...) == OK`, so an item
+                // that is not a List, or has the wrong number of elements for
+                // the targets, reports E714/E687/E688 exactly as `:let [a, b] =`
+                // does and ENDS the loop — `ex_while` treats a FALSE
+                // `next_for_item` like the end of the list.
                 self.set_var(&item_var);
+                self.get_var(&item_var);
+                self.emit(Op::LoadInt(names.len() as i64 + i64::from(rest.is_some())));
+                self.emit(Op::LoadInt(i64::from(rest.is_some())));
+                self.emit(Op::CallBuiltin(h::VIML_UNPACK_CHECK, 3));
+                unpack_failed = Some(self.emit(Op::JumpIfFalse(0)));
                 for (i, name) in names.iter().enumerate() {
                     self.get_var(&item_var);
                     self.emit(Op::LoadInt(i as i64));
                     self.emit(Op::CallBuiltin(h::VIML_INDEX, 2));
                     self.set_var(name);
+                }
+                if let Some(r) = rest {
+                    self.get_var(&item_var);
+                    self.emit(Op::LoadInt(names.len() as i64)); // from
+                    self.emit(Op::LoadUndef); // to = end
+                    self.emit(Op::CallBuiltin(h::VIML_SLICE, 3));
+                    self.set_var(r);
                 }
             }
         }
@@ -2037,6 +2060,9 @@ impl Compiler {
 
         let l_end = self.b.current_pos();
         self.b.patch_jump(jf, l_end);
+        if let Some(j) = unpack_failed {
+            self.b.patch_jump(j, l_end);
+        }
         for j in ctx.breaks {
             self.b.patch_jump(j, l_end);
         }

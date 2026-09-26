@@ -587,9 +587,18 @@ fn filter_map_string(str: &str, filtermap: filtermap_T, expr: &typval_T, rettv: 
         vval: v_string(s.into()),
     };
     let mut ga = String::new();
-    for (idx, ch) in str.chars().enumerate() {
-        let tv = str_tv(ch.to_string());
-        let key = nr_tv(idx as varnumber_T);
+    // c:229 — `len = utfc_ptr2len(p)`: one step is a base character PLUS its
+    // composing marks, so `filter("é", {i -> i})` sees one item, not two.
+    let bytes = str.as_bytes();
+    let mut p = 0;
+    let mut idx: varnumber_T = 0;
+    while p < bytes.len() {
+        let len = crate::ported::mbyte::utfc_ptr2len(&bytes[p..]).max(1) as usize;
+        let piece = &str[p..(p + len).min(bytes.len())];
+        p += piece.len();
+        let tv = str_tv(piece.to_string());
+        let key = nr_tv(idx);
+        idx += 1;
         match filter_map_one(&tv, &key, expr, filtermap) {
             None => break,
             // c:243 — the String's copy of the same test.
@@ -602,7 +611,7 @@ fn filter_map_string(str: &str, filtermap: filtermap_T, expr: &typval_T, rettv: 
                     }
                     ga.push_str(&tv_get_string(&newtv));
                 } else if filtermap == FILTERMAP_FOREACH || !rem {
-                    ga.push(ch);
+                    ga.push_str(piece);
                 }
             }
         }

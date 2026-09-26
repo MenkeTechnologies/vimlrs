@@ -1,0 +1,10 @@
+1
+1 [2, 3]
+4 []
+1 2 []
+3 4 [5]
+E687: Less targets than List items
+after E687
+5 6
+E688: More targets than List items
+after E688
