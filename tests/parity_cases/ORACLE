@@ -1,6 +1,6 @@
-binary: /opt/homebrew/Cellar/vim/9.2.1050/bin/vim
-sha256: 7c51b78e4d2d383d531171dd0a7b959114ffcbc2209d0462bbf36ad00555ec7d
-version: VIM - Vi IMproved 9.2 (2026 Feb 14, compiled Sep 08 2026 20:02:55)
+binary: /opt/homebrew/Cellar/vim/9.2.1100/bin/vim
+sha256: 01ca49b897c27d80d7c1aa1f5ec127db22e79a599ff0433408865fd7996a7e9b
+version: VIM - Vi IMproved 9.2 (2026 Feb 14, compiled Sep 14 2026 17:58:36)
 flags: -es -u NONE -i NONE -N
-command: /opt/homebrew/Cellar/vim/9.2.1050/bin/vim -es -u NONE -i NONE -N -c "verbose source CASE" -c "qa!"
+command: /opt/homebrew/Cellar/vim/9.2.1100/bin/vim -es -u NONE -i NONE -N -c "verbose source CASE" -c "qa!"
 env: LC_ALL=C.UTF-8 LANG=C.UTF-8 LC_MESSAGES=C.UTF-8 LANGUAGE= TZ=UTC (VIM/VIMRUNTIME unset)
