@@ -2415,6 +2415,17 @@ fn b_report_uncaught(_vm: &mut VM, _: u8) -> Value {
     Value::Undef
 }
 
+/// `v:val` / `v:key` while a `map()`/`filter()`/`foreach()` callback runs. They
+/// live in the callback state rather than in `vimvars[]`, so every place that
+/// reads a variable BY NAME has to ask here first.
+fn callback_vvar(name: &str) -> Option<typval_T> {
+    match name {
+        "v:val" => V_VAL.with(|v| v.borrow().clone()),
+        "v:key" => V_KEY.with(|v| v.borrow().clone()),
+        _ => None,
+    }
+}
+
 fn b_getvar(vm: &mut VM, _: u8) -> Value {
     let name = tv_get_string(&pop_tv(vm));
     // `b:changedtick` is Vim's always-present buffer change counter (never
@@ -2437,15 +2448,8 @@ fn b_getvar(vm: &mut VM, _: u8) -> Value {
     if name == "v:throwpoint" {
         return Value::str(V_THROWPOINT.with(|t| t.borrow().clone()));
     }
-    if name == "v:val" {
-        return V_VAL
-            .with(|v| v.borrow().clone())
-            .map_or(Value::Int(0), tv_to_value);
-    }
-    if name == "v:key" {
-        return V_KEY
-            .with(|v| v.borrow().clone())
-            .map_or(Value::Int(0), tv_to_value);
+    if name == "v:val" || name == "v:key" {
+        return callback_vvar(&name).map_or(Value::Int(0), tv_to_value);
     }
     match eval_variable(&name) {
         Some(tv) => tv_to_value(tv),
@@ -3897,7 +3901,8 @@ fn b_call_user(vm: &mut VM, argc: u8) -> Value {
     }
     // Fallback: `F(args)` where `F` is a variable holding a Funcref/Partial
     // (e.g. a lambda stored in a variable). Call through the funcref value.
-    if let Some(v) = eval_variable(&name) {
+    // `v:val` is the callback state's Funcref: `map(fs, 'v:val()')`.
+    if let Some(v) = callback_vvar(&name).or_else(|| eval_variable(&name)) {
         if matches!(v.v_type, VAR_FUNC | VAR_PARTIAL) {
             return match call_funcref(&v, args) {
                 Some(rettv) => tv_to_value(rettv),
