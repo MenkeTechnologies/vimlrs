@@ -2925,7 +2925,7 @@ mod tests {
         assert!(get_funccal_local_dict().is_none());
         assert!(get_funccal_args_ht().is_none());
         // Push a frame with one l: and one a: var.
-        let mut frame = FuncScope::default();
+        let frame = FuncScope::default();
         tv_dict_add_nr(&mut frame.fc_l_vars.borrow_mut(), "x", 1);
         tv_dict_add_nr(&mut frame.fc_l_avars.borrow_mut(), "1", 9);
         funccal_stack.with(|s| s.borrow_mut().push(frame));

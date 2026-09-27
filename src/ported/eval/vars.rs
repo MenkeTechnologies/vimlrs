@@ -3798,7 +3798,7 @@ mod find_var_ht_dict_tests {
         use crate::ported::eval::typval::tv_dict_add_nr;
         funccal_stack.with(|s| s.borrow_mut().clear());
         funccal_stack.with(|s| {
-            let mut frame = FuncScope::default();
+            let frame = FuncScope::default();
             tv_dict_add_nr(&mut frame.fc_l_avars.borrow_mut(), "1", 7);
             s.borrow_mut().push(frame);
         });
