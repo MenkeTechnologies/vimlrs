@@ -575,6 +575,11 @@ pub const VIML_ERR_COUNT: u16 = 3619;
 pub const VIML_ERRS_AFTER: u16 = 3620;
 /// A lambda expression's value — see `b_make_lambda`.
 pub const VIML_MAKE_LAMBDA: u16 = 3621;
+/// `:echoerr`: pop an argument and the message so far, push the message with the
+/// argument appended — see `b_echoerr_arg`.
+pub const VIML_ECHOERR_ARG: u16 = 3622;
+/// `:echoerr`: pop the whole message and report it — see `b_echoerr_end`.
+pub const VIML_ECHOERR_END: u16 = 3623;
 /// `json_encode()`
 pub const VIML_FN_JSON_ENCODE: u16 = 3186;
 /// `json_decode()`
@@ -3528,6 +3533,45 @@ fn b_str_interp(vm: &mut VM, _: u8) -> Value {
     let v = pop_tv(vm);
     tv_to_value(tv_str(encode_tv2echo(&v)))
 }
+/// One `:echoerr` argument onto the message — the `CMD_echoerr` arm of
+/// `ex_execute()` (`vendor/eval.c`): a String through `encode_tv2echo`, any other
+/// type through `encode_tv2string`, and a space before it once the message is not
+/// empty (c: `if (!GA_EMPTY(&ga)) ga.ga_data[ga.ga_len++] = ' ';`).
+fn b_echoerr_arg(vm: &mut VM, _: u8) -> Value {
+    let tv = pop_tv(vm);
+    let mut msg = tv_get_string(&pop_tv(vm));
+    let argstr = if tv.v_type == VAR_STRING {
+        encode_tv2echo(&tv).to_string()
+    } else {
+        encode_tv2string(&tv).to_string()
+    };
+    if !msg.is_empty() {
+        msg.push(' ');
+    }
+    msg.push_str(&argstr);
+    tv_to_value(tv_str(msg))
+}
+
+/// Report the assembled `:echoerr` message — c: `emsg_multiline(ga.ga_data,
+/// "echoerr", HLF_E, true)`, reached only for a non-empty message. It is an
+/// error like any other: it sets `v:errmsg`, makes the run exit 1, is silenced
+/// by `:silent!` and becomes `Vim(echoerr):…` inside a `:try`.
+///
+/// c: "We don't want to abort following commands, restore did_emsg." — unless
+/// the error became an exception (`force_abort`, [`PENDING_EXC`] here), so an
+/// `abort` function or an enclosing `:if` runs on after an `:echoerr`.
+fn b_echoerr_end(vm: &mut VM, _: u8) -> Value {
+    let msg = tv_get_string(&pop_tv(vm));
+    if !msg.is_empty() {
+        let save_did_emsg = message::did_emsg.with(|d| d.get());
+        message::emsg(&msg);
+        if PENDING_EXC.with(|p| p.borrow().is_none()) {
+            message::did_emsg.with(|d| d.set(save_did_emsg));
+        }
+    }
+    Value::Undef
+}
+
 fn b_exec_stmt(vm: &mut VM, argc: u8) -> Value {
     let mut parts = Vec::with_capacity(argc as usize);
     for _ in 0..argc {
@@ -6881,6 +6925,8 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_ERR_COUNT, b_err_count);
     vm.register_builtin(VIML_ERRS_AFTER, b_errs_after);
     vm.register_builtin(VIML_MAKE_LAMBDA, b_make_lambda);
+    vm.register_builtin(VIML_ECHOERR_ARG, b_echoerr_arg);
+    vm.register_builtin(VIML_ECHOERR_END, b_echoerr_end);
     vm.register_builtin(VIML_SET, b_set);
     vm.register_builtin(VIML_MAP, b_map);
     vm.register_builtin(VIML_COMMAND, b_command);

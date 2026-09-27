@@ -1,0 +1,24 @@
+1
+a
+boo 1 [1, 'x'] {'k': 'v'}
+b
+caught: Vim(echoerr):in try
+boo 1 [1, 'x'] {'k': 'v'}X
+after echon
+quiet
+in H
+H continues
+5
+in if
+if continues
+E121: Undefined variable: nosuch
+lead
+function('tr') 1.5 v:true
+boo
+2
+'
+1
+boo
+2'
+E121: Undefined variable: nosuch
+done

@@ -956,7 +956,9 @@ fn slot_plan(stmts: &[(u32, Stmt)], in_function: bool) -> SlotPlan {
                 Stmt::LockVar { .. } => *cx.bail = true,
                 // `:const` locks what it assigns, by name, at run time.
                 Stmt::Const { .. } => *cx.bail = true,
-                Stmt::Echo(es) | Stmt::Echon(es) => es.iter().for_each(|e| walk_expr(e, cx)),
+                Stmt::Echo(es) | Stmt::Echon(es) | Stmt::EchoErr(es) => {
+                    es.iter().for_each(|e| walk_expr(e, cx))
+                }
                 Stmt::LetList(vs) => vs.iter().for_each(|(_, e)| walk_expr(e, cx)),
                 // `:defer`'s arguments are evaluated where they are written, so
                 // they are walked like any other statement's expression.
@@ -1131,7 +1133,7 @@ fn slot_plan(stmts: &[(u32, Stmt)], in_function: bool) -> SlotPlan {
                     scoped_var(n, in_function, out);
                     scoped_e(expr, in_function, out);
                 }
-                Stmt::Echo(es) | Stmt::Echon(es) => {
+                Stmt::Echo(es) | Stmt::Echon(es) | Stmt::EchoErr(es) => {
                     es.iter().for_each(|e| scoped_e(e, in_function, out))
                 }
                 Stmt::LetList(vs) => vs.iter().for_each(|(_, e)| scoped_e(e, in_function, out)),
@@ -1227,6 +1229,7 @@ impl Compiler {
             Stmt::Echo(_) => "echo",
             Stmt::LetList(_) => "let",
             Stmt::Echon(_) => "echon",
+            Stmt::EchoErr(_) => "echoerr",
             Stmt::Let { .. } => "let",
             Stmt::Const { .. } => "const",
             Stmt::Call(_) => "call",
@@ -1368,6 +1371,7 @@ impl Compiler {
         match s {
             Stmt::Echo(args) => self.echo(args, h::VIML_ECHO),
             Stmt::Echon(args) => self.echo(args, h::VIML_ECHON),
+            Stmt::EchoErr(args) => self.echoerr(args),
             Stmt::LetList(vars) => self.let_list(vars),
             Stmt::Let { target, expr } => self.let_stmt(target, expr),
             Stmt::Const { target, expr } => self.const_stmt(target, expr),
@@ -1443,11 +1447,30 @@ impl Compiler {
             }
 
             Stmt::Execute(args) => {
-                for a in args {
+                // c: `ex_execute()` — an argument whose `eval1()` fails ends the
+                // command (`ret = FAIL; break;`) and nothing is executed:
+                // `execute 'echo' nosuch` is the E121 alone. Each failure path
+                // drops the value it left and the arguments already on the stack.
+                let mut failed = Vec::new();
+                for (i, a) in args.iter().enumerate() {
+                    self.emit(Op::CallBuiltin(h::VIML_ERR_MARK, 0));
+                    self.emit(Op::Pop);
                     self.expr(a)?;
+                    self.emit(Op::CallBuiltin(h::VIML_ERR_SINCE, 0));
+                    let ok = self.emit(Op::JumpIfFalse(0));
+                    for _ in 0..=i {
+                        self.emit(Op::Pop);
+                    }
+                    failed.push(self.emit(Op::Jump(0)));
+                    let here = self.b.current_pos();
+                    self.b.patch_jump(ok, here);
                 }
                 self.emit(Op::CallBuiltin(h::VIML_EXEC_STMT, Self::argc(args.len())?));
                 self.emit(Op::Pop);
+                let end = self.b.current_pos();
+                for j in failed {
+                    self.b.patch_jump(j, end);
+                }
                 Ok(())
             }
             Stmt::Set(args) => {
@@ -2385,6 +2408,38 @@ impl Compiler {
         self.emit(Op::LoadInt(newline));
         self.emit(Op::CallBuiltin(h::VIML_ECHO_END, 1));
         self.emit(Op::Pop);
+        Ok(())
+    }
+
+    /// `:echoerr {expr} …` — `ex_execute()` (`vendor/eval.c`) with `CMD_echoerr`:
+    /// each argument is evaluated and appended to ONE message, a space between
+    /// two once the message is not empty, a String as `:echo` shows it and any
+    /// other type as `string()` does. The first argument that fails to evaluate
+    /// ends the command with nothing reported but its own error (c: `ret = FAIL;
+    /// break;`); otherwise a non-empty message goes to `emsg_multiline()`.
+    /// Stack while it runs: the message so far, then the argument.
+    fn echoerr(&mut self, args: &[Expr]) -> Result<(), VimlError> {
+        self.load_str("");
+        let mut failed = Vec::new();
+        for a in args {
+            self.emit(Op::CallBuiltin(h::VIML_ERR_MARK, 0));
+            self.emit(Op::Pop);
+            self.expr(a)?;
+            self.emit(Op::CallBuiltin(h::VIML_ERR_SINCE, 0));
+            let ok = self.emit(Op::JumpIfFalse(0));
+            self.emit(Op::Pop); // the value the failed evaluation left
+            self.emit(Op::Pop); // the message so far
+            failed.push(self.emit(Op::Jump(0)));
+            let here = self.b.current_pos();
+            self.b.patch_jump(ok, here);
+            self.emit(Op::CallBuiltin(h::VIML_ECHOERR_ARG, 2));
+        }
+        self.emit(Op::CallBuiltin(h::VIML_ECHOERR_END, 1));
+        self.emit(Op::Pop);
+        let end = self.b.current_pos();
+        for j in failed {
+            self.b.patch_jump(j, end);
+        }
         Ok(())
     }
 

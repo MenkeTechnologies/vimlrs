@@ -169,14 +169,12 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
     match cmd {
         "echo" | "ec" => Ok(Stmt::Echo(parse_expr_list(rest)?)),
         "echon" => Ok(Stmt::Echon(parse_expr_list(rest)?)),
-        // `:echomsg`/`:echoerr` (Vim abbreviations `echom`, `echoe`/`echoer`)
-        // both evaluate and print their expression list; they are modelled as
-        // `:echo` here (same simplification already used for `:echomsg`). Adding
-        // `:echoerr` stops an unrecognized `echoerr` in a function body from
-        // falling through to `parse_expr` and aborting the `:function`.
-        "echomsg" | "echom" | "echoerr" | "echoer" | "echoe" => {
-            Ok(Stmt::Echo(parse_expr_list(rest)?))
-        }
+        // `:echomsg` (`echom`) evaluates and prints its expression list; it is
+        // modelled as `:echo` (there is no message history to add it to).
+        "echomsg" | "echom" => Ok(Stmt::Echo(parse_expr_list(rest)?)),
+        // `:echoerr` (`echoe`/`echoer`) reports its arguments as an ERROR — see
+        // `Stmt::EchoErr`.
+        "echoerr" | "echoer" | "echoe" => Ok(Stmt::EchoErr(parse_expr_list(rest)?)),
         // `:execute` accepts every prefix down to `:exe` (verified against Vim
         // 9.2: `exe`/`exec`/`execu`/`execut`/`execute` all run). Missing the
         // intermediate forms made `exec '…'` fall through to `parse_expr`, which
