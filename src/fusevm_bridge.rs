@@ -4992,7 +4992,13 @@ fn eval_callback(
 /// The `sort()`/`uniq()` `{func}` comparator hook (installed into the value
 /// layer's `SORT_FUNCREF_HOOK`): call the user function with the two items and
 /// read its result as a Number. `None` signals a call/type error.
-fn sort_compare_funcref(name: &str, a: &typval_T, b: &typval_T) -> Option<varnumber_T> {
+fn sort_compare_funcref(
+    name: &str,
+    partial: Option<&typval_T>,
+    selfdict: Option<&typval_T>,
+    a: &typval_T,
+    b: &typval_T,
+) -> Option<varnumber_T> {
     // c:1310-1324 `int res = call_func(...); if (res == FAIL) { … err = true; }
     // else { n = tv_get_number_chk(&rettv, &err); }` — a FAILED call and a
     // result that is not a Number both raise `item_compare_func_err`, which is
@@ -5014,7 +5020,13 @@ fn sort_compare_funcref(name: &str, a: &typval_T, b: &typval_T) -> Option<varnum
     //   a :function that reports, or fails, does NEITHER — its own do_cmdline
     //   resets did_emsg and swallows the failure.
     let before = message::did_emsg.with(|d| d.get());
-    let r = call_user_function(name, vec![a.clone(), b.clone()])?;
+    // c: `funcexe.fe_partial = partial; funcexe.fe_selfdict = selfdict` — a
+    // Partial brings its bound arguments, dict and closure scope.
+    let args = vec![a.clone(), b.clone()];
+    let r = match partial {
+        Some(p) => call_funcref_self(p, args, selfdict.cloned())?,
+        None => with_self(selfdict.cloned(), || call_user_function(name, args))?,
+    };
     let raised = message::did_emsg.with(|d| d.get()) > before;
     if name.starts_with("<lambda>") && (LAST_CALL_FAILED.with(|c| c.get()) || raised) {
         return None;

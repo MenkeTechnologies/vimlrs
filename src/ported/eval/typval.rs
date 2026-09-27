@@ -2346,7 +2346,7 @@ pub fn tv_list_slice_or_index(
 }
 
 /// Per-sort comparison configuration. Port of `sortinfo_T` from
-/// `Src/eval/typval.c:46`. Partials / `selfdict` are not modeled.
+/// `Src/eval/typval.c:46`.
 #[derive(Default)]
 pub struct sortinfo_T {
     pub item_compare_ic: bool,
@@ -2355,11 +2355,19 @@ pub struct sortinfo_T {
     pub item_compare_numbers: bool,
     pub item_compare_float: bool,
     pub item_compare_func: Option<String>,
+    /// `partial_T *item_compare_partial` — the `{func}` when it is a Partial,
+    /// kept whole (as its typval) so its bound arguments, dict and closure
+    /// scope reach the call.
+    pub item_compare_partial: Option<typval_T>,
+    /// `dict_T *item_compare_selfdict` — the optional `{dict}` argument.
+    pub item_compare_selfdict: Option<typval_T>,
     pub item_compare_func_err: std::cell::Cell<bool>,
 }
 
-/// Funcref comparator for `sort()`/`uniq()` (`(name, a, b) -> Some(cmp)`).
-type SortFuncrefFn = fn(&str, &typval_T, &typval_T) -> Option<varnumber_T>;
+/// Funcref comparator for `sort()`/`uniq()`: `(name, partial, selfdict, a, b)
+/// -> Some(cmp)`, with the arguments of `item_compare2`'s `call_func`.
+type SortFuncrefFn =
+    fn(&str, Option<&typval_T>, Option<&typval_T>, &typval_T, &typval_T) -> Option<varnumber_T>;
 /// Generic "call a Funcref/Partial typval with args → result" hook.
 type CallFuncFn = fn(&typval_T, &[typval_T]) -> Option<typval_T>;
 
@@ -2520,14 +2528,27 @@ fn item_compare2(tv1: &typval_T, tv2: &typval_T, info: &sortinfo_T) -> i32 {
     if info.item_compare_func_err.get() {
         return 0;
     }
-    let name = match &info.item_compare_func {
-        Some(n) => n,
-        None => return 0,
+    // c: `func_name = partial == NULL ? item_compare_func : partial_name(partial)`.
+    let name = match (&info.item_compare_partial, &info.item_compare_func) {
+        (Some(p), _) => match &p.vval {
+            v_partial(Some(pt)) => pt.pt_name.clone(),
+            _ => return 0,
+        },
+        (None, Some(n)) => n.clone(),
+        (None, None) => return 0,
     };
     // Copy the fn pointer out before calling it — the nested user-function run
     // re-enters install(), which borrows SORT_FUNCREF_HOOK mutably.
     let hook = SORT_FUNCREF_HOOK.with(|h| *h.borrow());
-    let res = hook.and_then(|f| f(name, tv1, tv2));
+    let res = hook.and_then(|f| {
+        f(
+            &name,
+            info.item_compare_partial.as_ref(),
+            info.item_compare_selfdict.as_ref(),
+            tv1,
+            tv2,
+        )
+    });
     match res {
         Some(n) => {
             if n > 0 {
@@ -2558,9 +2579,10 @@ fn parse_sort_uniq_args(argvars: &[typval_T], info: &mut sortinfo_T) -> i32 {
         return OK;
     }
     let a1 = &argvars[1];
-    // c: {func} as VAR_FUNC; VAR_PARTIAL not modeled.
     if a1.v_type == VAR_FUNC {
         info.item_compare_func = Some(tv_get_string(a1));
+    } else if a1.v_type == VAR_PARTIAL {
+        info.item_compare_partial = Some(a1.clone());
     } else {
         let mut error = false;
         let nr = tv_get_number_chk(a1, Some(&mut error)) as i32;
@@ -2603,10 +2625,11 @@ fn parse_sort_uniq_args(argvars: &[typval_T], info: &mut sortinfo_T) -> i32 {
         }
     }
     if argvars.len() > 2 {
-        // c: optional {dict} (selfdict) — validated, but unused (partials unmodeled).
+        // c: optional {dict} — the `self` of the comparator call.
         if tv_check_for_dict_arg(argvars, 2) == FAIL {
             return FAIL;
         }
+        info.item_compare_selfdict = Some(argvars[2].clone());
     }
     OK
 }
@@ -2614,7 +2637,7 @@ fn parse_sort_uniq_args(argvars: &[typval_T], info: &mut sortinfo_T) -> i32 {
 /// Port of `do_sort()` from `Src/eval/typval.c:1349`. Uses Rust's stable sort,
 /// so the C index tiebreak for stability is unnecessary.
 fn do_sort(l: &Rc<RefCell<list_T>>, info: &sortinfo_T) {
-    let has_func = info.item_compare_func.is_some();
+    let has_func = info.item_compare_func.is_some() || info.item_compare_partial.is_some();
     info.item_compare_func_err.set(false);
     let mut lb = l.borrow_mut();
     let original = lb.lv_items.clone();
@@ -2639,7 +2662,7 @@ fn do_sort(l: &Rc<RefCell<list_T>>, info: &sortinfo_T) {
 
 /// Port of `do_uniq()` from `Src/eval/typval.c:1390` — drop adjacent equal items.
 fn do_uniq(l: &Rc<RefCell<list_T>>, info: &sortinfo_T) {
-    let has_func = info.item_compare_func.is_some();
+    let has_func = info.item_compare_func.is_some() || info.item_compare_partial.is_some();
     info.item_compare_func_err.set(false);
     let mut lb = l.borrow_mut();
     let items = std::mem::take(&mut lb.lv_items);
