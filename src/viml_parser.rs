@@ -1294,7 +1294,12 @@ fn parse_one(cur: &mut Lines) -> Result<Vec<Stmt>, VimlError> {
             }
         }
         _ => {
-            let tail = cur.tails.get(cur.i).cloned().flatten().unwrap_or_else(|| line.clone());
+            let tail = cur
+                .tails
+                .get(cur.i)
+                .cloned()
+                .flatten()
+                .unwrap_or_else(|| line.clone());
             cur.bump();
             // Commands that absorb a trailing `|` (`:autocmd`, `:command`,
             // `:normal`, `:global`) are parsed whole — splitting them would break
@@ -2703,14 +2708,31 @@ fn parse_unlet_arg(arg: &str) -> Result<UnletArg, VimlError> {
         }
         let base_src = arg[..open].trim();
         let index_src = &arg[open + 1..arg.len() - 1];
-        // A range subscript (`unlet l[i:j]`) is not yet supported; fall through
-        // to treat the whole thing as a name so the runtime reports E108/E116.
-        if split_top_colon(index_src).is_none() {
-            return Ok(UnletArg::Item {
-                base: Box::new(parse_expr(base_src)?),
+        // A top-level `:` makes it a range, `unlet l[i:j]`.
+        let base = Box::new(parse_expr(base_src)?);
+        return Ok(match split_top_colon(index_src) {
+            Some((a, b)) => {
+                let parse_opt = |s: &str| -> Result<Option<Box<Expr>>, VimlError> {
+                    let s = s.trim();
+                    Ok(if s.is_empty() {
+                        None
+                    } else {
+                        Some(Box::new(parse_expr(s)?))
+                    })
+                };
+                UnletArg::Range {
+                    base,
+                    idx1: parse_opt(a)?,
+                    idx2: parse_opt(b)?,
+                    src: arg.to_string(),
+                }
+            }
+            None => UnletArg::Item {
+                base,
                 index: Box::new(parse_expr(index_src)?),
-            });
-        }
+                src: arg.to_string(),
+            },
+        });
     } else if !arg.contains('[')
         && arg.contains('.')
         && arg.rsplit_once('.').is_some_and(|(_, k)| {
@@ -2722,6 +2744,7 @@ fn parse_unlet_arg(arg: &str) -> Result<UnletArg, VimlError> {
         return Ok(UnletArg::Item {
             base: Box::new(parse_expr(base)?),
             index: Box::new(Expr::Str(key.to_string())),
+            src: arg.to_string(),
         });
     }
     Ok(UnletArg::Name(arg.to_string()))

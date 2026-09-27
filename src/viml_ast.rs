@@ -296,6 +296,21 @@ pub enum UnletArg {
         base: Box<Expr>,
         /// The index/key expression.
         index: Box<Expr>,
+        /// The argument as written: c `lp->ll_name`, which `E741` and `E108`
+        /// print.
+        src: String,
+    },
+    /// `unlet l[i:j]` — remove a range of List items (`tv_list_unlet_range`).
+    /// An omitted first index is 0; an omitted last index runs to the end.
+    Range {
+        /// The container expression.
+        base: Box<Expr>,
+        /// The first index (`None` → from the start).
+        idx1: Option<Box<Expr>>,
+        /// The last index (`None` → to the end).
+        idx2: Option<Box<Expr>>,
+        /// The argument as written, as for [`UnletArg::Item`].
+        src: String,
     },
 }
 

@@ -1,0 +1,33 @@
+1
+[0, 3, 4, 5]
+[0, 3]
+[2, 3]
+[0]
+E684: List index out of range: 1
+[0, 1, 2, 3]
+E684: List index out of range: 5
+[0, 1, 2, 3]
+[2, 3]
+E684: List index out of range: -9
+[0, 1, 2, 3]
+[]
+E719: Cannot slice a Dictionary
+{'a': 1}
+E108: No such variable: "b[1:2]"
+0z01020304
+E108: No such variable: "b[1]"
+0z01020304
+{'x': []}
+[3]
+E741: Value is locked: m[0]
+E741: Value is locked: m[0:1]
+[1, 2, 3]
+E741: Value is locked: md.a
+{'a': 1}
+caught Vim(let):E741: Value is locked: t[0] = 9 | catch | echo 'caught' v:exception | endtry
+E741: Value is locked: t[1] = 8 | echo 'not reached'
+E108: No such variable: "nosuch"
+E684: List index out of range: 5
+[1, 2]
+[2]
+end

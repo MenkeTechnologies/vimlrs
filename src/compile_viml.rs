@@ -1470,7 +1470,21 @@ impl Compiler {
                 Ok(())
             }
             Stmt::Unlet { args, bang } => {
-                for arg in args {
+                // c: `ex_unletlock` — once an argument has failed (`error =
+                // true`), the rest are only parsed, never unlet, so
+                // `unlet nosuch m[0]` reports E108 alone. The error count at the
+                // start stays on the stack while the arguments run.
+                let several = args.len() > 1;
+                if several {
+                    self.emit(Op::CallBuiltin(h::VIML_ERR_COUNT, 0));
+                }
+                let mut skips = Vec::new();
+                for (i, arg) in args.iter().enumerate() {
+                    if i > 0 {
+                        self.emit(Op::Dup);
+                        self.emit(Op::CallBuiltin(h::VIML_ERRS_AFTER, 1));
+                        skips.push(self.emit(Op::JumpIfTrue(0)));
+                    }
                     match arg {
                         // c: `do_unlet(lp->ll_name, lp->ll_name_len, eap->forceit)`
                         // — `forceit` reaches the leaf, where it decides between
@@ -1483,12 +1497,42 @@ impl Compiler {
                         // `unlet base[index]` / `unlet base.key` — push the
                         // container then the index; the bridge removes the
                         // element in place (mirroring `do_unlet_var()`).
-                        UnletArg::Item { base, index } => {
+                        UnletArg::Item { base, index, src } => {
                             self.expr(base)?;
                             self.expr(index)?;
-                            self.emit(Op::CallBuiltin(h::VIML_UNLET_INDEX, 2));
+                            self.load_str(src);
+                            self.emit(Op::CallBuiltin(h::VIML_UNLET_INDEX, 3));
+                        }
+                        // `unlet base[i:j]` — the container, both indexes (0 for
+                        // an omitted one), which were omitted, and the text.
+                        UnletArg::Range {
+                            base,
+                            idx1,
+                            idx2,
+                            src,
+                        } => {
+                            self.expr(base)?;
+                            for idx in [idx1, idx2] {
+                                match idx {
+                                    Some(e) => self.expr(e)?,
+                                    None => {
+                                        self.emit(Op::LoadInt(0));
+                                    }
+                                }
+                            }
+                            let empty = (idx1.is_none() as i64) | ((idx2.is_none() as i64) << 1);
+                            self.emit(Op::LoadInt(empty));
+                            self.load_str(src);
+                            self.emit(Op::CallBuiltin(h::VIML_UNLET_RANGE, 5));
                         }
                     }
+                    self.emit(Op::Pop);
+                }
+                let end = self.b.current_pos();
+                for j in skips {
+                    self.b.patch_jump(j, end);
+                }
+                if several {
                     self.emit(Op::Pop);
                 }
                 Ok(())

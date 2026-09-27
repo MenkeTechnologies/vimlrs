@@ -561,9 +561,16 @@ pub const VIML_SOURCE: u16 = 3500;
 /// `:lockvar` / `:unlockvar` — pops (lock, depth, name).
 pub const VIML_LOCKVAR: u16 = 3047;
 pub const VIML_UNLET: u16 = 3501;
-/// `:unlet base[index]` / `:unlet base.key`: pop index then container, remove
-/// the List item or Dict entry in place.
+/// `:unlet base[index]` / `:unlet base.key`: pop the argument as written, the
+/// index and the container; remove the List item or Dict entry in place.
 pub const VIML_UNLET_INDEX: u16 = 3502;
+/// `:unlet base[i:j]` — see `b_unlet_range`.
+pub const VIML_UNLET_RANGE: u16 = 3618;
+/// Push `Int(errors reported so far)` — the baseline `:unlet` keeps while it
+/// walks its arguments.
+pub const VIML_ERR_COUNT: u16 = 3619;
+/// Pop a baseline from `VIML_ERR_COUNT`; push `Bool(an error was reported since)`.
+pub const VIML_ERRS_AFTER: u16 = 3620;
 /// `json_encode()`
 pub const VIML_FN_JSON_ENCODE: u16 = 3186;
 /// `json_decode()`
@@ -3694,30 +3701,49 @@ fn b_unlet(vm: &mut VM, _: u8) -> Value {
 /// and lets the loop run on to `check_nextcmd`, so `try | unlet nosuchvar |
 /// catch | … | endtry` IS caught. Both engines agree on both.
 fn b_unlet_index(vm: &mut VM, _: u8) -> Value {
+    let src = tv_get_string(&pop_tv(vm));
     let index = pop_tv(vm);
     let base = pop_tv(vm);
-    eval_op(|| unlet_index(base, index))
+    // The lval resolution (`get_lval`) aborts the line on error; what follows
+    // it is `do_unlet_var`, the callback, whose failures only set `error`.
+    let Some(target) = eval_op(|| unlet_lval(&base, &index)) else {
+        return Value::Undef;
+    };
+    unlet_var(target, &src);
+    Value::Undef
 }
 
-/// The element-removal body of [`b_unlet_index`], split out so the whole of it
-/// runs inside `eval_op`'s error window.
-fn unlet_index(base: typval_T, index: typval_T) -> Value {
-    use crate::ported::eval::typval::{
-        tv_dict_item_remove, tv_dict_watcher_notify, tv_list_item_remove,
-    };
+/// A resolved `:unlet` element lval: what `get_lval` leaves in `lval_T` for
+/// the element branches of `do_unlet_var`.
+enum UnletTarget {
+    /// `ll_dict` + `ll_di`.
+    DictItem(
+        std::rc::Rc<RefCell<crate::ported::eval::typval_defs_h::dict_T>>,
+        String,
+    ),
+    /// `ll_list` + `ll_li` (and, for a range, the last index to remove).
+    ListItems(
+        std::rc::Rc<RefCell<crate::ported::eval::typval_defs_h::list_T>>,
+        usize,
+        Option<usize>,
+    ),
+    /// `ll_tv == NULL`: the lval names no variable `do_unlet` can find — a
+    /// Blob element, whose `get_lval` leaves only the name.
+    NoVariable,
+}
+
+/// `get_lval`'s subscript step for `:unlet base[index]` — `E716` for a missing
+/// key, `E684` for an index `tv_list_check_range_index_one` rejects, `E689`
+/// for a base that cannot be indexed.
+fn unlet_lval(base: &typval_T, index: &typval_T) -> Option<UnletTarget> {
     match (base.v_type, &base.vval) {
         (VAR_DICT, v_dict(Some(d))) => {
-            let key = tv_get_string(&index);
-            let old = d.borrow().dv_hashtab.get(&key).cloned();
-            match old {
-                None => {
-                    message::semsg(&format!("E716: Key not present in Dictionary: \"{key}\""));
-                }
-                Some(oldtv) => {
-                    tv_dict_item_remove(&mut d.borrow_mut(), &key);
-                    tv_dict_watcher_notify(d, &key, None, Some(&oldtv));
-                }
+            let key = tv_get_string(index);
+            if !d.borrow().dv_hashtab.contains_key(&key) {
+                message::semsg(&format!("E716: Key not present in Dictionary: \"{key}\""));
+                return None;
             }
+            Some(UnletTarget::DictItem(d.clone(), key))
         }
         (VAR_LIST, v_list(Some(l))) => {
             // c: `:unlet l[i]` reaches the same `get_lval` list arm as `:let`, so
@@ -3726,17 +3752,114 @@ fn unlet_index(base: typval_T, index: typval_T) -> Value {
             //
             //   unlet l[-9]  on [1,2,3]  no error, removes item 0 -> [2, 3]
             //   unlet l[9]   on [1,2,3]  E684: List index out of range: 9
-            let mut n1 = tv_get_number_chk(&index, None) as i32;
+            let mut n1 = tv_get_number_chk(index, None) as i32;
             let pos = crate::ported::eval::typval::tv_list_check_range_index_one(
                 &l.borrow(),
                 &mut n1,
                 false,
-            );
-            if let Some(p) = pos {
-                tv_list_item_remove(&mut l.borrow_mut(), p);
-            } // else: E684 already emitted, with the index
+            )?;
+            Some(UnletTarget::ListItems(l.clone(), pos, Some(pos)))
         }
-        _ => message::emsg("E689: Can only index a List, Dictionary or Blob"),
+        (VAR_BLOB, _) => Some(UnletTarget::NoVariable),
+        _ => {
+            message::emsg("E689: Can only index a List, Dictionary or Blob");
+            None
+        }
+    }
+}
+
+/// `do_unlet_var` (`vendor/eval/vars.c:1626`) for an element lval: the
+/// container's lock is checked first (`E741: Value is locked: {lval}`), then
+/// the Dict entry (with its watcher notification) or the List items go.
+fn unlet_var(target: UnletTarget, src: &str) {
+    use crate::ported::eval::typval::{
+        tv_dict_item_remove, tv_dict_watcher_notify, tv_list_remove_items, value_check_lock,
+    };
+    match target {
+        UnletTarget::NoVariable => {
+            message::semsg(&format!("E108: No such variable: \"{src}\""));
+        }
+        UnletTarget::DictItem(d, key) => {
+            let lock = d.borrow().dv_lock;
+            if value_check_lock(lock, Some(src), src.len()) {
+                return;
+            }
+            let old = d.borrow().dv_hashtab.get(&key).cloned();
+            if let Some(oldtv) = old {
+                tv_dict_item_remove(&mut d.borrow_mut(), &key);
+                tv_dict_watcher_notify(&d, &key, None, Some(&oldtv));
+            }
+        }
+        UnletTarget::ListItems(l, first, last) => {
+            let lock = l.borrow().lv_lock;
+            if value_check_lock(lock, Some(src), src.len()) {
+                return;
+            }
+            // c: `tv_list_unlet_range` walks from the first item until the list
+            // ends or the index passes N2, so an N2 beyond the end stops there.
+            let len = l.borrow().lv_items.len();
+            let last = last.map_or(len - 1, |n| n.min(len - 1));
+            tv_list_remove_items(&mut l.borrow_mut(), first, last);
+        }
+    }
+}
+
+fn b_err_count(_vm: &mut VM, _: u8) -> Value {
+    Value::Int(message::err_count.with(|c| c.get()) as i64)
+}
+
+fn b_errs_after(vm: &mut VM, _: u8) -> Value {
+    let base = tv_get_number_chk(&pop_tv(vm), None) as u64;
+    Value::Bool(message::err_count.with(|c| c.get()) > base)
+}
+
+/// `:unlet base[i:j]` — stack: container, first index, last index, the
+/// omitted-index flags (bit 0: no first index, bit 1: no last index), the
+/// argument as written. `get_lval_list` resolves both indexes (`E684`), a
+/// Dict is `E719`, then `do_unlet_var`'s `ll_range` branch removes the items.
+fn b_unlet_range(vm: &mut VM, _: u8) -> Value {
+    let src = tv_get_string(&pop_tv(vm));
+    let empty = tv_get_number_chk(&pop_tv(vm), None);
+    let idx2 = pop_tv(vm);
+    let idx1 = pop_tv(vm);
+    let base = pop_tv(vm);
+    let (empty1, empty2) = (empty & 1 != 0, empty & 2 != 0);
+    let resolved = eval_op(|| match (base.v_type, &base.vval) {
+        (VAR_DICT, _) => {
+            message::emsg("E719: Cannot slice a Dictionary");
+            None
+        }
+        (VAR_LIST, v_list(Some(l))) => {
+            let list = l.borrow();
+            let mut n1 = if empty1 {
+                0
+            } else {
+                tv_get_number_chk(&idx1, None) as i32
+            };
+            let pos1 =
+                crate::ported::eval::typval::tv_list_check_range_index_one(&list, &mut n1, false)?;
+            let last = if empty2 {
+                None
+            } else {
+                let mut n2 = tv_get_number_chk(&idx2, None) as i32;
+                if crate::ported::eval::typval::tv_list_check_range_index_two(
+                    &list, &mut n1, pos1, &mut n2, false,
+                ) == crate::ported::eval_h::FAIL
+                {
+                    return None;
+                }
+                Some(n2 as usize)
+            };
+            Some(UnletTarget::ListItems(l.clone(), pos1, last))
+        }
+        (VAR_BLOB, _) => Some(UnletTarget::NoVariable),
+        _ => {
+            message::emsg("E689: Can only index a List, Dictionary or Blob");
+            None
+        }
+    });
+    if let Some(target) = resolved {
+        unlet_var(target, &src);
     }
     Value::Undef
 }
@@ -6534,6 +6657,9 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_LOCKVAR, b_lockvar);
     vm.register_builtin(VIML_UNLET, b_unlet);
     vm.register_builtin(VIML_UNLET_INDEX, b_unlet_index);
+    vm.register_builtin(VIML_UNLET_RANGE, b_unlet_range);
+    vm.register_builtin(VIML_ERR_COUNT, b_err_count);
+    vm.register_builtin(VIML_ERRS_AFTER, b_errs_after);
     vm.register_builtin(VIML_SET, b_set);
     vm.register_builtin(VIML_MAP, b_map);
     vm.register_builtin(VIML_COMMAND, b_command);
