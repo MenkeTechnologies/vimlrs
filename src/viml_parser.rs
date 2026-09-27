@@ -33,6 +33,49 @@ thread_local! {
     /// there, and an unclosed `:while`/`:for` runs its body once — nothing
     /// reaches the `:endwhile` that would jump back. Set by [`parse_cmdline`].
     static CMDLINE_EOF: Cell<bool> = const { Cell::new(false) };
+    /// The command [`parse_stmt`] is reading, as `(start address, length)`,
+    /// with the text from its start to the end of its source line.
+    ///
+    /// c: a lval's `ll_name` points INTO the command line, and
+    /// `value_check_lock(…, lp->ll_name, TV_CSTRING)` prints from there to the
+    /// line's NUL — past any `|` and the commands after it. Bar-splitting has
+    /// already cut those off the text the parser sees, so the tail is kept here
+    /// for [`text_to_eol`].
+    static CMD_TAIL: std::cell::RefCell<Option<(usize, usize, String)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Byte offset of `part` (a subslice of `whole`) within `whole`.
+fn slice_offset(whole: &str, part: &str) -> usize {
+    part.as_ptr() as usize - whole.as_ptr() as usize
+}
+
+/// Run `f` with [`CMD_TAIL`] describing `cmd`, whose source line continues as
+/// `tail` (which starts with `cmd`'s text).
+fn with_cmd_tail<T>(cmd: &str, tail: &str, f: impl FnOnce() -> T) -> T {
+    let entry = tail
+        .starts_with(cmd)
+        .then(|| (cmd.as_ptr() as usize, cmd.len(), tail.to_string()));
+    let saved = CMD_TAIL.with(|t| std::mem::replace(&mut *t.borrow_mut(), entry));
+    let out = f();
+    CMD_TAIL.with(|t| *t.borrow_mut() = saved);
+    out
+}
+
+/// `arg` (a subslice of the command being parsed) extended to the end of its
+/// source line, trimmed; just `arg` trimmed when no tail is known.
+fn text_to_eol(arg: &str) -> String {
+    CMD_TAIL.with(|t| {
+        if let Some((start, len, tail)) = &*t.borrow() {
+            let at = arg.as_ptr() as usize;
+            if at >= *start && at + arg.len() <= start + len {
+                if let Some(rest) = tail.get(at - start..) {
+                    return rest.trim().to_string();
+                }
+            }
+        }
+        arg.trim().to_string()
+    })
 }
 
 /// True when the parser is in a vim9 region (see [`VIM9`]).
@@ -909,6 +952,10 @@ pub fn parse_program_lines_tolerant(src: &str) -> TolerantParse {
 /// source line where it began. `i` is the 0-based index of the next line.
 struct Lines {
     lines: Vec<(u32, String)>,
+    /// Parallel to `lines`: for a segment that pass 2 cut out of a `|`-separated
+    /// source line, the text from the segment's start to the end of that line
+    /// (see [`CMD_TAIL`]). `None` when the logical line is the whole line.
+    tails: Vec<Option<String>>,
     i: usize,
 }
 
@@ -1081,10 +1128,12 @@ impl Lines {
         // block opener anywhere on the line (`let x=1 | if x | … | endif`) is
         // parsed as its own line. Blank/comment lines are kept whole.
         let mut lines: Vec<(u32, String)> = Vec::new();
+        let mut tails: Vec<Option<String>> = Vec::new();
         for (lineno, text) in joined {
             let trimmed = text.trim();
             if trimmed.is_empty() || trimmed.starts_with('"') {
                 lines.push((lineno, text));
+                tails.push(None);
                 continue;
             }
             // Commands whose argument absorbs a trailing `|` (`:autocmd`,
@@ -1094,6 +1143,7 @@ impl Lines {
             let (lead, _) = cmd_word(strip_command_modifiers(trimmed));
             if cmd_takes_bar_arg(lead) {
                 lines.push((lineno, text));
+                tails.push(None);
                 continue;
             }
             let segs = split_commands(&text);
@@ -1101,13 +1151,15 @@ impl Lines {
                 for seg in segs {
                     if !seg.trim().is_empty() {
                         lines.push((lineno, seg.to_string()));
+                        tails.push(Some(text[slice_offset(&text, seg)..].to_string()));
                     }
                 }
             } else {
                 lines.push((lineno, text));
+                tails.push(None);
             }
         }
-        Lines { lines, i: 0 }
+        Lines { lines, tails, i: 0 }
     }
 
     /// Advance past blank lines and full-line `"` comments.
@@ -1242,19 +1294,21 @@ fn parse_one(cur: &mut Lines) -> Result<Vec<Stmt>, VimlError> {
             }
         }
         _ => {
+            let tail = cur.tails.get(cur.i).cloned().flatten().unwrap_or_else(|| line.clone());
             cur.bump();
             // Commands that absorb a trailing `|` (`:autocmd`, `:command`,
             // `:normal`, `:global`) are parsed whole — splitting them would break
             // off part of their argument (e.g. `autocmd … exe '…' | e`).
             if cmd_takes_bar_arg(cmd_word(strip_command_modifiers(line.trim())).0) {
-                return Ok(vec![parse_stmt(&line)?]);
+                return Ok(vec![with_cmd_tail(&line, &tail, || parse_stmt(&line))?]);
             }
             let mut out = Vec::new();
             for seg in split_commands(&line) {
                 if seg.trim().is_empty() {
                     continue;
                 }
-                out.push(parse_stmt(seg)?);
+                let seg_tail = tail.get(slice_offset(&line, seg)..).unwrap_or(seg);
+                out.push(with_cmd_tail(seg, seg_tail, || parse_stmt(seg))?);
             }
             Ok(out)
         }
@@ -2397,13 +2451,13 @@ fn parse_let(rest: &str) -> Result<Stmt, VimlError> {
                     base: Box::new(parse_expr(base_src)?),
                     idx1: parse_opt(a)?,
                     idx2: parse_opt(b)?,
-                    src: Some(rest.trim().to_string()),
+                    src: Some(text_to_eol(rest)),
                 }
             }
             None => LetTarget::Index {
                 base: Box::new(parse_expr(base_src)?),
                 index: Box::new(parse_expr(index_src)?),
-                src: Some(rest.trim().to_string()),
+                src: Some(text_to_eol(rest)),
             },
         }
     } else if !lhs.contains('[')
@@ -2417,7 +2471,7 @@ fn parse_let(rest: &str) -> Result<Stmt, VimlError> {
         LetTarget::Index {
             base: Box::new(parse_expr(base)?),
             index: Box::new(Expr::Str(key.to_string())),
-            src: Some(rest.trim().to_string()),
+            src: Some(text_to_eol(rest)),
         }
     } else {
         LetTarget::Var(lhs.to_string())
