@@ -1360,6 +1360,66 @@ fn cmd_takes_bar_arg(cmd: &str) -> bool {
     )
 }
 
+/// When `b[i..]` opens an interpolated string (`$'…'` or `$"…"`), the index just
+/// past its closing quote (or the end of `b`). A plain quote scan misreads one:
+/// in `$'{"x'y"}'` the `'` inside the `{expr}` is the expression's, not the
+/// literal's, and the `"` after it is not a comment. The rules are the lexer's
+/// (`lex_interp_string` / `scan_interp_expr`): `''` (or `\` in `$"…"`) escapes,
+/// `{{` is a literal brace, and a `{expr}` region runs to its matching `}` with
+/// nested braces counted and `'…'`/`"…"` strings skipped whole.
+fn skip_interp_string(b: &[u8], i: usize) -> Option<usize> {
+    let quote = *b.get(i + 1)?;
+    if b[i] != b'$' || (quote != b'\'' && quote != b'"') {
+        return None;
+    }
+    let double = quote == b'"';
+    let mut p = i + 2;
+    while p < b.len() {
+        match b[p] {
+            b'\\' if double => p += 2,
+            c if c == quote => {
+                if !double && b.get(p + 1) == Some(&b'\'') {
+                    p += 2;
+                } else {
+                    return Some(p + 1);
+                }
+            }
+            b'{' if b.get(p + 1) == Some(&b'{') => p += 2,
+            b'{' => {
+                let mut depth = 0u32;
+                while p < b.len() {
+                    match b[p] {
+                        b'{' => depth += 1,
+                        b'}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        b'\'' => {
+                            p += 1;
+                            while p < b.len() && !(b[p] == b'\'' && b.get(p + 1) != Some(&b'\'')) {
+                                p += if b[p] == b'\'' { 2 } else { 1 };
+                            }
+                        }
+                        b'"' => {
+                            p += 1;
+                            while p < b.len() && b[p] != b'"' {
+                                p += if b[p] == b'\\' { 2 } else { 1 };
+                            }
+                        }
+                        _ => {}
+                    }
+                    p += 1;
+                }
+                p += 1;
+            }
+            _ => p += 1,
+        }
+    }
+    Some(b.len())
+}
+
 fn split_commands(line: &str) -> Vec<&str> {
     let bytes = line.as_bytes();
     let mut segs = Vec::new();
@@ -1413,6 +1473,10 @@ fn split_commands(line: &str) -> Vec<&str> {
                 dq = false;
             }
             i += 1;
+            continue;
+        }
+        if let Some(end) = skip_interp_string(bytes, i) {
+            i = end;
             continue;
         }
         match c {
@@ -1511,6 +1575,10 @@ fn strip_legacy_trailing_comment(s: &str) -> &str {
     let b = s.as_bytes();
     let mut i = 0;
     while i < b.len() {
+        if let Some(end) = skip_interp_string(b, i) {
+            i = end;
+            continue;
+        }
         match b[i] {
             b'\'' => {
                 // Single-quoted string: `''` is an escaped quote.

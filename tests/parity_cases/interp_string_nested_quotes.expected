@@ -1,0 +1,8 @@
+0
+x'y
+a bc d
+a|b
+next
+q " r
+if ok
+['x''y', '{lit}']
