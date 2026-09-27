@@ -731,9 +731,24 @@ fn slot_plan(stmts: &[(u32, Stmt)], in_function: bool) -> SlotPlan {
     }
 
     // Builtins that look a variable up BY NAME — they can observe even an `l:`
-    // slot, so a chunk that calls one must not slot.
+    // slot, so a chunk that calls one must not slot. That includes every
+    // builtin that evaluates a String argument as an expression or a command
+    // in the caller's scope: `map([1], 'v:val * k')` reads the local `k`.
     fn introspects(name: &str) -> bool {
-        matches!(name, "exists" | "eval" | "execute" | "call")
+        matches!(
+            name,
+            "exists"
+                | "eval"
+                | "execute"
+                | "call"
+                | "map"
+                | "mapnew"
+                | "filter"
+                | "foreach"
+                | "substitute"
+                | "searchpair"
+                | "searchpairpos"
+        )
     }
 
     /// A bare SCOPE DICT — `l:`, `g:`, `b:`, `w:`, `t:`, `s:`, `a:`, `v:`.
@@ -807,6 +822,28 @@ fn slot_plan(stmts: &[(u32, Stmt)], in_function: bool) -> SlotPlan {
                 }
             }
             Expr::Var(name) if is_scope_dict(name) => *cx.bail = true,
+            // A call through a value, or a Dict member's function: the same rule
+            // as a named call, and the operands may themselves hold one
+            // (`eval('{-> q}')()` reads `q` by name through the inner call).
+            Expr::CallExpr { callee, args } => {
+                if !cx.in_function {
+                    *cx.bail = true;
+                } else {
+                    walk_expr(callee, cx);
+                    args.iter().for_each(|a| walk_expr(a, cx));
+                }
+            }
+            Expr::MemberCall { base, args, .. } => {
+                if !cx.in_function {
+                    *cx.bail = true;
+                } else {
+                    walk_expr(base, cx);
+                    args.iter().for_each(|a| walk_expr(a, cx));
+                }
+            }
+            Expr::Member { base, .. } => walk_expr(base, cx),
+            Expr::Interp(segs) => segs.iter().for_each(|s| walk_expr(s, cx)),
+            Expr::ScriptErrorGuard { inner, .. } => walk_expr(inner, cx),
             Expr::List(items) => items.iter().for_each(|i| walk_expr(i, cx)),
             Expr::Dict(pairs) => pairs.iter().for_each(|(k, v)| {
                 walk_expr(k, cx);
