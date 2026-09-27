@@ -1,0 +1,26 @@
+1
+1
+E121: Undefined variable: zz
+r= '
+E121: Undefined variable: zz'x
+E121: Undefined variable: yy
+8
+r= '
+7
+E121: Undefined variable: yy
+8'
+E121: Undefined variable: qq
+r= '
+E121: Undefined variable: qq'
+r= ''
+r= '
+E121: Undefined variable: zz'
+
+E121: Undefined variable: zz
+7n
+9
+E121: Undefined variable: zz
+'
+E121: Undefined variable: zz'
+caught Vim(let):E121: Undefined variable: zz
+0

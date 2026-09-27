@@ -125,6 +125,10 @@ pub fn emsg(s: &str) {
         // `errthrow` (equivalent: `cause_errthrow` c:189 declines to throw while
         // `emsg_silent` is up), so the one C site becomes these two.
         set_vim_var_string(VV_ERRMSG, s);
+        // c:817-834 "But do write it to the redirection file." — unless
+        // `emsg_noredir` (`execute(…, 'silent!')`): `silent! let r =
+        // execute('let x += 1')` still captures the E121.
+        crate::fusevm_bridge::redir_silenced_emsg(s);
         return;
     }
     did_emsg.with(|d| d.set(d.get() + 1));
@@ -147,6 +151,10 @@ pub fn emsg(s: &str) {
         // is about to be displayed. Same placement here: an error the `:try` took
         // ownership of does not latch it. See [`ex_exitval`].
         ex_exitval.with(|e| e.set(1));
+        // c:857-858 "Reset msg_silent, an error causes messages to be switched
+        // back on." — `msg_silent = 0;`. What follows the error inside a
+        // `:silent` command or an `execute()` is shown on the screen again.
+        msg_silent.with(|m| m.set(0));
         // c: `msg_start()` — an error message begins on a fresh line, so a
         // half-written `:echon` line is terminated first rather than having the
         // error run onto the end of it. It does NOT end one: `msg_col` is left

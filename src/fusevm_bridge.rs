@@ -1492,6 +1492,10 @@ thread_local! {
     /// execute()-capture convention (a newline *before* each `:echo`) instead of
     /// the trailing newline used for stdout / general captures.
     static EXECUTE_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// c: `emsg_noredir` (`globals.h`) — `execute(…, "silent!")` sets it so a
+    /// silenced error is not written into the capture either. Saved and restored
+    /// by [`b_execute`], as `execute_common()` does.
+    static EMSG_NOREDIR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Nesting depth of `do_cmdline`-style nested command execution (`:source`,
     /// `:execute`). Vim shares one counter across these and raises `E169: Command
     /// too recursive` at depth 200 — verified against `/opt/homebrew/bin/vim`
@@ -3314,6 +3318,7 @@ fn b_let_list_one(vm: &mut VM, _: u8) -> Value {
             line.push_char('\n');
         }
         echo_write(&line);
+        exec_display(&body, true);
     } else {
         msg_put(&body, true);
     }
@@ -3338,6 +3343,7 @@ fn b_echo_end(vm: &mut VM, _: u8) -> Value {
         line.push_char('\n');
     }
     echo_write(&line);
+    exec_display(&body, newline);
     Value::Undef
 }
 
@@ -3391,6 +3397,7 @@ fn echo_impl(vm: &mut VM, argc: u8, newline: bool) {
             line.push_char('\n');
         }
         echo_write(&line);
+        exec_display(&body, newline);
         return;
     }
     msg_put(&body, newline);
@@ -3407,13 +3414,13 @@ fn msg_put(body: &[u8], newline: bool) {
         return;
     }
     if newline && MSG_COL.with(|c| c.get()) {
-        echo_write(b"\n");
+        display_write(b"\n");
         MSG_COL.with(|c| c.set(false));
     }
     if body.is_empty() {
         return;
     }
-    echo_write(body);
+    display_write(body);
     // An embedded newline (`echo "a\nb"`) resets the column just like a break
     // does, so what matters is only the text after the last one. `\n` is ASCII
     // and cannot occur inside a UTF-8 multibyte sequence, so the byte scan is
@@ -3442,17 +3449,28 @@ fn msg_put(body: &[u8], newline: bool) {
 /// stdout, so stdout is flushed first: the two streams are usually merged by
 /// whoever is reading them, and Rust's stdout only flushes itself at a newline.
 pub fn msg_emsg(s: &str) {
-    // A capture (`execute()`, `:redir`, an embedding host) collects `:echo` output
-    // only — the error goes to stderr either way — and it keeps its own
-    // line-per-message convention rather than the message column (see
-    // [`echo_impl`]). So the column is neither read nor written while one is
-    // active, exactly as before this shared it with `:echo`.
     if ECHO_SINK.with(|s| s.borrow().is_some()) {
-        eprintln!("{s}");
-        return;
+        // An embedding host's capture collects `:echo` output only, in its own
+        // line-per-message convention, so the error goes to stderr apart from it
+        // and the message column is left alone.
+        if EXECUTE_DEPTH.with(|d| d.get()) == 0 {
+            eprintln!("{s}");
+            return;
+        }
+        // c: inside `execute()` the error is a message like any other:
+        // `msg_start()` writes the "\n" and `msg_puts` the text into the
+        // capture (`redir_write`), and it is shown on the screen as well —
+        // `emsg()` has just reset `msg_silent` — at the message column the
+        // run outside left, so `echo 1 | call execute('let x += 1')` puts the
+        // E121 on the line after the `1`.
+        if !EMSG_NOREDIR.with(|n| n.get()) {
+            let mut line = b"\n".to_vec();
+            line.extend_from_slice(s.as_bytes());
+            echo_write(&line);
+        }
     }
     if MSG_COL.with(|c| c.get()) {
-        echo_write(b"\n");
+        display_write(b"\n");
         MSG_COL.with(|c| c.set(false));
     }
     use std::io::Write;
@@ -3460,6 +3478,21 @@ pub fn msg_emsg(s: &str) {
     eprint!("{s}");
     let _ = std::io::stderr().lock().flush();
     MSG_COL.with(|c| c.set(true));
+}
+
+/// The `emsg_silent` half of the redirection: an error `:silent!` keeps off the
+/// screen is still written into an `execute()` capture (`message.c:817-834`),
+/// unless `emsg_noredir` is set. Nothing is displayed and the column is untouched.
+pub fn redir_silenced_emsg(s: &str) {
+    if EXECUTE_DEPTH.with(|d| d.get()) == 0
+        || EMSG_NOREDIR.with(|n| n.get())
+        || ECHO_SINK.with(|s| s.borrow().is_none())
+    {
+        return;
+    }
+    let mut line = b"\n".to_vec();
+    line.extend_from_slice(s.as_bytes());
+    echo_write(&line);
 }
 
 /// Close the message line if the run left text on it. Vim itself never writes
@@ -4773,7 +4806,15 @@ fn subst_expr_eval(expr: &str) -> String {
 
 /// `execute({command} [, {silent}])` — run ex command(s) (a string or a List of
 /// strings) and return their captured `:echo`/message output.
+///
+/// A builtin that reports an error still returns OK to the expression around it
+/// (`call_func()`), so `let r = execute('echo 1', [])` is the E730 and then an
+/// assignment — the whole call runs as a callee.
 fn b_execute(vm: &mut VM, argc: u8) -> Value {
+    in_callee(|| execute_impl(vm, argc))
+}
+
+fn execute_impl(vm: &mut VM, argc: u8) -> Value {
     let mut args = Vec::with_capacity(argc as usize);
     for _ in 0..argc {
         args.push(pop_tv(vm));
@@ -4783,6 +4824,28 @@ fn b_execute(vm: &mut VM, argc: u8) -> Value {
         (VAR_LIST, v_list(Some(l))) => l.borrow().lv_items.iter().map(tv_string_item).collect(),
         _ => vec![tv_get_string(&args[0])],
     };
+    // c:1280-1310 — `{silent}` absent or "silent…" raises `msg_silent`, so the
+    // command's messages reach only the capture; "" leaves it alone, so they are
+    // shown as well; "silent!" also raises `emsg_silent` and `emsg_noredir`.
+    let save_msg_silent = message::msg_silent.with(|m| m.get());
+    let save_emsg_silent = crate::ported::ex_eval::emsg_silent.with(|e| e.get());
+    let save_emsg_noredir = EMSG_NOREDIR.with(|n| n.get());
+    match args.get(1).filter(|a| a.v_type != VAR_UNKNOWN) {
+        Some(arg) => {
+            // c:1293-1296 — a {silent} that is not a String fails the call.
+            let Some(s) = tv_get_string_buf_chk(arg) else {
+                return Value::Int(0);
+            };
+            if s.as_bytes().starts_with(b"silent") {
+                message::msg_silent.with(|m| m.set(m.get() + 1));
+            }
+            if s.as_bytes() == b"silent!" {
+                crate::ported::ex_eval::emsg_silent.with(|e| e.set(1));
+                EMSG_NOREDIR.with(|n| n.set(true));
+            }
+        }
+        None => message::msg_silent.with(|m| m.set(m.get() + 1)),
+    }
     // Redirect output into a fresh capture buffer, run, then restore the sink.
     // EXECUTE_DEPTH switches `:echo` to the leading-newline capture convention.
     let saved = ECHO_SINK.with(|s| s.borrow_mut().replace(Vec::new()));
@@ -4804,12 +4867,24 @@ fn b_execute(vm: &mut VM, argc: u8) -> Value {
     // parses the sequence up front, and when that fails (nothing has run yet —
     // `run_nested` returns `Err` before executing) it falls back to one item at
     // a time, which is what every item that stands alone needs.
+    //
+    // An error inside the run is reported and the call still returns what it
+    // captured (`let r = execute('let x += 1')` assigns "\nE121: …"), unless the
+    // error became an exception — [`b_execute`] runs all of this as a callee.
     if cmds.len() < 2 || run_cmdline_nested(&cmds.join("\n")).is_err() {
         for cmd in &cmds {
             let _ = run_cmdline_nested(cmd);
         }
     }
     HARD_ERR.with(|h| h.set(saved_hard));
+    // c:1333-1346
+    message::msg_silent.with(|m| m.set(save_msg_silent));
+    crate::ported::ex_eval::emsg_silent.with(|e| e.set(save_emsg_silent));
+    EMSG_NOREDIR.with(|n| n.set(save_emsg_noredir));
+    // c:1337-1346 put `msg_col` back, but in `-es` mode the line break is decided
+    // by `msg_didout` (`msg_start()`), which is what [`MSG_COL`] models and which
+    // the C leaves as the run left it: after `execute('echo 7', '')` the next
+    // `:echo` still starts a new line.
     EXECUTE_DEPTH.with(|d| d.set(d.get() - 1));
     let out = ECHO_SINK.with(|s| s.borrow_mut().take().unwrap_or_default());
     ECHO_SINK.with(|s| *s.borrow_mut() = saved);
@@ -6131,17 +6206,35 @@ fn echo_write(s: &[u8]) {
             // message, not its existence — which is exactly why
             // `execute('silent echo "x"')` still returns "\nx" in Vim.
             Some(buf) => buf.extend_from_slice(s),
-            None => {
-                // c: `msg_silent` — nothing is shown while `:silent` is in effect.
-                if message::msg_silent.with(|m| m.get()) != 0 {
-                    return;
-                }
-                use std::io::Write;
-                let out = std::io::stdout();
-                let _ = out.lock().write_all(s);
-            }
+            None => display_write(s),
         }
     });
+}
+
+/// Write to the screen (stdout) whether or not a capture is active — the display
+/// half of a message. `execute()` keeps writing it beside the capture once
+/// `msg_silent` is back to 0 (see [`exec_display`]).
+fn display_write(s: &[u8]) {
+    // c: `msg_silent` — nothing is shown while `:silent` is in effect.
+    if message::msg_silent.with(|m| m.get()) != 0 {
+        return;
+    }
+    use std::io::Write;
+    let _ = std::io::stdout().lock().write_all(s);
+}
+
+/// The screen half of an `:echo` written while `execute()` captures.
+///
+/// c: `redir_write()` records a message whatever `msg_silent` says, and the
+/// display path runs beside it whenever `msg_silent` is 0. `execute()` raises
+/// `msg_silent` (unless its `{silent}` is `""`), so normally only the capture
+/// sees the text — but `emsg()` resets `msg_silent` to 0 (`message.c:858`), so
+/// after an error inside the command the rest of its output is shown as well:
+/// `execute(['echo 7', 'let x += 1', 'echo 8'])` displays the E121 and the `8`.
+fn exec_display(body: &[u8], newline: bool) {
+    if EXECUTE_DEPTH.with(|d| d.get()) > 0 && message::msg_silent.with(|m| m.get()) == 0 {
+        msg_put(body, newline);
+    }
 }
 
 /// Begin capturing `:echo` output into a buffer (tests / embedding).
