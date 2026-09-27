@@ -2650,11 +2650,15 @@ impl Compiler {
                 // sets base[index] = value (and fires Dict watchers). `base` is an
                 // expression, so nested `d['a']['b']` resolves the inner container
                 // (a shared Rc, so the mutation propagates).
+                // The error count before the lval is resolved rides along: an
+                // error there (`E121` for an undefined base) ends the `:let`
+                // in `get_lval`, before any write is attempted.
                 self.expr(expr)?;
+                self.emit(Op::CallBuiltin(h::VIML_ERR_COUNT, 0));
                 self.expr(base)?;
                 self.expr(index)?;
                 self.load_str(src.as_deref().unwrap_or(""));
-                self.emit(Op::CallBuiltin(h::VIML_SETINDEX, 4));
+                self.emit(Op::CallBuiltin(h::VIML_SETINDEX, 5));
                 self.emit(Op::Pop);
                 Ok(())
             }
@@ -2668,6 +2672,7 @@ impl Compiler {
                 // (default 0), idx2 (Undef → "to the end"); the bridge assigns
                 // the range in place via tv_list_assign_range.
                 self.expr(expr)?;
+                self.emit(Op::CallBuiltin(h::VIML_ERR_COUNT, 0));
                 self.expr(base)?;
                 match idx1 {
                     Some(e) => self.expr(e)?,
@@ -2682,7 +2687,7 @@ impl Compiler {
                     }
                 }
                 self.load_str(src.as_deref().unwrap_or(""));
-                self.emit(Op::CallBuiltin(h::VIML_SETRANGE, 5));
+                self.emit(Op::CallBuiltin(h::VIML_SETRANGE, 6));
                 self.emit(Op::Pop);
                 Ok(())
             }

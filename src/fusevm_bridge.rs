@@ -247,9 +247,11 @@ pub const VIML_MAKE_DICT: u16 = 3051;
 pub const VIML_INDEX: u16 = 3052;
 /// `base[from:to]`
 pub const VIML_SLICE: u16 = 3053;
-/// `let base`index` = value` — pop index, base, value; set base`index`=value.
+/// `let base`index` = value` — pop the lval text, index, base, the error count
+/// before the lval was evaluated, value; set base`index`=value.
 pub const VIML_SETINDEX: u16 = 3054;
-/// `let base[idx1:idx2] = list` — pop idx2, idx1, base, value; range-assign.
+/// `let base[idx1:idx2] = list` — pop the lval text, idx2, idx1, base, the error
+/// count before the lval was evaluated, value; range-assign.
 pub const VIML_SETRANGE: u16 = 3055;
 /// Runtime type test for the ambiguous no-space `base.key`: pop value → `Bool`
 /// (`true` iff it is a Dict). Drives the subscript-vs-concat branch selection.
@@ -3056,7 +3058,13 @@ fn b_setindex(vm: &mut VM, _: u8) -> Value {
     let lval = tv_get_string(&pop_tv(vm));
     let index = pop_tv(vm);
     let base = pop_tv(vm);
+    let errs_before = tv_get_number_chk(&pop_tv(vm), None) as u64;
     let value = pop_tv(vm);
+    // c: `get_lval` fails — and `ex_let` assigns nothing — when evaluating the
+    // base or the index reported an error (`let zz[0] = 1` is E121 alone).
+    if message::err_count.with(|c| c.get()) > errs_before {
+        return Value::Undef;
+    }
     // c: `set_var_lval` checks the container's lock before writing into it and
     // names the lval in the message — `lp->ll_name`, which for a SUBSCRIPTED
     // target still points into the source. Verified against vim 9.2:
@@ -3140,7 +3148,12 @@ fn b_setrange(vm: &mut VM, _: u8) -> Value {
     let idx2_tv = pop_tv(vm);
     let idx1_tv = pop_tv(vm);
     let base = pop_tv(vm);
+    let errs_before = tv_get_number_chk(&pop_tv(vm), None) as u64;
     let value = pop_tv(vm);
+    // As for `b_setindex`: an error resolving the lval ends the `:let`.
+    if message::err_count.with(|c| c.get()) > errs_before {
+        return Value::Undef;
+    }
     // c: `set_var_lval` checks the container's lock before writing into it and
     // names the lval in the message — `lp->ll_name`, which for a SUBSCRIPTED
     // target still points into the source. Verified against vim 9.2:
