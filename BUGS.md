@@ -6846,7 +6846,7 @@ used `eval_variable()`, which does not see `v:val`/`v:key` — they live in the
 callback state. `map([{-> 1}, {-> 2}], 'v:val()')` is `[1, 2]` in both
 engines. Parity case: `callback_vval_funcref_call.vim`.
 
-### R46-O1 (open). A lambda at script level captures globals
+### R46-O1 (CLOSED in R47). A lambda at script level captures globals
 
 ```vim
 let x = 5
@@ -6869,3 +6869,114 @@ and today all three rely on that capture. Not changed this round.
 "locks only literal values": `let l = [1] | const m = l | call add(l, 2)` works
 in vim. This port does not maintain `lv_refcount`, so the lock reaches the
 shared List and the `add()` is E741. Unchanged from before R46-3.
+
+## R47 — closures by reference, `:unlet` of a range, and reads before assignment
+
+Oracle: vim 9.2.1100 (`tests/parity_cases/ORACLE`), with Neovim 0.12.5 as the
+second opinion; a divergence counts only where the two agree. Found by probing
+outward from R46-O1 and from the `:unlet` / `:let` paths.
+
+### R47-1. A locked lval was quoted only up to the `|` — ✅ FIXED
+
+`value_check_lock(…, lp->ll_name, TV_CSTRING)` prints from the lval to the end
+of the SOURCE LINE, because `ll_name` points into the command line:
+`try | let m[0] = 5 | catch | echo v:exception | endtry` is
+`Vim(let):E741: Value is locked: m[0] = 5 | catch | echo v:exception | endtry`
+in both engines. Bar-splitting had already cut the tail off; the logical line
+now keeps it. Parity case: `let_lval_text_to_eol.vim`.
+
+### R47-2. `:unlet` of a range, of a locked container's item, of a Blob item — ✅ FIXED
+
+| probe | vim | before |
+|---|---|---|
+| `unlet l[1:2]` on `[0,1,2,3,4,5]` | `[0, 3, 4, 5]` | `E108: No such variable: "l[1:2]"` |
+| `unlet d['a':'b']` | `E719: Cannot slice a Dictionary` | E108 |
+| `lockvar m \| unlet m[0]` | `E741: Value is locked: m[0]`, `m` unchanged | item removed |
+| `unlet b[1]` on a Blob | `E108: No such variable: "b[1]"` | E689 |
+| `unlet nosuch m[0]` on a locked `m` | E108 only (`ex_unletlock` stops after a failure) | E108, then E741 for `m[0]` |
+
+Parity case: `unlet_range_and_lock.vim`. Vim and Neovim word the lock message
+of `:unlet` differently when more follows on the line (vim quotes to the end of
+the line, Neovim only the argument); this port follows Neovim, so that shape is
+not recorded.
+
+### R47-3. `sort()`/`uniq()` with a Partial comparator — ✅ FIXED
+
+`parse_sort_uniq_args` kept only a `VAR_FUNC`; a Partial went through
+`tv_get_number_chk` and was `E703: Using a Funcref as a Number`, and the
+optional `{dict}` never became `self`. `item_compare_partial` and
+`item_compare_selfdict` now reach the call. Parity case:
+`sort_partial_comparator.vim`.
+
+### R47-4. A local read by name through a String callback lived in a slot — ✅ FIXED
+
+`map([1, 2], 'v:val * k')` in a function was `E121: Undefined variable: k`:
+`slot_plan` put `k` in a fusevm slot, which a String expression evaluated in
+the caller's scope cannot see. The builtins that evaluate a String in the
+caller's scope (`map()`, `filter()`, `mapnew()`, `foreach()`, `substitute()`,
+`searchpair()`, `searchpairpos()`) now stop slotting, as do the call forms the
+walker had not descended into. Parity case: `local_read_by_name.vim`.
+
+### R47-5. Closures read their defining activation by reference — ✅ FIXED (closes R46-O1)
+
+A lambda captured every free name BY VALUE wherever it was written, and
+`:function … closure` was accepted and ignored:
+
+| probe | vim | before |
+|---|---|---|
+| counter factory with `function! Inc() closure` / `let n += 1` | `1 2 3` | `1.0 1.0 1.0` |
+| `let x = 5 \| let G = {-> x} \| echo G()` at script level | E121, `-1` | `5` |
+| `let a = 1 \| let F = {-> a} \| let a = 2 \| echo F()` in a function | `2` | `1` |
+| `let F = {-> v} \| let v = 42 \| echo F()` in a function | E121, `-1` | `v:null` |
+
+A function activation's `l:`/`a:` are now shared dicts; a closure's frame
+carries `uf_scoped`, and a bare, `l:` or `a:` name missing locally is read,
+assigned and unlet there (`find_var_in_scoped_ht`, `find_hi_in_scoped_ht`). A
+lambda is a closure only when, created inside a function, its body reads a name
+that is a local or an argument there (`check_vars`); its value is then a Partial
+carrying the scope. `:function … closure` at top level is E932. Parity case:
+`closure_scopes.vim`. `examples/lambdas.vim` asserted the old script-level
+capture and now shows closures inside a function.
+
+### R47-6. A name read before it was assigned read 0 from a slot — ✅ FIXED
+
+`let zz += 1` with no `zz` was silent (vim: E121, and `zz` stays undefined),
+because the slot planner assumed every candidate was initialized. It now tracks
+definite assignment per block. Parity case: `slot_read_before_assign.vim`.
+
+### R47-7. A subscripted `:let` on an undefined base assigned anyway — ✅ FIXED
+
+`let zz[0] = 1` reported E121 and then E689 for indexing the failed read's
+value; `get_lval` fails the `:let` at the E121. Parity case:
+`let_lval_undefined_base.vim`.
+
+### R47-O1 (open). Lambda names are numbered per compile, not per evaluation
+
+vim allocates a new `ufunc_T` (`<lambda>N`, a global counter) every time a
+lambda EXPRESSION is evaluated: `for i in range(2) | echo string({-> 3}) |
+endfor` prints `<lambda>10` then `<lambda>11`; this port names each lambda
+once, when it is compiled, and prints the same name twice. Numbering per
+evaluation needs a registry entry per evaluation, freed when the last
+reference goes — vim's refcount — which this port does not model.
+
+### R47-O2 (open). After E932 the body of a top-level `closure` function runs as commands
+
+vim fails `:function Top() closure` at its header, then reads the following
+lines as ordinary commands (`E133: :return not inside a function`,
+`E193: :endfunction not inside a function`). This port reports the E932 and
+skips the whole definition.
+
+### R47-O3 (open). An error inside `execute()` prints ahead of the pending `:echo`
+
+`echo 1 | call execute('let zz += 1')` on separate lines: vim prints `1` and
+then the E121; this port prints the E121 first. Present before this round.
+
+### R47-O4 (open). `expr(args)` on a value that is not a Funcref
+
+`handle_subscript` treats `(` as a call only when the value is a function, so
+`echo 5('x')` prints `5 x` and `let r = 5('x')` is
+`E488: Trailing characters: ('x')` in both engines; this port compiles the call
+and reports `E15: not a function`. The fix needs the parse to depend on a
+run-time type.
+
+### R46-O2, R30-O1 — unchanged
