@@ -157,16 +157,8 @@ pub fn f_typename(argvars: &[typval_T], rettv: &mut typval_T) {
 ///
 /// A **lambda**'s shape is its declared parameter count `d` and how many leading
 /// arguments `k` a partial has bound: `d == 0` or `k > d` renders `...`, else
-/// `d - k` parameters of `any`. Nothing per-lambda is stored.
-///
-/// KNOWN GAP (BUGS.md R22-O1): a lambda with NO declared parameters that
-/// captures a variable (`{-> a}`) prints `func(): [unknown]` here where vim
-/// prints `func(...): [unknown]`. This port desugars a capture into a leading
-/// parameter pre-bound by a Partial (`compile_viml.rs`, `Expr::Lambda`), while
-/// vim keeps captures in the closure environment and out of `uf_args` — so
-/// `{-> a}` (d=1, k=1 here) is indistinguishable from `function({x -> x}, [1])`
-/// (d=1, k=1 in vim too), and those two have DIFFERENT answers in vim. Telling
-/// them apart needs a capture count recorded on the function, not a rule.
+/// `d - k` parameters of `any`. Nothing per-lambda is stored: a closure's
+/// variables live in its defining activation, never in `uf_args`.
 fn type_name_of(tv: &typval_T) -> String {
     // The member type of a container: the shared type of every item, else "any".
     fn member_of<'a>(mut items: impl Iterator<Item = &'a typval_T>) -> String {
@@ -206,20 +198,12 @@ fn type_name_of(tv: &typval_T) -> String {
                     return "func(...): any".into();
                 }
                 // A lambda stores nothing per-function beyond its arity, so the
-                // shape is the DECLARED parameter count `d` minus what a Partial
-                // bound, `k`, with `d == 0` or `k > d` rendering `...`.
-                //
-                // "Declared" is the source's count, not `uf_args.len()`: this
-                // port desugars each captured variable into a leading parameter
-                // that the lambda's own Partial pre-binds (`uf_captures`), so
-                // both counts carry the same synthetic entries and both must
-                // drop them. Without that, `{-> a}` is (1, 1) here and so is
-                // `function({x -> x}, [1])` — and vim prints `func(...)` for the
-                // first and `func()` for the second. Measured across all twelve
-                // shapes (`tests/parity_cases/typename_lambda_capture.vim`).
-                let caps = f.uf_captures;
-                let d = f.uf_args.len().saturating_sub(caps);
-                let k = bound.saturating_sub(caps);
+                // shape is the declared parameter count `d` minus what a Partial
+                // bound, `k`, with `d == 0` or `k > d` rendering `...`. Measured
+                // across twelve shapes
+                // (`tests/parity_cases/typename_lambda_capture.vim`).
+                let d = f.uf_args.len();
+                let k = bound;
                 if d == 0 || k > d {
                     return "func(...): [unknown]".into();
                 }
@@ -12221,6 +12205,8 @@ pub fn common_function(argvars: &[typval_T], rettv: &mut typval_T, is_funcref: b
             // written in the call (`function('F', d)`) is an EXPLICIT binding,
             // so it is never re-bound by a later Dict read.
             pt_auto: false,
+            // c: `pt->pt_func = arg_pt->pt_func` keeps a lambda's scope.
+            pt_scoped: arg_pt.as_ref().and_then(|ap| ap.pt_scoped.clone()),
         };
 
         // c:1752 collect bound arguments: arg_pt's then the new list's.

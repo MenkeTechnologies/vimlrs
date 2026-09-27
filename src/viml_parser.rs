@@ -2123,12 +2123,13 @@ fn parse_function(cur: &mut Lines, header: &str) -> Result<Stmt, VimlError> {
     }
     // c: `ex_function` reads the attributes that follow the parameter list —
     // `range`, `abort`, `dict`, `closure` (userfunc.c) — setting `FC_RANGE`,
-    // `FC_ABORT`, `FC_DICT`, `FC_CLOSURE`. `dict` and `abort` are observable
-    // and are recorded; `range` and `closure` are accepted and ignored (this
-    // port has no `:{range}call` and captures closures by value).
+    // `FC_ABORT`, `FC_DICT`, `FC_CLOSURE`. `dict`, `abort` and `closure` are
+    // observable and are recorded; `range` is accepted and ignored (this port
+    // has no `:{range}call`).
     let attrs = &header[rparen + 1..];
     let dict = attrs.split_whitespace().any(|w| w == "dict");
     let abort = attrs.split_whitespace().any(|w| w == "abort");
+    let closure = attrs.split_whitespace().any(|w| w == "closure");
     let (body, term) = parse_block(cur, &["endfunction"])?;
     if term.is_none() {
         return Err(VimlError::msg("E126: Missing :endfunction"));
@@ -2141,6 +2142,7 @@ fn parse_function(cur: &mut Lines, header: &str) -> Result<Stmt, VimlError> {
         bang,
         dict,
         abort,
+        closure,
         // Legacy `:function`: bare names in the body do NOT see script-scope
         // vars (that requires an explicit `s:`/`g:` prefix).
         vim9: false,
@@ -2272,6 +2274,7 @@ fn parse_def(cur: &mut Lines, header: &str) -> Result<Stmt, VimlError> {
         // c: a vim9 `:def` body always aborts on error — `ex_docmd.c:647`'s
         // reset is for legacy function lines only.
         abort: true,
+        closure: false,
     })
 }
 
@@ -3913,6 +3916,7 @@ impl Parser {
         Ok(Expr::Lambda {
             params,
             body: Box::new(body),
+            vim9: true,
         })
     }
 
@@ -3992,6 +3996,7 @@ impl Parser {
         Ok(Expr::Lambda {
             params,
             body: Box::new(body),
+            vim9: vim9_active(),
         })
     }
 

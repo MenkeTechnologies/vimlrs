@@ -438,19 +438,6 @@ pub struct ufunc_T {
     pub uf_luaref: i32,
     /// `sctx_T uf_script_ctx` — script context where the function was defined.
     pub uf_script_ctx: sctx_T,
-    /// RUST-PORT NOTE — NO C COUNTERPART. How many leading [`Self::uf_args`]
-    /// entries are captured variables this port desugared into parameters
-    /// rather than parameters the source declared.
-    ///
-    /// In C a closure's captures live in the `funccal` chain and never enter
-    /// `uf_args`, so `uf_args.ga_len` IS the declared count and no such field is
-    /// needed. This port pre-binds each capture as a leading parameter (see
-    /// `compile_viml`'s `Expr::Lambda`), which makes `uf_args.len()` the declared
-    /// count PLUS the captures — indistinguishable, without this, from a Partial
-    /// that bound the same number of real parameters. `typename()` is the reader
-    /// that can tell the difference and must: vim prints `func(...)` for
-    /// `{-> a}` and `func()` for `function({x -> x}, [1])`.
-    pub uf_captures: usize,
 }
 
 /// "Look up a user function's metadata by name → reduced `ufunc_T`" hook,
@@ -474,13 +461,15 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// Port of `find_var_in_scoped_ht()` from `Src/eval/userfunc.c` — search a
-/// lambda's captured parent scope for a variable. RUST-PORT NOTE: closures
-/// capture the enclosing `a:`/`l:` scope at compile time and resolve through
-/// [`eval_variable`](crate::ported::eval::vars::eval_variable), so this runtime
-/// parent-scope search is unwired → `None`.
-pub fn find_var_in_scoped_ht() -> Option<crate::ported::eval::typval_defs_h::typval_T> {
-    None
+/// Port of `find_var_in_scoped_ht()` from `vendor/eval/userfunc.c:4056` — the
+/// value of `name` in the scopes a closure reads through: the running
+/// activation's `uf_scoped`, then that one's, and so on. Only the function
+/// scopes take part (a bare or `l:` name, an `a:` name); every other scope is
+/// the same dict from anywhere, so the caller has already looked there.
+pub fn find_var_in_scoped_ht(name: &str) -> Option<crate::ported::eval::typval_defs_h::typval_T> {
+    let (d, varname) = find_hi_in_scoped_ht(name)?;
+    let found = d.borrow().dv_hashtab.get(&varname).cloned();
+    found
 }
 
 /// Port of `get_func_line()` from `Src/eval/userfunc.c` — the getline callback
@@ -1078,14 +1067,14 @@ pub fn get_funccal_args_var() -> Option<crate::ported::eval::typval_defs_h::typv
 /// `l:` scope dict (read-snapshot), or `None` when not in a function.
 pub fn get_funccal_local_dict() -> Option<crate::ported::eval::typval_defs_h::dict_T> {
     crate::ported::eval::vars::funccal_stack
-        .with(|s| s.borrow().last().map(|f| f.fc_l_vars.clone()))
+        .with(|s| s.borrow().last().map(|f| f.fc_l_vars.borrow().clone()))
 }
 
 /// Port of `get_funccal_args_dict()` from `Src/eval/userfunc.c` — the current
 /// `a:` argument scope dict (read-snapshot), or `None`.
 pub fn get_funccal_args_dict() -> Option<crate::ported::eval::typval_defs_h::dict_T> {
     crate::ported::eval::vars::funccal_stack
-        .with(|s| s.borrow().last().map(|f| f.fc_l_avars.clone()))
+        .with(|s| s.borrow().last().map(|f| f.fc_l_avars.borrow().clone()))
 }
 
 /// Port of `get_funccal_local_ht()` from `Src/eval/userfunc.c` — the hashtable
@@ -1364,15 +1353,42 @@ pub fn do_return(
     true
 }
 
-/// Port of `find_hi_in_scoped_ht()` from `Src/eval/userfunc.c:4023`.
+/// Port of `find_hi_in_scoped_ht()` from `vendor/eval/userfunc.c:4023`.
 ///
-/// Search a hashitem in a lambda's captured parent scope. RUST-PORT NOTE: the C
-/// walks `current_funccal->fc_func->uf_scoped`, the closure's runtime
-/// parent-`funccall_T` chain; the reduced `ufunc_T` does not model `uf_scoped`
-/// (closures capture their enclosing scope at compile time in the bridge), so
-/// `fc_func->uf_scoped` is always absent → `None` (mirrors [`find_var_in_scoped_ht`]).
-pub fn find_hi_in_scoped_ht(_name: &str) -> Option<crate::ported::eval::typval_defs_h::typval_T> {
+/// Walk `current_funccal->fc_func->uf_scoped` (here the running frame's
+/// `fc_scoped`) and answer the scope dict of the first activation that holds
+/// `name`, with the key it is stored under — the C's `hashitem_T` plus `*pht`.
+/// `None` outside a closure, and for a name no function scope can hold.
+pub fn find_hi_in_scoped_ht(
+    name: &str,
+) -> Option<(
+    std::rc::Rc<std::cell::RefCell<crate::ported::eval::typval_defs_h::dict_T>>,
+    String,
+)> {
+    // c: `find_var_ht` inside a function — `a:` is the argument scope, `l:` and
+    // a bare name the local one; any other prefix is not a function scope.
+    let (args, varname) = if let Some(v) = name.strip_prefix("a:") {
+        (true, v)
+    } else if let Some(v) = name.strip_prefix("l:") {
+        (false, v)
+    } else if name.as_bytes().get(1) == Some(&b':') {
+        return None;
+    } else {
+        (false, name)
+    };
+    if varname.is_empty() {
+        return None;
+    }
     // c:4025 current_funccal == NULL || fc_func->uf_scoped == NULL -> return NULL.
+    let mut sc = crate::ported::eval::vars::funccal_stack
+        .with(|s| s.borrow().last().and_then(|f| f.fc_scoped.clone()));
+    while let Some(fc) = sc {
+        let d = if args { &fc.a } else { &fc.l };
+        if d.borrow().dv_hashtab.contains_key(varname) {
+            return Some((d.clone(), varname.to_string()));
+        }
+        sc = fc.up.clone();
+    }
     None
 }
 
@@ -1921,6 +1937,7 @@ pub fn get_lambda_tv(
             // c:360 `xcalloc` zeroes the struct — a lambda's partial carries no
             // dict, so nothing was auto-bound.
             pt_auto: false,
+            pt_scoped: None,
         };
         *rettv = typval_T {
             v_type: VAR_PARTIAL, // c:412
@@ -2909,8 +2926,8 @@ mod tests {
         assert!(get_funccal_args_ht().is_none());
         // Push a frame with one l: and one a: var.
         let mut frame = FuncScope::default();
-        tv_dict_add_nr(&mut frame.fc_l_vars, "x", 1);
-        tv_dict_add_nr(&mut frame.fc_l_avars, "1", 9);
+        tv_dict_add_nr(&mut frame.fc_l_vars.borrow_mut(), "x", 1);
+        tv_dict_add_nr(&mut frame.fc_l_avars.borrow_mut(), "1", 9);
         funccal_stack.with(|s| s.borrow_mut().push(frame));
         assert_eq!(get_funccal_local_ht().unwrap().len(), 1);
         assert!(get_funccal_local_dict()

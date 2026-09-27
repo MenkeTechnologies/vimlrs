@@ -43,18 +43,14 @@ pub struct UserFuncDef {
     pub abort: bool,
     /// Compiled function body.
     pub chunk: fusevm::Chunk,
-    /// How many of the leading [`Self::params`] are SYNTHETIC capture
-    /// parameters rather than parameters the source declared.
-    ///
-    /// No C counterpart: Vim keeps a closure's captured variables in the
-    /// funccal chain and out of `uf_args` entirely, while this port desugars
-    /// each capture into a leading parameter pre-bound by a Partial (see the
-    /// `Expr::Lambda` arm). That desugaring is invisible to callers but not to
-    /// anything that READS the arity — `typename()` renders a lambda from its
-    /// declared parameter count, and without this it could not tell `{-> a}`
-    /// (0 declared, 1 captured) from `function({x -> x}, [1])` (1 declared, 1
-    /// bound), which vim renders differently. Always 0 for a `:function`.
-    pub captures: usize,
+    /// c: `FC_CLOSURE` — declared `closure`. Such a function reads the
+    /// variables of the activation that defined it (`register_closure`).
+    #[serde(default)]
+    pub closure: bool,
+    /// c: `uf_scoped` — the activation a `closure` function was defined in,
+    /// recorded when its `:function` line runs. Runtime state, never cached.
+    #[serde(skip)]
+    pub scoped: Option<std::rc::Rc<crate::ported::eval::vars::ScopedFunccal>>,
 }
 
 /// A compiled program: the top-level `main` chunk plus the user functions it
@@ -146,10 +142,10 @@ pub fn deferred_key(def: &UserFuncDef) -> String {
     format!("{}#{:016x}", def.name, h.finish())
 }
 
-/// Collect the bare (unscoped) free variable names referenced in `e` that are
-/// not in `bound` — used to capture a lambda's enclosing-scope variables. A
-/// nested lambda's own params extend `bound` for its body. Function-call names
-/// are not variables and are not collected.
+/// Collect the function-scope variable names referenced in `e` that are not in
+/// `bound` — the names `check_vars` tests when a lambda is created, to decide
+/// whether it is a closure. A nested lambda's own params extend `bound` for
+/// its body. Function-call names are not variables and are not collected.
 fn collect_free_vars(
     e: &Expr,
     bound: &mut Vec<String>,
@@ -157,16 +153,16 @@ fn collect_free_vars(
 ) {
     match e {
         Expr::Var(n) => {
-            // A lambda closes over the enclosing function's local scope: bare
-            // names and the function-tied scopes `a:` (arguments) and `l:`
-            // (locals). The dynamic scopes (`g:`/`b:`/`w:`/`t:`/`v:`/`s:`)
-            // resolve globally when the lambda runs, so they are not captured.
+            // c: `check_vars` counts only a name whose scope is the running
+            // function's locals or arguments: bare names, `l:` and `a:`. The
+            // other scopes (`g:`/`b:`/`w:`/`t:`/`v:`/`s:`) are the same from
+            // inside the lambda.
             let capturable = !n.contains(':') || n.starts_with("a:") || n.starts_with("l:");
             if capturable && !bound.contains(n) {
                 out.insert(n.clone());
             }
         }
-        Expr::Lambda { params, body } => {
+        Expr::Lambda { params, body, .. } => {
             let base = bound.len();
             bound.extend(params.iter().cloned());
             collect_free_vars(body, bound, out);
@@ -254,9 +250,6 @@ fn build_user_func_def(
         .map(|(i, e)| Ok((*i, compile_expr_only(e)?)))
         .collect::<Result<Vec<_>, VimlError>>()?;
     Ok(UserFuncDef {
-        // A `:function` body reads its enclosing scope at call time; nothing is
-        // desugared into a leading parameter, so there are no capture params.
-        captures: 0,
         name: name.to_string(),
         params: args.to_vec(),
         defaults,
@@ -264,7 +257,9 @@ fn build_user_func_def(
         vim9: flags.vim9,
         dict: flags.dict,
         abort: flags.abort,
-        chunk: compile_function_body(body, exc, def_line, flags.abort, flags.vim9)?,
+        chunk: compile_function_body(body, exc, def_line, flags.abort, flags.vim9, flags.closure)?,
+        closure: flags.closure,
+        scoped: None,
     })
 }
 
@@ -281,6 +276,8 @@ struct FuncFlags {
     dict: bool,
     /// c: `FC_ABORT` — the `abort` attribute.
     abort: bool,
+    /// c: `FC_CLOSURE` — the `closure` attribute.
+    closure: bool,
 }
 
 /// Split a `:function` name that targets a Dict key (`d.key`, `g:d.key`,
@@ -412,6 +409,7 @@ fn compile_program_inner(
             vim9,
             dict: _,
             abort,
+            closure,
         } = s
         {
             // `:function d.key()` defines an ANONYMOUS function and stores a
@@ -433,6 +431,7 @@ fn compile_program_inner(
                         vim9: *vim9,
                         dict: true,
                         abort: *abort,
+                        closure: *closure,
                     };
                     funcs.push(build_user_func_def(
                         &anon, args, defaults, body, flags, *line, exc,
@@ -520,6 +519,7 @@ fn compile_function_body(
     def_line: u32,
     abort: bool,
     vim9: bool,
+    closure: bool,
 ) -> Result<fusevm::Chunk, VimlError> {
     let mut c = Compiler::new(true, exc);
     // vim numbers a function body's lines from 1 at the first line AFTER the
@@ -538,7 +538,9 @@ fn compile_function_body(
     // `Stmt::Let`, so the body alone cannot tell a declaration from an
     // assignment — until it can, a def body keeps its names dict-backed and the
     // `b_setvar` script-scope fallback resolves them at run time.
-    if !exc && !vim9 {
+    // A closure (a lambda, or a `:function … closure`) is excluded for the same
+    // reason: a bare name it never assigns may be its defining function's.
+    if !exc && !vim9 && !closure {
         (c.slots, c.int_slots) = slot_plan(body, true);
     }
     // c: `ex_docmd.c:647-651` resets `did_emsg` after every command of a function
@@ -717,8 +719,8 @@ fn slot_plan(stmts: &[(u32, Stmt)], in_function: bool) -> SlotPlan {
     }
 
     // The function-local slot key for a name, or None if it lives in another
-    // scope. In a function, `l:name` IS bare `name` (legacy VimL has no closures),
-    // so both share a slot; every other prefix (`g:`/`s:`/`a:`/`b:`/`w:`/`t:`/
+    // scope. In a function, `l:name` IS bare `name`, so both share a slot; every
+    // other prefix (`g:`/`s:`/`a:`/`b:`/`w:`/`t:`/
     // `v:`) is a distinct dict-backed store and can't be slotted.
     fn slot_key(name: &str, in_function: bool) -> Option<&str> {
         if is_bare(name) {
@@ -771,7 +773,8 @@ fn slot_plan(stmts: &[(u32, Stmt)], in_function: bool) -> SlotPlan {
     fn walk_expr(e: &Expr, cx: &mut Ctx) {
         match e {
             // A callee runs in its own frame and cannot see this function's
-            // `l:` locals (legacy VimL has no closures), so slotting survives
+            // `l:` locals — only a closure defined in THIS body can, and a
+            // lambda or a `:function` here already bails — so slotting survives
             // user/value-builtin calls inside a function. At SCRIPT scope a bare
             // var IS `g:`, which a callee can read — bail. Name-introspecting
             // builtins bail in either scope.
@@ -822,6 +825,9 @@ fn slot_plan(stmts: &[(u32, Stmt)], in_function: bool) -> SlotPlan {
                 }
             }
             Expr::Var(name) if is_scope_dict(name) => *cx.bail = true,
+            // A lambda may be a closure over this function's locals, reading
+            // and writing them by name after the fact: a slot is invisible to it.
+            Expr::Lambda { .. } => *cx.bail = true,
             // A call through a value, or a Dict member's function: the same rule
             // as a named call, and the operands may themselves hold one
             // (`eval('{-> q}')()` reads `q` by name through the inner call).
@@ -1643,6 +1649,7 @@ impl Compiler {
                 vim9,
                 dict,
                 abort,
+                closure,
             } => {
                 // A `:function` reached HERE (in `stmt`, not `compile_program`'s
                 // top-level loop) is nested inside a control-flow block and/or
@@ -1667,6 +1674,7 @@ impl Compiler {
                     vim9: *vim9,
                     dict: *dict,
                     abort: *abort,
+                    closure: *closure,
                 };
                 let def = build_user_func_def(
                     name,
@@ -2962,36 +2970,15 @@ impl Compiler {
                     }
                 }
             }
-            Expr::Lambda { params, body } => {
-                // Desugar to an anonymous function `<lambda>N(captures…, params…)`
-                // whose body binds each into the local scope (so each is referenced
-                // by bare name, as lambdas allow) and returns the body expression.
-                // Free variables of the body are captured BY VALUE here: the lambda
-                // value is a Partial that pre-binds their current values.
+            Expr::Lambda { params, body, vim9 } => {
+                // c: `get_lambda_tv` — an anonymous function `<lambda>N` whose
+                // body is `return {expr}`. Its parameters are bound as bare
+                // locals (so the body names them without `a:`).
                 let name = next_lambda_name();
-                let mut bound = params.clone();
-                let mut free = std::collections::BTreeSet::new();
-                collect_free_vars(body, &mut bound, &mut free);
-                let captures: Vec<String> = free.into_iter().collect();
-
-                // Each capture becomes a leading parameter of the anonymous
-                // function. A scoped capture (`a:n`/`l:n`) maps to the bare param
-                // `n`, so the body's `a:n`/`l:n`/`n` reference resolves to the
-                // rebound argument/local inside the lambda; the captured VALUE is
-                // still read from the scoped name in the enclosing scope.
-                let cap_param = |c: &str| -> String {
-                    c.strip_prefix("a:")
-                        .or_else(|| c.strip_prefix("l:"))
-                        .unwrap_or(c)
-                        .to_string()
-                };
-                let cap_params: Vec<String> = captures.iter().map(|c| cap_param(c)).collect();
-                let all_params: Vec<String> =
-                    cap_params.iter().chain(params.iter()).cloned().collect();
                 // A lambda body is one expression on one line, so every
                 // statement of the synthesized body reports line 1 — which is
                 // what vim reports for a throw inside `{x -> …}`.
-                let mut stmts: Block = all_params
+                let mut stmts: Block = params
                     .iter()
                     .map(|p| {
                         (
@@ -3004,43 +2991,39 @@ impl Compiler {
                     })
                     .collect();
                 stmts.push((1, Stmt::Return(Some((**body).clone()))));
-                let chunk = compile_function_body(&stmts, self.exc, 0, false, false)?;
-                let n_captures = cap_params.len();
+                let chunk = compile_function_body(&stmts, self.exc, 0, false, *vim9, true)?;
                 LAMBDA_FUNCS.with(|f| {
                     f.borrow_mut().push(UserFuncDef {
                         name: name.clone(),
-                        params: all_params,
-                        // The leading `cap_params` are this desugaring's doing,
-                        // not the source's — `typename()` must not count them.
-                        captures: n_captures,
+                        params: params.clone(),
                         defaults: Vec::new(),
                         bang: true,
-                        // A lambda captures its free vars by value (they are
-                        // rebound as leading params), so it needs no runtime
-                        // script-scope fallback.
-                        vim9: false,
+                        vim9: *vim9,
                         // c: `get_lambda_tv` builds the ufunc with
                         // `FC_LAMBDA|FC_CLOSURE`, never `FC_DICT` — a lambda
                         // stored in a Dict is not bound to it.
                         // c: `get_lambda_tv` sets no `FC_ABORT` either.
                         abort: false,
                         dict: false,
+                        // Whether THIS evaluation is a closure is decided when
+                        // it runs, and carried by the value (`VIML_MAKE_LAMBDA`).
+                        closure: false,
+                        scoped: None,
                         chunk,
                     })
                 });
-                // Value: `function('<lambda>N')`, or a capturing Partial
-                // `function('<lambda>N', [cap0, cap1, …])` when there are free vars.
-                let mut fn_args = vec![Expr::Str(name)];
-                if !captures.is_empty() {
-                    fn_args.push(Expr::List(
-                        captures.iter().map(|c| Expr::Var(c.clone())).collect(),
-                    ));
+                // c: while the body is parsed, `check_vars` sets `eval_lavars`
+                // for every name it reads that is a local or an argument of the
+                // current function; `VIML_MAKE_LAMBDA` makes that test against
+                // the names collected here.
+                let mut names = std::collections::BTreeSet::new();
+                collect_free_vars(body, &mut Vec::new(), &mut names);
+                self.load_str(&name);
+                let n = names.len().min(u8::MAX as usize - 1);
+                for v in names.iter().take(n) {
+                    self.load_str(v);
                 }
-                self.expr(&Expr::Call {
-                    name: "function".to_string(),
-                    args: fn_args,
-                    emsg_name: None,
-                })?;
+                self.emit(Op::CallBuiltin(h::VIML_MAKE_LAMBDA, (n + 1) as u8));
             }
             Expr::Unary { op, expr } => {
                 // Native numeric negation → `Op::Negate` (Int wrapping-negates,

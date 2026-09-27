@@ -23,16 +23,37 @@ use crate::ported::eval::typval_defs_h::{
 
 /// Reduced `funccall_T` (`typval_defs.h:299`) — one function-call activation's
 /// scope dicts. The full struct (profiling, defer, breakpoints, …) is not
-/// modelled; only the two scope dicts the variable lookup needs.
+/// modelled; only the two scope dicts the variable lookup needs, and the
+/// defining activation a closure reads through.
+///
+/// The dicts are shared (`Rc`) because a closure keeps its defining
+/// activation's variables alive and writable after that call has returned —
+/// the C keeps the `funccall_T` itself alive through `fc_refcount`.
 #[derive(Default)]
 pub struct FuncScope {
     /// `dict_T fc_l_vars` — the `l:` local scope. (typval_defs.h:304)
-    pub fc_l_vars: dict_T,
+    pub fc_l_vars: Rc<RefCell<dict_T>>,
     /// `dict_T fc_l_avars` — the `a:` argument scope. (typval_defs.h:306)
-    pub fc_l_avars: dict_T,
+    pub fc_l_avars: Rc<RefCell<dict_T>>,
+    /// c: `fc_func->uf_scoped` — for a closure, the activation it was defined
+    /// in, whose variables its bare, `l:` and `a:` names fall back to.
+    pub fc_scoped: Option<Rc<ScopedFunccal>>,
     /// `ufunc_T *fc_func`'s name (`typval_defs.h:300`) — the called function's
     /// name, for error messages / `v:throwpoint` (`func_name`).
     pub fc_name: String,
+}
+
+/// A function activation as a closure sees it: the `funccall_T` a closure
+/// function's `uf_scoped` points at, with that activation's own `uf_scoped`
+/// as `up` (`fc_func->uf_scoped`, followed by `find_var_in_scoped_ht`).
+#[derive(Debug)]
+pub struct ScopedFunccal {
+    /// The activation's `l:` dict.
+    pub l: Rc<RefCell<dict_T>>,
+    /// The activation's `a:` dict.
+    pub a: Rc<RefCell<dict_T>>,
+    /// The activation that one was itself defined in, if it is a closure.
+    pub up: Option<Rc<ScopedFunccal>>,
 }
 
 thread_local! {
@@ -108,11 +129,20 @@ pub fn set_var(name: &str, name_len: usize, tv: typval_T, _copy: bool) {
             tabpage_vars.with(|d| tv_dict_add_tv(&mut d.borrow_mut(), &varname, tv));
         }
         VarScopeDict::FuncLocal => {
-            funccal_stack.with(|s| {
-                if let Some(top) = s.borrow_mut().last_mut() {
-                    tv_dict_add_tv(&mut top.fc_l_vars, &varname, tv);
-                }
-            });
+            // c:2836 `di = find_var_in_ht(ht, …)`, and when that misses,
+            // `find_var_in_scoped_ht` — a closure assigns to the variable of the
+            // activation it was defined in when that one has it.
+            let local = funccal_stack.with(|s| s.borrow().last().map(|f| f.fc_l_vars.clone()));
+            if let Some(local) = local {
+                let present = local.borrow().dv_hashtab.contains_key(&*varname);
+                let target = if present {
+                    local
+                } else {
+                    crate::ported::eval::userfunc::find_hi_in_scoped_ht(&varname)
+                        .map_or(local, |(d, _)| d)
+                };
+                tv_dict_add_tv(&mut target.borrow_mut(), &varname, tv);
+            }
         }
         VarScopeDict::VimVar => {
             // c: existing v: var — decline read-only slots (var_check_ro, E46);
@@ -146,11 +176,13 @@ pub fn set_var(name: &str, name_len: usize, tv: typval_T, _copy: bool) {
             // name never gets that far and is `e_illvar` at c:2882. Verified
             // against vim 9.2: `let a:a = 5` in a function with parameter `a` is
             // E46, `let a:zz = 5` is E461.
-            let exists = funccal_stack.with(|s| {
-                s.borrow()
-                    .last()
-                    .is_some_and(|f| tv_dict_find(&f.fc_l_avars, &varname).is_some())
-            });
+            let exists =
+                funccal_stack.with(|s| {
+                    s.borrow()
+                        .last()
+                        .is_some_and(|f| tv_dict_find(&f.fc_l_avars.borrow(), &varname).is_some())
+                }) || crate::ported::eval::userfunc::find_hi_in_scoped_ht(&format!("a:{varname}"))
+                    .is_some();
             let msg = if exists {
                 format!("E46: Cannot change read-only variable \"{name}\"")
             } else {
@@ -631,6 +663,7 @@ pub fn evalvars_init() {
                 pt_argv: Vec::new(),
                 pt_dict: None,
                 pt_auto: false,
+                pt_scoped: None,
             }))),
         };
         // c: set_reg_var(0) → v:register defaults to '"'.
@@ -904,12 +937,25 @@ pub fn do_unlet(name: &str, _name_len: usize, forceit: bool) -> i32 {
     if let Some(k) = name.strip_prefix("t:") {
         return rm(&tabpage_vars, k);
     }
-    // Bare name: current function-local scope, else global.
+    // Bare name: current function-local scope, else global. c: a miss in the
+    // local scope tries `find_hi_in_scoped_ht` — a closure unlets the variable
+    // of the activation it was defined in.
     let in_func = funccal_stack.with(|s| {
-        s.borrow_mut()
-            .last_mut()
-            .map(|top| top.fc_l_vars.dv_hashtab.shift_remove(name).is_some())
+        s.borrow().last().map(|top| {
+            top.fc_l_vars
+                .borrow_mut()
+                .dv_hashtab
+                .shift_remove(name)
+                .is_some()
+        })
     });
+    let in_func = match in_func {
+        Some(false) => Some(
+            crate::ported::eval::userfunc::find_hi_in_scoped_ht(name)
+                .is_some_and(|(d, k)| d.borrow_mut().dv_hashtab.shift_remove(&k).is_some()),
+        ),
+        other => other,
+    };
     match in_func {
         Some(true) => ok,
         Some(false) => missing(),
@@ -1610,13 +1656,13 @@ pub fn find_var(name: &str, _no_autoload: bool) -> Option<typval_T> {
             VarScopeDict::FuncLocal => funccal_stack.with(|s| {
                 s.borrow()
                     .last()
-                    .map(|f| scope_snapshot(&f.fc_l_vars))
+                    .map(|f| scope_snapshot(&f.fc_l_vars.borrow()))
                     .unwrap_or_default()
             }),
             VarScopeDict::FuncArgs => funccal_stack.with(|s| {
                 s.borrow()
                     .last()
-                    .map(|f| scope_snapshot(&f.fc_l_avars))
+                    .map(|f| scope_snapshot(&f.fc_l_avars.borrow()))
                     .unwrap_or_default()
             }),
         });
@@ -1643,14 +1689,27 @@ pub fn find_var(name: &str, _no_autoload: bool) -> Option<typval_T> {
         VarScopeDict::Tabpage => {
             tabpage_vars.with(|d| tv_dict_find(&d.borrow(), &varname).cloned())
         }
-        VarScopeDict::FuncLocal => funccal_stack.with(|s| {
-            let s = s.borrow();
-            tv_dict_find(&s.last()?.fc_l_vars, &varname).cloned()
-        }),
-        VarScopeDict::FuncArgs => funccal_stack.with(|s| {
-            let s = s.borrow();
-            tv_dict_find(&s.last()?.fc_l_avars, &varname).cloned()
-        }),
+        // c:2424 a miss in the activation's own scope searches the scopes a
+        // closure was defined in (`find_var_in_scoped_ht`).
+        VarScopeDict::FuncLocal | VarScopeDict::FuncArgs => {
+            let args = matches!(scope, VarScopeDict::FuncArgs);
+            let own = funccal_stack.with(|s| {
+                let s = s.borrow();
+                let f = s.last()?;
+                let d = if args { &f.fc_l_avars } else { &f.fc_l_vars };
+                let found = tv_dict_find(&d.borrow(), &varname).cloned();
+                found
+            });
+            own.or_else(|| {
+                let (d, _) = crate::ported::eval::userfunc::find_hi_in_scoped_ht(&if args {
+                    format!("a:{varname}")
+                } else {
+                    varname.to_string()
+                })?;
+                let found = tv_dict_find(&d.borrow(), &varname).cloned();
+                found
+            })
+        }
         // c: v: variables live in the vimvars[] table. Returns None for
         //   VAR_UNKNOWN slots (v:val/v:key, supplied dynamically by the bridge)
         //   and for unknown v: names.
@@ -3740,7 +3799,7 @@ mod find_var_ht_dict_tests {
         funccal_stack.with(|s| s.borrow_mut().clear());
         funccal_stack.with(|s| {
             let mut frame = FuncScope::default();
-            tv_dict_add_nr(&mut frame.fc_l_avars, "1", 7);
+            tv_dict_add_nr(&mut frame.fc_l_avars.borrow_mut(), "1", 7);
             s.borrow_mut().push(frame);
         });
         // Bare write lands in l:, read back through the resolver.

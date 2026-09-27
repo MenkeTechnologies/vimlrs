@@ -40,6 +40,10 @@ pub enum Expr {
         params: Vec<String>,
         /// The single body expression.
         body: Box<Expr>,
+        /// Written in vim9 code (the `(x) => x` form, or any lambda in a vim9
+        /// region): a bare name the lambda does not bind falls back to script
+        /// scope, as in a `:def`.
+        vim9: bool,
     },
     /// Dict literal `{k: v, …}`.
     Dict(Vec<(Expr, Expr)>),
@@ -439,6 +443,9 @@ pub enum Stmt {
         /// function body (`ex_docmd.c:647-651`), so the flag stays set through
         /// the rest of the body AND out into the caller.
         abort: bool,
+        /// c: `FC_CLOSURE` — the `closure` attribute: the function reads the
+        /// variables of the function activation that ran its `:function`.
+        closure: bool,
     },
     /// `:try … :catch {pat} … :finally … :endtry`.
     /// `:try` … `:endtry`.

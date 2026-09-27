@@ -571,6 +571,8 @@ pub const VIML_UNLET_RANGE: u16 = 3618;
 pub const VIML_ERR_COUNT: u16 = 3619;
 /// Pop a baseline from `VIML_ERR_COUNT`; push `Bool(an error was reported since)`.
 pub const VIML_ERRS_AFTER: u16 = 3620;
+/// A lambda expression's value — see `b_make_lambda`.
+pub const VIML_MAKE_LAMBDA: u16 = 3621;
 /// `json_encode()`
 pub const VIML_FN_JSON_ENCODE: u16 = 3186;
 /// `json_decode()`
@@ -2986,6 +2988,7 @@ fn set_selfdict(
             pt_argv: argv,                   // c:3858 the partial's args are copied over
             pt_dict: Some(selfdict.clone()), // c:3840
             pt_auto: true,                   // c:3842
+            pt_scoped: None,                 // `uf_scoped` lives on the def
         }))),
     }
 }
@@ -4156,8 +4159,11 @@ fn call_user_function_raw(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
     // the arguments bound before it, as Vim evaluates defaults left to right.
     crate::ported::eval::vars::funccal_stack.with(|s| {
         s.borrow_mut().push(crate::ported::eval::vars::FuncScope {
-            fc_l_vars: crate::ported::eval::typval_defs_h::dict_T::default(),
-            fc_l_avars: crate::ported::eval::typval_defs_h::dict_T::default(),
+            fc_l_vars: Default::default(),
+            fc_l_avars: Default::default(),
+            fc_scoped: PENDING_SCOPED
+                .with(|p| p.borrow_mut().take())
+                .or_else(|| func.scoped.clone()),
             fc_name: name.to_string(),
         })
     });
@@ -4166,7 +4172,7 @@ fn call_user_function_raw(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
     if let Some(selftv) = PENDING_SELF.with(|s| s.borrow_mut().take()) {
         crate::ported::eval::vars::funccal_stack.with(|s| {
             if let Some(top) = s.borrow_mut().last_mut() {
-                tv_dict_add_tv(&mut top.fc_l_vars, "self", selftv);
+                tv_dict_add_tv(&mut top.fc_l_vars.borrow_mut(), "self", selftv);
             }
         });
     }
@@ -4182,7 +4188,7 @@ fn call_user_function_raw(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
         v.v_lock = crate::ported::eval::typval_defs_h::VarLockStatus::VAR_FIXED;
         crate::ported::eval::vars::funccal_stack.with(|s| {
             if let Some(top) = s.borrow_mut().last_mut() {
-                tv_dict_add_tv(&mut top.fc_l_avars, key, v);
+                tv_dict_add_tv(&mut top.fc_l_avars.borrow_mut(), key, v);
             }
         });
     };
@@ -5109,7 +5115,6 @@ fn find_func_hook(name: &str) -> Option<crate::ported::eval::userfunc::ufunc_T> 
             .map(|(i, _)| def.params[*i].clone())
             .collect(),
         uf_varargs: def.params.iter().any(|p| p == "..."),
-        uf_captures: def.captures,
         ..Default::default()
     })
 }
@@ -5185,7 +5190,10 @@ fn call_funcref_self(
                 v_lock: crate::ported::eval::typval_defs_h::VarLockStatus::VAR_UNLOCKED,
                 vval: v_dict(Some(d)),
             });
-            with_self(bound.or(selfdict), || call_named(&p.pt_name, args))
+            let scoped = p.pt_scoped.clone();
+            with_self(bound.or(selfdict), || {
+                with_scoped(scoped, || call_named(&p.pt_name, args))
+            })
         }
         _ => with_self(selfdict, || call_named(&tv_get_string(funcref), extra)),
     }
@@ -5212,7 +5220,22 @@ fn func_exists_hook(name: &str) -> bool {
 /// unconditionally). Returns a dummy the compiler immediately pops.
 fn b_define_func(vm: &mut VM, _argc: u8) -> Value {
     let key = tv_get_string(&pop_tv(vm));
-    if let Some(def) = PENDING_FUNCS.with(|p| p.borrow().get(&key).cloned()) {
+    if let Some(mut def) = PENDING_FUNCS.with(|p| p.borrow().get(&key).cloned()) {
+        // c: `ex_function` — a `closure` function outside any function is
+        // E932 and is not defined; inside one, `register_closure` records the
+        // running activation as its `uf_scoped`.
+        if def.closure {
+            match current_scope() {
+                Some(scope) => def.scoped = Some(scope),
+                None => {
+                    message::semsg(&format!(
+                        "E932: Closure function should not be at top level: {}",
+                        def.name
+                    ));
+                    return Value::Int(0);
+                }
+            }
+        }
         FUNCTIONS.with(|f| {
             f.borrow_mut()
                 .insert(canon_func_name(&def.name).into_owned(), def)
@@ -5231,6 +5254,85 @@ thread_local! {
     /// port has no `funcexe_T` to carry it through `call_named`, so it is parked
     /// here for the one call that immediately follows and taken exactly once.
     static PENDING_SELF: RefCell<Option<typval_T>> = const { RefCell::new(None) };
+}
+
+thread_local! {
+    /// The closure scope for the *next* user-function call — a lambda
+    /// partial's `pt_scoped` (c: `pt_func->uf_scoped`), taken by
+    /// [`call_user_function_raw`] when it pushes the frame. Parked like
+    /// [`PENDING_SELF`], for the same reason.
+    static PENDING_SCOPED: RefCell<Option<std::rc::Rc<crate::ported::eval::vars::ScopedFunccal>>> =
+        const { RefCell::new(None) };
+}
+
+/// c: `current_funccal`, as `register_closure` records it for a closure's
+/// `uf_scoped` — the running activation's scope dicts plus its own
+/// `uf_scoped`. `None` at script level.
+fn current_scope() -> Option<std::rc::Rc<crate::ported::eval::vars::ScopedFunccal>> {
+    crate::ported::eval::vars::funccal_stack.with(|s| {
+        s.borrow().last().map(|f| {
+            std::rc::Rc::new(crate::ported::eval::vars::ScopedFunccal {
+                l: f.fc_l_vars.clone(),
+                a: f.fc_l_avars.clone(),
+                up: f.fc_scoped.clone(),
+            })
+        })
+    })
+}
+
+/// Run `f` with `scoped` parked for the call it makes, clearing it after.
+fn with_scoped<R>(
+    scoped: Option<std::rc::Rc<crate::ported::eval::vars::ScopedFunccal>>,
+    f: impl FnOnce() -> R,
+) -> R {
+    PENDING_SCOPED.with(|s| *s.borrow_mut() = scoped);
+    let r = f();
+    PENDING_SCOPED.with(|s| *s.borrow_mut() = None);
+    r
+}
+
+/// `VIML_MAKE_LAMBDA` — the value of a lambda expression. Stack: the compiled
+/// function's name, then every variable name its body reads.
+///
+/// c: `get_lambda_tv` (`vendor/eval/userfunc.c:377`) makes the lambda a
+/// closure — `register_closure`, recording the running function activation as
+/// its `uf_scoped` — only when `current_funccal != NULL && eval_lavars`, and
+/// `check_vars` sets `eval_lavars` for a name that resolves to a local or an
+/// argument of that activation (or, through `find_var`, of the ones it can see).
+/// A closure is a Partial carrying that scope; anything else is the bare
+/// Funcref, and its body's names resolve in its own call alone.
+fn b_make_lambda(vm: &mut VM, argc: u8) -> Value {
+    use crate::ported::eval::vars::{eval_variable, funccal_stack};
+    let mut names = Vec::with_capacity(argc as usize);
+    for _ in 1..argc {
+        names.push(tv_get_string(&pop_tv(vm)));
+    }
+    let name = tv_get_string(&pop_tv(vm));
+    let in_function = funccal_stack.with(|s| !s.borrow().is_empty());
+    let reads_local = |n: &str| {
+        let function_scope = !n.contains(':') || n.starts_with("l:") || n.starts_with("a:");
+        function_scope && eval_variable(n).is_some()
+    };
+    if in_function && names.iter().any(|n| reads_local(n)) {
+        let pt = crate::ported::eval::typval_defs_h::partial_T {
+            pt_refcount: 1,
+            pt_name: name,
+            pt_argv: Vec::new(),
+            pt_dict: None,
+            pt_auto: false,
+            pt_scoped: current_scope(),
+        };
+        return tv_to_value(typval_T {
+            v_type: VAR_PARTIAL,
+            v_lock: VAR_UNLOCKED,
+            vval: v_partial(Some(std::rc::Rc::new(pt))),
+        });
+    }
+    tv_to_value(typval_T {
+        v_type: VAR_FUNC,
+        v_lock: VAR_UNLOCKED,
+        vval: v_string(name.into()),
+    })
 }
 
 /// Run `f` with `selfdict` parked as the `self` of the call it makes. Always
@@ -6672,6 +6774,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_UNLET_RANGE, b_unlet_range);
     vm.register_builtin(VIML_ERR_COUNT, b_err_count);
     vm.register_builtin(VIML_ERRS_AFTER, b_errs_after);
+    vm.register_builtin(VIML_MAKE_LAMBDA, b_make_lambda);
     vm.register_builtin(VIML_SET, b_set);
     vm.register_builtin(VIML_MAP, b_map);
     vm.register_builtin(VIML_COMMAND, b_command);

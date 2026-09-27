@@ -175,6 +175,11 @@ pub struct partial_T {
     /// bound explicitly, so `function('F', d)` stored in another Dict keeps `d`
     /// while a `d.key` reference re-binds to whichever Dict it is read from.
     pub pt_auto: bool,
+    /// `pt_func->uf_scoped` — for a lambda that is a closure, the function
+    /// activation it was created in. In C every lambda evaluation allocates its
+    /// own `ufunc_T`, so the scope belongs to the value; here the compiled body
+    /// is shared by name, and the partial carries the scope instead.
+    pub pt_scoped: Option<Rc<crate::ported::eval::vars::ScopedFunccal>>,
 }
 
 /// `typedef struct { VarType v_type; VarLockStatus v_lock; union … vval; }

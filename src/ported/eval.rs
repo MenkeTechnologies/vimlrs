@@ -6440,6 +6440,7 @@ mod tests {
                 pt_argv: vec![],
                 pt_dict: None,
                 pt_auto: false,
+                pt_scoped: None,
             }))),
         };
         let mut rv2 = typval_T::from(-1);
@@ -6516,6 +6517,7 @@ mod tests {
             pt_argv: Vec::new(),
             pt_dict: None,
             pt_auto: false,
+            pt_scoped: None,
         });
         assert!(!is_luafunc(&other));
     }

@@ -30,12 +30,21 @@ call assert_equal(7, call(Add, [3, 4]))
 " ── no-argument lambda ──
 call assert_equal(42, call({-> 42}, []))
 
-" ── closures: a lambda captures enclosing-scope variables (by value) ──
-let n = 10
-call assert_equal([11, 12, 13], map([1, 2, 3], {i, v -> v + n}))
-let factor = 3
-let Mul = {x -> x * factor}
-call assert_equal(21, Mul(7))
+" ── closures: a lambda written in a function reads that function's
+"    variables, by reference (at script level nothing is captured) ──
+function! s:Closures()
+  let n = 10
+  call assert_equal([11, 12, 13], map([1, 2, 3], {i, v -> v + n}))
+  let factor = 3
+  let Mul = {x -> x * factor}
+  let factor = 4
+  call assert_equal(28, Mul(7))
+  " The closure's List is the function's own: adding to it is seen here.
+  let seen = []
+  call map([1, 2, 3], {i, v -> add(seen, v * 2)})
+  call assert_equal([2, 4, 6], seen)
+endfunction
+call s:Closures()
 " Nested closures: the inner lambda captures the outer lambda's parameter.
 call assert_equal([[11, 21], [12, 22]], map([1, 2], {i, v -> map([10, 20], {j, w -> w + v})}))
 
