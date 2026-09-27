@@ -929,6 +929,10 @@ pub const EX_COMMANDS: &[(&str, &str)] = &[
         ":echomsg {expr} — display {expr} and save it in the message history.",
     ),
     (
+        "echoerr",
+        ":echoerr {expr} — report {expr} as an error message: sets v:errmsg, becomes Vim(echoerr):{msg} inside :try, sets exit status 1.",
+    ),
+    (
         "let",
         ":let {var} = {expr} — assign the value of {expr} to {var}.",
     ),
