@@ -6980,3 +6980,39 @@ and reports `E15: not a function`. The fix needs the parse to depend on a
 run-time type.
 
 ### R46-O2, R30-O1 — unchanged
+
+## R48 — `execute()` errors, `:echoerr`, and interpolated strings on the command line
+
+Oracle: vim 9.2.1100 (`tests/parity_cases/ORACLE`).
+
+### R48-1. An error inside `execute()` — ✅ FIXED (closes R47-O3)
+
+An error raised inside `execute()` printed ahead of the pending `:echo` line,
+was missing from the returned string, and failed the expression around the
+call, so `let r = execute(...)` left `r` undefined; `{silent}` was ignored.
+The error now goes into the capture (`"\n"` + message) and to the screen at the
+message column the outer run left; `emsg()` resets `msg_silent`
+(`message.c:858`); `{silent}` distinguishes absent/`"silent"`, `""` and
+`"silent!"` (`emsg_silent`, `emsg_noredir`); the call runs as a callee, so its
+errors no longer fail the enclosing `:let`. Parity case:
+`execute_error_capture.vim`.
+
+### R48-2. `:echoerr` was `:echo` — ✅ FIXED
+
+`:echoerr` printed to stdout, exited 0, was never catchable and did not set
+`v:errmsg`. It is now the `CMD_echoerr` arm of `ex_execute()`: the arguments
+join into one message, a failing argument ends the command, and the message
+goes through `emsg()` (`Vim(echoerr):…` inside `:try`, silenced by `:silent!`,
+exit status 1). `:execute` also stops at the first argument that fails to
+evaluate instead of running the partial command line. Parity case:
+`echoerr_is_an_error.vim`.
+
+### R48-3. A quote inside an interpolated string's `{expr}` — ✅ FIXED
+
+`split_commands` and the legacy trailing-comment strip scanned `$'…'`/`$"…"`
+as plain quoted strings: in `$'{"x'y"}'` the `'` inside `{expr}` ended the
+literal and the `"` after it began a comment, and a `|` inside `{expr}` split
+the line. Both now skip an interpolated string by the lexer's rules. Parity
+case: `interp_string_nested_quotes.vim`.
+
+### R47-O1, R47-O2, R47-O4, R46-O2, R30-O1 — unchanged
