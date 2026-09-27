@@ -768,6 +768,11 @@ fn slot_plan(stmts: &[(u32, Stmt)], in_function: bool) -> SlotPlan {
         assigns: &'a mut HashMap<String, Vec<Expr>>,
         disq: &'a mut HashSet<String>,
         in_function: bool,
+        /// Slot keys definitely assigned before the point being walked. A slot
+        /// always holds a Number, so a name read before its first assignment —
+        /// `let n += 1` with no `n`, a global the script never assigned — must
+        /// stay in its dict, where the read is `E121` (or finds the variable).
+        init: Vec<String>,
     }
 
     fn walk_expr(e: &Expr, cx: &mut Ctx) {
@@ -825,6 +830,13 @@ fn slot_plan(stmts: &[(u32, Stmt)], in_function: bool) -> SlotPlan {
                 }
             }
             Expr::Var(name) if is_scope_dict(name) => *cx.bail = true,
+            Expr::Var(name) => {
+                if let Some(key) = slot_key(name, cx.in_function) {
+                    if !cx.init.iter().any(|k| k == key) {
+                        cx.disq.insert(key.to_string());
+                    }
+                }
+            }
             // A lambda may be a closure over this function's locals, reading
             // and writing them by name after the fact: a slot is invisible to it.
             Expr::Lambda { .. } => *cx.bail = true,
@@ -860,6 +872,14 @@ fn slot_plan(stmts: &[(u32, Stmt)], in_function: bool) -> SlotPlan {
     }
 
     fn walk(stmts: &[(u32, Stmt)], cx: &mut Ctx) {
+        // An assignment makes its name initialized for the rest of THIS block
+        // only: after a loop or a conditional arm it may not have run.
+        let init_depth = cx.init.len();
+        walk_block(stmts, cx);
+        cx.init.truncate(init_depth);
+    }
+
+    fn walk_block(stmts: &[(u32, Stmt)], cx: &mut Ctx) {
         for (_, s) in stmts {
             if *cx.bail {
                 return;
@@ -891,8 +911,14 @@ fn slot_plan(stmts: &[(u32, Stmt)], in_function: bool) -> SlotPlan {
                         args.iter().for_each(|a| walk_expr(a, cx));
                     }
                     let key = slot_key(name, cx.in_function).unwrap().to_string();
-                    cx.assigns.entry(key).or_default().push(Expr::Number(0));
+                    cx.assigns
+                        .entry(key.clone())
+                        .or_default()
+                        .push(Expr::Number(0));
+                    let init_depth = cx.init.len();
+                    cx.init.push(key);
                     walk(body, cx);
+                    cx.init.truncate(init_depth);
                 }
                 // Any other for-loop: the loop var(s) take non-Number values —
                 // disqualify them (by slot key) — but DON'T bail; sibling numeric
@@ -921,6 +947,7 @@ fn slot_plan(stmts: &[(u32, Stmt)], in_function: bool) -> SlotPlan {
                             .entry(key.to_string())
                             .or_default()
                             .push(expr.clone());
+                        cx.init.push(key.to_string());
                     }
                 }
                 Stmt::Let { .. } => *cx.bail = true, // non-bare target: be safe
@@ -963,6 +990,7 @@ fn slot_plan(stmts: &[(u32, Stmt)], in_function: bool) -> SlotPlan {
             assigns: &mut assigns,
             disq: &mut disq,
             in_function,
+            init: Vec::new(),
         },
     );
     if bail || assigns.is_empty() {
