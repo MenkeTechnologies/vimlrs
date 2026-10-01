@@ -166,28 +166,24 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
     let cmd = &line[..cmd_end];
     let rest = line[cmd_end..].trim_start();
 
-    match cmd {
-        "echo" | "ec" => Ok(Stmt::Echo(parse_expr_list(rest)?)),
+    match ex_full_name(cmd) {
+        "echo" => Ok(Stmt::Echo(parse_expr_list(rest)?)),
         "echon" => Ok(Stmt::Echon(parse_expr_list(rest)?)),
         // `:echomsg` (`echom`) evaluates and prints its expression list; it is
         // modelled as `:echo` (there is no message history to add it to).
-        "echomsg" | "echom" => Ok(Stmt::Echo(parse_expr_list(rest)?)),
+        "echomsg" => Ok(Stmt::Echo(parse_expr_list(rest)?)),
         // `:echoerr` (`echoe`/`echoer`) reports its arguments as an ERROR — see
         // `Stmt::EchoErr`.
-        "echoerr" | "echoer" | "echoe" => Ok(Stmt::EchoErr(parse_expr_list(rest)?)),
+        "echoerr" => Ok(Stmt::EchoErr(parse_expr_list(rest)?)),
         // `:execute` accepts every prefix down to `:exe` (verified against Vim
         // 9.2: `exe`/`exec`/`execu`/`execut`/`execute` all run). Missing the
         // intermediate forms made `exec '…'` fall through to `parse_expr`, which
         // aborts the enclosing function definition and leaks its body to global
         // scope (E461 on `l:` vars).
-        "execute" | "execut" | "execu" | "exec" | "exe" => {
-            Ok(Stmt::Execute(parse_expr_list(rest)?))
-        }
-        "set" | "se" | "setlocal" | "setl" | "setglobal" | "setg" => {
-            Ok(Stmt::Set(rest.to_string()))
-        }
-        "source" | "so" => Ok(Stmt::Source(rest.trim().to_string())),
-        "unlet" | "unl" => {
+        "execute" => Ok(Stmt::Execute(parse_expr_list(rest)?)),
+        "set" | "setlocal" | "setglobal" => Ok(Stmt::Set(rest.to_string())),
+        "source" => Ok(Stmt::Source(rest.trim().to_string())),
+        "unlet" => {
             // `:unlet[!] x y …` — the optional `!` suppresses the missing-var
             // error. Each argument is a bare name or a List/Dict element target
             // (`l[i]` / `d.key`), matching `do_unlet_var()` (vendor/eval/vars.c).
@@ -202,9 +198,7 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
         // `:lockvar[!] [depth] {name}…` / `:unlockvar[!] …` — `ex_lockvar`
         // (vendor/eval/vars.c): `!` locks/unlocks all levels (`DICT_MAXNEST`), an
         // optional leading number is the explicit depth, and the default is 2.
-        "lockvar" | "lockva" | "lockv" | "unlockvar" | "unlockva" | "unlockv" | "unlo" => {
-            parse_lockvar(rest, !cmd.starts_with("un"))
-        }
+        "lockvar" | "unlockvar" => parse_lockvar(rest, !cmd.starts_with("un")),
         "let" => parse_let(rest),
         // vim9 `:var {name}[: type] = {expr}` declare-and-assign like `:let`. The
         // `: type` annotation is parsed and discarded (checking/coercion deferred).
@@ -220,16 +214,12 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
         // parameter-list `(` is the listing/show command, not a definition:
         // no-op editor-less. (`:function {name}(…)` behind a modifier is not a
         // leaf and is left to error, matching the pre-existing limitation.)
-        "function" | "fu" | "fun" | "func" | "funct" | "functi" | "functio"
-            if !rest.contains('(') =>
-        {
-            Ok(Stmt::Expr(Expr::Number(0)))
-        }
+        "function" if !rest.contains('(') => Ok(Stmt::Expr(Expr::Number(0))),
         // `:const {name} = {expr}` / `:const [a, b; rest] = {expr}` — `ex_let`
         // with `is_const`. `set_var_const` refuses a name that already exists
         // (E995) and locks a new one with `DICT_MAXNEST` depth, which is why a
         // later `:let` of it is E741. Any other target shape is left to `:let`.
-        "const" | "cons" => match parse_let(&strip_vim9_type(rest))? {
+        "const" => match parse_let(&strip_vim9_type(rest))? {
             Stmt::Let {
                 target: target @ (LetTarget::Var(_) | LetTarget::List { .. }),
                 expr,
@@ -266,43 +256,37 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
         // continue). Getting this wrong is silent: `retu 42` parsed as an
         // expression statement, which made the whole enclosing `:function`
         // fail to parse and `E117: Unknown function` fire at the call site.
-        "brea" | "break" => Ok(Stmt::Break),
-        "con" | "cont" | "conti" | "continu" | "continue" => Ok(Stmt::Continue),
-        "fini" | "finis" | "finish" => Ok(Stmt::Finish),
-        "retu" | "retur" | "return" => Ok(if rest.trim().is_empty() {
+        "break" => Ok(Stmt::Break),
+        "continue" => Ok(Stmt::Continue),
+        "finish" => Ok(Stmt::Finish),
+        "return" => Ok(if rest.trim().is_empty() {
             Stmt::Return(None)
         } else {
             Stmt::Return(Some(parse_expr(strip_legacy_trailing_comment(rest))?))
         }),
-        "th" | "thr" | "thro" | "throw" => Ok(Stmt::Throw(parse_expr(
-            strip_legacy_trailing_comment(rest),
-        )?)),
+        "throw" => Ok(Stmt::Throw(parse_expr(strip_legacy_trailing_comment(
+            rest,
+        ))?)),
         // `:command[!] …` defines a user command; `:delcommand` removes one.
         // (`command(`/`delcommand(` are not builtins, but guard anyway.)
-        "command" | "comm" | "com" if !line[cmd.len()..].starts_with('(') => {
+        "command" if !line[cmd.len()..].starts_with('(') => {
             Ok(Stmt::CommandDef(line[cmd.len()..].trim_start().to_string()))
         }
-        "delcommand" | "delc" if !line[cmd.len()..].starts_with('(') => {
+        "delcommand" if !line[cmd.len()..].starts_with('(') => {
             Ok(Stmt::CommandDel(rest.to_string()))
         }
         // `:delf[unction][!] {name}` removes a user function. The raw remainder
         // (the run-time handler splits off a leading `!`) carries the name; a
         // `delfunction(` form is an expression call, so guard on `(`.
-        "delfunction" | "delfunctio" | "delfuncti" | "delfunct" | "delfunc" | "delfun" | "delf"
-            if !line[cmd.len()..].starts_with('(') =>
-        {
-            Ok(Stmt::DelFunction(
-                line[cmd.len()..].trim_start().to_string(),
-            ))
-        }
+        "delfunction" if !line[cmd.len()..].starts_with('(') => Ok(Stmt::DelFunction(
+            line[cmd.len()..].trim_start().to_string(),
+        )),
         // `:autocmd`/`:augroup`/`:doautocmd` (with abbreviations).
-        "autocmd" | "autocm" | "autoc" | "auto" | "au" if !line[cmd.len()..].starts_with('(') => {
+        "autocmd" if !line[cmd.len()..].starts_with('(') => {
             Ok(Stmt::Autocmd(line[cmd.len()..].trim_start().to_string()))
         }
-        "augroup" | "aug" if !line[cmd.len()..].starts_with('(') => {
-            Ok(Stmt::Augroup(rest.to_string()))
-        }
-        "doautocmd" | "doau" | "doautoall" if !line[cmd.len()..].starts_with('(') => {
+        "augroup" if !line[cmd.len()..].starts_with('(') => Ok(Stmt::Augroup(rest.to_string())),
+        "doautocmd" | "doautoall" if !line[cmd.len()..].starts_with('(') => {
             Ok(Stmt::Doautocmd(rest.to_string()))
         }
         // `:map`-family commands (`nmap`/`inoremap`/`vunmap`/`mapclear`/`map!`).
@@ -312,27 +296,23 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
             Ok(Stmt::Map(line.to_string()))
         }
         // `:colorscheme {name}` / `:colo` — the bare form (no name) is a query.
-        "colorscheme" | "colo" | "colors" | "colorsc" | "colorsch" | "colorsche" | "colorschem"
-            if !line[cmd.len()..].starts_with('(') =>
-        {
+        "colorscheme" if !line[cmd.len()..].starts_with('(') => {
             Ok(Stmt::Colorscheme(rest.trim().to_string()))
         }
         // `:highlight`/`:hi` — define or link a highlight group. `:hi` on its own
         // (or `:hi {group}` with no keys) is a listing query in real vim; we keep
         // the raw args and let the runtime decide.
-        "highlight" | "hi" | "highligh" | "highlig" | "highli" | "highl" | "high" | "hig"
-            if !line[cmd.len()..].starts_with('(') =>
-        {
+        "highlight" if !line[cmd.len()..].starts_with('(') => {
             Ok(Stmt::Highlight(line[cmd.len()..].trim_start().to_string()))
         }
         // `:syntax`/`:syn` and `:filetype`/`:filet` — recognized so real vimrc
         // files parse. Standalone they are no-ops (zmax highlights and detects
         // filetypes itself); an embedding editor may hook them.
-        "syntax" | "syn" | "synta" | "synt" if !line[cmd.len()..].starts_with('(') => {
+        "syntax" if !line[cmd.len()..].starts_with('(') => {
             Ok(Stmt::Syntax(rest.trim().to_string()))
         }
         // `:filet` is the shortest form (`:file` is a different command).
-        "filetype" | "filetyp" | "filety" | "filet" if !line[cmd.len()..].starts_with('(') => {
+        "filetype" if !line[cmd.len()..].starts_with('(') => {
             Ok(Stmt::Filetype(rest.trim().to_string()))
         }
         // `:normal[!] {keys}` runs normal-mode keys against the buffer, dispatched
@@ -340,17 +320,13 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
         // function body line like `normal! el` parses and the function defines —
         // otherwise it fell through to `parse_expr`, aborting the whole `:function`
         // and leaking its body to global scope.
-        "normal" | "norm" if !line[cmd.len()..].starts_with('(') => {
-            Ok(Stmt::ExCmd(line.to_string()))
-        }
+        "normal" if !line[cmd.len()..].starts_with('(') => Ok(Stmt::ExCmd(line.to_string())),
         // `:echohl {group}` sets the highlight group for later `:echo` output.
         // Its argument is a group NAME, not an expression, so it can't go through
         // the `:echo` path (that would evaluate the name as a variable). Routed to
         // `do_excmd`'s `ex_echohl` handler; recognized even bare so a function body
         // line like `echohl ErrorMsg` parses instead of aborting the `:function`.
-        "echohl" | "echoh" if !line[cmd.len()..].starts_with('(') => {
-            Ok(Stmt::ExCmd(line.to_string()))
-        }
+        "echohl" if !line[cmd.len()..].starts_with('(') => Ok(Stmt::ExCmd(line.to_string())),
         // Screen/session/mark commands (`:redraw[!]`, `:redir`, `:runtime`,
         // `:mark`, `:nohlsearch`) — dispatched (or no-op'd) by `do_excmd`.
         // Recognized bare so a function body line like `redraw!` or `redir => x`
@@ -358,10 +334,8 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
         // `:function`. `:noh[lsearch]` (`:h :noh`) clears search highlight — a
         // no-op editor-less; recognized so a config/syntax line `nohlsearch`
         // parses instead of falling through to `parse_expr` and erroring E121.
-        "redraw" | "redr" | "redra" | "redraws" | "redrawstatus" | "redrawt" | "redrawtabline"
-        | "redir" | "redi" | "runtime" | "ru" | "run" | "runt" | "runti" | "runtim" | "mark"
-        | "ma" | "mar" | "noh" | "nohl" | "nohls" | "nohlse" | "nohlsea" | "nohlsear"
-        | "nohlsearc" | "nohlsearch"
+        "redraw" | "redrawstatus" | "redrawtabline" | "redir" | "runtime" | "mark"
+        | "nohlsearch"
             if !line[cmd.len()..].starts_with('(') =>
         {
             Ok(Stmt::ExCmd(line.to_string()))
@@ -373,19 +347,15 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
         // config/syntax line like `syntax/cdl.vim`'s `%foldo!` (whole-file range +
         // recursive open) is handled instead of falling through to `parse_expr`
         // (which would raise E121 / E492 on the fold word).
-        "fold" | "fo" | "fol" | "foldopen" | "foldo" | "foldop" | "foldope" | "foldclose"
-        | "foldc" | "foldcl" | "foldclo" | "foldclos"
-            if !line[cmd.len()..].starts_with('(') =>
-        {
+        "fold" | "foldopen" | "foldclose" if !line[cmd.len()..].starts_with('(') => {
             Ok(Stmt::ExCmd(line.to_string()))
         }
         // `:edit`/`:ed` (load a file / reload) and buffer-list navigation
         // (`:bnext`, `:bprevious`, `:bfirst`, `:blast`, `:buffer`, …) — dispatched
         // by `do_excmd`. Recognized bare so a body line like `edit #` or `bnext`
         // parses instead of `parse_expr` choking on it and aborting the function.
-        "edit" | "ed" | "bnext" | "bn" | "bne" | "bprevious" | "bp" | "bprev" | "bNext" | "bN"
-        | "bfirst" | "bf" | "blast" | "bl" | "buffer" | "bu" | "buf" | "bmodified" | "bm"
-        | "bmod" | "ball" | "ba"
+        "edit" | "bnext" | "bprevious" | "bNext" | "bfirst" | "blast" | "buffer" | "bmodified"
+        | "ball"
             if !line[cmd.len()..].starts_with('(') =>
         {
             Ok(Stmt::ExCmd(line.to_string()))
@@ -455,6 +425,95 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
         }
         _ => Ok(Stmt::Expr(parse_expr(line)?)),
     }
+}
+
+/// Every Ex command [`parse_stmt`] recognizes by name, with the length of its
+/// shortest accepted abbreviation — the `:ec[ho]` notation of `:h ex-cmd-index`.
+///
+/// c: `find_ex_command` resolves a command word by scanning `cmdnames[]` in
+/// table order for the first entry the word is a prefix of, so every prefix from
+/// the documented minimum up to the full name reaches the same command. Each
+/// minimum here was read out of vim 9.2.1150 with `fullcommand()` over every
+/// prefix of the name; below the minimum the word belongs to a different
+/// command (`co` is `:copy`, `ev` is `:eval` but `e` is `:edit`).
+///
+/// RUST-PORT NOTE: `:edit` and `:buffer` accept the single letters `e`/`b` in
+/// vim; here they start at two letters, because a one-letter line is still read
+/// as a bare expression by this crate's expression entry point.
+const EX_CMD_ABBREV: &[(&str, usize)] = &[
+    ("augroup", 3),
+    ("autocmd", 2),
+    ("bNext", 2),
+    ("ball", 2),
+    ("bfirst", 2),
+    ("blast", 2),
+    ("bmodified", 2),
+    ("bnext", 2),
+    ("bprevious", 2),
+    ("break", 4),
+    ("buffer", 2),
+    ("call", 3),
+    ("colorscheme", 4),
+    ("command", 3),
+    ("const", 4),
+    ("continue", 3),
+    ("defer", 4),
+    ("delcommand", 4),
+    ("delfunction", 4),
+    ("doautoall", 7),
+    ("doautocmd", 2),
+    ("echo", 2),
+    ("echoerr", 5),
+    ("echohl", 5),
+    ("echomsg", 5),
+    ("echon", 5),
+    ("edit", 2),
+    ("eval", 2),
+    ("execute", 3),
+    ("filetype", 5),
+    ("final", 5),
+    ("finish", 4),
+    ("fold", 2),
+    ("foldclose", 5),
+    ("foldopen", 5),
+    ("function", 2),
+    ("highlight", 2),
+    ("let", 3),
+    ("lockvar", 5),
+    ("mark", 2),
+    ("nohlsearch", 3),
+    ("normal", 4),
+    ("redir", 4),
+    ("redraw", 4),
+    ("redrawstatus", 7),
+    ("redrawtabline", 7),
+    ("return", 4),
+    ("runtime", 2),
+    ("set", 2),
+    ("setglobal", 4),
+    ("setlocal", 4),
+    ("source", 2),
+    ("syntax", 2),
+    ("throw", 2),
+    ("unlet", 3),
+    ("unlockvar", 4),
+    ("var", 2),
+];
+
+/// The full name of the Ex command `word` abbreviates, or `word` unchanged when
+/// it is not an accepted abbreviation of a command in [`EX_CMD_ABBREV`].
+///
+/// A word that is a valid prefix of two entries resolves to the longer minimum's
+/// owner only when it reaches that minimum: `doautoa` is `:doautoall` while
+/// `doauto` is still `:doautocmd`, `echon` is `:echon` and not `:echo`.
+fn ex_full_name(word: &str) -> &str {
+    let mut best: Option<(&'static str, usize)> = None;
+    for &(full, min) in EX_CMD_ABBREV {
+        if word.len() >= min && full.starts_with(word) && best.map_or(true, |(_, m)| min > m) {
+            best = Some((full, min));
+        }
+    }
+    best.map_or(word, |(full, _)| full)
 }
 
 /// The `:h :command-modifiers` (and their common abbreviations) that may prefix
@@ -3045,9 +3104,8 @@ impl Parser {
         let arg = orig.get(arg_at..).unwrap_or("");
         let b = arg.as_bytes();
         let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b':';
-        let curly = (1..b.len()).any(|k| {
-            (b[k] == b'{' && ident(b[k - 1])) || (b[k - 1] == b'}' && ident(b[k]))
-        });
+        let curly = (1..b.len())
+            .any(|k| (b[k] == b'{' && ident(b[k - 1])) || (b[k - 1] == b'}' && ident(b[k])));
         if curly {
             return None;
         }
@@ -3063,7 +3121,10 @@ impl Parser {
             return (!quoted.is_empty()).then(|| format!("E15: Invalid expression: \"{quoted}\""));
         }
         if err.0.starts_with("E15: Invalid expression: \"") && !rest.is_empty() {
-            return Some(format!("E15: Invalid expression: \"{}\"", text_to_eol(rest)));
+            return Some(format!(
+                "E15: Invalid expression: \"{}\"",
+                text_to_eol(rest)
+            ));
         }
         Some(err.0.clone())
     }
@@ -3942,11 +4003,17 @@ impl Parser {
                 break;
             }
             if !had_comma {
-                return Err(VimlError::msg(format!("E696: Missing comma in List: {}", self.rest())));
+                return Err(VimlError::msg(format!(
+                    "E696: Missing comma in List: {}",
+                    self.rest()
+                )));
             }
         }
         if *self.peek() != Tok::RBracket {
-            return Err(VimlError::msg(format!("E697: Missing end of List ']': {}", self.rest())));
+            return Err(VimlError::msg(format!(
+                "E697: Missing end of List ']': {}",
+                self.rest()
+            )));
         }
         self.advance();
         Ok(Expr::List(items))
