@@ -884,6 +884,12 @@ fn slot_plan(stmts: &[(u32, Stmt)], in_function: bool) -> SlotPlan {
             if *cx.bail {
                 return;
             }
+            walk_stmt(s, cx);
+        }
+    }
+
+    fn walk_stmt(s: &Stmt, cx: &mut Ctx) {
+        {
             match s {
                 Stmt::Function { .. }
                 | Stmt::Execute(_)
@@ -956,6 +962,20 @@ fn slot_plan(stmts: &[(u32, Stmt)], in_function: bool) -> SlotPlan {
                 Stmt::LockVar { .. } => *cx.bail = true,
                 // `:const` locks what it assigns, by name, at run time.
                 Stmt::Const { .. } => *cx.bail = true,
+                // `:unlet` removes a variable by NAME at run time (`do_unlet`), which
+                // a slot does not have: `let d = 5 | unlet d` must find `d`.
+                Stmt::Unlet { .. } => *cx.bail = true,
+                // The commands of a `|`-separated line run in order in this same
+                // block, and `:silent` wraps one command: both are walked through.
+                Stmt::LineGroup(inner) => {
+                    for s in inner {
+                        if *cx.bail {
+                            return;
+                        }
+                        walk_stmt(s, cx);
+                    }
+                }
+                Stmt::Silent { stmt, .. } => walk_stmt(stmt, cx),
                 Stmt::Echo(es) | Stmt::Echon(es) | Stmt::EchoErr(es) => {
                     es.iter().for_each(|e| walk_expr(e, cx))
                 }
