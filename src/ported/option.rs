@@ -14,7 +14,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use crate::ported::eval::typval::{tv_get_bool, tv_get_string};
+use crate::ported::eval::typval::{tv_get_bool, tv_get_number, tv_get_string};
 use crate::ported::eval::typval_defs_h::{typval_T, varnumber_T};
 
 /// Option kind, for parsing `:set` values.
@@ -275,10 +275,9 @@ pub fn do_set(args: &str) {
     for part in args.split_whitespace() {
         // `opt=val` / `opt:val`, plus the compound-assign operators `opt+=val`
         // (append), `opt^=val` (prepend), `opt-=val` (remove) — `do_set`'s
-        // OP_ADDING/OP_PREPENDING/OP_REMOVING. Compound ops apply to comma-list
-        // string options (e.g. `set rtp+=DIR`); on number/bool options a compound
-        // op is left as a no-op (matches the prior behavior where `sw+` failed to
-        // resolve). A plain `=`/`:` sets.
+        // OP_ADDING/OP_PREPENDING/OP_REMOVING. On a comma-list string option they
+        // edit the list (`set rtp+=DIR`); on a number option they add, multiply
+        // and subtract. A plain `=`/`:` sets.
         if let Some((lhs, val)) = part.split_once(['=', ':']) {
             let (name, op) = match lhs.strip_suffix(['+', '^', '-']) {
                 Some(base) => (base, lhs.as_bytes()[lhs.len() - 1]),
@@ -312,8 +311,20 @@ pub fn do_set(args: &str) {
                         )
                     }
                     (Kind::String, _) => typval_T::from(val.to_string()),
+                    (Kind::Number, _) => {
+                        let n = val.trim().parse::<varnumber_T>().unwrap_or(0);
+                        // c: `do_set_option_numeric` — `+=` adds, `^=` MULTIPLIES,
+                        // `-=` subtracts (`set tw+=10`, `set sw^=2`).
+                        let cur = tv_get_number(&get_option_value(canon));
+                        typval_T::from(match op {
+                            b'+' => cur.wrapping_add(n),
+                            b'^' => cur.wrapping_mul(n),
+                            b'-' => cur.wrapping_sub(n),
+                            _ => n,
+                        })
+                    }
                     (_, b'=') => typval_T::from(val.trim().parse::<varnumber_T>().unwrap_or(0)),
-                    // Compound op on a number/bool option: no-op.
+                    // Compound op on a bool option: no-op.
                     _ => continue,
                 };
                 set_option_value(canon, tv);
@@ -325,6 +336,18 @@ pub fn do_set(args: &str) {
             if let Some((canon, _, Kind::Bool, _, _)) = findoption(name) {
                 let cur = tv_get_bool(&get_option_value(canon)) != 0;
                 set_option_value(canon, typval_T::from(varnumber_T::from(!cur)));
+            }
+            continue;
+        }
+        // `opt&` / `opt&vim` / `opt&vi` — back to the default (`do_set_option`'s
+        // `nextchar == '&'` branch, `set_option_default`). Every row of this
+        // table has one default for both, so the three spellings agree.
+        if let Some((name, _)) = part
+            .split_once('&')
+            .filter(|(_, how)| matches!(*how, "" | "vim" | "vi"))
+        {
+            if let Some((canon, ..)) = findoption(name) {
+                option_values.with(|m| m.borrow_mut().remove(*canon));
             }
             continue;
         }
