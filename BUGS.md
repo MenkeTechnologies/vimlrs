@@ -7078,3 +7078,155 @@ Errors were written raw; `emsg()` displays through `msg_outtrans()`, so TAB is
   engines answer from their patch tables. `f_has` documents this as deliberate.
 - `call` and other non-echo commands still route their parse errors through
   `source_tolerant()` (R30-O1).
+
+## R50 — command abbreviations, `:finally` on the way out, and the lines that vanished
+
+Oracle: vim 9.2.1150 (`/opt/homebrew/bin/vim`; `/usr/local/bin/vim` on this
+machine is MacVim 9.2.0321, which fails the fuzzer's preflight, so
+`VIM=`/`FUZZ_VIM=` pin the oracle). New cases were recorded from that binary
+only; the committed `ORACLE` stamp is left as it was.
+
+Baseline at the start of the round: `scripts/parity.sh` 118/118;
+`fuzz-parity --seed 4931 --count 1500`: expressions 0 gaps, `--regex` 1 gap
+(`\%C` in `substitute()`), `--stmts` 151 gaps (19 distinct). End of the round:
+parity 132/132; expressions 0, `--regex` 0, `--stmts` 151 (19 distinct) — the
+statement gaps are the R50-O1 classes below, none of which this round's fixes
+touch. A fresh `--stmts --seed 7710` run reports 206 (17 distinct), the same
+classes.
+
+### R50-1. A command word was matched against a hand list — ✅ FIXED
+
+`ech d`, `echoms`, `cal`, `ev`/`eva`, `defe`, `unle`, `unloc`/`unlock`, `sou`,
+`comma`, `delco`, `sy`, `norma`, `contin`, `va`, `aut`/`augr`, `doa`, `color`
+and the `setl*`/`setg*`/`redraw*`/`b*` spellings fell through to the expression
+parser and the line was dropped. `parse_stmt` now resolves the command word
+through `CMDNAMES`, the `cmdnames[]` walk `fullcommand()` and `exists(':cmd')`
+already use (vim9's `:var`/`:final`, absent from Neovim's table, first). A
+one-letter word (`e`, `b`) is still left alone, because the expression entry
+point reads a one-letter line as an expression. Parity case:
+`ex_command_abbreviations.vim`.
+
+### R50-2. `:unlet` of a slotted variable — ✅ FIXED
+
+`let d = 5` then `unlet d` (with no name-introspecting call anywhere in the
+script) put `d` in a slot and the by-name unlet raised E108. The slot pass now
+bails on `:unlet` and walks the commands of a `|`-line and the command under
+`:silent`, which it skipped. Parity case: `unlet_after_numeric_let.vim`.
+
+### R50-3. `substitute()` stepped past an empty match by code point — ✅ FIXED
+
+`do_string_sub` advances by `mb_ptr2len` (character plus composing marks); one
+code point let `\%C` start on the mark and delete it. Parity case:
+`substitute_composing_advance.vim`.
+
+### R50-4. Leaving a `:try` skipped its `:finally` and its try level — ✅ FIXED
+
+`:return`/`:break`/`:continue` jumped straight out of a `:try`: the `:finally`
+never ran, and `VIML_TRY_LEAVE` never ran either, so after any function that
+returned from inside a `:try` every later error was turned into an exception and
+the rest of the script disappeared, exit status 0. They now record the pending
+command (`CSF_PENDING`), run each `:finally` they cross and resume at
+`:endtry`, innermost first, with `:break`/`:continue` crossing only the tries
+inside their loop. Parity case: `try_exit_runs_finally.vim`.
+
+### R50-5. `:break`/`:continue`/`:return` in the wrong place — ✅ FIXED
+
+They were COMPILE errors, which kept the whole file from running. They are
+run-time errors now: `E587`/`E586` append the command as written
+(`append_command`: modifiers and blanks kept, a trailing comment cut, so
+`if 1 | break | endif` reports `:  break `), `E133` does not, and the script
+carries on. Parity case: `loop_exit_outside_loop.vim`.
+
+### R50-6. `:execute 'return …'` from a function — ✅ FIXED
+
+`ex_execute` hands `do_cmdline` the function's own getline, so `:return` in the
+text returns from the FUNCTION; the rest of the current line still runs
+(`exe 'return' | echo 'x'` prints `x`), the rest of the text does not. Parity
+case: `execute_return_in_function.vim`.
+
+### R50-7. `:execute` parsed its text as a file — ✅ FIXED
+
+`exe 'try | throw "z"'` failed to parse (no `:endtry`) and ran nothing;
+`:execute` now goes through the command-line parser `execute()` already used.
+Parity case: `execute_unclosed_try.vim`.
+
+### R50-8. Optional argument passed as `v:none` — ✅ FIXED
+
+`call_user_func` takes the default for a missing argument OR a `v:none` one:
+`Def(1, v:none, 3)` skips `b`. Parity case: `optional_arg_none_default.vim`.
+
+### R50-9. `:function d.key()` below the script top level — ✅ FIXED
+
+Only the top level desugared it to an anonymous numbered function plus the Dict
+assignment; inside a function or a block it registered a function literally
+named `c.next`, so a constructor building its own local Dict got E716. An
+indexed container (`s:m[k].name()`) is parsed as an expression. Parity case:
+`dict_function_defined_at_run_time.vim`.
+
+### R50-10. `is#`, `is?`, `isnot#`, `isnot?` — ✅ FIXED
+
+The lexer read `is#` as the start of an autoload name and dropped the line.
+After an operand it is now the comparison with its case flag. Parity case:
+`is_operator_case_suffix.vim`.
+
+### R50-11. `:set` compound operators on a number option, `:set opt&` — ✅ FIXED
+
+`set tw+=10` was ignored; vim adds, subtracts (`-=`) and MULTIPLIES (`^=`).
+`set opt&`/`opt&vim`/`opt&vi` restore the default. Parity case:
+`set_number_compound.vim`.
+
+### R50-12. User-command codes — ✅ FIXED
+
+Ported `uc_check_code`/`uc_split_args`: `<q-args>` is double-quoted with `\`
+and `"` escaped (it was single-quoted), `<f-args>` splits with backslash-space
+and `\\` handling and stays one argument under `-nargs=1`/`?`, and `<bang>`,
+`<line1>`, `<line2>`, `<range>`, `<count>` (`uc_def`: -1 unless `-count` or
+`-range=N`), `<reg>`, `<mods>`, `<lt>` expand with their `q-` forms; an unknown
+`<code>` keeps its `<`. Parity case: `user_command_codes.vim`.
+
+### R50-13. `printf()` `%S` — ✅ FIXED
+
+Width and precision are screen cells (`%.1S` of `éa` is `é`, `%4.2S` of `日本`
+is two blanks and `日`). Parity case: `printf_S_cells.vim`.
+
+### R50-14. An `:echo` argument that does not lex — ✅ FIXED
+
+The whole line was lexed up front, so an unterminated string anywhere in it
+dropped the command before any argument ran. Arguments are now lexed as far as
+the text goes and the lexer's E114/E115 is the failing operand, reached in its
+turn (`echo 1 printf('%E')'` prints `1` and the E766 first); a List literal cut
+short by such a stop reports E115, not E697. The message wording itself is the
+known split (vim `Missing single quote`, Neovim and this port `Missing quote`).
+Parity case: `echo_unlexed_argument.vim`.
+
+### R50-15. Exit status of a tolerantly-sourced file — ✅ FIXED
+
+`reset_run()` at each statement zeroed `ex_exitval`, so a reported error was
+forgotten once a later statement ran clean. The latch is carried across the
+statements. Unit test: `source_tolerant_keeps_the_exit_status` (no parity case
+can show it: the line that sends a file down this path prints an error in vim
+and nothing here, R30-O1).
+
+### R50-O1. Open, measured this round
+
+- `--stmts` cascades that are harness state, not language: a case that runs
+  `lockvar l` or `const c` leaves `g:l`/`c` locked in this port's long-lived
+  child, while vim's driver aborts at the next `let g:l = …` and the fuzzer
+  restarts a fresh vim — 121 + 13 of the 151 gaps at seed 4931.
+- The rest are R30-O1 inside `execute()`: a later command on the line that does
+  not parse (`try | ec printf('%E')|en`, `… | o'`) drops the whole text here,
+  while vim runs the commands ahead of it.
+- `execute('return 3')` in a function: vim returns from the function (its
+  `ex_return` checks `current_funccal`, not the getline) and abandons the
+  caller's expression; here it is E133.
+- `string()`/`:echo` of a NaN or an infinity: `nan`/`inf` in vim 9.2,
+  `str2float('nan')` here and in Neovim (R34-O2, unchanged).
+- `printf('%.2s', 'héllo')`: vim and Neovim cut at the byte (`h` plus a lone
+  `0xc3`); this port keeps a character boundary.
+- `<SID>Priv()` in an expression is `E121: Undefined variable: SID` in vim; here
+  it calls the function.
+- `:exe 'if 0 | …'` at script level leaks the conditional into the rest of the
+  file in vim (followed by E171 at the end); here the conditional ends with the
+  text.
+
+### R49-O1, R47-O1, R47-O2, R47-O4, R46-O2, R30-O1 — unchanged
