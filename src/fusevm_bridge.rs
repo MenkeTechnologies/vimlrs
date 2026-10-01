@@ -4361,9 +4361,17 @@ fn call_user_function_raw(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
         });
     };
     for (i, p) in func.params.iter().take(nfixed).enumerate() {
-        let v = if i < args.len() {
+        let default = func.defaults.iter().find(|(di, _)| *di == i);
+        // c: `call_user_func` takes the default when the argument is missing OR
+        // is `v:none` (`argvars[i].v_type == VAR_SPECIAL && v_number ==
+        // VVAL_NONE`), which is how a caller skips one optional argument to
+        // pass a later one: `F(1, v:none, 3)`.
+        let passed_none = args.get(i).is_some_and(|a| {
+            a.v_type == VAR_SPECIAL && matches!(a.vval, v_special(kSpecialVarNone))
+        });
+        let v = if i < args.len() && !(passed_none && default.is_some()) {
             args[i].clone()
-        } else if let Some((_, chunk)) = func.defaults.iter().find(|(di, _)| *di == i) {
+        } else if let Some((_, chunk)) = default {
             // c: an omitted optional argument is its default value (evaluated now,
             // in the partially-bound a: scope); a missing non-optional one is the
             // special "v:none"-like value, as before.
