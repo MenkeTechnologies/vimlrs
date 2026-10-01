@@ -3656,7 +3656,11 @@ fn b_exec_stmt(vm: &mut VM, argc: u8) -> Value {
         parts.push(tv_get_string(&pop_tv(vm)));
     }
     parts.reverse();
-    let _ = run_source_nested(&parts.join(" "));
+    // c: `ex_execute` runs the text through `do_cmdline()` as a COMMAND LINE,
+    // like `execute()`: an unclosed `:try` ends with the text, so
+    // `exe 'try | throw "z"'` throws `z` to the caller instead of failing to
+    // parse and running nothing.
+    let _ = run_cmdline_nested(&parts.join(" "));
     Value::Undef
 }
 
