@@ -1,0 +1,31 @@
+1
+a
+E15: Invalid expression: "'b' *"
+next1
+a
+E15: Invalid expression: "* 2 | echo 'same line'"
+next2x
+E15: Invalid expression: ")"
+next3
+a
+E15: Invalid expression: "*]"
+next4
+a
+E15: Invalid expression: "1 +"
+next5
+a
+E110: Missing ')'
+next6
+E15: Invalid expression: "| echo 'no'"
+E110: Missing ')'
+E15: Invalid expression: "< 2"
+E15: Invalid expression: "== 2"
+E15: Invalid expression: "'echo' *"
+x
+E109: Missing ':' after '?'
+E15: Invalid expression: "*"
+E722: Missing comma in Dictionary: 
+n7
+n8
+in try
+caught Vim(echo):E15: Invalid expression: "*"

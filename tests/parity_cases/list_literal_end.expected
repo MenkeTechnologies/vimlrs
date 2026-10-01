@@ -1,0 +1,16 @@
+1
+E697: Missing end of List ']': 
+a
+E696: Missing comma in List: 
+b
+E696: Missing comma in List: 2]
+c
+E697: Missing end of List ']': 
+d
+E697: Missing end of List ']': 
+e
+E15: Invalid expression: "[1 +"
+f
+E697: Missing end of List ']': 
+E15: Invalid expression: "[1,"
+0

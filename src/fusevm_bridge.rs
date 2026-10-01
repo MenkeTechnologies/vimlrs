@@ -3453,13 +3453,26 @@ fn msg_put(body: &[u8], newline: bool) {
 /// The text goes to stderr (Vim prints errors there) while `:echo` goes to
 /// stdout, so stdout is flushed first: the two streams are usually merged by
 /// whoever is reading them, and Rust's stdout only flushes itself at a newline.
-pub fn msg_emsg(s: &str) {
+///
+/// What is written is the DISPLAYED form (`msg_keep`, `vendor/message.c:888`):
+/// see [`message::emsg_multiline`] for which control bytes are translated.
+pub fn msg_emsg(s: &str, multiline: bool) {
+    let mut shown = crate::vimstr::VimStr::new();
+    if multiline {
+        message::msg_multiline(s.as_bytes(), &mut shown);
+    } else {
+        message::msg_outtrans(s.as_bytes(), &mut shown);
+    }
+    let shown = shown.as_bytes();
     if ECHO_SINK.with(|s| s.borrow().is_some()) {
         // An embedding host's capture collects `:echo` output only, in its own
         // line-per-message convention, so the error goes to stderr apart from it
         // and the message column is left alone.
         if EXECUTE_DEPTH.with(|d| d.get()) == 0 {
-            eprintln!("{s}");
+            use std::io::Write;
+            let mut err = std::io::stderr().lock();
+            let _ = err.write_all(shown);
+            let _ = err.write_all(b"\n");
             return;
         }
         // c: inside `execute()` the error is a message like any other:
@@ -3470,7 +3483,7 @@ pub fn msg_emsg(s: &str) {
         // E121 on the line after the `1`.
         if !EMSG_NOREDIR.with(|n| n.get()) {
             let mut line = b"\n".to_vec();
-            line.extend_from_slice(s.as_bytes());
+            line.extend_from_slice(shown);
             echo_write(&line);
         }
     }
@@ -3480,8 +3493,9 @@ pub fn msg_emsg(s: &str) {
     }
     use std::io::Write;
     let _ = std::io::stdout().lock().flush();
-    eprint!("{s}");
-    let _ = std::io::stderr().lock().flush();
+    let mut err = std::io::stderr().lock();
+    let _ = err.write_all(shown);
+    let _ = err.flush();
     MSG_COL.with(|c| c.set(true));
 }
 
@@ -3552,8 +3566,8 @@ fn b_echoerr_arg(vm: &mut VM, _: u8) -> Value {
     tv_to_value(tv_str(msg))
 }
 
-/// Report the assembled `:echoerr` message — c: `emsg_multiline(ga.ga_data,
-/// "echoerr", HLF_E, true)`, reached only for a non-empty message. It is an
+/// Report the assembled `:echoerr` message — reached only for a non-empty
+/// message. It is an
 /// error like any other: it sets `v:errmsg`, makes the run exit 1, is silenced
 /// by `:silent!` and becomes `Vim(echoerr):…` inside a `:try`.
 ///
@@ -3564,6 +3578,9 @@ fn b_echoerr_end(vm: &mut VM, _: u8) -> Value {
     let msg = tv_get_string(&pop_tv(vm));
     if !msg.is_empty() {
         let save_did_emsg = message::did_emsg.with(|d| d.get());
+        // vim 9.2 `ex_execute()` reports `:echoerr` through plain `emsg()`, so a
+        // TAB or NL in it shows as `^I`/`^@` like in any other error; Neovim's
+        // `emsg_multiline(…, true)` writes them raw. The reference editor wins.
         message::emsg(&msg);
         if PENDING_EXC.with(|p| p.borrow().is_none()) {
             message::did_emsg.with(|d| d.set(save_did_emsg));
@@ -4759,8 +4776,15 @@ fn stage_deferred_funcs(funcs: Vec<crate::compile_viml::UserFuncDef>) {
     });
 }
 
+/// `eval({string})`. Like every builtin it runs as a callee ([`in_callee`]):
+/// its E15 is reported but the call still returns Number 0 to the command
+/// around it, so `echo eval('*')` prints the two E15s and then `0`.
 fn b_eval(vm: &mut VM, _: u8) -> Value {
     let src = tv_get_string(&pop_tv(vm));
+    in_callee(|| eval_string(&src))
+}
+
+fn eval_string(src: &str) -> Value {
     // c: `f_eval` (c:1235) runs `eval1()` on the string, **evaluates** what it
     // parsed, and only then reports what is left over:
     //   `if (eval1(&s, rettv, &EVALARG_EVALUATE) == FAIL) semsg(e_invexpr2, …);`
@@ -4799,15 +4823,21 @@ fn b_eval(vm: &mut VM, _: u8) -> Value {
     // `eval1` itself raised (E121 for an undefined variable, …) is what
     // surfaces. The trailing-characters check only runs when evaluation
     // SUCCEEDED: `else if (*s != NUL) semsg(_(e_trailing_arg), s);`.
-    match run_chunk_capture(chunk) {
-        Some(tv) => {
-            let rest = src[rest_at..].trim();
+    // A run-time evaluator failure (`eval('nosuchvar')` is E121) is the same
+    // FAIL: E15 over the whole string and Number 0, never the half-built value.
+    // A builtin's own error inside does not count — `in_callee` rolled it back.
+    let fail_before = EVAL_FAIL.with(|f| f.get());
+    let got = run_chunk_capture(chunk);
+    let failed = EVAL_FAIL.with(|f| f.get()) > fail_before;
+    match got {
+        Some(tv) if !failed => {
+            let rest = &src[rest_at..];
             if !rest.is_empty() {
                 message::semsg(&format!("E488: Trailing characters: {rest}"));
             }
             tv_to_value(tv)
         }
-        None => eval_failed(&src, &crate::viml_lexer::VimlError::silent()),
+        _ => eval_failed(src, &crate::viml_lexer::VimlError::silent()),
     }
 }
 

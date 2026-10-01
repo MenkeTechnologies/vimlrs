@@ -2363,10 +2363,41 @@ pub fn f_exists(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.vval = v_number(present as varnumber_T);
 }
 
-/// Port of `f_printf()` from `Src/eval/funcs.c` (subset) — `%[-0][width][.prec]`
-/// with conversions `d`/`i`, `s`, `f`, `x`/`X`, and `%%`. The full
-/// `vim_vsnprintf` conversion set arrives with that port.
+/// Port of `f_printf()` from `vendor/eval/funcs.c:4872` — the `did_emsg` frame
+/// around `vim_vsnprintf_typval`: the counter is cleared, the format renders,
+/// and if ANY conversion reported an error (`printf('%d', 1.5)` is E805,
+/// `printf('%d', [1])` is E745) the result is the empty string, not the
+/// partially rendered text. The caller's `did_emsg` is folded back in after
+/// (`did_emsg |= saved_did_emsg`).
 pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
+    use crate::ported::message::did_emsg;
+    let saved = did_emsg.with(|d| d.replace(0)); // c:4877-4880
+    vim_vsnprintf_typval(argvars, rettv);
+    let errs = did_emsg.with(|d| d.get());
+    if errs != 0 {
+        // c:4884 `if (!did_emsg)` — the string is only produced error-free.
+        rettv.v_type = VAR_STRING;
+        rettv.vval = v_string(VimStr::new());
+    }
+    did_emsg.with(|d| d.set(saved + errs)); // c:4889
+}
+
+/// The rendering half of `f_printf()` — `vim_vsnprintf_typval()` from
+/// `Src/strings.c` (subset): `%[-0][width][.prec]` with the `d`/`i`, `s`/`S`,
+/// `f`/`e`/`g`, `x`/`X`/`o`/`b`/`u`/`c` conversions and `%%`.
+fn vim_vsnprintf_typval(argvars: &[typval_T], rettv: &mut typval_T) {
+    // c (`tv_nr`, Src/strings.c): the integer fetch passes an error sink, so a
+    // non-numeric argument reports its error and reads as 0, not the bare
+    // `tv_get_number`'s -1 (`silent! echo printf('%d', 1.5)` prints `0`).
+    let printf_nr = |t: &typval_T| {
+        let mut err = false;
+        let n = tv_get_number_chk(t, Some(&mut err));
+        if err {
+            0
+        } else {
+            n
+        }
+    };
     rettv.v_type = VAR_STRING;
     let fmt = tv_get_string(&argvars[0]);
     // c (`vim_vsnprintf_typval` → `parse_fmt_types`, Src/strings.c:1101):
@@ -2463,7 +2494,7 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
             let w = match argvars.get(wsrc) {
                 Some(t) => {
                     used_max = used_max.max(wsrc);
-                    tv_get_number_chk(t, None)
+                    printf_nr(t)
                 }
                 None => {
                     missing = true;
@@ -2515,7 +2546,7 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
                 let p = match argvars.get(psrc) {
                     Some(t) => {
                         used_max = used_max.max(psrc);
-                        tv_get_number_chk(t, None)
+                        printf_nr(t)
                     }
                     None => {
                         missing = true;
@@ -2652,7 +2683,7 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
             }
         };
         let core = match conv {
-            'd' | 'i' => cur.map_or(0, |t| tv_get_number_chk(t, None)).to_string(),
+            'd' | 'i' => cur.map_or(0, |t| printf_nr(t)).to_string(),
             // c: `%s`/`%S` fetch the argument through `tv_str()`, which for a
             // non-string typval returns `encode_tv2echo()` — so List/Dict/Funcref/
             // Blob stringify (`[1, 2, 3]`, `{'a': 1}`, `type`) instead of raising
@@ -2683,15 +2714,15 @@ pub fn f_printf(argvars: &[typval_T], rettv: &mut typval_T) {
                     format!("{:.*}", prec.unwrap_or(6), v)
                 }
             }
-            'x' => format!("{:x}", cur.map_or(0, |t| tv_get_number_chk(t, None))),
-            'X' => format!("{:X}", cur.map_or(0, |t| tv_get_number_chk(t, None))),
-            'o' => format!("{:o}", cur.map_or(0, |t| tv_get_number_chk(t, None))),
-            'b' | 'B' => format!("{:b}", cur.map_or(0, |t| tv_get_number_chk(t, None))),
-            'u' => (cur.map_or(0, |t| tv_get_number_chk(t, None)) as u64).to_string(),
+            'x' => format!("{:x}", cur.map_or(0, |t| printf_nr(t))),
+            'X' => format!("{:X}", cur.map_or(0, |t| printf_nr(t))),
+            'o' => format!("{:o}", cur.map_or(0, |t| printf_nr(t))),
+            'b' | 'B' => format!("{:b}", cur.map_or(0, |t| printf_nr(t))),
+            'u' => (cur.map_or(0, |t| printf_nr(t)) as u64).to_string(),
             'c' => {
                 // c: `%c` emits a single byte — the value truncated to `char`
                 // (`str[0] = (char)uj`), i.e. `value & 0xFF`.
-                let byte = (cur.map_or(0, |t| tv_get_number_chk(t, None)) & 0xFF) as u32;
+                let byte = (cur.map_or(0, |t| printf_nr(t)) & 0xFF) as u32;
                 char::from_u32(byte).unwrap_or('\u{0}').to_string()
             }
             'g' | 'G' => {

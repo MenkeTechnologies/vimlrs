@@ -1,0 +1,27 @@
+1
+E15: Invalid expression: "*"
+E15: Invalid expression: "1 + *"
+0
+E15: Invalid expression: "*"
+E15: Invalid expression: "*"
+0
+E15: Invalid expression: "]"
+E15: Invalid expression: "]"
+0
+E121: Undefined variable: nosuchvar
+E15: Invalid expression: "nosuchvar"
+0
+a
+E697: Missing end of List ']': 
+E15: Invalid expression: "[1," 0 b
+E730: Using a List as a String
+0
+caught Vim(echo):E15: Invalid expression: "*"
+caught Vim(let):E121: Undefined variable: nosuch
+E488: Trailing characters:  2
+1
+E488: Trailing characters:  
+1|
+E488: Trailing characters: ^I2
+1
+8

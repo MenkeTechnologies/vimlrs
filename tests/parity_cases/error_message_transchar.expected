@@ -1,0 +1,22 @@
+1
+E488: Trailing characters: ^A
+1
+E488: Trailing characters: ^I
+1
+E488: Trailing characters: ^@2
+1
+E488: Trailing characters: ^M
+1
+E488: Trailing characters:  ^[
+1
+E730: Using a List as a String
+0 a	b
+x^Iy^@z
+E488: Trailing characters: ^I
+1
+
+E488: Trailing characters: ^I
+1
+
+1
+Vim(echo):E488: Trailing characters: 	

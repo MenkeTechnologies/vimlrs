@@ -2890,7 +2890,22 @@ fn parse_expr_list(src: &str) -> Result<Vec<Expr>, VimlError> {
     let mut p = Parser::new(toks, src);
     let mut out = Vec::new();
     loop {
-        let e = p.eval1()?;
+        let arg_at = p.peek_span().unwrap_or(src.len());
+        let e = match p.eval1() {
+            Ok(e) => e,
+            Err(err) => match p.operand_invexpr(src, &err, arg_at) {
+                // c (`ex_echo`, `ex_execute`): each argument is parsed AND
+                // evaluated before the next is read, so the arguments ahead of
+                // a malformed one are already printed when its E15 reports, and
+                // the error aborts the rest of the command line. A runtime
+                // error operand reproduces that ordering.
+                Some(msg) => {
+                    out.push(Expr::ScriptError(msg));
+                    return Ok(out);
+                }
+                None => return Err(err),
+            },
+        };
         out.push(p.guard_deferred(e));
         if matches!(p.peek(), Tok::Eof) {
             break;
@@ -2919,9 +2934,11 @@ pub fn parse_expr_prefix(src: &str) -> Result<(Expr, usize), VimlError> {
     p.lex_err = lex_err;
     let e = p.eval1()?;
     let e = p.guard_deferred(e);
-    // The next token's start is where the expression ended; `Eof` means it ran to
-    // the point where lexing stopped (the end of the string when it all lexed).
-    let rest_at = p.peek_span().unwrap_or(lex_stop);
+    // c: `eval1()` leaves `*arg` just past the last character it consumed — a
+    // level that looks ahead for an operator and finds none does not advance
+    // over the blanks it skipped — so the leftover text keeps its leading
+    // whitespace (`eval('1 2')` is `E488: Trailing characters:  2`).
+    let rest_at = p.i.checked_sub(1).map_or(lex_stop, |last| p.toks[last].end);
     Ok((e, rest_at))
 }
 
@@ -2999,6 +3016,56 @@ impl Parser {
             return self.lex_err.clone().unwrap_or_else(VimlError::silent);
         }
         VimlError::msg(format!("E15: Invalid expression: \"{rest}\""))
+    }
+
+    /// The diagnostic an `:echo`/`:execute` argument that failed to PARSE
+    /// reports at run time, or `None` to leave it a parse failure.
+    ///
+    /// c (`ex_echo`, `ex_execute`): each argument is parsed and evaluated before
+    /// the next is read, so a malformed one reports when execution reaches it —
+    /// after the arguments ahead of it printed — and abandons the rest of the
+    /// line. Its message is whatever the failing level said (`E110`, `E696`,
+    /// `E697`, `E15` over the unread text), or, when that level said nothing,
+    /// `ex_echo`'s own `semsg(_(e_invexpr2), p)` with `p` where THIS argument
+    /// began (`echo 'a' 1 +` is `E15: Invalid expression: "1 +"`).
+    ///
+    /// The quoted text runs to the end of the LINE, because vim never cut it at
+    /// the `|`: `echo 1 + * 2 | echo 3` is `"* 2 | echo 3"`, and a parse that
+    /// ran out at the `|` is vim's scan stopping ON it (`"| echo 3"`).
+    ///
+    /// `None` for an argument holding a curly-brace name (`g:a_{x}`): this
+    /// parser cannot read those yet, and reporting its failure would put an
+    /// error on valid vim source — the reason `source_tolerant` keeps parse
+    /// errors quiet at all.
+    ///
+    /// `orig` is the caller's slice of the command line (the same text as
+    /// `self.src`): `text_to_eol` can only see past a `|` from a pointer into
+    /// the line itself, not from this parser's owned copy.
+    fn operand_invexpr(&self, orig: &str, err: &VimlError, arg_at: usize) -> Option<String> {
+        let arg = orig.get(arg_at..).unwrap_or("");
+        let b = arg.as_bytes();
+        let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b':';
+        let curly = (1..b.len()).any(|k| {
+            (b[k] == b'{' && ident(b[k - 1])) || (b[k - 1] == b'}' && ident(b[k]))
+        });
+        if curly {
+            return None;
+        }
+        let at = self.peek_span().unwrap_or(orig.len());
+        let rest = orig.get(at..).unwrap_or("");
+        if err.is_silent() {
+            let past = text_to_eol(orig.get(orig.len()..).unwrap_or(""));
+            let quoted = if rest.is_empty() && !past.is_empty() {
+                past
+            } else {
+                text_to_eol(arg)
+            };
+            return (!quoted.is_empty()).then(|| format!("E15: Invalid expression: \"{quoted}\""));
+        }
+        if err.0.starts_with("E15: Invalid expression: \"") && !rest.is_empty() {
+            return Some(format!("E15: Invalid expression: \"{}\"", text_to_eol(rest)));
+        }
+        Some(err.0.clone())
     }
 
     /// Consume `want`, or fail with vim's own message for that construct —
@@ -3542,6 +3609,7 @@ impl Parser {
         // The source offset of the token about to be consumed. For a call this
         // is where the C's `name` pointer would aim — see `Expr::Call::emsg_name`.
         let at = self.peek_span();
+        let at_tok = self.i;
         match self.advance() {
             Tok::Number(n) => Ok(Expr::Number(n)),
             Tok::Float(f) => Ok(Expr::Float(f)),
@@ -3633,7 +3701,13 @@ impl Parser {
                     Ok(Expr::Var(name))
                 }
             }
-            _ => Err(self.invexpr()),
+            // c (`eval9` → `eval_leader`/default): the token that cannot start an
+            // operand is still unread when E15 quotes the rest, so it heads the
+            // quoted text (`echo 1 + * 2` is `"* 2"`, `echo )` is `")"`).
+            _ => {
+                self.i = at_tok;
+                Err(self.invexpr())
+            }
         }
     }
 
@@ -3848,12 +3922,34 @@ impl Parser {
         }
     }
 
+    /// Port of `eval_list()` (`vendor/eval.c:3857`), opening `[` consumed.
+    ///
+    /// The loop stops at `]` OR the end of the text, so the two ways a list can
+    /// run out are different errors: after an item with no comma it is E696
+    /// (`[1`), but after a comma — or before any item — the loop never runs
+    /// again and the end check reports E697 (`[1,`, `[`). An item that fails
+    /// with nothing to say (`[1 +`) stays silent, for the caller's E15.
     fn list_literal(&mut self) -> Result<Expr, VimlError> {
-        Ok(Expr::List(self.arg_list(
-            &Tok::RBracket,
-            "E696: Missing comma in List: %s",
-            "E696: Missing comma in List: %s",
-        )?))
+        let mut items = Vec::new();
+        while !matches!(self.peek(), Tok::RBracket | Tok::Eof) {
+            items.push(self.nested_eval1()?);
+            // c: the comma must come after the value
+            let had_comma = *self.peek() == Tok::Comma;
+            if had_comma {
+                self.advance();
+            }
+            if *self.peek() == Tok::RBracket {
+                break;
+            }
+            if !had_comma {
+                return Err(VimlError::msg(format!("E696: Missing comma in List: {}", self.rest())));
+            }
+        }
+        if *self.peek() != Tok::RBracket {
+            return Err(VimlError::msg(format!("E697: Missing end of List ']': {}", self.rest())));
+        }
+        self.advance();
+        Ok(Expr::List(items))
     }
 
     /// Lookahead (just past the opening `{`) deciding lambda vs dict: a lambda

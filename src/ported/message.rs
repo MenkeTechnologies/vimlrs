@@ -89,6 +89,16 @@ pub fn capture_errors_take() -> Vec<String> {
 /// capture is active (`assert_fails`), in which case the text is collected and
 /// not printed, like Vim's `emsg_silent` path.
 pub fn emsg(s: &str) {
+    // c:902 `return emsg_multiline(s, "emsg", HLF_E, false);`
+    emsg_multiline(s, false);
+}
+
+/// Port of `emsg_multiline()` from `vendor/message.c:776`. `multiline` picks how
+/// the text reaches the screen (`msg_keep` c:888): `true` (`:echoerr`) through
+/// [`msg_multiline`], which writes NL/TAB/CR raw; `false` (every other error)
+/// through [`msg_outtrans`], which shows them as `^@`/`^I`/`^M` like any other
+/// control byte — `eval("1\t2")` reports `E488: Trailing characters: ^I2`.
+pub fn emsg_multiline(s: &str, multiline: bool) {
     // Counted first: this one tracks *every* error, whatever happens to it next.
     err_count.with(|d| d.set(d.get() + 1));
     // The narrower counter: the same bump, but rolled back across a called
@@ -159,7 +169,7 @@ pub fn emsg(s: &str) {
         // half-written `:echon` line is terminated first rather than having the
         // error run onto the end of it. It does NOT end one: `msg_col` is left
         // non-zero, so a following `:echo` argument continues on the error's line.
-        crate::fusevm_bridge::msg_emsg(s);
+        crate::fusevm_bridge::msg_emsg(s, multiline);
     }
 }
 
