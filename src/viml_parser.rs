@@ -2908,10 +2908,21 @@ fn parse_expr_list(src: &str) -> Result<Vec<Expr>, VimlError> {
     if src.trim().is_empty() {
         return Ok(Vec::new());
     }
-    let toks = lex(src)?;
+    // Lex only as far as the text tokenizes: an argument that does not lex (an
+    // unterminated string) is reached and reported in its turn, after the
+    // arguments ahead of it ran — `echo 1 printf('%E')'` prints `1`, the E766,
+    // and only then `E115: Missing single quote`.
+    let (toks, _, lex_err) = crate::viml_lexer::lex_prefix(src);
     let mut p = Parser::new(toks, src);
+    p.lex_err = lex_err;
     let mut out = Vec::new();
     loop {
+        if matches!(p.peek(), Tok::Eof) {
+            if let Some(err) = &p.lex_err {
+                out.push(Expr::ScriptError(err.0.clone()));
+            }
+            break;
+        }
         let arg_at = p.peek_span().unwrap_or(src.len());
         let e = match p.eval1() {
             Ok(e) => e,
@@ -2929,9 +2940,6 @@ fn parse_expr_list(src: &str) -> Result<Vec<Expr>, VimlError> {
             },
         };
         out.push(p.guard_deferred(e));
-        if matches!(p.peek(), Tok::Eof) {
-            break;
-        }
     }
     Ok(out)
 }
@@ -3955,7 +3963,12 @@ impl Parser {
     /// with nothing to say (`[1 +`) stays silent, for the caller's E15.
     fn list_literal(&mut self) -> Result<Expr, VimlError> {
         let mut items = Vec::new();
-        while !matches!(self.peek(), Tok::RBracket | Tok::Eof) {
+        // The end of the TOKENS is the end of the text only when the lexer did
+        // not stop early: text it could not read (`[1, 'a`) is still an item
+        // for `eval1()`, whose error (E115) is the one reported.
+        while !matches!(self.peek(), Tok::RBracket)
+            && !(matches!(self.peek(), Tok::Eof) && self.lex_err.is_none())
+        {
             items.push(self.nested_eval1()?);
             // c: the comma must come after the value
             let had_comma = *self.peek() == Tok::Comma;
