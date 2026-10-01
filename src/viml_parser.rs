@@ -448,93 +448,35 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
     }
 }
 
-/// Every Ex command [`parse_stmt`] recognizes by name, with the length of its
-/// shortest accepted abbreviation — the `:ec[ho]` notation of `:h ex-cmd-index`.
+/// The full name of the Ex command `word` abbreviates — c: `find_ex_command`'s
+/// walk of `cmdnames[]` (`ex_docmd.c:3130-3137`), shared with `fullcommand()`
+/// and `exists(':cmd')` through [`CMDNAMES`]: the FIRST entry that starts with
+/// the word wins, so `ech` is `:echo`, `cal` is `:call`, `con` is `:continue`
+/// and `co` is `:copy`.
 ///
-/// c: `find_ex_command` resolves a command word by scanning `cmdnames[]` in
-/// table order for the first entry the word is a prefix of, so every prefix from
-/// the documented minimum up to the full name reaches the same command. Each
-/// minimum here was read out of vim 9.2.1150 with `fullcommand()` over every
-/// prefix of the name; below the minimum the word belongs to a different
-/// command (`co` is `:copy`, `ev` is `:eval` but `e` is `:edit`).
+/// The table is Neovim's, which has no vim9 `:var`/`:final`; their vim
+/// spellings (`va`, `var`, `final`) are matched first.
 ///
-/// RUST-PORT NOTE: `:edit` and `:buffer` accept the single letters `e`/`b` in
-/// vim; here they start at two letters, because a one-letter line is still read
-/// as a bare expression by this crate's expression entry point.
-const EX_CMD_ABBREV: &[(&str, usize)] = &[
-    ("augroup", 3),
-    ("autocmd", 2),
-    ("bNext", 2),
-    ("ball", 2),
-    ("bfirst", 2),
-    ("blast", 2),
-    ("bmodified", 2),
-    ("bnext", 2),
-    ("bprevious", 2),
-    ("break", 4),
-    ("buffer", 2),
-    ("call", 3),
-    ("colorscheme", 4),
-    ("command", 3),
-    ("const", 4),
-    ("continue", 3),
-    ("defer", 4),
-    ("delcommand", 4),
-    ("delfunction", 4),
-    ("doautoall", 7),
-    ("doautocmd", 2),
-    ("echo", 2),
-    ("echoerr", 5),
-    ("echohl", 5),
-    ("echomsg", 5),
-    ("echon", 5),
-    ("edit", 2),
-    ("eval", 2),
-    ("execute", 3),
-    ("filetype", 5),
-    ("final", 5),
-    ("finish", 4),
-    ("fold", 2),
-    ("foldclose", 5),
-    ("foldopen", 5),
-    ("function", 2),
-    ("highlight", 2),
-    ("let", 3),
-    ("lockvar", 5),
-    ("mark", 2),
-    ("nohlsearch", 3),
-    ("normal", 4),
-    ("redir", 4),
-    ("redraw", 4),
-    ("redrawstatus", 7),
-    ("redrawtabline", 7),
-    ("return", 4),
-    ("runtime", 2),
-    ("set", 2),
-    ("setglobal", 4),
-    ("setlocal", 4),
-    ("source", 2),
-    ("syntax", 2),
-    ("throw", 2),
-    ("unlet", 3),
-    ("unlockvar", 4),
-    ("var", 2),
-];
-
-/// The full name of the Ex command `word` abbreviates, or `word` unchanged when
-/// it is not an accepted abbreviation of a command in [`EX_CMD_ABBREV`].
+/// RUST-PORT NOTE: a one-letter word is left alone. vim reads `e` as `:edit`
+/// and `b` as `:buffer`, but this crate's expression entry point still takes
+/// a one-letter line as a bare expression.
 ///
-/// A word that is a valid prefix of two entries resolves to the longer minimum's
-/// owner only when it reaches that minimum: `doautoa` is `:doautoall` while
-/// `doauto` is still `:doautocmd`, `echon` is `:echon` and not `:echo`.
+/// [`CMDNAMES`]: crate::ported::eval::funcs::CMDNAMES
 fn ex_full_name(word: &str) -> &str {
-    let mut best: Option<(&'static str, usize)> = None;
-    for &(full, min) in EX_CMD_ABBREV {
-        if word.len() >= min && full.starts_with(word) && best.map_or(true, |(_, m)| min > m) {
-            best = Some((full, min));
-        }
+    if word.len() < 2 {
+        return word;
     }
-    best.map_or(word, |(full, _)| full)
+    if word == "va" || word == "var" {
+        return "var";
+    }
+    if word == "final" {
+        return "final";
+    }
+    crate::ported::eval::funcs::CMDNAMES
+        .iter()
+        .find(|n| n.starts_with(word))
+        .copied()
+        .unwrap_or(word)
 }
 
 /// The `:h :command-modifiers` (and their common abbreviations) that may prefix
