@@ -4792,7 +4792,7 @@ fn eval_string(src: &str) -> Value {
     // Compiling the whole string up front instead turned text Vim would have
     // evaluated into a parse error: `eval("nl\nhere")` is E121 (undefined variable
     // `nl`) in Vim, and was E15 here.
-    let (expr, rest_at) = match crate::viml_parser::parse_expr_prefix(&src) {
+    let (expr, rest_at) = match crate::viml_parser::parse_expr_prefix(src) {
         Ok(v) => v,
         // c: `eval1()` returned FAIL during the PARSE. That is the same FAIL the
         // run-time branch below handles, and it gets the same treatment: report
@@ -4802,7 +4802,7 @@ fn eval_string(src: &str) -> Value {
         // Undef. A FAIL with nothing to say (`VimlError::silent`) skips only the
         // first of those, which is why `eval('1 +')` prints one E15 and
         // `eval(']')` prints two.
-        Err(e) => return eval_failed(&src, &e),
+        Err(e) => return eval_failed(src, &e),
     };
     let chunk = match crate::compile_viml::compile_program(&[(1, Stmt::Expr(expr))]) {
         // A lambda in the expression compiles to a SEPARATE `<lambda>N` chunk,
@@ -4816,7 +4816,7 @@ fn eval_string(src: &str) -> Value {
             stage_deferred_funcs(p.deferred_funcs);
             p.main
         }
-        Err(e) => return eval_failed(&src, &e),
+        Err(e) => return eval_failed(src, &e),
     };
     // c: the FAIL branch (`eval1() == FAIL`) reports E15 with the whole
     // expression — unless aborting(), which is why inside `:try` the error
