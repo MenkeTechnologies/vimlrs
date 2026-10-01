@@ -289,6 +289,13 @@ fn dict_func_target(name: &str) -> Option<(Expr, String)> {
     if head.is_empty() || key.is_empty() {
         return None;
     }
+    // An indexed container (`s:m[k].name`) is an expression in its own right:
+    // c: `trans_function_name` hands it to `get_lval`, which evaluates `[k]`.
+    if head.contains('[') {
+        return crate::viml_parser::parse_expr(head)
+            .ok()
+            .map(|base| (base, key.to_string()));
+    }
     // The container is everything before the last dot, itself possibly a chain.
     let mut base = match head.split_once('.') {
         None => Expr::Var(head.to_string()),
@@ -1830,15 +1837,22 @@ impl Compiler {
                 // is staged into the program's `deferred_funcs`; the runtime
                 // define-op inserts it into the live registry, keyed by a
                 // content-stable staging key.
+                // `:function d.key()` here is the same anonymous numbered function
+                // plus Dict assignment as at script level (see
+                // `compile_program_inner`), defined when the line runs: a
+                // constructor function that builds `let c = {}` and then
+                // `function c.next() dict` must find its own local `c`.
+                let target = dict_func_target(name);
                 let flags = FuncFlags {
                     bang: *bang,
                     vim9: *vim9,
-                    dict: *dict,
+                    dict: *dict || target.is_some(),
                     abort: *abort,
                     closure: *closure,
                 };
+                let anon = target.as_ref().map(|_| next_dict_func_name());
                 let def = build_user_func_def(
-                    name,
+                    anon.as_deref().unwrap_or(name),
                     args,
                     defaults,
                     body,
@@ -1851,6 +1865,16 @@ impl Compiler {
                 self.load_str(&key);
                 self.emit(Op::CallBuiltin(h::VIML_DEFINE_FUNC, 1));
                 self.emit(Op::Pop);
+                if let (Some((base, key)), Some(anon)) = (target, anon) {
+                    self.stmt(&Stmt::Let {
+                        target: LetTarget::Index {
+                            base: Box::new(base),
+                            index: Box::new(Expr::Str(key)),
+                            src: None,
+                        },
+                        expr: Expr::Str(format!("\u{1}func\u{1}{anon}")),
+                    })?;
+                }
                 Ok(())
             }
             // c: `do_cmdline` abandons the REST OF THE COMMAND LINE when a command
