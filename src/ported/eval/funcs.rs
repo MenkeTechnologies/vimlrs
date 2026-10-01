@@ -2691,7 +2691,20 @@ fn vim_vsnprintf_typval(argvars: &[typval_T], rettv: &mut typval_T) {
             // that width/precision count screen cells; the value renders the same.
             's' | 'S' => {
                 let mut s = cur.map(encode_tv2echo).unwrap_or_default().to_string();
-                if let Some(p) = prec {
+                if let (Some(p), 'S') = (prec, conv) {
+                    // c: for `%S` the precision is in screen cells: whole
+                    // characters are taken while their cells fit
+                    // (`printf('%.1S', 'éa')` is `é`).
+                    let mut cells = 0usize;
+                    let end = s
+                        .char_indices()
+                        .find(|&(_, ch)| {
+                            cells += crate::ported::mbyte::utf_char2cells(ch as i32) as usize;
+                            cells > p
+                        })
+                        .map_or(s.len(), |(i, _)| i);
+                    s.truncate(end);
+                } else if let Some(p) = prec {
                     // c: precision caps the byte count; keep it a char boundary so
                     // multi-byte container output never splits mid-codepoint.
                     if s.len() > p {
@@ -2836,10 +2849,12 @@ fn vim_vsnprintf_typval(argvars: &[typval_T], rettv: &mut typval_T) {
             ("", core)
         };
         // Pad to width (width counts the sign). c: `%s` width is the byte length
-        // (`strlen`); `%S` counts screen cells (here approximated by the codepoint
-        // count); numeric conversions are ASCII so bytes and chars coincide.
+        // (`strlen`); `%S` counts screen cells (`mb_string2cells`); numeric
+        // conversions are ASCII so bytes and cells coincide.
         let visible = if conv == 'S' {
-            core.chars().count()
+            core.chars()
+                .map(|ch| crate::ported::mbyte::utf_char2cells(ch as i32) as usize)
+                .sum()
         } else {
             core.len()
         };
@@ -9603,6 +9618,10 @@ pub struct ucmd_T {
     pub rep: String,
     pub nargs: char,
     pub bang: bool,
+    /// `-range=%` (`EX_DFLALL`): with no range given, the whole buffer.
+    pub range_all: bool,
+    /// `uc_def` — the default `-count=N` / `-range=N`, read by `<count>`.
+    pub def: varnumber_T,
 }
 
 thread_local! {
@@ -9612,17 +9631,10 @@ thread_local! {
 }
 
 /// Port of `uc_add_command()` (Neovim usercmd.c) — register user command
-/// `name` with replacement `rep`.
-fn uc_add_command(name: &str, rep: &str, nargs: char, bang: bool) {
+/// `name` as `cmd`.
+fn uc_add_command(name: &str, cmd: ucmd_T) {
     USER_COMMANDS.with(|c| {
-        c.borrow_mut().insert(
-            name.to_string(),
-            ucmd_T {
-                rep: rep.to_string(),
-                nargs,
-                bang,
-            },
-        );
+        c.borrow_mut().insert(name.to_string(), cmd);
     });
 }
 
@@ -9642,50 +9654,172 @@ fn find_ucmd(name: &str) -> Option<ucmd_T> {
     })
 }
 
-/// Port of `uc_check_code()` (Neovim usercmd.c) — substitute the `<...>` codes
-/// in a user command's replacement: `<args>` (verbatim), `<q-args>` (one quoted
-/// String), `<f-args>` (comma-separated quoted args), `<bang>` (`!`/nothing),
-/// `<lt>` (`<`). Unknown codes are copied through.
-fn uc_check_code(rep: &str, args: &str, bang: bool) -> String {
-    let quote = |s: &str| format!("'{}'", s.replace('\'', "''"));
-    let chars: Vec<char> = rep.chars().collect();
-    let mut out = String::new();
-    let mut i = 0;
-    while i < chars.len() {
-        if chars[i] == '<' {
-            if let Some(off) = chars[i..].iter().position(|&c| c == '>') {
-                let code: String = chars[i + 1..i + off].iter().collect();
-                let repl = match code.to_ascii_lowercase().as_str() {
-                    "args" => Some(args.to_string()),
-                    "q-args" => Some(quote(args)),
-                    "f-args" => Some(
-                        args.split_whitespace()
-                            .map(quote)
-                            .collect::<Vec<_>>()
-                            .join(", "),
-                    ),
-                    "bang" => Some(if bang { "!".to_string() } else { String::new() }),
-                    "lt" => Some("<".to_string()),
-                    _ => None,
-                };
-                if let Some(r) = repl {
-                    out.push_str(&r);
-                    i += off + 1;
-                    continue;
-                }
+/// Port of `uc_split_args()` (Neovim usercmd.c, the `args == NULL` branch) —
+/// `<f-args>`: the arguments split at white space, each in double quotes with
+/// `\` and `"` escaped, joined by `, `. A backslash before white space keeps the
+/// white space in the argument; `\\` stays two backslashes.
+fn uc_split_args(arg: &str) -> String {
+    let b = arg.as_bytes();
+    let is_white = |c: u8| c == b' ' || c == b'\t';
+    let mut q: Vec<u8> = vec![b'"'];
+    let mut p = 0;
+    while p < b.len() {
+        if b[p] == b'\\' && b.get(p + 1) == Some(&b'\\') {
+            q.extend_from_slice(b"\\\\");
+            p += 2;
+        } else if b[p] == b'\\' && b.get(p + 1).is_some_and(|&c| is_white(c)) {
+            q.push(b[p + 1]);
+            p += 2;
+        } else if b[p] == b'\\' || b[p] == b'"' {
+            q.push(b'\\');
+            q.push(b[p]);
+            p += 1;
+        } else if is_white(b[p]) {
+            while p < b.len() && is_white(b[p]) {
+                p += 1;
             }
+            if p == b.len() {
+                break;
+            }
+            q.extend_from_slice(b"\", \"");
+        } else {
+            q.push(b[p]);
+            p += 1;
         }
-        out.push(chars[i]);
-        i += 1;
     }
-    out
+    q.push(b'"');
+    String::from_utf8_lossy(&q).into_owned()
+}
+
+/// Port of `uc_check_code()` (Neovim usercmd.c) — the replacement for one
+/// `<…>` code of a user command, or `None` when it is not a code (the caller
+/// then copies the `<` and goes on after it). `code` is the text between `<`
+/// and `>`. A `q-`/`Q-` prefix quotes the value, `f-`/`F-` quotes and splits it.
+fn uc_check_code(code: &str, cmd: &ucmd_T, args: &str, bang: bool) -> Option<String> {
+    let mut p = code;
+    let mut quote = 0;
+    if p.len() >= 2
+        && matches!(p.as_bytes()[0], b'q' | b'Q' | b'f' | b'F')
+        && p.as_bytes()[1] == b'-'
+    {
+        quote = if matches!(p.as_bytes()[0], b'q' | b'Q') {
+            1
+        } else {
+            2
+        };
+        p = &p[2..];
+    }
+    let is = |name: &str| p.eq_ignore_ascii_case(name);
+    let dquote = |s: &str| format!("\"{s}\"");
+    if p.is_empty() {
+        return None;
+    }
+    if is("args") {
+        if args.is_empty() {
+            return Some(if quote == 1 {
+                "''".into()
+            } else {
+                String::new()
+            });
+        }
+        // c: "When specified there is a single argument don't split it" —
+        // `-nargs=1` and `-nargs=?` carry `EX_NOSPC`.
+        if matches!(cmd.nargs, '1' | '?') && quote == 2 {
+            quote = 1;
+        }
+        return Some(match quote {
+            0 => args.to_string(),
+            1 => {
+                let mut s = String::from("\"");
+                for ch in args.chars() {
+                    if ch == '\\' || ch == '"' {
+                        s.push('\\');
+                    }
+                    s.push(ch);
+                }
+                s.push('"');
+                s
+            }
+            _ => uc_split_args(args),
+        });
+    }
+    if is("bang") {
+        let v = if bang { "!" } else { "" };
+        return Some(if quote != 0 { dquote(v) } else { v.to_string() });
+    }
+    let line2 = if cmd.range_all {
+        curbuf_len()
+    } else {
+        CURPOS.with(|c| c.borrow().0)
+    };
+    let line1 = if cmd.range_all { 1 } else { line2 };
+    let num = if is("line1") {
+        Some(line1)
+    } else if is("line2") {
+        Some(line2)
+    } else if is("range") {
+        // `addr_count`: no range was typed on the command line.
+        Some(0)
+    } else if is("count") {
+        Some(cmd.def)
+    } else {
+        None
+    };
+    if let Some(n) = num {
+        return Some(if quote != 0 {
+            dquote(&n.to_string())
+        } else {
+            n.to_string()
+        });
+    }
+    if is("lt") {
+        return Some("<".into());
+    }
+    if is("reg") || is("register") {
+        return Some(if quote != 0 {
+            "''".into()
+        } else {
+            String::new()
+        });
+    }
+    if is("mods") {
+        return Some(if quote != 0 {
+            "\"\"".into()
+        } else {
+            String::new()
+        });
+    }
+    None
 }
 
 /// Port of `do_ucmd()` (Neovim usercmd.c) — expand user command `name`'s
 /// replacement with `args`/`bang`, ready to run. `None` if no such command.
+/// Each `<` opens a code that ends at the next `>`; one that is not a code
+/// keeps its `<` and scanning resumes right after it.
 pub fn do_ucmd(name: &str, args: &str, bang: bool) -> Option<String> {
     let uc = find_ucmd(name)?;
-    Some(uc_check_code(&uc.rep, args, bang && uc.bang))
+    let bang = bang && uc.bang;
+    let rep = uc.rep.as_str();
+    let mut out = String::new();
+    let mut p = 0;
+    while let Some(start) = rep[p..].find('<').map(|i| p + i) {
+        let Some(end) = rep[start + 1..].find('>').map(|i| start + 1 + i) else {
+            break;
+        };
+        out.push_str(&rep[p..start]);
+        match uc_check_code(&rep[start + 1..end], &uc, args, bang) {
+            Some(r) => {
+                out.push_str(&r);
+                p = end + 1;
+            }
+            None => {
+                out.push('<');
+                p = start + 1;
+            }
+        }
+    }
+    out.push_str(&rep[p..]);
+    Some(out)
 }
 
 /// Port of `ex_command()` (Neovim usercmd.c) — define a user command from a
@@ -9694,27 +9828,43 @@ pub fn ex_command(arg: &str) {
     let mut s = arg.trim();
     // A leading `!` means `:command!` (redefine); we always overwrite anyway.
     s = s.strip_prefix('!').unwrap_or(s).trim_start();
-    let mut nargs = '0';
-    let mut bang = false;
-    // c: parse the leading `-attr[=val]` command attributes.
+    let mut cmd = ucmd_T {
+        rep: String::new(),
+        nargs: '0',
+        bang: false,
+        range_all: false,
+        // c: `uc_scan_attr` leaves `def` at -1 unless `-count`/`-range=N` sets it.
+        def: -1,
+    };
+    // c: parse the leading `-attr[=val]` command attributes (`uc_scan_attr`).
     while let Some(r) = s.strip_prefix('-') {
         let end = r.find(char::is_whitespace).unwrap_or(r.len());
         let attr = r[..end].to_ascii_lowercase();
         if let Some(v) = attr.strip_prefix("nargs=") {
-            nargs = v.chars().next().unwrap_or('0');
+            cmd.nargs = v.chars().next().unwrap_or('0');
         } else if attr == "bang" {
-            bang = true;
+            cmd.bang = true;
+        } else if let Some(v) = attr.strip_prefix("range=") {
+            if v == "%" {
+                cmd.range_all = true;
+            } else if let Ok(n) = v.parse() {
+                cmd.def = n;
+            }
+        } else if attr == "count" {
+            cmd.def = 0;
+        } else if let Some(v) = attr.strip_prefix("count=") {
+            cmd.def = v.parse().unwrap_or(0);
         }
-        // -range/-count/-complete=/-buffer/… are accepted and ignored.
+        // -complete=/-buffer/-bar/… are accepted and ignored.
         s = r[end..].trim_start();
     }
     let end = s.find(char::is_whitespace).unwrap_or(s.len());
     let name = &s[..end];
-    let rep = s[end..].trim_start();
+    cmd.rep = s[end..].trim_start().to_string();
     if name.is_empty() {
         return;
     }
-    uc_add_command(name, rep, nargs, bang);
+    uc_add_command(name, cmd);
 }
 
 /// Port of `ex_delcommand()` (Neovim usercmd.c) — delete user command `name`.
