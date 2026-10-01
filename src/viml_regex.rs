@@ -3020,8 +3020,13 @@ pub fn regex_substitute(subject: &str, pat: &str, sub: &str, flags: &str) -> Str
         if s == e {
             if zero_width == Some(s) {
                 if tail < chars.len() {
-                    out.push(chars[tail]);
-                    tail += 1;
+                    // c: `i = mb_ptr2len(tail)` — `utfc_ptr2len`, the character
+                    // WITH its composing marks, so the next search never starts
+                    // on a mark: `substitute("e\u301x", '\%C', '', 'g')` keeps
+                    // the mark in both engines.
+                    let next = cluster_end(&chars, tail);
+                    out.extend(&chars[tail..next]);
+                    tail = next;
                     continue;
                 }
                 break;
