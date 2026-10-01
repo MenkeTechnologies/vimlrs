@@ -410,10 +410,12 @@ pub enum Stmt {
         /// Loop body.
         body: Block,
     },
-    /// `:break`.
-    Break,
-    /// `:continue`.
-    Continue,
+    /// `:break`, with the command text as written (modifiers and surrounding
+    /// blanks included, a trailing comment cut off) — the `: {cmd}` that vim
+    /// appends to `E587` when there is no loop to leave.
+    Break(String),
+    /// `:continue`, with its command text for `E586` (see [`Stmt::Break`]).
+    Continue(String),
     /// `:finish` — stop sourcing the rest of the current script/file.
     Finish,
     /// `:return [expr]`.

@@ -78,6 +78,27 @@ fn text_to_eol(arg: &str) -> String {
     })
 }
 
+/// The command text vim appends to an `eap->errmsg` error (`E586`/`E587`).
+///
+/// c: `do_one_cmd` reports `errormsg` through `append_command(*cmdlinep)`, the
+/// command as written: from just after the previous `|` (or the start of the
+/// line) up to where `separate_nextcmd` cut it — the next `|`, or the `"` of a
+/// trailing comment — so command modifiers and the blanks around the command
+/// stay in (`if 1 | break | endif` reports `:  break `). `line` is the
+/// modifier-stripped text, used only when no source segment is known.
+fn errmsg_cmd_text(line: &str) -> String {
+    let raw = CMD_TAIL.with(|t| {
+        t.borrow()
+            .as_ref()
+            .and_then(|(_, len, tail)| tail.get(..*len).map(str::to_string))
+    });
+    let raw = raw.unwrap_or_else(|| line.to_string());
+    match raw.find('"') {
+        Some(q) => raw[..q].to_string(),
+        None => raw,
+    }
+}
+
 /// True when the parser is in a vim9 region (see [`VIM9`]).
 fn vim9_active() -> bool {
     VIM9.with(|f| f.get())
@@ -256,8 +277,8 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
         // continue). Getting this wrong is silent: `retu 42` parsed as an
         // expression statement, which made the whole enclosing `:function`
         // fail to parse and `E117: Unknown function` fire at the call site.
-        "break" => Ok(Stmt::Break),
-        "continue" => Ok(Stmt::Continue),
+        "break" => Ok(Stmt::Break(errmsg_cmd_text(line))),
+        "continue" => Ok(Stmt::Continue(errmsg_cmd_text(line))),
         "finish" => Ok(Stmt::Finish),
         "return" => Ok(if rest.trim().is_empty() {
             Stmt::Return(None)
@@ -914,7 +935,7 @@ fn eof_closes_block() -> bool {
 /// because nothing reaches the `:endwhile`/`:endfor` that loops back; modelled
 /// as the body followed by `:break`.
 fn run_once(mut body: Block, line: u32) -> Block {
-    body.push((line, Stmt::Break));
+    body.push((line, Stmt::Break(String::new())));
     body
 }
 

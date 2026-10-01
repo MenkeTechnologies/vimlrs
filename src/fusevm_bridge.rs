@@ -580,6 +580,18 @@ pub const VIML_MAKE_LAMBDA: u16 = 3621;
 pub const VIML_ECHOERR_ARG: u16 = 3622;
 /// `:echoerr`: pop the whole message and report it — see `b_echoerr_end`.
 pub const VIML_ECHOERR_END: u16 = 3623;
+/// `:execute` from a function body (or from text such an `:execute` ran): like
+/// `VIML_EXEC_STMT`, but the text is compiled so that its `:return` returns from
+/// the function — see `compile_program_nested_in_function`.
+pub const VIML_EXEC_STMT_FN: u16 = 3624;
+/// The "an `:execute`d `:return` fired" flag. Stack: the mode
+/// (`compile_viml::EXEC_RETURNED_*`); pushes the flag as it was.
+pub const VIML_EXEC_RETURNED: u16 = 3625;
+/// Push a pending-command code (`compile_viml::EXIT_*`, 0 for none) as a
+/// `:finally` is entered. Stack: the code.
+pub const VIML_PENDING_PUSH: u16 = 3626;
+/// Pop the top pending code if it equals the argument; push whether it did.
+pub const VIML_PENDING_TAKE_IF: u16 = 3627;
 /// `json_encode()`
 pub const VIML_FN_JSON_ENCODE: u16 = 3186;
 /// `json_decode()`
@@ -1507,6 +1519,15 @@ thread_local! {
     /// (self-`:source` reaches 199 then E169). Without this guard a self-sourcing
     /// script or nested `:execute` overflows the native stack.
     static CMD_RECURSE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// Set by `VIML_EXEC_STMT_FN` for the one nested compile it causes: the
+    /// text's `:return` returns from the calling function.
+    static EXEC_IN_FUNCTION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// An `:execute`d `:return` has stored the function's value and is unwinding
+    /// to it — see `VIML_EXEC_RETURNED`.
+    static EXEC_RETURNED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// One entry per `:finally` being run: the `:return`/`:break`/`:continue` it
+    /// interrupted, resumed at `:endtry` (c: the `CSF_PENDING` bits).
+    static PENDING: std::cell::RefCell<Vec<i64>> = const { std::cell::RefCell::new(Vec::new()) };
     /// Persistent per-script `s:` scopes, keyed by the script's canonical path —
     /// the reduced stand-in for Vim's `SCRIPT_SV(sid)->sv_dict` array indexed by
     /// script id. Vim gives every sourced script its own script-local scope, so a
@@ -3589,6 +3610,46 @@ fn b_echoerr_end(vm: &mut VM, _: u8) -> Value {
     Value::Undef
 }
 
+/// `VIML_EXEC_STMT_FN`: `:execute` whose text may `:return` from the function.
+fn b_exec_stmt_fn(vm: &mut VM, argc: u8) -> Value {
+    EXEC_IN_FUNCTION.with(|c| c.set(true));
+    let v = b_exec_stmt(vm, argc);
+    EXEC_IN_FUNCTION.with(|c| c.set(false));
+    v
+}
+
+/// `VIML_PENDING_PUSH`.
+fn b_pending_push(vm: &mut VM, _: u8) -> Value {
+    let code = vm.pop().to_int();
+    PENDING.with(|p| p.borrow_mut().push(code));
+    Value::Undef
+}
+
+/// `VIML_PENDING_TAKE_IF`.
+fn b_pending_take_if(vm: &mut VM, _: u8) -> Value {
+    let code = vm.pop().to_int();
+    Value::Bool(PENDING.with(|p| {
+        let mut p = p.borrow_mut();
+        let hit = p.last() == Some(&code);
+        if hit {
+            p.pop();
+        }
+        hit
+    }))
+}
+
+/// `VIML_EXEC_RETURNED`: push the flag, then apply the mode to it.
+fn b_exec_returned(vm: &mut VM, _: u8) -> Value {
+    let mode = vm.pop().to_int();
+    let was = EXEC_RETURNED.with(|c| c.get());
+    match mode {
+        crate::compile_viml::EXEC_RETURNED_SET => EXEC_RETURNED.with(|c| c.set(true)),
+        crate::compile_viml::EXEC_RETURNED_TAKE => EXEC_RETURNED.with(|c| c.set(false)),
+        _ => {}
+    }
+    Value::Bool(was)
+}
+
 fn b_exec_stmt(vm: &mut VM, argc: u8) -> Value {
     let mut parts = Vec::with_capacity(argc as usize);
     for _ in 0..argc {
@@ -4740,7 +4801,15 @@ fn run_nested(
     }
     CMD_RECURSE.with(|c| c.set(depth + 1));
     let r = (|| {
-        let prog = crate::compile_viml::compile_program_nested(&parse(src)?)?;
+        // Taken here, so only the text this `:execute` runs sees it — an
+        // `execute()` or a `:source` inside that text compiles without it.
+        let in_function = EXEC_IN_FUNCTION.with(|c| c.replace(false));
+        let stmts = parse(src)?;
+        let prog = if in_function {
+            crate::compile_viml::compile_program_nested_in_function(&stmts)?
+        } else {
+            crate::compile_viml::compile_program_nested(&stmts)?
+        };
         register_prog_funcs(&mut prog.funcs.into_iter());
         stage_deferred_funcs(prog.deferred_funcs);
         run_chunk_nested(prog.main);
@@ -6957,6 +7026,10 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_MAKE_LAMBDA, b_make_lambda);
     vm.register_builtin(VIML_ECHOERR_ARG, b_echoerr_arg);
     vm.register_builtin(VIML_ECHOERR_END, b_echoerr_end);
+    vm.register_builtin(VIML_EXEC_STMT_FN, b_exec_stmt_fn);
+    vm.register_builtin(VIML_EXEC_RETURNED, b_exec_returned);
+    vm.register_builtin(VIML_PENDING_PUSH, b_pending_push);
+    vm.register_builtin(VIML_PENDING_TAKE_IF, b_pending_take_if);
     vm.register_builtin(VIML_SET, b_set);
     vm.register_builtin(VIML_MAP, b_map);
     vm.register_builtin(VIML_COMMAND, b_command);

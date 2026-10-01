@@ -1,0 +1,20 @@
+1
+0
+E133: :return not inside a function
+1
+E133: :return not inside a function
+Vim(break):E587: :break without :while or :for:  break 
+E586: :continue without :while or :for:  contin 
+E586: :continue without :while or :for:    continue  
+1
+E586: :continue without :while or :for: continue
+1
+E586: :continue without :while or :for:   silent continue  
+1
+E586: :continue without :while or :for:   cont 
+Vim(return):E133: :return not inside a function
+E587: :break without :while or :for: break
+
+E587: :break without :while or :for: break
+E133: :return not inside a function
+after

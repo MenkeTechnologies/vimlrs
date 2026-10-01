@@ -1,0 +1,23 @@
+1
+1
+E684: List index out of range: 0
+next
+body 0
+fin 0
+fin 1
+body 0
+fin 0
+fin 1
+body 2
+fin 2
+inner fin
+outer fin
+b
+c fin 0
+0
+d fin
+from catch
+e2
+inner loop fin 1
+while fin
+done

@@ -342,7 +342,7 @@ fn next_lambda_name() -> String {
 /// Compile a program: top-level statements into `main`, `:function` definitions
 /// into `funcs`.
 pub fn compile_program(stmts: &[(u32, Stmt)]) -> Result<CompiledProgram, VimlError> {
-    compile_program_inner(stmts, true, false)
+    compile_program_inner(stmts, true, false, false)
 }
 
 /// Compile a program that runs INSIDE another one — an `execute()` command
@@ -358,7 +358,25 @@ pub fn compile_program(stmts: &[(u32, Stmt)]) -> Result<CompiledProgram, VimlErr
 /// `Vim(let):E728` — whatever tag the enclosing statement had last set — where
 /// both vim 9.2 and nvim 0.12 report `Vim(echo):E728`.
 pub fn compile_program_nested(stmts: &[(u32, Stmt)]) -> Result<CompiledProgram, VimlError> {
-    compile_program_inner(stmts, true, true)
+    compile_program_inner(stmts, true, true, false)
+}
+
+/// [`compile_program_nested`] for the text of an `:execute` run from a function
+/// body. c: `ex_execute` hands `do_cmdline` the function's own `getline`, so
+/// `ex_return`'s `getline_equal(…, get_func_line)` holds and `:return` there
+/// returns from the FUNCTION (`exe 'return ' . x`). `execute()`, autocommands
+/// and user commands pass no getline and stay [`compile_program_nested`].
+/// `VIML_EXEC_RETURNED` modes: look at the flag, set it, or read and clear it.
+pub const EXEC_RETURNED_PEEK: i64 = 0;
+/// See [`EXEC_RETURNED_PEEK`].
+pub const EXEC_RETURNED_SET: i64 = 1;
+/// See [`EXEC_RETURNED_PEEK`].
+pub const EXEC_RETURNED_TAKE: i64 = 2;
+
+pub fn compile_program_nested_in_function(
+    stmts: &[(u32, Stmt)],
+) -> Result<CompiledProgram, VimlError> {
+    compile_program_inner(stmts, true, true, true)
 }
 
 /// Compile a program that is only *part* of a script — one statement of a
@@ -371,13 +389,14 @@ pub fn compile_program_nested(stmts: &[(u32, Stmt)]) -> Result<CompiledProgram, 
 /// slot absorbs it and `g:A` is never written — the next statement's `echo A`
 /// then raised E121 where vim prints 1.
 pub fn compile_script_stmt(stmts: &[(u32, Stmt)]) -> Result<CompiledProgram, VimlError> {
-    compile_program_inner(stmts, false, false)
+    compile_program_inner(stmts, false, false, false)
 }
 
 fn compile_program_inner(
     stmts: &[(u32, Stmt)],
     slot_top: bool,
     nested: bool,
+    func_cmdline: bool,
 ) -> Result<CompiledProgram, VimlError> {
     // Exceptions are global: if anything in the program throws or `:try`s, every
     // compilation unit emits unwind checks (so a throw can propagate through a
@@ -474,6 +493,7 @@ fn compile_program_inner(
         }
     }
     let mut c = Compiler::new(false, exc);
+    c.func_cmdline = func_cmdline;
     // Slot provably-Number top-level locals so a script-level numeric loop
     // JIT-traces too. Sound: `slot_plan` bails on function calls/dynamic and
     // drops any bare name whose `g:`-alias is referenced (a bare script-level
@@ -581,6 +601,17 @@ pub fn compile_expr_only(e: &Expr) -> Result<fusevm::Chunk, VimlError> {
     Ok(c.b.build())
 }
 
+/// Whether the line `s` runs an `:execute` itself — not in a nested block, whose
+/// own lines are checked where they are compiled.
+fn runs_execute(s: &Stmt) -> bool {
+    match s {
+        Stmt::Execute(_) => true,
+        Stmt::LineGroup(stmts) => stmts.iter().any(runs_execute),
+        Stmt::Silent { stmt, .. } => runs_execute(stmt),
+        _ => false,
+    }
+}
+
 /// Whether any statement (recursively) uses `:try` or `:throw`.
 fn uses_exceptions(stmts: &[(u32, Stmt)]) -> bool {
     stmts.iter().any(|(_, s)| match s {
@@ -630,6 +661,8 @@ struct Compiler {
     b: ChunkBuilder,
     /// Stack of enclosing loops; `break`/`continue` record jump sites here.
     loops: Vec<LoopCtx>,
+    /// Enclosing `:try`s of this body, innermost last (see [`FinCtx`]).
+    fin: Vec<FinCtx>,
     /// Counter for unique hidden `:for` iterator/index variable names.
     hidden: u32,
     /// Whether we are compiling inside a function body (`:return` is valid).
@@ -639,6 +672,10 @@ struct Compiler {
     /// `:finish` jump sites, patched to the end of the current chunk (stops
     /// sourcing the rest of the script/file).
     finishes: Vec<usize>,
+    /// The program is the text of an `:execute` run from a function body, so a
+    /// `:return` in it returns from that function (see
+    /// [`compile_program_nested_in_function`]).
+    func_cmdline: bool,
     /// Whether the program uses exceptions (`:try`/`:throw`). When set, a
     /// per-statement unwind check is emitted after every statement.
     exc: bool,
@@ -1206,10 +1243,12 @@ impl Compiler {
         Compiler {
             b: ChunkBuilder::new(),
             loops: Vec::new(),
+            fin: Vec::new(),
             hidden: 0,
             in_function,
             returns: Vec::new(),
             finishes: Vec::new(),
+            func_cmdline: false,
             exc,
             unwind: Vec::new(),
             slots: std::collections::HashMap::new(),
@@ -1255,6 +1294,8 @@ impl Compiler {
             Stmt::Call(_) => "call",
             Stmt::Defer(_) => "defer",
             Stmt::Return(_) => "return",
+            Stmt::Break(_) => "break",
+            Stmt::Continue(_) => "continue",
             Stmt::Throw(_) => "throw",
             Stmt::Execute(_) => "execute",
             Stmt::Unlet { .. } => "unlet",
@@ -1317,6 +1358,9 @@ impl Compiler {
             }
             let calls_before = self.calls;
             self.stmt(s)?;
+            if (self.in_function || self.func_cmdline) && runs_execute(s) {
+                self.exec_return_check();
+            }
             if self.exc {
                 self.emit(Op::CallBuiltin(h::VIML_CHECK_EXC, 0));
                 let j = self.emit(Op::JumpIfTrue(0));
@@ -1346,6 +1390,30 @@ struct LoopCtx {
     breaks: Vec<usize>,
     continues: Vec<usize>,
 }
+
+/// A `:try` being compiled, for the `:return`/`:break`/`:continue` that leave it.
+///
+/// c: `ex_return`, `ex_break` and `ex_continue` do not jump: they mark the
+/// try-conditionals they cross `CSF_PENDING` (`cleanup_conditionals`), and each
+/// `:finally` on the way runs before `ex_endtry` resumes the pending command
+/// (`rewind_conditionals`). Every `:endtry` crossed also drops the try level —
+/// a `:return` out of a `:try` that skipped that left every later error
+/// turned into an exception.
+#[derive(Default)]
+struct FinCtx {
+    /// `loops.len()` when the `:try` opened: a `:break` crosses this `:try` only
+    /// when its loop is outside it.
+    loop_depth: usize,
+    /// Jumps from a leaving command to the try's pending entry.
+    sites: Vec<usize>,
+    /// Which pending kinds (`EXIT_*`) were recorded.
+    kinds: Vec<i64>,
+}
+
+/// Pending-command codes for `VIML_PENDING_PUSH`. 0 is "nothing pending".
+const EXIT_RETURN: i64 = 1;
+const EXIT_BREAK: i64 = 2;
+const EXIT_CONTINUE: i64 = 3;
 
 impl Compiler {
     fn emit(&mut self, op: Op) -> usize {
@@ -1485,7 +1553,14 @@ impl Compiler {
                     let here = self.b.current_pos();
                     self.b.patch_jump(ok, here);
                 }
-                self.emit(Op::CallBuiltin(h::VIML_EXEC_STMT, Self::argc(args.len())?));
+                // From a function body, the text may `:return` from the function;
+                // `compile_stmts` acts on that at the end of the line.
+                let id = if self.in_function || self.func_cmdline {
+                    h::VIML_EXEC_STMT_FN
+                } else {
+                    h::VIML_EXEC_STMT
+                };
+                self.emit(Op::CallBuiltin(id, Self::argc(args.len())?));
                 self.emit(Op::Pop);
                 let end = self.b.current_pos();
                 for j in failed {
@@ -1661,13 +1736,15 @@ impl Compiler {
                 self.emit(Op::Pop);
                 Ok(())
             }
-            Stmt::Break => {
-                let j = self.emit(Op::Jump(0));
-                self.loops
-                    .last_mut()
-                    .ok_or_else(|| VimlError::msg("E587: :break without :while or :for"))?
-                    .breaks
-                    .push(j);
+            // c: `ex_break` with no loop on the condition stack sets
+            // `eap->errmsg`, which `do_one_cmd` reports at RUN time with the
+            // command text appended; the script carries on after it.
+            Stmt::Break(text) => {
+                if self.loops.is_empty() {
+                    self.raise_cmd(&format!("E587: :break without :while or :for: {text}"));
+                    return Ok(());
+                }
+                self.exit_jump(EXIT_BREAK);
                 Ok(())
             }
             Stmt::Finish => {
@@ -1678,18 +1755,21 @@ impl Compiler {
                 self.finishes.push(j);
                 Ok(())
             }
-            Stmt::Continue => {
-                let j = self.emit(Op::Jump(0));
-                self.loops
-                    .last_mut()
-                    .ok_or_else(|| VimlError::msg("E586: :continue without :while or :for"))?
-                    .continues
-                    .push(j);
+            Stmt::Continue(text) => {
+                if self.loops.is_empty() {
+                    self.raise_cmd(&format!("E586: :continue without :while or :for: {text}"));
+                    return Ok(());
+                }
+                self.exit_jump(EXIT_CONTINUE);
                 Ok(())
             }
             Stmt::Return(expr) => {
-                if !self.in_function {
-                    return Err(VimlError::msg("E133: :return not inside a function"));
+                // c: `ex_return` outside a function is `emsg(e_return_not_inside_function)`
+                // at run time, before the argument is evaluated, and without
+                // the command text; the script carries on after it.
+                if !self.in_function && !self.func_cmdline {
+                    self.raise_cmd("E133: :return not inside a function");
+                    return Ok(());
                 }
                 // c: `ex_return` returns the evaluated value only when `eval0()`
                 // succeeded; on FAIL it still returns, but through
@@ -1707,8 +1787,18 @@ impl Compiler {
                 }
                 self.emit(Op::CallBuiltin(h::VIML_SET_RETURN, 1));
                 self.emit(Op::Pop);
-                let j = self.emit(Op::Jump(0));
-                self.returns.push(j);
+                if !self.in_function {
+                    // An `:execute` of the function: the value is in the
+                    // function's return slot; flag it for the `:execute` that
+                    // ran this text and stop running the text.
+                    self.emit(Op::LoadInt(EXEC_RETURNED_SET));
+                    self.emit(Op::CallBuiltin(h::VIML_EXEC_RETURNED, 1));
+                    self.emit(Op::Pop);
+                    let j = self.emit(Op::Jump(0));
+                    self.finishes.push(j);
+                    return Ok(());
+                }
+                self.exit_jump(EXIT_RETURN);
                 Ok(())
             }
             Stmt::Function {
@@ -1880,6 +1970,10 @@ impl Compiler {
         // a catchable exception rather than a printed message (`cause_errthrow`).
         self.emit(Op::CallBuiltin(h::VIML_TRY_ENTER, 0));
         self.emit(Op::Pop);
+        self.fin.push(FinCtx {
+            loop_depth: self.loops.len(),
+            ..FinCtx::default()
+        });
         // Protected body — its unwind frame targets the catch dispatch.
         self.unwind.push(Vec::new());
         self.compile_stmts(body)?;
@@ -1927,9 +2021,21 @@ impl Compiler {
         // catch matched" — converges here, so this is where the try level drops
         // again. An error raised inside a `:catch`/`:finally` body is therefore
         // only catchable by an *enclosing* `:try`, as in Vim.
+        // The `:finally` is not inside its own `:try`: a `:return` there leaves
+        // outward. With a command pending, every other way in records "none".
+        let fin = self.fin.pop().expect("try fin ctx");
         let finally_start = self.b.current_pos();
         if let Some(j) = skip_catches {
             self.b.patch_jump(j, finally_start);
+        }
+        if !fin.sites.is_empty() {
+            self.emit(Op::LoadInt(0));
+            self.emit(Op::CallBuiltin(h::VIML_PENDING_PUSH, 1));
+            self.emit(Op::Pop);
+            let pending_entry = self.b.current_pos();
+            for j in &fin.sites {
+                self.b.patch_jump(*j, pending_entry);
+            }
         }
         self.emit(Op::CallBuiltin(h::VIML_TRY_LEAVE, 0));
         self.emit(Op::Pop);
@@ -1942,6 +2048,18 @@ impl Compiler {
         if let Some(fbody) = finally {
             self.compile_stmts(fbody)?;
         }
+        // c: `ex_endtry` resumes the command the `:finally` interrupted.
+        let mut resume = Vec::new();
+        if !fin.sites.is_empty() {
+            for &kind in &fin.kinds {
+                self.emit(Op::LoadInt(kind));
+                self.emit(Op::CallBuiltin(h::VIML_PENDING_TAKE_IF, 1));
+                resume.push((kind, self.emit(Op::JumpIfTrue(0))));
+            }
+            self.emit(Op::LoadInt(0));
+            self.emit(Op::CallBuiltin(h::VIML_PENDING_TAKE_IF, 1));
+            self.emit(Op::Pop);
+        }
         // After finally: if an exception is still pending, propagate it to the
         // enclosing boundary (the try's own frame is already popped).
         if self.exc {
@@ -1950,6 +2068,16 @@ impl Compiler {
             if let Some(frame) = self.unwind.last_mut() {
                 frame.push(j);
             }
+        }
+        if !resume.is_empty() {
+            let done = self.emit(Op::Jump(0));
+            for (kind, j) in resume {
+                let here = self.b.current_pos();
+                self.b.patch_jump(j, here);
+                self.exit_jump(kind);
+            }
+            let here = self.b.current_pos();
+            self.b.patch_jump(done, here);
         }
         Ok(())
     }
@@ -2522,6 +2650,74 @@ impl Compiler {
     /// `ex_let_register`.
     fn arith_compound_op(expr: &Expr) -> Option<char> {
         Self::let_compound_op(expr).filter(|c| *c != '.')
+    }
+
+    /// After a line that ran an `:execute` from a function: if the text
+    /// `:return`ed, return now. c: `ex_return` only marks the function returned
+    /// (`do_return`), and `do_cmdline` sees it when it fetches the next line —
+    /// so the rest of the `|`-separated line still runs (`exe 'return' | echo
+    /// 'x'` prints `x`). Text that an `:execute` ran ends instead, leaving the
+    /// flag for the function.
+    fn exec_return_check(&mut self) {
+        let mode = if self.in_function {
+            EXEC_RETURNED_TAKE
+        } else {
+            EXEC_RETURNED_PEEK
+        };
+        self.emit(Op::LoadInt(mode));
+        self.emit(Op::CallBuiltin(h::VIML_EXEC_RETURNED, 1));
+        let skip = self.emit(Op::JumpIfFalse(0));
+        if self.in_function {
+            self.exit_jump(EXIT_RETURN);
+        } else {
+            let j = self.emit(Op::Jump(0));
+            self.finishes.push(j);
+        }
+        let here = self.b.current_pos();
+        self.b.patch_jump(skip, here);
+    }
+
+    /// Leave by `:return` (`EXIT_RETURN`), `:break` or `:continue`. Inside a
+    /// `:try` the command crosses, record it as pending there and go to that
+    /// try's `:finally`; otherwise jump straight to the target.
+    fn exit_jump(&mut self, kind: i64) {
+        let loops = self.loops.len();
+        let crosses = self
+            .fin
+            .last()
+            .is_some_and(|f| kind == EXIT_RETURN || f.loop_depth == loops);
+        if crosses {
+            self.emit(Op::LoadInt(kind));
+            self.emit(Op::CallBuiltin(h::VIML_PENDING_PUSH, 1));
+            self.emit(Op::Pop);
+            let j = self.emit(Op::Jump(0));
+            let f = self.fin.last_mut().expect("crossed :try");
+            f.sites.push(j);
+            if !f.kinds.contains(&kind) {
+                f.kinds.push(kind);
+            }
+            return;
+        }
+        let j = self.emit(Op::Jump(0));
+        match kind {
+            EXIT_RETURN => self.returns.push(j),
+            EXIT_BREAK => self.loops.last_mut().expect("in a loop").breaks.push(j),
+            _ => self.loops.last_mut().expect("in a loop").continues.push(j),
+        }
+    }
+
+    /// Report `msg` as the current command's error at run time (`emsg()` from
+    /// inside an Ex command: tagged `Vim(cmd):` inside `:try`, and it abandons
+    /// the rest of a `|`-separated line because it is reported).
+    /// The error mark is set first: `VIML_RAISE` stays quiet when an earlier
+    /// error is still above the mark, which is right for an expression and wrong
+    /// for a command of its own.
+    fn raise_cmd(&mut self, msg: &str) {
+        self.emit(Op::CallBuiltin(h::VIML_ERR_MARK, 0));
+        self.emit(Op::Pop);
+        self.load_str(msg);
+        self.emit(Op::CallBuiltin(h::VIML_RAISE_CMD, 1));
+        self.emit(Op::Pop);
     }
 
     /// c: `semsg(_(e_letwrong), op)` — "E734: Wrong variable type for %s=".
