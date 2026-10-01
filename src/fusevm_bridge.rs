@@ -7880,12 +7880,10 @@ fn eval_file_inner(path: &std::path::Path) -> Result<(), VimlError> {
 /// "this line is invalid VimL" vs "this line is valid VimL this parser cannot
 /// read yet". Do not report the list until that exists.
 ///
-/// The exit status has a second, independent cause worth recording here: every
-/// statement runs as its own chunk and `run_chunk` opens with `reset_run()`,
-/// which zeroes `did_emsg`. So even a REPORTED error is erased by the next
-/// statement starting, and only an error in the file's last statement can reach
-/// the CLI's `errored()`. The C keeps one `did_emsg` per sourced script, not per
-/// command.
+/// Every statement runs as its own chunk and `run_chunk` opens with
+/// `reset_run()`, which zeroes `ex_exitval`; the latch is carried across them
+/// here, so a REPORTED error in any statement still makes the exit status 1, as
+/// the C's one `ex_exitval` per process does.
 pub fn source_tolerant(src: &str) -> (usize, usize) {
     let (stmts, parse_errs) = crate::viml_parser::parse_program_lines_tolerant(src);
     let mut ran = 0usize;
@@ -7893,6 +7891,7 @@ pub fn source_tolerant(src: &str) -> (usize, usize) {
     // Each statement runs once in its own one-shot chunk; block-JITing those is
     // pointless and, for structurally-identical chunks, unsound (see SUPPRESS_JIT).
     let _no_jit = suppress_jit();
+    let mut exitval = message::ex_exitval.with(|e| e.get());
     for numbered in stmts {
         // Each statement compiles + runs independently; a compile error or an
         // uncaught run-time error ends only that statement's chunk.
@@ -7902,11 +7901,13 @@ pub fn source_tolerant(src: &str) -> (usize, usize) {
         match crate::compile_viml::compile_script_stmt(std::slice::from_ref(&numbered)) {
             Ok(prog) => {
                 run_compiled(prog);
+                exitval = exitval.max(message::ex_exitval.with(|e| e.get()));
                 ran += 1;
             }
             Err(_) => skipped += 1,
         }
     }
+    message::ex_exitval.with(|e| e.set(exitval));
     (ran, skipped)
 }
 
@@ -8116,6 +8117,16 @@ mod tests {
         assert_eq!(run("echo g:sta").trim(), "10");
         assert_eq!(run("echo g:stb").trim(), "20");
         assert!(ran >= 2 && skipped >= 1, "ran={ran} skipped={skipped}");
+    }
+
+    /// A reported error early in a tolerantly-sourced file still sets the exit
+    /// status: each statement's `reset_run()` zeroes `ex_exitval`, so the latch
+    /// has to be carried across them. It was lost as soon as a later statement
+    /// ran clean, and `viml` exited 0 after printing the E684.
+    #[test]
+    fn source_tolerant_keeps_the_exit_status() {
+        source_tolerant("echo [][0]\nlet bad = \"oops\nlet g:clean_after = 1\n");
+        assert_eq!(message::ex_exitval.with(|e| e.get()), 1);
     }
 
     /// `:colorscheme {name}` records `g:colors_name`, sources the matching
