@@ -7016,3 +7016,65 @@ the line. Both now skip an interpolated string by the lexer's rules. Parity
 case: `interp_string_nested_quotes.vim`.
 
 ### R47-O1, R47-O2, R47-O4, R46-O2, R30-O1 — unchanged
+
+## R49 — malformed `:echo` arguments, `eval()` failures, `printf()` errors, error-message display
+
+Oracle: vim 9.2.1150 (`/opt/homebrew/bin/vim`; the committed records still
+replay byte-identical under it). New cases recorded from that binary only.
+
+### R49-1. A malformed `:echo`/`:execute` argument printed nothing — ✅ FIXED (narrows R30-O1)
+
+`echo 1 + * 2`, `echo )`, `echo 'a' 1 +`, `echo [1,` dropped the whole command
+silently and exited 0: the parse error sent the file to `source_tolerant()`,
+which discards parse errors (R30-O1). `parse_expr_list` now turns a failing
+argument into a run-time error operand, so the arguments ahead of it print, the
+error reports (`ex_echo`'s `semsg(_(e_invexpr2), p)` when the failing level was
+silent), the rest of the line is abandoned, and the file stays on the fast path
+(exit 1). The E15 text runs to the end of the LINE, `|` included, because vim
+never cut it there. `primary()`'s fallback now leaves the offending token
+unread, so E15 quotes from it (`"* 2"`, not `"2"`). An argument holding a
+curly-brace name (`g:a_{x}`, still unparsed here) is excluded, so valid vim
+source never gains an error. Parity case: `echo_arg_parse_error.vim`.
+
+### R49-2. `eval_list()`'s two end-of-text errors — ✅ FIXED
+
+`[1,` and `[` are `E697: Missing end of List ']': ` (the loop stops at NUL and
+the end check reports); only `[1` with no comma is E696. A silent item failure
+(`[1 +`) stays silent for the caller's E15. Parity case: `list_literal_end.vim`.
+
+### R49-3. A failing `eval()` returned nothing — ✅ FIXED
+
+`echo eval('*')` printed the E15s and no `0`; `eval('nosuchvar')` returned
+`v:null` with no E15. `eval()` now runs as a callee (its error does not fail the
+command around it) and a run-time evaluator failure takes the same `eval1() ==
+FAIL` branch as a parse failure. E488 quotes the leftover text from the end of
+the last consumed token, leading blanks included (`eval('1 2')` →
+`E488: Trailing characters:  2`). Parity case: `eval_failure_value.vim`.
+
+### R49-4. `printf()` after a conversion error — ✅ FIXED
+
+`printf('%d', 1.5)` returned `-1` after E805; `f_printf` clears `did_emsg`
+around `vim_vsnprintf_typval` and returns the empty string if anything was
+reported, and `tv_nr` reads a bad argument as 0 (visible under `:silent!`).
+Parity case: `printf_conversion_error.vim`.
+
+### R49-5. Control bytes in an error message — ✅ FIXED
+
+Errors were written raw; `emsg()` displays through `msg_outtrans()`, so TAB is
+`^I`, NL `^@`, `0x01` `^A` (`eval("1\t2")` → `E488: Trailing characters: ^I2`).
+`:echoerr` follows vim 9.2, which reports it through plain `emsg()` (Neovim's
+`emsg_multiline(…, true)` writes TAB/NL raw). Parity case:
+`error_message_transchar.vim`.
+
+### R49-O1. Open, measured this round
+
+- `echo foo(*)`: vim adds `E116: Invalid arguments for function foo(*)` after
+  the E15 (same class as R33-O3, the deferred second diagnostic).
+- `echo 2 &&& 1`: vim `E112: Option name missing: & 1`, here `0 1`.
+- `>>`/`<<` bitwise shifts (vim 9.2 legacy, `E1282`/`E1283`): here a parse
+  failure dropped by `source_tolerant()`. Neovim has no shift operators (E15),
+  so this is an engine split that needs a decision before it is ported.
+- `has('patch-…')` is always 0 here while `v:version` reports 801; both
+  engines answer from their patch tables. `f_has` documents this as deliberate.
+- `call` and other non-echo commands still route their parse errors through
+  `source_tolerant()` (R30-O1).
