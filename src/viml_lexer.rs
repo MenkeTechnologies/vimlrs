@@ -821,6 +821,33 @@ impl<'a> Lexer<'a> {
         while matches!(self.peek(), b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_') {
             self.pos += 1;
         }
+        // c: `get_compare` reads `is`/`isnot` with an optional `#` (match case)
+        // or `?` (ignore case) straight from the text after an operand, so
+        // `1 is#1` is a comparison, not the autoload name `is#1`. Only after an
+        // operand: in operand position `is#x` is still a name.
+        let word = &self.s[start..self.pos];
+        if (word == "is" || word == "isnot") && matches!(self.peek(), b'#' | b'?') {
+            let before = self.src[..start]
+                .iter()
+                .rev()
+                .find(|b| !matches!(b, b' ' | b'\t' | b'\r' | b'\n'));
+            if before.is_some_and(|b| {
+                b.is_ascii_alphanumeric() || matches!(b, b'_' | b')' | b']' | b'}' | b'\'' | b'"')
+            }) {
+                let op = if word == "is" {
+                    CmpOp::Is
+                } else {
+                    CmpOp::IsNot
+                };
+                let case = if self.peek() == b'#' {
+                    CaseFlag::MatchCase
+                } else {
+                    CaseFlag::IgnoreCase
+                };
+                self.pos += 1;
+                return Tok::Cmp(op, case);
+            }
+        }
         // A leading single-letter scope prefix (`a:`/`b:`/`g:`/`l:`/`s:`/`t:`/
         // `v:`/`w:`) absorbs its `:` and the name after it. Only the real scope
         // letters do this — otherwise `z:1` (a no-space ternary `?z:1`) or a
