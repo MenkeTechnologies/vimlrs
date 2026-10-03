@@ -43,6 +43,14 @@ thread_local! {
     /// for [`text_to_eol`].
     static CMD_TAIL: std::cell::RefCell<Option<(usize, usize, String)>> =
         const { std::cell::RefCell::new(None) };
+    /// Whether every line being parsed is an Ex command, as in vim: a sourced
+    /// file, or the text `:execute` and friends run. c: `do_one_cmd`
+    /// (`ex_docmd.c`) reads a line as `[range]{command}` and nothing else, so a
+    /// leading number is a range (`30` goes to line 30, `1wincmd w` is a count)
+    /// and a word from the command table is that command (`only`, `cd ~/`),
+    /// never an expression. Off for the `eval_source` REPL, which evaluates bare
+    /// expressions, so `3 + 4` there still yields 7. Set by [`with_ex_lines`].
+    static EX_LINES: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Byte offset of `part` (a subslice of `whole`) within `whole`.
@@ -97,6 +105,51 @@ fn errmsg_cmd_text(line: &str) -> String {
         Some(q) => raw[..q].to_string(),
         None => raw,
     }
+}
+
+/// Run `f` with [`EX_LINES`] on, restoring the previous value afterwards.
+pub fn with_ex_lines<T>(f: impl FnOnce() -> T) -> T {
+    let saved = EX_LINES.with(|c| c.replace(true));
+    let out = f();
+    EX_LINES.with(|c| c.set(saved));
+    out
+}
+
+/// A legacy-script line read as vim reads it (see [`EX_LINES`]). vim9 keeps
+/// expression statements (`list->add(1)`), so it is excluded.
+fn ex_lines_active() -> bool {
+    EX_LINES.with(|c| c.get()) && !vim9_active()
+}
+
+/// Whether `word` names a built-in Ex command by `find_ex_command`'s rule
+/// (`ex_docmd.c:3130-3137`): it is a prefix of some [`CMDNAMES`] entry.
+///
+/// [`CMDNAMES`]: crate::ported::eval::funcs::CMDNAMES
+fn is_builtin_ex_command(word: &str) -> bool {
+    !word.is_empty()
+        && crate::ported::eval::funcs::CMDNAMES
+            .iter()
+            .any(|name| name.starts_with(word))
+}
+
+/// Whether `line`, read as an Ex command line (see [`EX_LINES`]), is an Ex
+/// command rather than one of the statements vimlrs evaluates itself — the
+/// case where running it again as a statement only yields the same command.
+pub fn is_ex_command_line(line: &str) -> bool {
+    with_ex_lines(|| matches!(parse_stmt(line), Ok(Stmt::ExCmd(_))))
+}
+
+/// Whether `line`, after any range, names a built-in Ex command. One that
+/// neither vimlrs nor its host runs is then skipped, as vim runs it without a
+/// word (`only`, `argglobal`, `%argdel` print nothing under `vim -es`).
+pub fn names_builtin_ex_command(line: &str) -> bool {
+    let rest = line.trim_start_matches(|c: char| {
+        c.is_ascii_digit() || matches!(c, ':' | '%' | '$' | '.' | ',' | ';' | '+' | '-' | ' ')
+    });
+    let end = rest
+        .find(|c: char| !c.is_ascii_alphabetic())
+        .unwrap_or(rest.len());
+    is_builtin_ex_command(&rest[..end])
 }
 
 /// True when the parser is in a vim9 region (see [`VIM9`]).
@@ -417,6 +470,11 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
         // parses as one (no trailing tokens); only a line the expression grammar
         // rejects — a range comma or a trailing command word (`1,1print`,
         // `1print`) — falls through to `do_excmd`.
+        // Read as vim reads a script or command line (see [`EX_LINES`]), the
+        // number is always a range.
+        _ if ex_lines_active() && line.starts_with(|c: char| c.is_ascii_digit()) => {
+            Ok(Stmt::ExCmd(line.to_string()))
+        }
         _ if line.starts_with(|c: char| c.is_ascii_digit()) => match parse_expr(line) {
             Ok(e) => Ok(Stmt::Expr(e)),
             Err(_) => Ok(Stmt::ExCmd(line.to_string())),
@@ -440,6 +498,18 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
         // (`MyCmd key=val`) and comparisons. Kept ahead of the uppercase
         // user-command arm so a CamelCase script var (`Total = 0`) assigns.
         _ if vim9_active() && is_vim9_assignment(line) => parse_let(line),
+        // In a script or command line (see [`EX_LINES`]), a line opening with a
+        // range address (`$argadd f`, `.,$d`, `+3`) or a word from the command
+        // table (`only`, `cd ~/`, `argglobal`, `wincmd t`) is that Ex command.
+        // `word(` stays a function call.
+        _ if ex_lines_active()
+            && (line.starts_with(['$', '.', ',', ';', '+', '-'])
+                || (cmd.starts_with(|c: char| c.is_ascii_lowercase())
+                    && !line[cmd.len()..].starts_with('(')
+                    && is_builtin_ex_command(cmd))) =>
+        {
+            Ok(Stmt::ExCmd(line.to_string()))
+        }
         // A command word starting with an uppercase letter is a user-command
         // invocation (`:Foo args`), resolved at run time. A name immediately
         // followed by `(` is a funcref call expression, not a command.
@@ -4886,5 +4956,59 @@ mod tests {
         assert!(matches!(parse_expr("x[1:2]").unwrap(), Expr::Slice { .. }));
         assert!(matches!(parse_stmt("echo 1 + 1").unwrap(), Stmt::Echo(_)));
         assert!(matches!(parse_stmt("let x = 5").unwrap(), Stmt::Let { .. }));
+    }
+
+    /// The lines a `:mksession` / vim-session script is made of. In a sourced
+    /// file each is an Ex command, as vim's `do_one_cmd` reads it; outside one
+    /// (the expression REPL) the old reading stands.
+    #[test]
+    fn script_lines_are_ex_commands() {
+        let ex = |line: &str| with_ex_lines(|| matches!(parse_stmt(line), Ok(Stmt::ExCmd(_))));
+        for line in [
+            "only",
+            "cd ~/",
+            "cd /tmp/x",
+            "argglobal",
+            "%argdel",
+            "$argadd .zshrc",
+            "wincmd t",
+            "1wincmd w",
+            "tabnext 1",
+            "30",
+            "407",
+            ".,$d",
+            "+3",
+        ] {
+            assert!(ex(line), "`{line}` in a script is an Ex command");
+        }
+        // `silent only`: the modifier wraps the command, it does not hide it.
+        let wrapped = with_ex_lines(|| parse_stmt("silent only").unwrap());
+        assert!(
+            matches!(&wrapped, Stmt::Silent { stmt, .. } if matches!(**stmt, Stmt::ExCmd(_))),
+            "{wrapped:?}"
+        );
+
+        // Statements vimlrs evaluates keep their own parse, and a call stays a
+        // call even when the name is a command word (`list(…)` is not `:list`).
+        assert!(with_ex_lines(|| matches!(parse_stmt("let s:l = 1").unwrap(), Stmt::Let { .. })));
+        assert!(with_ex_lines(|| matches!(parse_stmt("set so=0").unwrap(), Stmt::Set(_))));
+        assert!(!ex("list(1)"), "a word followed by `(` is a call");
+        assert!(!ex("undefinedword"), "not in the command table");
+
+        // Outside a script, a number and a bare word are expressions as before.
+        assert!(matches!(parse_stmt("30").unwrap(), Stmt::Expr(_)));
+        assert!(matches!(parse_stmt("3 + 4").unwrap(), Stmt::Expr(_)));
+    }
+
+    /// Which command lines the runtime may skip silently (built-in, as vim runs
+    /// them without a word) and which are E492 (no such command).
+    #[test]
+    fn builtin_ex_command_names_see_past_the_range() {
+        for line in ["only", "%argdel", "$argadd f", "1wincmd w", ".,$d", "argg"] {
+            assert!(names_builtin_ex_command(line), "{line}");
+        }
+        for line in ["%foobar", "!ls", "zzz"] {
+            assert!(!names_builtin_ex_command(line), "{line}");
+        }
     }
 }

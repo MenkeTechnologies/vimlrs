@@ -4891,7 +4891,9 @@ fn run_nested(
         // Taken here, so only the text this `:execute` runs sees it — an
         // `execute()` or a `:source` inside that text compiles without it.
         let in_function = EXEC_IN_FUNCTION.with(|c| c.replace(false));
-        let stmts = parse(src)?;
+        // What `:execute`, `:source` and the other command-line callers run is
+        // Ex commands, as in vim.
+        let stmts = crate::viml_parser::with_ex_lines(|| parse(src))?;
         let prog = if in_function {
             crate::compile_viml::compile_program_nested_in_function(&stmts)?
         } else {
@@ -5945,27 +5947,29 @@ fn exec_ex_or_stmt(line: &str) {
         ExCmdResult::NotEx => {
             // Strip a leading ':' so `:echo …` runs as the `echo` statement.
             let stmt = line.trim().strip_prefix(':').unwrap_or(line.trim());
-            // A statement whose first character re-routes it straight back to an
-            // Ex command (the parser sends leading `'` mark-addresses, `!`, and
-            // `%`+alpha to `Stmt::ExCmd`) must NOT be re-dispatched here: doing so
-            // re-parses the identical line into another ExCmd and recurses without
-            // bound (stack overflow). `do_excmd` already declined it, so emit the
-            // error real Vim produces for the single-line form and stop. (These
-            // lines reach here mostly as vim9script bracket-continuation fragments
-            // like `'context\w\+',`, which real Vim joins to the previous line.)
+            // The embedding editor runs its own `:` commands first — range and
+            // all (`%argdel`, `1wincmd w`, `30`).
+            if fire_excmd_host_hook(stmt) {
+                return;
+            }
+            // A line that parses straight back to an Ex command must NOT be
+            // re-dispatched as a statement: that re-parses the identical line into
+            // another ExCmd and recurses without bound (E169, then a stack
+            // overflow). `do_excmd` and the host have both declined it.
             if stmt.starts_with('\'') {
                 // `'{mark}…`: Vim evaluates the mark address first; an unset mark
-                // is E20 (`'aa'` → `E20: Mark not set`).
+                // is E20 (`'aa'` → `E20: Mark not set`). (These lines reach here
+                // mostly as vim9script bracket-continuation fragments like
+                // `'context\w\+',`, which real Vim joins to the previous line.)
                 message::emsg("E20: Mark not set");
-            } else if stmt.starts_with('!')
-                || (stmt.starts_with('%')
-                    && stmt[1..].starts_with(|c: char| c.is_ascii_alphabetic()))
-            {
-                // Unrecognized command word after a `%`/`!` range (`%foobar`).
-                message::semsg(&format!("E492: Not an editor command: {stmt}"));
-            } else if !fire_excmd_host_hook(stmt) {
-                // The embedding editor didn't claim it as one of its own `:`
-                // commands, so fall back to Vimscript statement evaluation.
+            } else if crate::viml_parser::is_ex_command_line(stmt) {
+                // A built-in command nothing here runs (`only`, `argglobal`) is
+                // skipped, as vim runs it without a word; an unknown one
+                // (`%foobar`, `!` with nothing to run it) is E492.
+                if !crate::viml_parser::names_builtin_ex_command(stmt) {
+                    message::semsg(&format!("E492: Not an editor command: {stmt}"));
+                }
+            } else {
                 let _ = run_source_nested(stmt);
             }
         }
@@ -7902,8 +7906,9 @@ fn eval_file_inner(path: &std::path::Path) -> Result<(), VimlError> {
     }
     let src = std::fs::read_to_string(path)
         .map_err(|e| VimlError::msg(format!("vimlrs: {}: {e}", path.display())))?;
-    // Fast path: the whole file parses + compiles as one chunk (cached).
-    match crate::viml_parser::parse_program(&src) {
+    // Fast path: the whole file parses + compiles as one chunk (cached). Every
+    // line of a sourced file is an Ex command, as in vim.
+    match crate::viml_parser::with_ex_lines(|| crate::viml_parser::parse_program(&src)) {
         Ok(stmts) => {
             let prog = compile_program(&stmts)?;
             crate::script_cache::store(path, &prog);
@@ -7917,7 +7922,7 @@ fn eval_file_inner(path: &std::path::Path) -> Result<(), VimlError> {
         // parse or that error at run time, exactly as Vim reports an error while
         // sourcing and continues with the next command.
         Err(_) => {
-            source_tolerant(&src);
+            crate::viml_parser::with_ex_lines(|| source_tolerant(&src));
             Ok(())
         }
     }
