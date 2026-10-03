@@ -1604,6 +1604,14 @@ fn split_commands(line: &str) -> Vec<&str> {
     );
     let mut slash = false; // inside a `/…/` :syntax pattern (\ escapes, / closes)
     while i < bytes.len() {
+        // `:wincmd {arg}` reads the next character as its argument, even a `|`
+        // (`wincmd _ | wincmd |`), and only then looks for a separator.
+        if i == start {
+            if let Some(end) = wincmd_arg_end(&line[start..]) {
+                i = start + end;
+                continue;
+            }
+        }
         let c = bytes[i];
         if slash {
             if c == b'\\' {
@@ -1679,6 +1687,29 @@ fn split_commands(line: &str) -> Vec<&str> {
         segs.push(tail);
     }
     segs
+}
+
+/// The byte offset just past `:[count]wincmd {arg}`'s argument when `seg`
+/// is that command: vim's `ex_wincmd` takes one character (two after `g` or
+/// CTRL-G) and only then calls `check_nextcmd`, so a `|` argument is not a
+/// separator.
+fn wincmd_arg_end(seg: &str) -> Option<usize> {
+    let body = seg.trim_start_matches([' ', '\t', ':']);
+    let body = body.trim_start_matches(|c: char| c.is_ascii_digit());
+    let word_end = body.find(|c: char| !c.is_ascii_alphabetic()).unwrap_or(body.len());
+    if !matches!(&body[..word_end], "winc" | "wincm" | "wincmd") {
+        return None;
+    }
+    let after = &body[word_end..];
+    let arg = after.trim_start_matches([' ', '\t']);
+    let mut chars = arg.char_indices();
+    let (_, first) = chars.next()?;
+    let len = if first == 'g' || first == '\x07' {
+        chars.next().map_or(first.len_utf8(), |(i, c)| i + c.len_utf8())
+    } else {
+        first.len_utf8()
+    };
+    Some(seg.len() - arg.len() + len)
 }
 
 /// A parsed block body plus the terminator `(cmd, rest)` it stopped on
@@ -4796,6 +4827,16 @@ fn const_dict_key(key: &Expr) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `:wincmd`'s argument is the next character even when it is `|` — every
+    /// `:mksession` writes `wincmd _ | wincmd |` — and a later `|` separates.
+    #[test]
+    fn wincmd_takes_a_bar_as_its_argument() {
+        assert_eq!(split_commands("wincmd _ | wincmd |"), ["wincmd _ ", " wincmd |"]);
+        assert_eq!(split_commands("2wincmd | | echo 1"), ["2wincmd | ", " echo 1"]);
+        assert_eq!(split_commands("winc gf | echo 1"), ["winc gf ", " echo 1"]);
+        assert_eq!(split_commands("echo 1 | echo 2"), ["echo 1 ", " echo 2"]);
+    }
 
     #[test]
     fn command_modifiers_are_stripped() {
