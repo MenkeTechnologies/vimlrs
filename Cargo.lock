@@ -672,9 +672,9 @@ checksum = "e6d5a32815ae3f33302d95fdcb2ce17862f8c65363dcfd29360480ba1001fc9c"
 
 [[package]]
 name = "fusevm"
-version = "0.26.7"
+version = "0.26.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93e134c61a2f7365207bc23a2324c7f5c9768f42a123759400ac0718f68956b1"
+checksum = "52e9c630b03b4cd39bdec854806a9f6b93f24e29c9e0c7008a9d80b67c291d32"
 dependencies = [
  "base64",
  "bincode",
@@ -1742,7 +1742,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vimlrs"
-version = "0.2.16"
+version = "0.2.17"
 dependencies = [
  "bincode",
  "clap",
