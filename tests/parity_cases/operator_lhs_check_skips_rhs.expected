@@ -1,0 +1,11 @@
+1
+E745: Using a List as a Number
+[1, 2, 3, 4]
+E731: Using a Dictionary as a String
+[1, 2, 3, 4]
+E1282: Bitshift operands must be numbers
+[1, 2, 3, 4]
+E1282: Bitshift operands must be numbers
+[1, 2, 3, 4]
+E974: Using a Blob as a Number
+[2, 3, 4]

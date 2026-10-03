@@ -234,6 +234,10 @@ pub enum ArithOp {
     Mod,
     /// `.` / `..`
     Concat,
+    /// `<<` — vim 9.2 legacy bitwise left shift (`eval_shift_number`)
+    ShiftL,
+    /// `>>` — vim 9.2 legacy bitwise right shift, unsigned
+    ShiftR,
 }
 
 /// Assignment target for `:let`.

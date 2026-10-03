@@ -1,0 +1,44 @@
+1
+y                     #5
+E15: Invalid expression: "<<= 2"
+y                     #5
+E15: Invalid expression: ">>= 1"
+y                     #5
+E15: Invalid expression: "< 2"
+y                     #5
+z                     #6
+E15: Invalid expression: "~ w"
+y                     #5
+E15: Invalid expression: "~ z"
+y                     #5
+E15: Invalid expression: "<= 2"
+y                     #5
+z                     #6
+E15: Invalid expression: "<"
+y                     #5
+E15: Invalid expression: "! = 3"
+y                     #5
+E121: Undefined variable: 3
+y                     #5
+z                     #6
+bar
+y                     #5
+E15: Invalid expression: "< 2 | echo 'not run'"
+y                     #5
+E121: Undefined variable: nope
+E15: Invalid expression: "&ts"
+E15: Invalid expression: "$NOPE_X"
+E15: Invalid expression: "@a"
+y                     #5
+E15: Invalid expression: "&ts"
+y                     #5
+E15: Invalid expression: "'str'"
+y                     #5
+E15: Invalid expression: "("
+y                     #5
+E15: Invalid expression: "."
+y                     #5
+y                     #5
+ok
+E474: Invalid argument
+5 6

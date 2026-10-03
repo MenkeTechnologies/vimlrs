@@ -220,7 +220,7 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
         // (vendor/eval/vars.c): `!` locks/unlocks all levels (`DICT_MAXNEST`), an
         // optional leading number is the explicit depth, and the default is 2.
         "lockvar" | "unlockvar" => parse_lockvar(rest, !cmd.starts_with("un")),
-        "let" => parse_let(rest),
+        "let" => parse_legacy_let(rest),
         // vim9 `:var {name}[: type] = {expr}` declare-and-assign like `:let`. The
         // `: type` annotation is parsed and discarded (checking/coercion deferred).
         // A type-only `:var x: number` (no initializer) default-inits to the
@@ -2447,15 +2447,124 @@ fn let_list(rest: &str) -> Option<Stmt> {
         return None;
     }
     let mut out = Vec::with_capacity(names.len());
+    // c: `get_name_len(&arg, &tofree, true, true)` reports
+    // `E15: Invalid expression: "%s"` over the REST OF THE COMMAND LINE when
+    // the argument does not start a name (`let &ts`, `let y 'str'`), and
+    // `list_arg_vars` stops there with no next command.
+    let invalid =
+        |at: &str| Expr::ScriptError(format!("E15: Invalid expression: \"{}\"", text_to_eol(at)));
     for name in names {
         let first = *name.as_bytes().first()?;
         let bare_scope = name.len() == 2 && name.as_bytes()[1] == b':';
-        if bare_scope || !(first.is_ascii_alphabetic() || first == b'_') {
+        if bare_scope {
             return None;
         }
-        out.push((name.to_string(), parse_expr(name).ok()?));
+        if !is_let_name_byte(first) {
+            out.push((String::new(), invalid(name)));
+            break;
+        }
+        let name_end = name
+            .bytes()
+            .position(|b| !is_let_name_byte(b))
+            .unwrap_or(name.len());
+        // `get_name_len` takes a leading digit as a name character too, and no
+        // variable is called `3`.
+        if first.is_ascii_digit() {
+            let head = &name[..name_end];
+            out.push((
+                String::new(),
+                Expr::ScriptError(format!("E121: Undefined variable: {head}")),
+            ));
+            break;
+        }
+        let tail = &name[name_end..];
+        let subscript = tail.starts_with('[')
+            || tail
+                .strip_prefix('.')
+                .and_then(|k| k.bytes().next())
+                .is_some_and(is_let_name_byte);
+        if tail.is_empty() || subscript {
+            out.push((name.to_string(), parse_expr(name).ok()?));
+        } else {
+            // `let y z<`: `y` and `z` are listed, then the `<` is E15.
+            let head = &name[..name_end];
+            out.push((head.to_string(), parse_expr(head).ok()?));
+            out.push((String::new(), invalid(tail)));
+            break;
+        }
     }
     Some(Stmt::LetList(out))
+}
+
+/// A byte `get_name_len()` takes as part of a variable name (`eval_isnamec`,
+/// without the curly braces this reader does not expand).
+fn is_let_name_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'_' | b':' | b'#')
+}
+
+/// Where a `:let` target ends — `skip_var_list()` (`vendor/eval/vars.c`): a
+/// `[a, b; c]` list, or one name with its `{}`/`[]` parts and `.key`s.
+fn let_target_end(s: &str) -> usize {
+    let b = s.as_bytes();
+    let mut i = 0;
+    // `&opt` / `&l:opt`, `$ENV`, `@r` — the sigil and its name.
+    match b.first() {
+        Some(b'@') => return 2.min(b.len()),
+        Some(b'&' | b'$') => i = 1,
+        _ => {}
+    }
+    let mut depth = 0i32;
+    let mut quote = None::<u8>;
+    while i < b.len() {
+        let c = b[i];
+        match quote {
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                }
+            }
+            None if depth > 0 => match c {
+                b'\'' | b'"' => quote = Some(c),
+                b'[' | b'{' => depth += 1,
+                b']' | b'}' => depth -= 1,
+                _ => {}
+            },
+            None => match c {
+                b'[' | b'{' => depth += 1,
+                // `.key`, but not the `.` of `.=` / `..=`.
+                b'.' if b.get(i + 1).copied().is_some_and(is_let_name_byte) => {}
+                _ if is_let_name_byte(c) => {}
+                _ => break,
+            },
+        }
+        i += 1;
+    }
+    i
+}
+
+/// Legacy `:let`. c: `ex_let` decides between assigning and LISTING by the text
+/// right after the target (`skip_var_list` + `skipwhite`): an `=`, an `op=` or
+/// `..=` assigns, anything else lists — so `let y <<= 2` lists `y` and reports
+/// E15 for `<<= 2`, and `let [a] < 1` is E474.
+fn parse_legacy_let(rest: &str) -> Result<Stmt, VimlError> {
+    let s = rest.trim_start();
+    let after = s[let_target_end(s)..].trim_start().as_bytes();
+    let assigns = match after {
+        [b'=', ..] | [b'.', b'.', b'=', ..] => true,
+        [op, b'=', ..] => b"+-*/%.".contains(op),
+        _ => false,
+    };
+    if assigns {
+        return parse_let(rest);
+    }
+    if s.starts_with('[') {
+        return Ok(Stmt::Expr(Expr::ScriptError(
+            "E474: Invalid argument".to_string(),
+        )));
+    }
+    // `:let` alone and the whole-scope forms (`:let g:`) list a hashtable in its
+    // iteration order, which is not modelled — those stay a no-op.
+    Ok(let_list(strip_legacy_trailing_comment(rest)).unwrap_or(Stmt::Expr(Expr::Number(0))))
 }
 
 fn parse_let(rest: &str) -> Result<Stmt, VimlError> {
@@ -2576,13 +2685,20 @@ fn parse_let(rest: &str) -> Result<Stmt, VimlError> {
     // (`tv_op` semantics), reusing the same store path so it stays JIT-eligible.
     let rhs = strip_legacy_trailing_comment(rhs);
     let expr = match op {
-        None => parse_expr(rhs)?,
+        None => parse_let_rhs(rhs)?,
         Some(op) => {
             let cur = let_target_expr(&target)?;
+            let rhs = parse_let_rhs(rhs)?;
+            // c: `ex_let` evaluates `{expr}` BEFORE it reads the target, so an
+            // expression that does not parse is the only error
+            // (`let nosuch += * 2` is E15, not E121).
+            if let Expr::ScriptError(_) = rhs {
+                return Ok(Stmt::Let { target, expr: rhs });
+            }
             Expr::Arith {
                 op,
                 lhs: Box::new(cur),
-                rhs: Box::new(parse_expr(rhs)?),
+                rhs: Box::new(rhs),
                 // c: `ex_let_one` applies the operator with `eexe_mod_op`, not with
                 // the expression operator — see `Expr::Arith::mod_op`.
                 mod_op: true,
@@ -2904,6 +3020,42 @@ fn let_target_expr(target: &LetTarget) -> Result<Expr, VimlError> {
     })
 }
 
+/// The `{expr}` of a `:let`. c: `ex_let` runs `eval0()` on it when the command
+/// EXECUTES, so text that does not parse is an error at run time, not a reason
+/// to reject the whole script: `let x = 1 +` reports `E15: Invalid expression:
+/// "1 +"` (eval0's own message, over the whole expression to the end of the
+/// line), `let x = (1` the level's `E110`, `let x = 1 2` `E488: Trailing
+/// characters: 2` — and the variable is not assigned. The error is an
+/// [`Expr::ScriptError`], which the `:let` store's failure guard already skips.
+///
+/// A curly-brace name still fails the parse, for the reason given at
+/// [`Parser::operand_invexpr`].
+fn parse_let_rhs(src: &str) -> Result<Expr, VimlError> {
+    let (toks, _, lex_err) = crate::viml_lexer::lex_prefix(src);
+    let mut p = Parser::new(toks, src);
+    p.lex_err = lex_err;
+    let e = match p.eval1() {
+        Ok(e) => p.guard_deferred(e),
+        Err(err) => {
+            return match p.operand_invexpr(src, &err, 0) {
+                Some(msg) => Ok(Expr::ScriptError(msg)),
+                None => Err(err),
+            }
+        }
+    };
+    if matches!(p.peek(), Tok::Eof) && p.lex_err.is_none() {
+        return Ok(e);
+    }
+    // c: `eval0`: `if (!ends_excmd(*p)) semsg(_(e_trailing_arg), p)` — the
+    // expression is not evaluated, so its own errors never show. Text the lexer
+    // could not read (`1 ~ 2`, `1 'abc`) is trailing text all the same.
+    let at = p.toks.get(p.i).map_or(src.len(), |t| t.span);
+    Ok(Expr::ScriptError(format!(
+        "E488: Trailing characters: {}",
+        text_to_eol(&src[at..])
+    )))
+}
+
 fn parse_expr_list(src: &str) -> Result<Vec<Expr>, VimlError> {
     if src.trim().is_empty() {
         return Ok(Vec::new());
@@ -2919,7 +3071,14 @@ fn parse_expr_list(src: &str) -> Result<Vec<Expr>, VimlError> {
     loop {
         if matches!(p.peek(), Tok::Eof) {
             if let Some(err) = &p.lex_err {
-                out.push(Expr::ScriptError(err.0.clone()));
+                // An argument the lexer stopped on: its E15 quotes the text to
+                // the end of the line, past any `|` (`echo 1 ~ 2 | echo 3`).
+                let at = p.toks.get(p.i).map_or(src.len(), |t| t.span);
+                let msg = match p.operand_invexpr(src, err, at) {
+                    Some(m) if err.0.starts_with("E15: ") => m,
+                    _ => err.0.clone(),
+                };
+                out.push(Expr::ScriptError(msg));
             }
             break;
         }
@@ -3080,7 +3239,9 @@ impl Parser {
         if curly {
             return None;
         }
-        let at = self.peek_span().unwrap_or(orig.len());
+        // The current token's span: at the `Eof` the lexer stopped on, that is
+        // where the text it could not read begins (`~ 3`), not the end.
+        let at = self.toks.get(self.i).map_or(orig.len(), |t| t.span);
         let rest = orig.get(at..).unwrap_or("");
         if err.is_silent() {
             let past = text_to_eol(orig.get(orig.len()..).unwrap_or(""));
@@ -3532,7 +3693,7 @@ impl Parser {
     }
 
     fn eval4(&mut self) -> Result<Expr, VimlError> {
-        let lhs = self.eval5()?;
+        let lhs = self.eval_shift()?;
         let (op, case) = match self.peek() {
             Tok::Cmp(op, case) => (*op, *case),
             Tok::Ident(id) if id == "is" => (CmpOp::Is, CaseFlag::Default),
@@ -3540,13 +3701,39 @@ impl Parser {
             _ => return Ok(lhs),
         };
         self.advance();
-        let rhs = self.eval5()?;
+        let rhs = self.eval_shift()?;
         Ok(Expr::Compare {
             op,
             case,
             lhs: Box::new(lhs),
             rhs: Box::new(rhs),
         })
+    }
+
+    /// Bitwise shifts, the level vim 9.2 inserts between the comparisons and
+    /// `+`/`-`/`.`: `var1 << var2`, `var1 >> var2`, left-associative.
+    ///
+    /// c: vim `eval.c` `eval5()` — Neovim has no such level (`1 << 2` is E15
+    /// there), so this follows vim. Both operands are evaluated at run time by
+    /// `eval_shift_number()`; see `b_check_lhs_shift` / `b_shift`.
+    fn eval_shift(&mut self) -> Result<Expr, VimlError> {
+        let mut lhs = self.eval5()?;
+        loop {
+            let op = match self.peek() {
+                Tok::ShiftL => ArithOp::ShiftL,
+                Tok::ShiftR => ArithOp::ShiftR,
+                _ => break,
+            };
+            self.advance();
+            let rhs = self.eval5()?;
+            lhs = Expr::Arith {
+                op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+                mod_op: false,
+            };
+        }
+        Ok(lhs)
     }
 
     fn eval5(&mut self) -> Result<Expr, VimlError> {
@@ -4141,6 +4328,11 @@ impl Parser {
                     angle -= 1;
                     self.advance();
                 }
+                // `list<list<number>>` closes two levels with one `>>` token.
+                Tok::ShiftR if angle > 1 => {
+                    angle -= 2;
+                    self.advance();
+                }
                 Tok::LParen | Tok::LBracket => {
                     paren += 1;
                     self.advance();
@@ -4483,9 +4675,9 @@ mod tests {
 
     #[test]
     fn tolerant_parse_skips_bad_statements() {
-        // Line 2 is an unterminated string (a parse error). Tolerant parsing must
+        // Line 2 is a `:call` whose argument list does not parse. Tolerant parsing must
         // still yield the good statements on lines 1 and 3.
-        let src = "set number\nlet x = \"oops\ncolorscheme molokai\n";
+        let src = "set number\ncall Bad(\"oops\ncolorscheme molokai\n";
         let (stmts, errs) = parse_program_lines_tolerant(src);
         assert_eq!(errs.len(), 1, "one statement skipped");
         assert!(stmts

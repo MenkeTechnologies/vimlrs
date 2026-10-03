@@ -1066,14 +1066,15 @@ fn slot_plan(stmts: &[(u32, Stmt)], in_function: bool) -> SlotPlan {
     // A tree is a Number (`is_int=false`) / an Integer (`is_int=true`) when every
     // leaf is a matching literal or a (still-candidate) slot var of that kind.
     // `+ - * / %` of Numbers are Numbers; only `/`,`%` and Float leaves break
-    // integer-ness. Concat is a string op — never numeric.
+    // integer-ness. Concat is a string op — never numeric. A shift can fail on
+    // Number operands (`1 << -1`, E1283), so it is never proved numeric either.
     fn rhs_kind(e: &Expr, set: &HashSet<String>, is_int: bool, in_function: bool) -> bool {
         match e {
             Expr::Number(_) => true,
             Expr::Float(_) => !is_int,
             Expr::Var(n) => slot_key(n, in_function).is_some_and(|k| set.contains(k)),
             Expr::Arith { op, lhs, rhs, .. } => {
-                !matches!(op, ArithOp::Concat)
+                !matches!(op, ArithOp::Concat | ArithOp::ShiftL | ArithOp::ShiftR)
                     && rhs_kind(lhs, set, is_int, in_function)
                     && rhs_kind(rhs, set, is_int, in_function)
             }
@@ -2664,6 +2665,8 @@ impl Compiler {
                 ArithOp::Div => '/',
                 ArithOp::Mod => '%',
                 ArithOp::Concat => '.',
+                // Never a compound operator: legacy vim has no `<<=`/`>>=`.
+                ArithOp::ShiftL | ArithOp::ShiftR => return None,
             }),
             _ => None,
         }
@@ -3043,7 +3046,9 @@ impl Compiler {
             Expr::Number(_) | Expr::Float(_) => true,
             Expr::Var(name) => self.slots.contains_key(self.slot_key(name)), // slotted ⇒ Number
             Expr::Arith { op, lhs, rhs, .. } => {
-                !matches!(op, ArithOp::Concat) && self.expr_is_num(lhs) && self.expr_is_num(rhs)
+                !matches!(op, ArithOp::Concat | ArithOp::ShiftL | ArithOp::ShiftR)
+                    && self.expr_is_num(lhs)
+                    && self.expr_is_num(rhs)
             }
             Expr::Unary {
                 op: UnaryOp::Neg | UnaryOp::Plus,
@@ -3078,7 +3083,9 @@ impl Compiler {
             Expr::Number(_) => true,
             Expr::Var(name) => self.int_slots.contains(self.slot_key(name)),
             Expr::Arith { op, lhs, rhs, .. } => {
-                !matches!(op, ArithOp::Concat) && self.expr_is_int(lhs) && self.expr_is_int(rhs)
+                !matches!(op, ArithOp::Concat | ArithOp::ShiftL | ArithOp::ShiftR)
+                    && self.expr_is_int(lhs)
+                    && self.expr_is_int(rhs)
             }
             Expr::Unary {
                 op: UnaryOp::Neg | UnaryOp::Plus,
@@ -3459,6 +3466,8 @@ impl Compiler {
                         ArithOp::Div => "/",
                         ArithOp::Mod => "%",
                         ArithOp::Concat => ".",
+                        ArithOp::ShiftL => "<<",
+                        ArithOp::ShiftR => ">>",
                     });
                     self.emit(Op::CallBuiltin(h::VIML_MOD_OP, 3));
                     let end = self.b.current_pos();
@@ -3475,18 +3484,36 @@ impl Compiler {
                 // A statically-numeric left operand can never fail either check
                 // (a Number passes both tv_check_num and tv_check_str), so the check
                 // is skipped there and `i + 1` keeps its native-arithmetic fast path.
-                if !self.expr_is_num(lhs) {
+                // c: vim `eval5()` checks a shift's left operand the same way, and
+                // there a Float passes `expr_is_num` but must still fail (E1282).
+                if !self.expr_is_num(lhs) || matches!(op, ArithOp::ShiftL | ArithOp::ShiftR) {
                     let chk = match op {
                         ArithOp::Add => Some(h::VIML_CHECK_LHS_ADD),
                         ArithOp::Sub => Some(h::VIML_CHECK_LHS_SUB),
                         ArithOp::Concat => Some(h::VIML_CHECK_LHS_CONCAT),
+                        ArithOp::ShiftL | ArithOp::ShiftR => Some(h::VIML_CHECK_LHS_SHIFT),
                         _ => None,
                     };
                     if let Some(chk) = chk {
                         self.emit(Op::CallBuiltin(chk, 1));
+                        // c: eval5 returns FAIL before it parses the right
+                        // operand, so a refused left operand skips it and its
+                        // side effects (`[] - remove(l, 0)` leaves `l` alone).
+                        self.emit(Op::CallBuiltin(h::VIML_LHS_CHECK_FAILED, 0));
+                        let to_rhs = self.emit(Op::JumpIfFalse(0));
+                        self.emit(Op::LoadInt(0));
+                        let to_op = self.emit(Op::Jump(0));
+                        let rhs_at = self.b.current_pos();
+                        self.b.patch_jump(to_rhs, rhs_at);
+                        self.expr(rhs)?;
+                        let op_at = self.b.current_pos();
+                        self.b.patch_jump(to_op, op_at);
+                    } else {
+                        self.expr(rhs)?;
                     }
+                } else {
+                    self.expr(rhs)?;
                 }
-                self.expr(rhs)?;
                 let id = match op {
                     ArithOp::Add => h::VIML_ADD,
                     ArithOp::Sub => h::VIML_SUB,
@@ -3494,6 +3521,8 @@ impl Compiler {
                     ArithOp::Div => h::VIML_DIV,
                     ArithOp::Mod => h::VIML_MOD,
                     ArithOp::Concat => h::VIML_CONCAT,
+                    ArithOp::ShiftL => h::VIML_SHIFT_L,
+                    ArithOp::ShiftR => h::VIML_SHIFT_R,
                 };
                 self.emit(Op::CallBuiltin(id, 2));
             }

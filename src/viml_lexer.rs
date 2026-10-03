@@ -97,6 +97,10 @@ pub enum Tok {
     Plus,
     /// `-`
     Minus,
+    /// `<<` (vim 9 bitwise left shift)
+    ShiftL,
+    /// `>>` (vim 9 bitwise right shift)
+    ShiftR,
     /// `.`
     Dot,
     /// `..`
@@ -945,6 +949,16 @@ impl<'a> Lexer<'a> {
                 self.pos += 1;
                 Ok(Tok::Bang)
             }
+            // c: `eval5` claims `<<`/`>>` before `eval4` looks for a comparison,
+            // so the pair is never `<` followed by `<`.
+            (b'<', b'<') => {
+                self.pos += 2;
+                Ok(Tok::ShiftL)
+            }
+            (b'>', b'>') => {
+                self.pos += 2;
+                Ok(Tok::ShiftR)
+            }
             (b'>', b'=') => cmp!(CmpOp::GreaterEqual, 2),
             (b'>', _) => cmp!(CmpOp::Greater, 1),
             (b'<', b'=') => cmp!(CmpOp::LessEqual, 2),
@@ -1009,9 +1023,12 @@ impl<'a> Lexer<'a> {
                 self.pos += 1;
                 Ok(Tok::Comma)
             }
+            // c: `eval7`'s operand switch has no case for the character, so it
+            // reports `E15: Invalid expression: "%s"` over the text from there
+            // on (`echo ~ 3`, `let x = ! = 3`).
             _ => Err(VimlError::msg(format!(
-                "E15: Invalid expression: unexpected '{}'",
-                c as char
+                "E15: Invalid expression: \"{}\"",
+                self.s.get(self.pos..).unwrap_or("")
             ))),
         }
     }

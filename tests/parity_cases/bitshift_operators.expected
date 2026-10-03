@@ -1,0 +1,40 @@
+1
+8
+4
+32
+-9223372036854775808
+0
+9223372036854775804
+1
+1
+12
+32
+2
+4
+4
+2
+1
+4
+8
+2
+next
+[2, 4, 6]
+12
+6
+2 8
+0
+-2
+E1283: Bitshift amount must be a positive number
+E1282: Bitshift operands must be numbers
+E1282: Bitshift operands must be numbers
+E1282: Bitshift operands must be numbers
+E1282: Bitshift operands must be numbers
+E1282: Bitshift operands must be numbers
+E1282: Bitshift operands must be numbers
+E1282: Bitshift operands must be numbers
+E1282: Bitshift operands must be numbers
+c2 Vim(echo):E1283: Bitshift amount must be a positive number
+E15: Invalid expression: "? 1"
+y                     #5
+E15: Invalid expression: "<<= 2"
+5

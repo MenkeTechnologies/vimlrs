@@ -592,6 +592,16 @@ pub const VIML_EXEC_RETURNED: u16 = 3625;
 pub const VIML_PENDING_PUSH: u16 = 3626;
 /// Pop the top pending code if it equals the argument; push whether it did.
 pub const VIML_PENDING_TAKE_IF: u16 = 3627;
+/// A bitwise shift's left operand — see `b_check_lhs_shift`.
+pub const VIML_CHECK_LHS_SHIFT: u16 = 3628;
+/// `<<` — see `b_shift`.
+pub const VIML_SHIFT_L: u16 = 3629;
+/// `>>` — see `b_shift`.
+pub const VIML_SHIFT_R: u16 = 3630;
+/// Push `Bool(the left-operand check just run failed)` — the right operand is then
+/// skipped. c: eval5 `return FAIL` before `eval6(arg, &var2, …)` "to avoid side
+/// effects after an error" (`vendor/eval.c` eval5).
+pub const VIML_LHS_CHECK_FAILED: u16 = 3631;
 /// `json_encode()`
 pub const VIML_FN_JSON_ENCODE: u16 = 3186;
 /// `json_decode()`
@@ -1749,6 +1759,27 @@ fn set_hard_err() {
     HARD_ERR.with(|h| h.set(true));
 }
 
+thread_local! {
+    /// Set when an operator's left-operand check failed — see
+    /// [`VIML_LHS_CHECK_FAILED`].
+    static LHS_CHECK_FAILED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A `VIML_CHECK_LHS_*` check refused its operand (the error is already
+/// reported): the expression fails hard, and the right operand is not
+/// evaluated. Leaves a Number 0 so the operator raises nothing further.
+fn fail_lhs_check() -> Value {
+    set_hard_err();
+    LHS_CHECK_FAILED.with(|f| f.set(true));
+    Value::Int(0)
+}
+
+/// `VIML_LHS_CHECK_FAILED`: push whether the check just run refused its operand,
+/// clearing the flag.
+fn b_lhs_check_failed(_: &mut VM, _: u8) -> Value {
+    Value::Bool(LHS_CHECK_FAILED.with(|f| f.replace(false)))
+}
+
 /// Run a COMMAND-level diagnostic — one the C raises after the argument was
 /// already parsed and evaluated — without counting it as an evaluator failure.
 ///
@@ -2632,8 +2663,7 @@ fn b_check_lhs_add(vm: &mut VM, _: u8) -> Value {
     } else {
         // c: eval5 returns FAIL here — the expression is abandoned outright, and a
         // `:catch` on the same command line never sees it (VIML_EXC_IS_HARD).
-        set_hard_err();
-        Value::Int(0)
+        fail_lhs_check()
     }
 }
 
@@ -2644,8 +2674,7 @@ fn b_check_lhs_sub(vm: &mut VM, _: u8) -> Value {
     } else {
         // c: eval5 returns FAIL here — the expression is abandoned outright, and a
         // `:catch` on the same command line never sees it (VIML_EXC_IS_HARD).
-        set_hard_err();
-        Value::Int(0)
+        fail_lhs_check()
     }
 }
 
@@ -2656,9 +2685,55 @@ fn b_check_lhs_concat(vm: &mut VM, _: u8) -> Value {
     } else {
         // c: eval5 returns FAIL here — the expression is abandoned outright, and a
         // `:catch` on the same command line never sees it (VIML_EXC_IS_HARD).
-        set_hard_err();
-        Value::Int(0)
+        fail_lhs_check()
     }
+}
+
+/// The left operand of `<<`/`>>`, checked before the right one is evaluated.
+///
+/// c: vim `eval5()`: `if (evaluate && rettv->v_type != VAR_NUMBER) {
+/// emsg(_(e_bitshift_ops_must_be_number)); … return FAIL; }` — a plain type
+/// test, not `tv_check_num`: a Float, a Bool and a numeric String all fail.
+fn b_check_lhs_shift(vm: &mut VM, _: u8) -> Value {
+    let v = pop_tv(vm);
+    if v.v_type == VAR_NUMBER {
+        tv_to_value(v)
+    } else {
+        message::emsg("E1282: Bitshift operands must be numbers");
+        fail_lhs_check()
+    }
+}
+
+/// Port of vim's `eval_shift_number()` (`eval.c`): the shift amount must be a
+/// non-negative Number, more than 63 bits gives 0, and both directions shift
+/// the UNSIGNED value (`-8 >> 1` is 9223372036854775804).
+fn b_shift(vm: &mut VM, left: bool) -> Value {
+    let b = pop_tv(vm);
+    let a = pop_tv(vm);
+    // Reading a Number cannot raise anything; anything else is reported below.
+    let by = if b.v_type == VAR_NUMBER {
+        tv_get_number_chk(&b, None)
+    } else {
+        0
+    };
+    if b.v_type != VAR_NUMBER || by < 0 {
+        message::emsg(if b.v_type != VAR_NUMBER {
+            "E1282: Bitshift operands must be numbers"
+        } else {
+            "E1283: Bitshift amount must be a positive number"
+        });
+        return Value::Int(0);
+    }
+    // c: `#define MAX_LSHIFT_BITS (varnumber_T)((sizeof(uvarnumber_T) * 8) - 1)`
+    let n = tv_get_number_chk(&a, None) as u64;
+    let r = if by > 63 {
+        0
+    } else if left {
+        n << by
+    } else {
+        n >> by
+    };
+    tv_to_value(tv_num(r as varnumber_T))
 }
 
 fn b_add(vm: &mut VM, _: u8) -> Value {
@@ -7013,6 +7088,10 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_CHECK_LHS_ADD, b_check_lhs_add);
     vm.register_builtin(VIML_CHECK_LHS_SUB, b_check_lhs_sub);
     vm.register_builtin(VIML_CHECK_LHS_CONCAT, b_check_lhs_concat);
+    vm.register_builtin(VIML_CHECK_LHS_SHIFT, b_check_lhs_shift);
+    vm.register_builtin(VIML_SHIFT_L, |vm, _| b_shift(vm, true));
+    vm.register_builtin(VIML_SHIFT_R, |vm, _| b_shift(vm, false));
+    vm.register_builtin(VIML_LHS_CHECK_FAILED, b_lhs_check_failed);
     vm.register_builtin(VIML_FN_EVAL, b_eval);
     crate::viml_regex::SUBST_EXPR_HOOK.with(|h| *h.borrow_mut() = Some(subst_expr_eval));
     vm.register_builtin(VIML_FN_EXECUTE, b_execute);
@@ -8113,10 +8192,10 @@ mod tests {
     /// errors at run time — the good statements on either side still take effect.
     #[test]
     fn source_tolerant_continues_past_errors() {
-        // Line 2 is an unterminated string (parse error); line 3 calls an
+        // Line 2 is a `:call` that does not parse; line 3 calls an
         // undefined function (run-time error). The `:let`s on 1 and 4 must run.
         let (ran, skipped) = source_tolerant(
-            "let g:sta = 10\nlet bad = \"oops\ncall NoSuchFunc_xyz()\nlet g:stb = 20\n",
+            "let g:sta = 10\ncall Bad(\"oops\ncall NoSuchFunc_xyz()\nlet g:stb = 20\n",
         );
         assert_eq!(run("echo g:sta").trim(), "10");
         assert_eq!(run("echo g:stb").trim(), "20");
@@ -8129,7 +8208,7 @@ mod tests {
     /// ran clean, and `viml` exited 0 after printing the E684.
     #[test]
     fn source_tolerant_keeps_the_exit_status() {
-        source_tolerant("echo [][0]\nlet bad = \"oops\nlet g:clean_after = 1\n");
+        source_tolerant("echo [][0]\ncall Bad(\"oops\nlet g:clean_after = 1\n");
         assert_eq!(message::ex_exitval.with(|e| e.get()), 1);
     }
 
