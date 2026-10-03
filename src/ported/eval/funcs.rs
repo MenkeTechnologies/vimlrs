@@ -1067,10 +1067,87 @@ pub fn f_match(argvars: &[typval_T], rettv: &mut typval_T) {
 pub fn f_substitute(argvars: &[typval_T], rettv: &mut typval_T) {
     let s = tv_get_string(&argvars[0]);
     let pat = tv_get_string(&argvars[1]);
-    let sub = tv_get_string(&argvars[2]);
     let flags = argvars.get(3).map(tv_get_string).unwrap_or_default();
     rettv.v_type = VAR_STRING;
-    rettv.vval = v_string(crate::viml_regex::regex_substitute(&s, &pat, &sub, &flags).into());
+    // c: `if (tv_is_func(argvars[2])) { expr = &argvars[2]; } else { sub = … }`
+    // — a Funcref/Partial {sub} is CALLED per match, never read as text.
+    let out = if matches!(argvars[2].v_type, VAR_FUNC | VAR_PARTIAL) {
+        let expr = &argvars[2];
+        crate::viml_regex::regex_substitute_fn(&s, &pat, &flags, &mut |subs| {
+            regsub_call_expr(expr, subs)
+        })
+    } else {
+        let sub = tv_get_string(&argvars[2]);
+        crate::viml_regex::regex_substitute(&s, &pat, &sub, &flags)
+    };
+    rettv.vval = v_string(out.into());
+}
+
+/// The Funcref branch of `vim_regsub_both()` (`regexp.c`): call `expr` for one
+/// match and render what it returns.
+///
+/// The submatches reach the callee through `fill_submatch_list()`, which only
+/// supplies them to a user function that can take one more argument than the
+/// partial already binds:
+///
+/// ```c
+/// if (!fp->uf_varargs && fp->uf_args.ga_len <= argskip)
+///     // called function doesn't take a submatches argument
+///     return argskip;
+/// ```
+///
+/// A lambda is always `uf_varargs` (`get_lambda_tv`), so `{-> 'X'}` gets the
+/// List and ignores it. A builtin has no `ufunc_T`, so `fe_argv_func` never runs
+/// for it and it receives the List UNFILLED — empty: `function('len')` answers
+/// `0`. The result is read with `tv_get_string_buf_chk`, so a List, Dict or
+/// Funcref is the per-type string error and contributes nothing.
+fn regsub_call_expr(expr: &typval_T, subs: &[String]) -> String {
+    let (name, argskip) = match (expr.v_type, &expr.vval) {
+        (VAR_PARTIAL, v_partial(Some(p))) => (p.pt_name.to_string(), p.pt_argv.len()),
+        _ => (tv_get_string(expr), 0),
+    };
+    // (pass the List, fill it) — a builtin gets it, but empty.
+    let (takes_list, fill) = match crate::ported::eval::userfunc::find_func(&name) {
+        Some(fp) => {
+            let t = fp.uf_varargs || name.starts_with("<lambda>") || fp.uf_args.len() > argskip;
+            (t, t)
+        }
+        None => (true, false),
+    };
+    let list = tv_list_alloc(10);
+    if fill {
+        let mut l = list.borrow_mut();
+        // c: "There are always 10 list items in staticList10_T."
+        for i in 0..10 {
+            tv_list_append_string(&mut l, subs.get(i).map_or("", String::as_str));
+        }
+    }
+    let argv: Vec<typval_T> = if takes_list {
+        vec![typval_T {
+            v_type: VAR_LIST,
+            v_lock: VarLockStatus::VAR_UNLOCKED,
+            vval: v_list(Some(list)),
+        }]
+    } else {
+        Vec::new()
+    };
+    let rettv = match crate::ported::eval::typval::CALL_FUNC_HOOK
+        .with(|h| *h.borrow())
+        .and_then(|f| f(expr, &argv))
+    {
+        Some(tv) => tv,
+        // c: `if (rettv.v_type == VAR_UNKNOWN)` — "something failed, no need to
+        // report another error".
+        None => return String::new(),
+    };
+    if matches!(rettv.v_type, VAR_FUNC | VAR_PARTIAL) {
+        // c: `tv_get_string_buf_chk` → `str_errors[VAR_FUNC]` (E729).
+        crate::ported::eval::typval::tv_check_str(&rettv);
+        return String::new();
+    }
+    tv_get_string_buf_chk(&rettv)
+        .map(|s| s.to_string())
+        .unwrap_or_default()
 }
 
 // Port of `f_join()` from `Src/eval/funcs.c` — join a List with a separator

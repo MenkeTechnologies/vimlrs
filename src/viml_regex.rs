@@ -2977,6 +2977,54 @@ pub fn regex_matchlist(pat: &str, subject: &str, ic: bool) -> Vec<String> {
 /// `substitute({str}, {pat}, {sub}, {flags})` — replace the first match, or all
 /// with the `g` flag. `\0`/`&` is the whole match; `\1`..`\9` are groups.
 pub fn regex_substitute(subject: &str, pat: &str, sub: &str, flags: &str) -> String {
+    // A `\=`-prefixed replacement is a Vim expression evaluated per match (with
+    // `submatch()` available), not literal text.
+    match sub.strip_prefix("\\=") {
+        Some(expr) => substitute_each(subject, pat, flags, &mut |chars, groups| {
+            publish_submatches(chars, groups);
+            // Copy the fn pointer out before calling it — the evaluator re-enters
+            // install(), which borrows SUBST_EXPR_HOOK mutably.
+            let hook = SUBST_EXPR_HOOK.with(|h| *h.borrow());
+            hook.map(|f| f(expr)).unwrap_or_default()
+        }),
+        None => substitute_each(subject, pat, flags, &mut |chars, groups| {
+            expand_sub(sub, chars, groups)
+        }),
+    }
+}
+
+/// `substitute()` with a Funcref `{sub}`: `rep` receives the ten submatches
+/// (`submatch()` is live while it runs, as for `\=`) and returns the text.
+pub fn regex_substitute_fn(
+    subject: &str,
+    pat: &str,
+    flags: &str,
+    rep: &mut dyn FnMut(&[String]) -> String,
+) -> String {
+    substitute_each(subject, pat, flags, &mut |chars, groups| {
+        rep(&publish_submatches(chars, groups))
+    })
+}
+
+/// Make one match's ten submatches what `submatch()` answers, and return them.
+fn publish_submatches(chars: &[char], groups: &[Option<(usize, usize)>]) -> Vec<String> {
+    let subs: Vec<String> = groups
+        .iter()
+        .map(|g| match g {
+            Some((a, b)) => chars[*a..*b].iter().collect(),
+            None => String::new(),
+        })
+        .collect();
+    SUBMATCHES.with(|m| *m.borrow_mut() = subs.clone());
+    subs
+}
+
+/// Produces one match's replacement from the subject and that match's groups.
+type SubRep<'a> = dyn FnMut(&[char], &[Option<(usize, usize)>]) -> String + 'a;
+
+/// The match loop of `do_string_sub` (eval.c), with the replacement for each
+/// match produced by `rep` from the subject and that match's groups.
+fn substitute_each(subject: &str, pat: &str, flags: &str, rep: &mut SubRep<'_>) -> String {
     let chars: Vec<char> = subject.chars().collect();
     let re = Regex::compile(pat);
     // c: `int do_all = (flags[0] == 'g');` (`do_string_sub`, eval.c) — the FIRST
@@ -2992,9 +3040,6 @@ pub fn regex_substitute(subject: &str, pat: &str, sub: &str, flags: &str) -> Str
     // compiler) or from `'ignorecase'`, which this path does not consult yet —
     // Vim's default is `noignorecase`, so `false` is its default behaviour.
     let ic = false;
-    // A `\=`-prefixed replacement is a Vim expression evaluated per match (with
-    // `submatch()` available), not literal text.
-    let sub_expr = sub.strip_prefix("\\=");
     let mut out = String::new();
     // Faithful port of `do_string_sub` (eval.c:6398). `tail` is the current
     // search origin; `zero_width` remembers the position of the last empty match
@@ -3034,24 +3079,7 @@ pub fn regex_substitute(subject: &str, pat: &str, sub: &str, flags: &str) -> Str
             zero_width = Some(s);
         }
         out.extend(&chars[tail..s]);
-        if let Some(expr) = sub_expr {
-            // Populate submatch() context, then evaluate the replacement expr.
-            let subs: Vec<String> = groups
-                .iter()
-                .map(|g| match g {
-                    Some((a, b)) => chars[*a..*b].iter().collect(),
-                    None => String::new(),
-                })
-                .collect();
-            SUBMATCHES.with(|m| *m.borrow_mut() = subs);
-            // Copy the fn pointer out before calling it — the evaluator re-enters
-            // install(), which borrows SUBST_EXPR_HOOK mutably.
-            let hook = SUBST_EXPR_HOOK.with(|h| *h.borrow());
-            let rep = hook.map(|f| f(expr)).unwrap_or_default();
-            out.push_str(&rep);
-        } else {
-            out.push_str(&expand_sub(sub, &chars, &groups));
-        }
+        out.push_str(&rep(&chars, &groups));
         // c: `tail = regmatch.endp[0]; if (*tail == NUL) break;`
         tail = e;
         if tail >= chars.len() {
