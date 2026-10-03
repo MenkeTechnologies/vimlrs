@@ -5880,6 +5880,8 @@ fn b_doautocmd(vm: &mut VM, _: u8) -> Value {
 fn is_host_editor_cmd(line: &str) -> bool {
     let word = line
         .trim_start_matches([':', ' '])
+        // A fold command carries a line range (`10,20fold`), skipped here.
+        .trim_start_matches(|c: char| c.is_ascii_digit() || ",.$%;+-".contains(c))
         .split(|c: char| c.is_whitespace() || c == '!')
         .next()
         .unwrap_or("");
@@ -5930,6 +5932,19 @@ fn is_host_editor_cmd(line: &str) -> bool {
             | "sview"
             | "sbuffer"
             | "sb"
+            // Folds live in a window, which only the host has (`ex_fold`).
+            | "fold"
+            | "fo"
+            | "fol"
+            | "foldopen"
+            | "foldo"
+            | "foldop"
+            | "foldope"
+            | "foldclose"
+            | "foldc"
+            | "foldcl"
+            | "foldclo"
+            | "foldclos"
     )
 }
 
@@ -8183,7 +8198,8 @@ mod tests {
     }
 
     /// A window modifier stays on the command line the host receives:
-    /// `:vertical 1resize 30` sizes a width, `:1resize 30` a height. Standalone
+    /// `:vertical 1resize 30` sizes a width, `:1resize 30` a height. A ranged
+    /// `:fold` is the host's too: folds live in its windows. Standalone
     /// there are no windows and the line is skipped without an error.
     #[test]
     fn window_modifiers_reach_the_host() {
@@ -8203,7 +8219,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("vimlrs-winmod-host-{}.vim", std::process::id()));
         std::fs::write(
             &path,
-            "exe 'vert 1resize ' . 30\nsilent! vertical resize 20\ntab split\n2resize 5\n",
+            "exe 'vert 1resize ' . 30\nsilent! vertical resize 20\ntab split\n2resize 5\nsil! 10,20fold\n",
         )
         .unwrap();
         eval_file(&path).unwrap();
@@ -8211,7 +8227,7 @@ mod tests {
         let seen = SEEN.with(|s| s.borrow().clone());
         assert_eq!(
             seen,
-            ["vert 1resize 30", "vertical resize 20", "tab split", "2resize 5"]
+            ["vert 1resize 30", "vertical resize 20", "tab split", "2resize 5", "10,20fold"]
         );
     }
 
