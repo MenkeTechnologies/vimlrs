@@ -19,8 +19,7 @@ call assert_true(len(s:globbed) >= 10)
 " order, and that the String form is the same set joined by newlines.
 call assert_true(index(s:globbed, 'examples/expand.vim') >= 0)
 call assert_equal(sort(copy(s:globbed)), s:globbed)
-call assert_equal(join(s:globbed, "
-"), expand('examples/*.vim'))
+call assert_equal(join(s:globbed, "\n"), expand('examples/*.vim'))
 " expandcmd() expands $VAR inside a command string.
 call assert_equal('cat ' . $HOME . '/.vimrc', expandcmd('cat $HOME/.vimrc'))
 
