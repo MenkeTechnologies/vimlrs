@@ -2116,6 +2116,7 @@ impl Compiler {
         let mut end_jumps = Vec::new();
         for (cond, body) in arms {
             let calls_before = self.calls;
+            self.mark_parse_error(cond);
             self.cond(cond)?;
             // c: `ex_if` reads `CHECK_SKIP` (`vendor/ex_eval.c:865`, the macro at
             // c:80-85) — an error raised WHILE evaluating the condition sets
@@ -2141,6 +2142,18 @@ impl Compiler {
         Ok(())
     }
 
+    /// A block header whose text did not parse ([`Expr::ScriptError`], see
+    /// `viml_parser::parse_cmd_expr`) reports unconditionally: `VIML_RAISE` stays
+    /// quiet when an error was already counted since the last mark (a deferred
+    /// error to the right of a failed operand), and with no mark set by this
+    /// command that baseline is whatever an earlier statement left.
+    fn mark_parse_error(&mut self, e: &Expr) {
+        if matches!(e, Expr::ScriptError(_)) {
+            self.emit(Op::CallBuiltin(h::VIML_ERR_MARK, 0));
+            self.emit(Op::Pop);
+        }
+    }
+
     /// `:while {cond} … :endwhile`.
     fn while_stmt(&mut self, cond: &Expr, body: &[(u32, Stmt)]) -> Result<(), VimlError> {
         // Loop rotation: enter at the test, put the body first, and make the
@@ -2157,6 +2170,7 @@ impl Compiler {
         let l_test = self.b.current_pos();
         self.b.patch_jump(to_test, l_test);
         let calls_before = self.calls;
+        self.mark_parse_error(cond);
         self.cond(cond)?;
         // c: `ex_while` passes `skip = CHECK_SKIP` to `eval_to_bool`
         // (`vendor/ex_eval.c:1007-1009`) and only activates the loop when
@@ -2300,11 +2314,26 @@ impl Compiler {
 
         // list = <iter>;  idx = 0
         let calls_before = self.calls;
+        self.emit(Op::CallBuiltin(h::VIML_ARGS_BEGIN, 0));
+        self.emit(Op::Pop);
+        self.mark_parse_error(iter);
         self.expr(iter)?;
+        // c: `eval_for_line` returns at once when `eval1()` FAILED — there is no
+        // value to type-check, so `for x in nosuch` is E121 alone, not also
+        // E1098. The loop then walks an empty List.
+        self.emit(Op::CallBuiltin(h::VIML_ARGS_FAILED, 0));
+        let evaluated = self.emit(Op::JumpIfFalse(0));
+        self.emit(Op::Pop);
+        self.emit(Op::CallBuiltin(h::VIML_MAKE_LIST, 0));
+        let to_store = self.emit(Op::Jump(0));
+        let check_at = self.b.current_pos();
+        self.b.patch_jump(evaluated, check_at);
         // c: `eval_for_line`'s type switch — a String is walked one character
         // (with its composing marks) at a time, not one byte; any other type
         // than String/List/Blob is E1098 and leaves nothing to walk.
         self.emit(Op::CallBuiltin(h::VIML_FOR_ITEMS, 1));
+        let store_at = self.b.current_pos();
+        self.b.patch_jump(to_store, store_at);
         // c: `ex_while`'s `:for` arm calls `eval_for_line` and then only advances
         // when `!error && fi != NULL && !skip` (`vendor/ex_eval.c:1021-1030`) —
         // an error while evaluating the list leaves the loop inactive. vim

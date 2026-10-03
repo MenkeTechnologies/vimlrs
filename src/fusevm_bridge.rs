@@ -8192,10 +8192,10 @@ mod tests {
     /// errors at run time — the good statements on either side still take effect.
     #[test]
     fn source_tolerant_continues_past_errors() {
-        // Line 2 is a `:call` that does not parse; line 3 calls an
+        // Line 2 is a `:let` whose target does not parse; line 3 calls an
         // undefined function (run-time error). The `:let`s on 1 and 4 must run.
         let (ran, skipped) = source_tolerant(
-            "let g:sta = 10\ncall Bad(\"oops\ncall NoSuchFunc_xyz()\nlet g:stb = 20\n",
+            "let g:sta = 10\nlet bad[1 +] = 0\ncall NoSuchFunc_xyz()\nlet g:stb = 20\n",
         );
         assert_eq!(run("echo g:sta").trim(), "10");
         assert_eq!(run("echo g:stb").trim(), "20");
@@ -8208,7 +8208,7 @@ mod tests {
     /// ran clean, and `viml` exited 0 after printing the E684.
     #[test]
     fn source_tolerant_keeps_the_exit_status() {
-        source_tolerant("echo [][0]\ncall Bad(\"oops\nlet g:clean_after = 1\n");
+        source_tolerant("echo [][0]\nlet bad[1 +] = 0\nlet g:clean_after = 1\n");
         assert_eq!(message::ex_exitval.with(|e| e.get()), 1);
     }
 

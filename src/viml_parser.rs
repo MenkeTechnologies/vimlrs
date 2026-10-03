@@ -257,7 +257,9 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
         // is `E116: … function type([1] . '')`. Only the OUTERMOST call is
         // renamed; one nested in an argument was still read from the source.
         "call" => {
-            let mut e = parse_expr(strip_legacy_trailing_comment(rest))?;
+            // An argument list that does not parse is reported when the `:call`
+            // runs (see `parse_cmd_expr`): `call len(1 2)` is E116 there.
+            let mut e = parse_cmd_expr(strip_legacy_trailing_comment(rest))?;
             if let Expr::Call { emsg_name, .. } = &mut e {
                 *emsg_name = None;
             }
@@ -268,7 +270,9 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
         "defer" => Ok(Stmt::Defer(parse_expr(strip_legacy_trailing_comment(
             rest,
         ))?)),
-        "eval" => Ok(Stmt::Expr(parse_expr(strip_legacy_trailing_comment(rest))?)),
+        "eval" => Ok(Stmt::Expr(parse_cmd_expr(strip_legacy_trailing_comment(
+            rest,
+        ))?)),
         // Abbreviations, as explicit sets rather than prefix tests, because the
         // shortest accepted prefix is not the shortest unique one and the
         // one-shorter spelling usually resolves to a DIFFERENT command. Read out
@@ -283,9 +287,9 @@ pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
         "return" => Ok(if rest.trim().is_empty() {
             Stmt::Return(None)
         } else {
-            Stmt::Return(Some(parse_expr(strip_legacy_trailing_comment(rest))?))
+            Stmt::Return(Some(parse_cmd_expr(strip_legacy_trailing_comment(rest))?))
         }),
-        "throw" => Ok(Stmt::Throw(parse_expr(strip_legacy_trailing_comment(
+        "throw" => Ok(Stmt::Throw(parse_cmd_expr(strip_legacy_trailing_comment(
             rest,
         ))?)),
         // `:command[!] …` defines a user command; `:delcommand` removes one.
@@ -1182,6 +1186,18 @@ impl Lines {
         Lines { lines, tails, i: 0 }
     }
 
+    /// The text from the start of the segment at the cursor (`line`) to the end
+    /// of its source line — see [`CMD_TAIL`]. A block header quotes it in a
+    /// parse error: `if 1 + | echo 'a' | endif` is `E15: Invalid expression:
+    /// "| echo 'a' | endif"`, because vim's scan ran into the `|`.
+    fn line_tail(&self, line: &str) -> String {
+        self.tails
+            .get(self.i)
+            .cloned()
+            .flatten()
+            .unwrap_or_else(|| line.to_string())
+    }
+
     /// Advance past blank lines and full-line `"` comments.
     fn skip_blanks(&mut self) {
         while let Some((_, l)) = self.lines.get(self.i) {
@@ -1263,16 +1279,21 @@ fn parse_one(cur: &mut Lines) -> Result<Vec<Stmt>, VimlError> {
     // (`fu`/`fun`/`func` for `:function`, `wh` for `:while`, …) opens the block.
     match canon_block_kw(cmd) {
         "if" => {
+            let tail = cur.line_tail(&line);
             cur.bump();
-            Ok(vec![parse_if(cur, rest)?])
+            Ok(vec![with_cmd_tail(&line, &tail, || parse_if(cur, rest))?])
         }
         "while" => {
+            let tail = cur.line_tail(&line);
             cur.bump();
-            Ok(vec![parse_while(cur, rest)?])
+            Ok(vec![with_cmd_tail(&line, &tail, || {
+                parse_while(cur, rest)
+            })?])
         }
         "for" => {
+            let tail = cur.line_tail(&line);
             cur.bump();
-            Ok(vec![parse_for(cur, rest)?])
+            Ok(vec![with_cmd_tail(&line, &tail, || parse_for(cur, rest))?])
         }
         "try" => {
             cur.bump();
@@ -1638,6 +1659,9 @@ fn strip_legacy_trailing_comment(s: &str) -> &str {
                     return s[..i].trim_end(); // unterminated → start of comment
                 }
             }
+            // `@"` is the unnamed register, not a comment: the character after
+            // `@` is a register name whatever it is (`call F(@")`).
+            b'@' => i += 2,
             _ => i += 1,
         }
     }
@@ -1648,11 +1672,14 @@ fn parse_if(cur: &mut Lines, cond_str: &str) -> Result<Stmt, VimlError> {
     let mut arms = Vec::new();
     let mut else_body = None;
     let (body, mut term) = parse_block(cur, IF_TERMS)?;
-    arms.push((parse_expr(strip_legacy_trailing_comment(cond_str))?, body));
+    arms.push((
+        parse_cmd_expr(strip_legacy_trailing_comment(cond_str))?,
+        body,
+    ));
     loop {
         match term {
             Some((ref c, ref rest)) if c == "elseif" => {
-                let cond = parse_expr(strip_legacy_trailing_comment(rest))?;
+                let cond = parse_cmd_expr(strip_legacy_trailing_comment(rest))?;
                 let (b, t) = parse_block(cur, IF_TERMS)?;
                 arms.push((cond, b));
                 term = t;
@@ -1675,7 +1702,7 @@ fn parse_if(cur: &mut Lines, cond_str: &str) -> Result<Stmt, VimlError> {
 }
 
 fn parse_while(cur: &mut Lines, cond_str: &str) -> Result<Stmt, VimlError> {
-    let cond = parse_expr(strip_legacy_trailing_comment(cond_str))?;
+    let cond = parse_cmd_expr(strip_legacy_trailing_comment(cond_str))?;
     let (body, term) = parse_block(cur, &["endwhile"])?;
     if term.is_none() {
         if eof_closes_block() {
@@ -1710,7 +1737,7 @@ fn parse_for(cur: &mut Lines, header: &str) -> Result<Stmt, VimlError> {
     } else {
         ForVars::One(var.to_string())
     };
-    let iter = parse_expr(strip_legacy_trailing_comment(header[idx + 4..].trim()))?;
+    let iter = parse_cmd_expr(strip_legacy_trailing_comment(header[idx + 4..].trim()))?;
     let (body, term) = parse_block(cur, &["endfor"])?;
     if term.is_none() {
         if eof_closes_block() {
@@ -2685,10 +2712,10 @@ fn parse_let(rest: &str) -> Result<Stmt, VimlError> {
     // (`tv_op` semantics), reusing the same store path so it stays JIT-eligible.
     let rhs = strip_legacy_trailing_comment(rhs);
     let expr = match op {
-        None => parse_let_rhs(rhs)?,
+        None => parse_cmd_expr(rhs)?,
         Some(op) => {
             let cur = let_target_expr(&target)?;
-            let rhs = parse_let_rhs(rhs)?;
+            let rhs = parse_cmd_expr(rhs)?;
             // c: `ex_let` evaluates `{expr}` BEFORE it reads the target, so an
             // expression that does not parse is the only error
             // (`let nosuch += * 2` is E15, not E121).
@@ -3020,17 +3047,21 @@ fn let_target_expr(target: &LetTarget) -> Result<Expr, VimlError> {
     })
 }
 
-/// The `{expr}` of a `:let`. c: `ex_let` runs `eval0()` on it when the command
-/// EXECUTES, so text that does not parse is an error at run time, not a reason
+/// The `{expr}` of a `:let`, `:return`, `:throw`, `:eval`, and the condition or
+/// list of `:if`/`:elseif`/`:while`/`:for`. c: each runs `eval0()` (or
+/// `eval_to_bool()`) on it when the command EXECUTES, so text that does not parse is an error at run time, not a reason
 /// to reject the whole script: `let x = 1 +` reports `E15: Invalid expression:
 /// "1 +"` (eval0's own message, over the whole expression to the end of the
 /// line), `let x = (1` the level's `E110`, `let x = 1 2` `E488: Trailing
 /// characters: 2` — and the variable is not assigned. The error is an
-/// [`Expr::ScriptError`], which the `:let` store's failure guard already skips.
+/// [`Expr::ScriptError`]: the `:let` store's failure guard skips the
+/// assignment, and a failed `:if`/`:while`/`:for` header skips the construct,
+/// exactly as a run-time error there does. In code that is not executed (a
+/// false `:if` branch) nothing is reported, as vim's `emsg_skip` has it.
 ///
 /// A curly-brace name still fails the parse, for the reason given at
 /// [`Parser::operand_invexpr`].
-fn parse_let_rhs(src: &str) -> Result<Expr, VimlError> {
+fn parse_cmd_expr(src: &str) -> Result<Expr, VimlError> {
     let (toks, _, lex_err) = crate::viml_lexer::lex_prefix(src);
     let mut p = Parser::new(toks, src);
     p.lex_err = lex_err;
@@ -4585,6 +4616,12 @@ impl Parser {
             return Ok(args);
         }
         loop {
+            // c: `get_func_arguments` stops at a `,` where an argument should
+            // start, and the list is then not closed by `)`: E116, not a
+            // complaint about the comma (`assert_equal(, x)`).
+            if *close == Tok::RParen && matches!(self.peek(), Tok::Comma) {
+                return Err(VimlError::msg(ran_out.replace("%s", "")));
+            }
             // An operand that simply RAN OUT (`f(`, `f(1,`) is the same
             // unterminated-list failure as a missing separator, and vim reports
             // it with the same message — `E116: Invalid arguments for function
@@ -4608,7 +4645,13 @@ impl Parser {
                     }
                 }
                 ref t if t == close => break,
-                _ if rest.is_empty() => return Err(VimlError::msg(ran_out.replace("%s", ""))),
+                // c: `get_func_arguments` stops at anything but a `,` after an
+                // argument, and a list not then closed by `)` is `ret = FAIL` —
+                // E116 for the function, never a message about the text itself
+                // (`len(1 2)`).
+                _ if rest.is_empty() || *close == Tok::RParen => {
+                    return Err(VimlError::msg(ran_out.replace("%s", "")))
+                }
                 _ => return Err(VimlError::msg(junk.replace("%s", &rest))),
             }
         }
@@ -4675,9 +4718,9 @@ mod tests {
 
     #[test]
     fn tolerant_parse_skips_bad_statements() {
-        // Line 2 is a `:call` whose argument list does not parse. Tolerant parsing must
+        // Line 2 is a `:let` whose target does not parse. Tolerant parsing must
         // still yield the good statements on lines 1 and 3.
-        let src = "set number\ncall Bad(\"oops\ncolorscheme molokai\n";
+        let src = "set number\nlet bad[1 +] = 0\ncolorscheme molokai\n";
         let (stmts, errs) = parse_program_lines_tolerant(src);
         assert_eq!(errs.len(), 1, "one statement skipped");
         assert!(stmts
