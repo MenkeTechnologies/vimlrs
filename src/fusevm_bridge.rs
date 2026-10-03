@@ -6819,8 +6819,13 @@ pub fn install_screen_size_hook(f: Box<dyn Fn() -> (HostNum, HostNum)>) {
     crate::ported::option::SCREEN_SIZE_HOOK.with(|h| *h.borrow_mut() = Some(f));
 }
 
-/// The host's current-window `(height, width)`, or `None` when standalone.
-pub fn editor_win_size() -> Option<(HostNum, HostNum)> {
+/// The `(height, width)` of window `nr` as `find_win_by_nr_or_id()` resolves
+/// it, when that is the host's current window (`nr` 0, `curwin`); `None` for
+/// any other window, and standalone.
+pub fn editor_win_size(nr: HostNum) -> Option<(HostNum, HostNum)> {
+    if nr != 0 {
+        return None;
+    }
     WIN_SIZE_HOOK.with(|h| h.borrow().as_ref().map(|f| f()))
 }
 
@@ -8175,6 +8180,39 @@ mod tests {
         assert_eq!(run("echo winheight(2) winwidth(-1)").trim(), "-1 -1");
         // aliases.vim: `let s:l = 40 - ((39 * winheight(0) + 41) / 82)`
         assert_eq!(run("echo 40 - ((39 * winheight(0) + 41) / 82)").trim(), "18");
+    }
+
+    /// A window modifier stays on the command line the host receives:
+    /// `:vertical 1resize 30` sizes a width, `:1resize 30` a height. Standalone
+    /// there are no windows and the line is skipped without an error.
+    #[test]
+    fn window_modifiers_reach_the_host() {
+        use std::cell::RefCell;
+        let path = std::env::temp_dir().join(format!("vimlrs-winmod-{}.vim", std::process::id()));
+        std::fs::write(&path, "vertical resize 30 | echo 'ok'\ntab split\n").unwrap();
+        capture_begin();
+        eval_file(&path).unwrap();
+        assert_eq!(capture_take().trim(), "ok");
+        let _ = std::fs::remove_file(&path);
+
+        thread_local! { static SEEN: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) }; }
+        install_excmd_hook(Box::new(|line: &str| {
+            SEEN.with(|s| s.borrow_mut().push(line.to_string()));
+            true
+        }));
+        let path = std::env::temp_dir().join(format!("vimlrs-winmod-host-{}.vim", std::process::id()));
+        std::fs::write(
+            &path,
+            "exe 'vert 1resize ' . 30\nsilent! vertical resize 20\ntab split\n2resize 5\n",
+        )
+        .unwrap();
+        eval_file(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let seen = SEEN.with(|s| s.borrow().clone());
+        assert_eq!(
+            seen,
+            ["vert 1resize 30", "vertical resize 20", "tab split", "2resize 5"]
+        );
     }
 
     /// `&columns` / `&lines` are vim's 80x24 standalone and the host's screen

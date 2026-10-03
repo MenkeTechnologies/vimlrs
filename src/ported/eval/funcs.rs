@@ -6792,19 +6792,13 @@ pub fn f_winbufnr(argvars: &[typval_T], rettv: &mut typval_T) {
 /// vimlrs can measure is the embedding editor's current one (`{nr}` 0);
 /// standalone there is no window at all.
 pub fn f_winwidth(argvars: &[typval_T], rettv: &mut typval_T) {
-    *rettv = typval_T::from(cur_win_size(argvars).map_or(-1, |(_, w)| w));
+    let nr = argvars.first().map_or(0, tv_get_number);
+    *rettv = typval_T::from(crate::fusevm_bridge::editor_win_size(nr).map_or(-1, |(_, w)| w));
 }
 /// Port of `f_winheight()` (evalwindow.c) — `wp->w_height`, as [`f_winwidth`].
 pub fn f_winheight(argvars: &[typval_T], rettv: &mut typval_T) {
-    *rettv = typval_T::from(cur_win_size(argvars).map_or(-1, |(h, _)| h));
-}
-/// The host's current-window `(height, width)` when `argvars[0]` is 0, the
-/// number `find_win_by_nr_or_id()` resolves to `curwin`.
-fn cur_win_size(argvars: &[typval_T]) -> Option<(varnumber_T, varnumber_T)> {
-    if argvars.first().map_or(0, tv_get_number) != 0 {
-        return None;
-    }
-    crate::fusevm_bridge::editor_win_size()
+    let nr = argvars.first().map_or(0, tv_get_number);
+    *rettv = typval_T::from(crate::fusevm_bridge::editor_win_size(nr).map_or(-1, |(h, _)| h));
 }
 /// Port of `f_winlayout()` (window.c) — no window tree → empty List.
 pub fn f_winlayout(_argvars: &[typval_T], rettv: &mut typval_T) {

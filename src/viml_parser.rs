@@ -197,6 +197,45 @@ pub const PHASE3_BUILTINS: &[&str] = &[
     "float2nr",
 ];
 
+/// The window modifiers vim accepts before a command (`:vertical resize 30`,
+/// `:tab split`, `:topleft copen`).
+const WINDOW_MODIFIERS: &[&str] = &[
+    "vertical", "vert", "horizontal", "hor", "tab", "aboveleft", "abo", "belowright", "bel",
+    "botright", "bo", "topleft", "to", "leftabove", "lefta", "rightbelow", "rightb",
+];
+
+/// The window modifiers in `line`'s leading modifier run, each followed by a
+/// space (`"vertical "` for `silent! vert 1resize 30`), with `tab`'s count.
+fn window_modifiers(line: &str) -> String {
+    let line = line.trim();
+    let prefix = &line[..line.len() - strip_command_modifiers(line).len()];
+    let mut out = String::new();
+    let mut keep_count = false;
+    for token in prefix.split_whitespace() {
+        let word = token.trim_end_matches('!');
+        if WINDOW_MODIFIERS.contains(&word) || (keep_count && word.bytes().all(|b| b.is_ascii_digit())) {
+            out.push_str(token);
+            out.push(' ');
+        }
+        keep_count = word == "tab";
+    }
+    out
+}
+
+/// Put `placement` back in front of the Ex command `stmt` runs. vimlrs has no
+/// windows, so a window modifier only means something to the embedding host
+/// that receives the command line (`:vertical 1resize 30` sizes a width).
+fn place(stmt: Stmt, placement: &str) -> Stmt {
+    match stmt {
+        Stmt::ExCmd(cmd) => Stmt::ExCmd(format!("{placement}{cmd}")),
+        Stmt::Silent { bang, stmt } => Stmt::Silent {
+            bang,
+            stmt: Box::new(place(*stmt, placement)),
+        },
+        other => other,
+    }
+}
+
 /// Parse one statement line into a [`Stmt`].
 ///
 /// Inline trailing comments (`echo 1  " note`) are not stripped in Phase 3: a
@@ -204,6 +243,17 @@ pub const PHASE3_BUILTINS: &[&str] = &[
 /// in expression position it opens a string. Full-line comments are skipped by
 /// the source splitter before this is called.
 pub fn parse_stmt(line: &str) -> Result<Stmt, VimlError> {
+    let placement = window_modifiers(line);
+    let stmt = parse_stmt_unplaced(line)?;
+    Ok(if placement.is_empty() {
+        stmt
+    } else {
+        place(stmt, &placement)
+    })
+}
+
+/// [`parse_stmt`] before the window modifiers are put back.
+fn parse_stmt_unplaced(line: &str) -> Result<Stmt, VimlError> {
     // Strip leading command modifiers (`silent`, `silent!`, `verbose 9`,
     // `noautocmd`, `keepjumps`, …). They change how a command runs, not what it
     // is, and real vimrcs use them constantly (`silent! colorscheme x`). A bare
