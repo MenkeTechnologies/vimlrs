@@ -6777,6 +6777,27 @@ pub fn editor_host_active() -> bool {
     EDITOR_HOST.with(|s| s.borrow().is_some())
 }
 
+thread_local! {
+    /// Host callback giving the current window's text-area `(height, width)`,
+    /// what `winheight(0)` / `winwidth(0)` report. A `:mksession` script sizes
+    /// its scroll from it (`let s:l = 40 - ((39 * winheight(0) + 41) / 82)`).
+    /// EXTENSION seam, kept apart from [`EditorHost`] so hosts that build that
+    /// struct are unaffected. Unset (standalone): no window, -1.
+    #[allow(clippy::type_complexity)]
+    static WIN_SIZE_HOOK: RefCell<Option<Box<dyn Fn() -> (HostNum, HostNum)>>> =
+        const { RefCell::new(None) };
+}
+
+/// Install the host's current-window size callback (see `WIN_SIZE_HOOK`).
+pub fn install_win_size_hook(f: Box<dyn Fn() -> (HostNum, HostNum)>) {
+    WIN_SIZE_HOOK.with(|h| *h.borrow_mut() = Some(f));
+}
+
+/// The host's current-window `(height, width)`, or `None` when standalone.
+pub fn editor_win_size() -> Option<(HostNum, HostNum)> {
+    WIN_SIZE_HOOK.with(|h| h.borrow().as_ref().map(|f| f()))
+}
+
 /// Host line count, or `None` when standalone.
 pub fn editor_line_count() -> Option<HostNum> {
     EDITOR_HOST.with(|s| s.borrow().as_ref().map(|h| (h.line_count)()))
@@ -8115,6 +8136,19 @@ mod tests {
         clear_editor_host();
         // after clearing, builtins fall back to the standalone model
         assert_eq!(run("call setline(1,'x') | echo getline(1)").trim(), "x");
+    }
+
+    /// `winheight(0)` / `winwidth(0)` report the host's current window, so a
+    /// `:mksession` script's scroll formula lands where vim's does; standalone,
+    /// and for any window but the current one, there is no window: -1.
+    #[test]
+    fn win_size_hook_sizes_the_current_window() {
+        assert_eq!(run("echo winheight(0) winwidth(0)").trim(), "-1 -1");
+        install_win_size_hook(Box::new(|| (46, 120)));
+        assert_eq!(run("echo winheight(0) winwidth(0)").trim(), "46 120");
+        assert_eq!(run("echo winheight(2) winwidth(-1)").trim(), "-1 -1");
+        // aliases.vim: `let s:l = 40 - ((39 * winheight(0) + 41) / 82)`
+        assert_eq!(run("echo 40 - ((39 * winheight(0) + 41) / 82)").trim(), "18");
     }
 
     #[test]
