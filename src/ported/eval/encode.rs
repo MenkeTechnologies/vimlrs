@@ -6,8 +6,8 @@
 //! instantiating the `typval_encode.c.h` template twice. The two instantiations
 //! render identically for nested values (both quote nested strings); they differ
 //! only at the outermost string, which the `encode_tv2*` wrappers handle. The
-//! recursive walk is ported once as `encode_vim_to_string`; `encode_vim_to_echo`
-//! delegates to it (the bodies the macro emits are equivalent).
+//! recursive walk is ported once (`TYPVAL_ENCODE_CONVERT_ONE_VALUE`); the two instantiations differ
+//! only in what a self-referencing container becomes (`TYPVAL_ENCODE_CONV_RECURSE`).
 #![allow(non_snake_case)]
 
 use crate::ported::eval::typval_defs_h::{
@@ -435,7 +435,7 @@ pub fn encode_list_write(list: &mut crate::ported::eval::typval_defs_h::list_T, 
 /// String representation of a value with quotes around strings (parseable back
 /// by `eval()`). This is `string()`.
 pub fn encode_tv2string(tv: &typval_T) -> VimStr {
-    // c: encode_vim_to_string(&ga, tv, ...)
+    // c: encode_vim_to_string(&ga, tv, ...); did_echo_string_emsg = false;
     encode_vim_to_string(tv)
 }
 
@@ -460,6 +460,74 @@ pub fn encode_tv2echo(tv: &typval_T) -> VimStr {
 /// hold bytes that are not valid UTF-8 (`string(list2str([-1]))` quotes the
 /// single byte `0xff`), and those bytes are spliced in as they are.
 pub fn encode_vim_to_string(tv: &typval_T) -> VimStr {
+    TYPVAL_ENCODE_CONVERT_ONE_VALUE(tv, &mut EncodeState::new(Recurse::String))
+}
+
+/// Which `TYPVAL_ENCODE_CONV_RECURSE` the instantiation defines — what a
+/// container that is already being converted (a self-reference) turns into.
+#[derive(Clone, Copy, PartialEq)]
+enum Recurse {
+    /// `encode_vim_to_string` (`vendor/eval/encode.c:459`): `E724` once, and
+    /// `{E724@N}` in the text.
+    String,
+    /// `encode_vim_to_echo` (`vendor/eval/encode.c:501`): `[...@N]` / `{...@N}`,
+    /// no error.
+    Echo,
+}
+
+/// The walk's `mpstack`, reduced to what `TYPVAL_ENCODE_CONV_RECURSE` reads:
+/// the containers currently being converted, outermost first, each with
+/// whether it is a Dict (`kMPConvDict`) or a List (`kMPConvList`).
+///
+/// c: `TYPVAL_ENCODE_CHECK_SELF_REFERENCE` marks a container with the walk's
+/// `copyID` on entry and restores the saved one when it is done, so only a
+/// container that CONTAINS ITSELF is a reference back — the same List twice
+/// side by side (`[l, l]`) is converted twice. Membership in this stack is that
+/// test.
+struct EncodeState {
+    stack: Vec<(bool, *const ())>,
+    recurse: Recurse,
+    /// c: `did_echo_string_emsg` — "Only give this message once for a recursive
+    /// call to avoid flooding the user with errors."
+    did_emsg: bool,
+}
+
+impl EncodeState {
+    fn new(recurse: Recurse) -> Self {
+        EncodeState {
+            stack: Vec::new(),
+            recurse,
+            did_emsg: false,
+        }
+    }
+
+    /// `TYPVAL_ENCODE_CONV_RECURSE(val, conv_type)` when `ptr` is already on the
+    /// stack, else `None` (the C's NOTDONE: convert it).
+    fn TYPVAL_ENCODE_CHECK_SELF_REFERENCE(
+        &mut self,
+        is_dict: bool,
+        ptr: *const (),
+    ) -> Option<VimStr> {
+        let backref = self.stack.iter().position(|&e| e == (is_dict, ptr))?;
+        Some(match self.recurse {
+            Recurse::String => {
+                if !self.did_emsg {
+                    self.did_emsg = true;
+                    crate::ported::message::emsg(
+                        "E724: unable to correctly dump variable with self-referencing container",
+                    );
+                }
+                format!("{{E724@{backref}}}").into()
+            }
+            Recurse::Echo if is_dict => format!("{{...@{backref}}}").into(),
+            Recurse::Echo => format!("[...@{backref}]").into(),
+        })
+    }
+}
+
+/// One value of the `typval_encode.c.h` walk (`TYPVAL_ENCODE_CONVERT_ONE_VALUE`)
+/// for the `string` and `echo` instantiations.
+fn TYPVAL_ENCODE_CONVERT_ONE_VALUE(tv: &typval_T, st: &mut EncodeState) -> VimStr {
     match (tv.v_type, &tv.vval) {
         // TYPVAL_ENCODE_CONV_NUMBER
         (VAR_NUMBER, v_number(n)) => n.to_string().into(),
@@ -540,19 +608,22 @@ pub fn encode_vim_to_string(tv: &typval_T) -> VimStr {
                     if i > 0 {
                         out.push_str(", ");
                     }
-                    out.push_bytes(&encode_tv2string(a));
+                    out.push_bytes(&TYPVAL_ENCODE_CONVERT_ONE_VALUE(a, st));
                 }
                 out.push_char(']');
             }
             if let Some(d) = &p.pt_dict {
                 out.push_str(", ");
-                out.push_bytes(&encode_tv2string(&typval_T {
-                    v_type: VAR_DICT,
-                    v_lock: crate::ported::eval::typval_defs_h::VarLockStatus::VAR_UNLOCKED,
-                    vval: crate::ported::eval::typval_defs_h::typval_vval_union::v_dict(Some(
-                        d.clone(),
-                    )),
-                }));
+                out.push_bytes(&TYPVAL_ENCODE_CONVERT_ONE_VALUE(
+                    &typval_T {
+                        v_type: VAR_DICT,
+                        v_lock: crate::ported::eval::typval_defs_h::VarLockStatus::VAR_UNLOCKED,
+                        vval: crate::ported::eval::typval_defs_h::typval_vval_union::v_dict(Some(
+                            d.clone(),
+                        )),
+                    },
+                    st,
+                ));
             }
             out.push_char(')');
             out
@@ -569,15 +640,21 @@ pub fn encode_vim_to_string(tv: &typval_T) -> VimStr {
         (VAR_LIST, v_list(l)) => match l {
             None => "[]".into(),
             Some(l) => {
+                let ptr = std::rc::Rc::as_ptr(l) as *const ();
+                if let Some(text) = st.TYPVAL_ENCODE_CHECK_SELF_REFERENCE(false, ptr) {
+                    return text;
+                }
+                st.stack.push((false, ptr));
                 let l = l.borrow();
                 let mut out = VimStr::from("[");
                 for (i, it) in l.lv_items.iter().enumerate() {
                     if i > 0 {
                         out.push_str(", ");
                     }
-                    out.push_bytes(&encode_vim_to_string(&it.li_tv));
+                    out.push_bytes(&TYPVAL_ENCODE_CONVERT_ONE_VALUE(&it.li_tv, st));
                 }
                 out.push_char(']');
+                st.stack.pop();
                 out
             }
         },
@@ -585,6 +662,11 @@ pub fn encode_vim_to_string(tv: &typval_T) -> VimStr {
         (VAR_DICT, v_dict(d)) => match d {
             None => "{}".into(),
             Some(d) => {
+                let ptr = std::rc::Rc::as_ptr(d) as *const ();
+                if let Some(text) = st.TYPVAL_ENCODE_CHECK_SELF_REFERENCE(true, ptr) {
+                    return text;
+                }
+                st.stack.push((true, ptr));
                 let d = d.borrow();
                 let mut out = VimStr::from("{");
                 for (i, (k, v)) in d.dv_hashtab.iter().enumerate() {
@@ -593,9 +675,10 @@ pub fn encode_vim_to_string(tv: &typval_T) -> VimStr {
                     }
                     out.push_str(&format!("'{}'", k.replace('\'', "''")));
                     out.push_str(": ");
-                    out.push_bytes(&encode_vim_to_string(v));
+                    out.push_bytes(&TYPVAL_ENCODE_CONVERT_ONE_VALUE(v, st));
                 }
                 out.push_char('}');
+                st.stack.pop();
                 out
             }
         },
@@ -619,15 +702,16 @@ pub fn encode_vim_to_string(tv: &typval_T) -> VimStr {
 }
 
 /// Port of the `encode_vim_to_echo` instantiation. Equivalent to
-/// [`encode_vim_to_string`] for all nested values (see file-header note).
+/// [`encode_vim_to_string`] for all nested values (see file-header note) except
+/// a self-reference, which prints `[...@N]` / `{...@N}` and reports nothing.
 pub fn encode_vim_to_echo(tv: &typval_T) -> VimStr {
-    encode_vim_to_string(tv)
+    TYPVAL_ENCODE_CONVERT_ONE_VALUE(tv, &mut EncodeState::new(Recurse::Echo))
 }
 
 /// Port of `encode_tv2json()` from `Src/eval/encode.c:921` — the `json_encode()`
 /// rendering of a value.
 pub fn encode_tv2json(tv: &typval_T) -> String {
-    encode_vim_to_json(tv)
+    encode_vim_to_json(tv, &mut Vec::new())
 }
 
 /// Port of `convert_to_json_string()` from `Src/eval/encode.c:621` — a
@@ -655,7 +739,13 @@ fn convert_to_json_string(s: &str) -> String {
 /// Port of the `encode_vim_to_json` instantiation of the encode template — JSON
 /// render. Strings/keys are double-quoted+escaped, `v:true`/`v:false`/`v:null`
 /// become `true`/`false`/`null`.
-pub fn encode_vim_to_json(tv: &typval_T) -> String {
+///
+/// `open` holds the containers being encoded,
+/// outermost first: one that contains itself is written as an EMPTY container
+/// of its kind, with no error — vim 9.2 `json_encode()` (`[1, l]` with `l`
+/// inside is `[1,[]]`). Neovim reports E724 and writes nothing there; this
+/// encoder follows vim's JSON text throughout (no blank after `,` or `:`).
+pub fn encode_vim_to_json(tv: &typval_T, open: &mut Vec<*const ()>) -> String {
     match (tv.v_type, &tv.vval) {
         (VAR_NUMBER, v_number(n)) => n.to_string(),
         (VAR_FLOAT, v_float(f)) => {
@@ -676,21 +766,32 @@ pub fn encode_vim_to_json(tv: &typval_T) -> String {
         (VAR_LIST, v_list(l)) => match l {
             None => "[]".to_string(),
             Some(l) => {
+                let ptr = std::rc::Rc::as_ptr(l) as *const ();
+                if open.contains(&ptr) {
+                    return "[]".to_string();
+                }
+                open.push(ptr);
                 let l = l.borrow();
                 let mut out = String::from("[");
                 for (i, it) in l.lv_items.iter().enumerate() {
                     if i > 0 {
                         out.push(',');
                     }
-                    out.push_str(&encode_vim_to_json(&it.li_tv));
+                    out.push_str(&encode_vim_to_json(&it.li_tv, open));
                 }
                 out.push(']');
+                open.pop();
                 out
             }
         },
         (VAR_DICT, v_dict(d)) => match d {
             None => "{}".to_string(),
             Some(d) => {
+                let ptr = std::rc::Rc::as_ptr(d) as *const ();
+                if open.contains(&ptr) {
+                    return "{}".to_string();
+                }
+                open.push(ptr);
                 let d = d.borrow();
                 let mut out = String::from("{");
                 for (i, (k, v)) in d.dv_hashtab.iter().enumerate() {
@@ -699,9 +800,10 @@ pub fn encode_vim_to_json(tv: &typval_T) -> String {
                     }
                     out.push_str(&convert_to_json_string(k));
                     out.push(':');
-                    out.push_str(&encode_vim_to_json(v));
+                    out.push_str(&encode_vim_to_json(v, open));
                 }
                 out.push('}');
+                open.pop();
                 out
             }
         },

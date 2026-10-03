@@ -3223,57 +3223,120 @@ pub fn f_flattennew(argvars: &[typval_T], rettv: &mut typval_T) {
 
 // ── batch 5: deepcopy + more float math (Src/eval/funcs.c) ──
 
-/// Port of `var_item_copy()` from `Src/eval/typval.c` — a deep copy of `from`
-/// (Lists/Dicts copied recursively into fresh handles).
-pub(crate) fn var_item_copy(from: &typval_T) -> typval_T {
-    match (from.v_type, &from.vval) {
+/// Port of `var_item_copy()` from `vendor/eval.c:6041` for `deep == true`
+/// (Lists/Dicts copied recursively into fresh handles); `None` is its FAIL,
+/// after which the caller holds a NULL List/Dict, read as empty.
+///
+/// `copies` is the C's `copyID` bookkeeping: `Some` when a copyID is in use
+/// (`deepcopy(x)`), mapping each original container to its copy. The entry is
+/// made BEFORE the items are copied — c: `tv_list_copy` "Do this before adding
+/// the items, because one of the items may refer back to this list" — so a
+/// self-reference becomes a reference to the copy, and a container that
+/// appears twice is copied once (`deepcopy([x, x])` keeps `y[0] is y[1]`).
+/// `None` is `deepcopy(x, 1)` (copyID 0): nothing is shared, and a
+/// self-reference recurses until `DICT_MAXNEST`, E698.
+pub(crate) fn var_item_copy(
+    from: &typval_T,
+    copies: &mut Option<std::collections::HashMap<*const (), typval_T>>,
+    recurse: &mut i32,
+) -> Option<typval_T> {
+    // c: `if (recurse >= DICT_MAXNEST) { emsg(_(e_variable_nested_too_deep_for_making_copy)); return FAIL; }`
+    const DICT_MAXNEST: i32 = 100;
+    if *recurse >= DICT_MAXNEST {
+        crate::ported::message::emsg("E698: Variable nested too deep for making a copy");
+        return None;
+    }
+    *recurse += 1;
+    let out = match (from.v_type, &from.vval) {
         (VAR_LIST, v_list(Some(l))) => {
-            let items: Vec<typval_T> = l
-                .borrow()
-                .lv_items
-                .iter()
-                .map(|it| var_item_copy(&it.li_tv))
-                .collect();
-            let out = crate::ported::eval::typval::tv_list_alloc(items.len() as isize);
-            {
-                let mut ob = out.borrow_mut();
-                for tv in items {
-                    tv_list_append_tv(&mut ob, tv);
+            let key = std::rc::Rc::as_ptr(l) as *const ();
+            if let Some(done) = copies.as_ref().and_then(|m| m.get(&key)) {
+                // c: "Use the copy made earlier."
+                Some(done.clone())
+            } else {
+                let copy =
+                    crate::ported::eval::typval::tv_list_alloc(l.borrow().lv_items.len() as isize);
+                let tv = typval_T {
+                    v_type: VAR_LIST,
+                    v_lock: crate::ported::eval::typval_defs_h::VarLockStatus::VAR_UNLOCKED,
+                    vval: v_list(Some(copy.clone())),
+                };
+                if let Some(m) = copies.as_mut() {
+                    m.insert(key, tv.clone());
                 }
-            }
-            typval_T {
-                v_type: VAR_LIST,
-                v_lock: crate::ported::eval::typval_defs_h::VarLockStatus::VAR_UNLOCKED,
-                vval: v_list(Some(out)),
+                let items: Vec<typval_T> = l
+                    .borrow()
+                    .lv_items
+                    .iter()
+                    .map(|it| it.li_tv.clone())
+                    .collect();
+                let mut ok = true;
+                for item in &items {
+                    match var_item_copy(item, copies, recurse) {
+                        Some(c) => tv_list_append_tv(&mut copy.borrow_mut(), c),
+                        None => {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                ok.then_some(tv)
             }
         }
         (VAR_DICT, v_dict(Some(d))) => {
-            let pairs: Vec<(String, typval_T)> = d
-                .borrow()
-                .dv_hashtab
-                .iter()
-                .map(|(k, v)| (k.clone(), var_item_copy(v)))
-                .collect();
-            let out = crate::ported::eval::typval::tv_dict_alloc();
-            {
-                let mut ob = out.borrow_mut();
-                for (k, v) in pairs {
-                    tv_dict_add_tv(&mut ob, &k, v);
+            let key = std::rc::Rc::as_ptr(d) as *const ();
+            if let Some(done) = copies.as_ref().and_then(|m| m.get(&key)) {
+                Some(done.clone())
+            } else {
+                let copy = crate::ported::eval::typval::tv_dict_alloc();
+                let tv = typval_T {
+                    v_type: VAR_DICT,
+                    v_lock: crate::ported::eval::typval_defs_h::VarLockStatus::VAR_UNLOCKED,
+                    vval: v_dict(Some(copy.clone())),
+                };
+                if let Some(m) = copies.as_mut() {
+                    m.insert(key, tv.clone());
                 }
-            }
-            typval_T {
-                v_type: VAR_DICT,
-                v_lock: crate::ported::eval::typval_defs_h::VarLockStatus::VAR_UNLOCKED,
-                vval: v_dict(Some(out)),
+                let pairs: Vec<(String, typval_T)> = d
+                    .borrow()
+                    .dv_hashtab
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                let mut ok = true;
+                for (k, v) in &pairs {
+                    match var_item_copy(v, copies, recurse) {
+                        Some(c) => tv_dict_add_tv(&mut copy.borrow_mut(), k, c),
+                        None => {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                ok.then_some(tv)
             }
         }
-        _ => from.clone(),
-    }
+        _ => Some(from.clone()),
+    };
+    *recurse -= 1;
+    out
 }
 
-/// Port of `f_deepcopy()` from `Src/eval/funcs.c` — a recursive copy of `{expr}`.
+/// Port of `f_deepcopy()` from `vendor/eval/funcs.c:1065` — a recursive copy of
+/// `{expr}`; with `{noref}` true no container is shared (copyID 0).
 pub fn f_deepcopy(argvars: &[typval_T], rettv: &mut typval_T) {
-    *rettv = var_item_copy(&argvars[0]);
+    let noref = argvars.get(1).is_some_and(|a| a.v_type != VAR_UNKNOWN)
+        && crate::ported::eval::typval::tv_get_bool_chk(&argvars[1], None) != 0;
+    let mut copies = (!noref).then(std::collections::HashMap::new);
+    *rettv = var_item_copy(&argvars[0], &mut copies, &mut 0).unwrap_or_else(|| typval_T {
+        v_type: argvars[0].v_type,
+        v_lock: crate::ported::eval::typval_defs_h::VarLockStatus::VAR_UNLOCKED,
+        vval: if argvars[0].v_type == VAR_DICT {
+            v_dict(None)
+        } else {
+            v_list(None)
+        },
+    });
 }
 
 /// Port of `f_fmod()` from `Src/eval/funcs.c` — floating-point remainder.
@@ -7367,8 +7430,45 @@ pub fn f_libcallnr(_argvars: &[typval_T], rettv: &mut typval_T) {
 
 /// Append the minimal-width MessagePack encoding of `tv` to `out`. Mirrors
 /// `encode_vim_to_msgpack()` (encode.c) over msgpack-c's `msgpack_pack_*`.
-/// Returns the Vim error string (E5004/E5005) for an unencodable value.
-fn mpack_encode_tv(tv: &typval_T, out: &mut Vec<u8>) -> Result<(), &'static str> {
+/// Returns the Vim error (E5004/E5005) for an unencodable value; what was
+/// written before it stays in `out`, as the C packer's buffer does.
+///
+/// `path` is the walk's `mpstack`: each container being dumped, with the
+/// `conv_error()` (`vendor/eval/encode.c:113`) text for the child currently
+/// being written — `index %i` in a List, `key %s` (the key through
+/// `encode_tv2string`) in a Dict. A container met again while it is on the
+/// path is `TYPVAL_ENCODE_CONV_RECURSE`: E5005.
+fn mpack_encode_tv(
+    tv: &typval_T,
+    out: &mut Vec<u8>,
+    objname: &str,
+    path: &mut Vec<(*const (), String)>,
+) -> Result<(), String> {
+    // c: conv_error — the path, or "itself" when the failing value is the
+    // dumped object itself.
+    let where_ = |path: &[(*const (), String)]| {
+        if path.is_empty() {
+            "itself".to_string()
+        } else {
+            path.iter()
+                .map(|(_, seg)| seg.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    };
+    let container = match &tv.vval {
+        v_list(Some(l)) => Some(std::rc::Rc::as_ptr(l) as *const ()),
+        v_dict(Some(d)) => Some(std::rc::Rc::as_ptr(d) as *const ()),
+        _ => None,
+    };
+    if let Some(ptr) = container {
+        if path.iter().any(|(p, _)| *p == ptr) {
+            return Err(format!(
+                "E5005: Unable to dump {objname}: container references itself in {}",
+                where_(path)
+            ));
+        }
+    }
     match (tv.v_type, &tv.vval) {
         // c: every special (v:null / v:none) encodes as msgpack nil; v:true /
         // v:false → bool.
@@ -7402,8 +7502,13 @@ fn mpack_encode_tv(tv: &typval_T, out: &mut Vec<u8>) -> Result<(), &'static str>
                 })
                 .unwrap_or_default();
             mpack_pack_array_len(items.len(), out);
-            for it in &items {
-                mpack_encode_tv(it, out)?;
+            if let Some(ptr) = container {
+                path.push((ptr, String::new()));
+                for (i, it) in items.iter().enumerate() {
+                    path.last_mut().unwrap().1 = format!("index {i}");
+                    mpack_encode_tv(it, out, objname, path)?;
+                }
+                path.pop();
             }
         }
         (VAR_DICT, v_dict(d)) => {
@@ -7418,17 +7523,30 @@ fn mpack_encode_tv(tv: &typval_T, out: &mut Vec<u8>) -> Result<(), &'static str>
                 })
                 .unwrap_or_default();
             mpack_pack_map_len(pairs.len(), out);
-            for (k, v) in &pairs {
-                // c: keys are always dumped as STR strings (limitation 3).
-                mpack_pack_str(k.as_bytes(), out);
-                mpack_encode_tv(v, out)?;
+            if let Some(ptr) = container {
+                path.push((ptr, String::new()));
+                for (k, v) in &pairs {
+                    // c: keys are always dumped as STR strings (limitation 3).
+                    mpack_pack_str(k.as_bytes(), out);
+                    path.last_mut().unwrap().1 = format!("key '{}'", k.replace('\'', "''"));
+                    mpack_encode_tv(v, out, objname, path)?;
+                }
+                path.pop();
             }
         }
         // c: E5004 — Funcref/Partial cannot be dumped.
         (VAR_FUNC, _) | (VAR_PARTIAL, _) => {
-            return Err("E5004: Error while dumping: attempt to dump function reference")
+            return Err(format!(
+                "E5004: Error while dumping {objname}, {}: attempt to dump function reference",
+                where_(path)
+            ))
         }
-        _ => return Err("E5004: Error while dumping: attempt to dump unsupported type"),
+        _ => {
+            return Err(format!(
+                "E5004: Error while dumping {objname}, {}: attempt to dump unsupported type",
+                where_(path)
+            ))
+        }
     }
     Ok(())
 }
@@ -7546,11 +7664,14 @@ pub fn f_msgpackdump(argvars: &[typval_T], rettv: &mut typval_T) {
     };
     let want_blob = argvars.len() > 1 && tv_get_string(&argvars[1]).contains('B');
     let mut bytes = Vec::new();
-    for it in &items {
-        if let Err(e) = mpack_encode_tv(it, &mut bytes) {
-            emsg(e);
-            tv_list_alloc_ret(rettv, 0);
-            return;
+    // c: each item is dumped as "msgpackdump() argument, index %i"; the first
+    // one that fails is reported and ends the dump, and the bytes packed so far
+    // are still the result (`msgpackdump([1, function('len')])` is `['^A']`).
+    for (idx, it) in items.iter().enumerate() {
+        let objname = format!("msgpackdump() argument, index {idx}");
+        if let Err(e) = mpack_encode_tv(it, &mut bytes, &objname, &mut Vec::new()) {
+            emsg(&e);
+            break;
         }
     }
     if want_blob {

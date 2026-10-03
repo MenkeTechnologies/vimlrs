@@ -1323,27 +1323,27 @@ pub fn tv_blob_slice_or_index(
 //
 // The C linked-list walk + `copyID` cycle detection + `vimconv` reduce over the
 // `Vec`/`Rc` model: a shallow copy is `tv_copy` per item, a deep copy delegates
-// to `var_item_copy` (matching `f_copy`/`f_deepcopy`; `copyID` cycle detection is
-// not modeled, so self-referential containers are unsupported, as in the
-// existing `var_item_copy`).
+// to `var_item_copy` with one copyID for the whole copy, and stops at the first
+// item that fails to copy (E698).
 
 /// Port of `tv_list_copy()` from `Src/eval/typval.c` (c:591) — a new list with
 /// each item shallow- (`deep=false`) or deep-copied (`deep=true`).
 pub fn tv_list_copy(orig: &Rc<RefCell<list_T>>, deep: bool) -> Rc<RefCell<list_T>> {
+    let mut copies = Some(std::collections::HashMap::new());
     let items: Vec<typval_T> = orig
         .borrow()
         .lv_items
         .iter()
-        .map(|it| {
-            if deep {
-                crate::ported::eval::funcs::var_item_copy(&it.li_tv)
+        .map_while(|it| {
+            Some(if deep {
+                crate::ported::eval::funcs::var_item_copy(&it.li_tv, &mut copies, &mut 0)?
             } else {
                 {
                     let mut t = it.li_tv.clone();
                     t.v_lock = VarLockStatus::VAR_UNLOCKED;
                     t
                 }
-            }
+            })
         })
         .collect();
     let copy = tv_list_alloc(items.len() as isize);
@@ -1359,13 +1359,14 @@ pub fn tv_list_copy(orig: &Rc<RefCell<list_T>>, deep: bool) -> Rc<RefCell<list_T
 /// Port of `tv_dict_copy()` from `Src/eval/typval.c` (c:2838) — a new dict with
 /// each value shallow- or deep-copied.
 pub fn tv_dict_copy(orig: &Rc<RefCell<dict_T>>, deep: bool) -> Rc<RefCell<dict_T>> {
+    let mut copies = Some(std::collections::HashMap::new());
     let pairs: Vec<(String, typval_T)> = orig
         .borrow()
         .dv_hashtab
         .iter()
-        .map(|(k, v)| {
+        .map_while(|(k, v)| {
             let nv = if deep {
-                crate::ported::eval::funcs::var_item_copy(v)
+                crate::ported::eval::funcs::var_item_copy(v, &mut copies, &mut 0)?
             } else {
                 {
                     let mut t = v.clone();
@@ -1373,7 +1374,7 @@ pub fn tv_dict_copy(orig: &Rc<RefCell<dict_T>>, deep: bool) -> Rc<RefCell<dict_T
                     t
                 }
             };
-            (k.clone(), nv)
+            Some((k.clone(), nv))
         })
         .collect();
     let copy = tv_dict_alloc();

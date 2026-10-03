@@ -1,0 +1,11 @@
+1
+2 1 1
+1 0 0
+1 0
+1
+0
+E698: Variable nested too deep for making a copy
+after noref
+[1,[]] {"k":{"a":1,"self":{}}}
+1 1
+end

@@ -78,6 +78,19 @@ call assert_fails('call msgpackparse(0z93)', 'E475: Invalid argument: Incomplete
 
 " error path: Funcrefs cannot be dumped (E5004).
 call assert_fails("call msgpackdump([function('tr')])", 'E5004')
+" The error names the argument and the path to the value (conv_error), and the
+" bytes packed before it are still the result — measured from nvim 0.12.
+call assert_fails("call msgpackdump([1, function('tr')])", "E5004: Error while dumping msgpackdump() argument, index 1, itself: attempt to dump function reference")
+call assert_fails("call msgpackdump([{'a': [function('tr')]}])", "E5004: Error while dumping msgpackdump() argument, index 0, key 'a', index 0: attempt to dump function reference")
+silent! let s:partial = msgpackdump([1, function('tr')])
+call assert_equal(["\x01"], s:partial)
+" A container that holds itself is E5005, not a hang.
+let s:rec = [1]
+call add(s:rec, s:rec)
+call assert_fails('call msgpackdump([s:rec])', 'E5005: Unable to dump msgpackdump() argument, index 0: container references itself in index 1')
+let s:recd = {}
+let s:recd.x = [s:recd]
+call assert_fails('call msgpackdump([1, s:recd])', "E5005: Unable to dump msgpackdump() argument, index 1: container references itself in key 'x', index 0")
 
 if len(v:errors) > 0
   for err in v:errors
