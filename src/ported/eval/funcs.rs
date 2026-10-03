@@ -10823,6 +10823,9 @@ fn char_class(c: char) -> u8 {
 /// Runs the key sequence `keys` against the current buffer/cursor (ASCII; the
 /// cursor column is treated as a character index).
 pub fn do_normal(keys: &str) {
+    if crate::fusevm_bridge::fire_normal_hook(keys) {
+        return;
+    }
     let k: Vec<char> = keys.chars().collect();
     let nlines = || curbuf_len();
     let line_chars = |l: varnumber_T| -> Vec<char> {

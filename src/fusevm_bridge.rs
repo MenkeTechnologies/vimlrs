@@ -6793,6 +6793,26 @@ pub fn install_win_size_hook(f: Box<dyn Fn() -> (HostNum, HostNum)>) {
     WIN_SIZE_HOOK.with(|h| *h.borrow_mut() = Some(f));
 }
 
+thread_local! {
+    /// Host callback that runs a `:normal` key sequence with the editor's own
+    /// Normal mode, returning `true` when it did. vimlrs's `do_normal` port is
+    /// a bounded subset with no window (`zt`, `zz`, `<C-W>` are lost), so an
+    /// embedding editor that can execute the keys in order claims them here.
+    /// EXTENSION seam; unset (standalone) or `false`: the ported subset runs.
+    #[allow(clippy::type_complexity)]
+    static NORMAL_HOOK: RefCell<Option<Box<dyn Fn(&str) -> bool>>> = const { RefCell::new(None) };
+}
+
+/// Install the host's `:normal` executor (see `NORMAL_HOOK`).
+pub fn install_normal_hook(f: Box<dyn Fn(&str) -> bool>) {
+    NORMAL_HOOK.with(|h| *h.borrow_mut() = Some(f));
+}
+
+/// Offer `keys` to the host's `:normal` executor; `true` if it ran them.
+pub fn fire_normal_hook(keys: &str) -> bool {
+    NORMAL_HOOK.with(|h| h.borrow().as_ref().is_some_and(|f| f(keys)))
+}
+
 /// The host's current-window `(height, width)`, or `None` when standalone.
 pub fn editor_win_size() -> Option<(HostNum, HostNum)> {
     WIN_SIZE_HOOK.with(|h| h.borrow().as_ref().map(|f| f()))
@@ -8149,6 +8169,23 @@ mod tests {
         assert_eq!(run("echo winheight(2) winwidth(-1)").trim(), "-1 -1");
         // aliases.vim: `let s:l = 40 - ((39 * winheight(0) + 41) / 82)`
         assert_eq!(run("echo 40 - ((39 * winheight(0) + 41) / 82)").trim(), "18");
+    }
+
+    /// `:normal` keys go to a host that claims them, verbatim and in script
+    /// order; a host that declines leaves the ported subset to run them.
+    #[test]
+    fn normal_hook_claims_keys_in_order() {
+        use std::cell::RefCell;
+        thread_local! { static SEEN: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) }; }
+        install_normal_hook(Box::new(|keys: &str| {
+            SEEN.with(|s| s.borrow_mut().push(keys.to_string()));
+            keys != "$"
+        }));
+        run("normal! zt\nexe 'normal! 0'\nnormal zz");
+        assert_eq!(SEEN.with(|s| s.borrow().clone()), ["zt", "0", "zz"]);
+
+        run("call setline(1, 'abc') | call cursor(1, 1) | normal $");
+        assert_eq!(run("echo col('.')").trim(), "3");
     }
 
     #[test]
