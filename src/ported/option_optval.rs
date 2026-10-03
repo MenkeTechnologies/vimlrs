@@ -346,6 +346,8 @@ pub(crate) static options: LazyLock<Vec<vimoption_T>> = LazyLock::new(|| {
         b("undofile", "udf", TriState::kFalse),
         n("cmdheight", "ch", 1),
         n("cmdwinheight", "cwh", 7),
+        n("columns", "co", 80),
+        n("lines", "lines", 24),
         n("conceallevel", "cole", 0),
         n("foldlevel", "fdl", 0),
         n("helpheight", "hh", 20),

@@ -179,6 +179,10 @@ const OPTIONS: &[(&str, &str, Kind, varnumber_T, &str)] = &[
     ("undofile", "udf", Kind::Bool, 0, ""),
     ("cmdheight", "ch", Kind::Number, 1, ""),
     ("cmdwinheight", "cwh", Kind::Number, 7, ""),
+    // The screen size: 80x24 in vim -es and nvim --headless alike. An embedding
+    // editor reports its own through `install_screen_size_hook`.
+    ("columns", "co", Kind::Number, 80, ""),
+    ("lines", "lines", Kind::Number, 24, ""),
     ("conceallevel", "cole", Kind::Number, 0, ""),
     ("foldlevel", "fdl", Kind::Number, 0, ""),
     ("helpheight", "hh", Kind::Number, 20, ""),
@@ -238,6 +242,13 @@ pub fn get_option_value(name: &str) -> typval_T {
     let Some((canon, _, kind, default, sdefault)) = findoption(name) else {
         return typval_T::from(String::new());
     };
+    if let Some((lines, columns)) = SCREEN_SIZE_HOOK.with(|h| h.borrow().as_ref().map(|f| f())) {
+        match *canon {
+            "columns" => return typval_T::from(columns),
+            "lines" => return typval_T::from(lines),
+            _ => {}
+        }
+    }
     option_values.with(|m| {
         m.borrow()
             .get(*canon)
@@ -247,6 +258,17 @@ pub fn get_option_value(name: &str) -> typval_T {
                 _ => typval_T::from(*default),
             })
     })
+}
+
+thread_local! {
+    /// Host hook giving the embedding editor's screen `(lines, columns)`, what
+    /// `&lines` / `&columns` read: a `:mksession` script sizes its windows from
+    /// them (`exe 'vert 1resize ' . ((&columns * 30 + 99) / 199)`). EXTENSION —
+    /// installed by [`crate::fusevm_bridge::install_screen_size_hook`]; unset, the
+    /// table's 80x24 stands.
+    #[allow(clippy::type_complexity)]
+    pub static SCREEN_SIZE_HOOK: std::cell::RefCell<Option<Box<dyn Fn() -> (varnumber_T, varnumber_T)>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 thread_local! {

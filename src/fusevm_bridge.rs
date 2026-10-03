@@ -6813,6 +6813,12 @@ pub fn fire_normal_hook(keys: &str) -> bool {
     NORMAL_HOOK.with(|h| h.borrow().as_ref().is_some_and(|f| f(keys)))
 }
 
+/// Install the host's screen-size callback, `(lines, columns)`, which
+/// `&lines` / `&columns` then read (see `option::SCREEN_SIZE_HOOK`).
+pub fn install_screen_size_hook(f: Box<dyn Fn() -> (HostNum, HostNum)>) {
+    crate::ported::option::SCREEN_SIZE_HOOK.with(|h| *h.borrow_mut() = Some(f));
+}
+
 /// The host's current-window `(height, width)`, or `None` when standalone.
 pub fn editor_win_size() -> Option<(HostNum, HostNum)> {
     WIN_SIZE_HOOK.with(|h| h.borrow().as_ref().map(|f| f()))
@@ -8169,6 +8175,17 @@ mod tests {
         assert_eq!(run("echo winheight(2) winwidth(-1)").trim(), "-1 -1");
         // aliases.vim: `let s:l = 40 - ((39 * winheight(0) + 41) / 82)`
         assert_eq!(run("echo 40 - ((39 * winheight(0) + 41) / 82)").trim(), "18");
+    }
+
+    /// `&columns` / `&lines` are vim's 80x24 standalone and the host's screen
+    /// once it reports one, so a session's `vert Nresize` formula scales to it.
+    #[test]
+    fn screen_size_hook_sizes_columns_and_lines() {
+        assert_eq!(run("echo &columns &co &lines").trim(), "80 80 24");
+        install_screen_size_hook(Box::new(|| (50, 200)));
+        assert_eq!(run("echo &columns &lines").trim(), "200 50");
+        // Scripting.vim: `exe 'vert 1resize ' . ((&columns * 30 + 99) / 199)`
+        assert_eq!(run("echo (&columns * 30 + 99) / 199").trim(), "30");
     }
 
     /// `:normal` keys go to a host that claims them, verbatim and in script
