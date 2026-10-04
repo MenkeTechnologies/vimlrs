@@ -8219,7 +8219,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("vimlrs-winmod-host-{}.vim", std::process::id()));
         std::fs::write(
             &path,
-            "exe 'vert 1resize ' . 30\nsilent! vertical resize 20\ntab split\n2resize 5\nsil! 10,20fold\n",
+            "exe 'vert 1resize ' . 30\nsilent! vertical resize 20\ntab split\n2resize 5\nsil! 10,20fold\nargglobal\n%argdel\n$argadd c.txt\n",
         )
         .unwrap();
         eval_file(&path).unwrap();
@@ -8227,7 +8227,7 @@ mod tests {
         let seen = SEEN.with(|s| s.borrow().clone());
         assert_eq!(
             seen,
-            ["vert 1resize 30", "vertical resize 20", "tab split", "2resize 5", "10,20fold"]
+            ["vert 1resize 30", "vertical resize 20", "tab split", "2resize 5", "10,20fold", "argglobal", "%argdel", "$argadd c.txt"]
         );
     }
 
