@@ -767,7 +767,16 @@ fn slot_plan(stmts: &[(u32, Stmt)], in_function: bool) -> SlotPlan {
     // other prefix (`g:`/`s:`/`a:`/`b:`/`w:`/`t:`/
     // `v:`) is a distinct dict-backed store and can't be slotted.
     fn slot_key(name: &str, in_function: bool) -> Option<&str> {
-        if is_bare(name) {
+        // A script-level name IS `g:name`, and one with an uppercase first
+        // letter outlives the script — `:mksession` saves the mixed-case ones
+        // and ShaDa the all-caps ones (`var_flavour`) — so it must be stored.
+        if is_bare(name)
+            && !in_function
+            && crate::ported::eval::var_flavour(name)
+                != crate::ported::eval::var_flavour_T::VAR_FLAVOUR_DEFAULT
+        {
+            None
+        } else if is_bare(name) {
             Some(name)
         } else if in_function {
             name.strip_prefix("l:").filter(|r| is_bare(r))

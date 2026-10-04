@@ -8231,6 +8231,27 @@ mod tests {
         );
     }
 
+    /// `store_session_globals`: what nvim 0.12 writes for these globals with
+    /// `'sessionoptions'` "globals" — only mixed-case names, only Numbers,
+    /// Strings and Floats, a Number space-padded, a String escaped.
+    #[test]
+    fn session_globals_are_the_lines_nvim_writes() {
+        run(concat!(
+            "let Count = 3\n",
+            "let Name = \"a\\\"b\\nc\\\\d\"\n",
+            "let ALLCAPS = 1\n",
+            "let lower = 1\n",
+            "let Ratio = -1.5\n",
+            "let Items = [1]\n",
+        ));
+        let mut lines = crate::ported::ex_session::store_session_globals();
+        lines.sort();
+        assert_eq!(
+            lines,
+            ["let Count =  3 ", "let Name = \"a\\\"b\\nc\\\\d\"", "let Ratio = -1.500000"]
+        );
+    }
+
     /// `&columns` / `&lines` are vim's 80x24 standalone and the host's screen
     /// once it reports one, so a session's `vert Nresize` formula scales to it.
     #[test]

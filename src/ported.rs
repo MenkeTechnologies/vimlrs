@@ -32,6 +32,8 @@ pub mod eval;
 pub mod eval_h;
 /// Port of `src/nvim/ex_eval.c` (abort/exception state predicates).
 pub mod ex_eval;
+/// Port of `src/nvim/ex_session.c` (subset: the session's global variables).
+pub mod ex_session;
 /// Port of `src/nvim/grid_defs.h` (ScreenGrid) + `ui_compositor.c` (empty standalone).
 pub mod grid;
 /// Port of `src/nvim/strings.c` (the Vimscript string builtins `f_string`,
