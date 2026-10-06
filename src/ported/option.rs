@@ -5,16 +5,20 @@
 //! scopes, side effects). This ports the boolean, number and string options
 //! whose default both reference engines agree on, plus the `do_set` argument
 //! grammar (`set opt`, `set noopt`, `set opt!`, `set inv opt`, `set opt=val`,
-//! `set opt?`); the value store is a thread-local map seeded with Vim's
-//! defaults. Per-buffer and per-window scopes follow with the editor
-//! integration — a buffer-local option's row here carries its default and is
-//! read globally.
+//! `set opt?`, `set opt&`, `set opt<`) under `:set`, `:setlocal` and
+//! `:setglobal`. Values live in `option_optval`'s store, which keeps a global
+//! and a local value per option (see `option_optval::get_varp_scope`).
 #![allow(non_snake_case, non_upper_case_globals)]
 
-use std::cell::RefCell;
+#[cfg(test)]
+use crate::ported::eval::typval::tv_get_bool;
+#[cfg(test)]
 use std::collections::HashMap;
-
-use crate::ported::eval::typval::{tv_get_bool, tv_get_number, tv_get_string};
+use crate::ported::option_optval::{
+    self, find_option, get_varp_scope, kOptScopeBuf, kOptScopeGlobal, kOptScopeWin, options,
+    optval_from_varp, set_option, OptVal, OptValData, OptVarp, TriState, BOOLEAN_OPTVAL, NIL_OPTVAL,
+    NUMBER_OPTVAL, OPT_GLOBAL, OPT_LOCAL, STRING_OPTVAL, TRISTATE_FROM_INT,
+};
 use crate::ported::eval::typval_defs_h::{typval_T, varnumber_T};
 
 /// Option kind, for parsing `:set` values.
@@ -213,12 +217,6 @@ const OPTIONS: &[(&str, &str, Kind, varnumber_T, &str)] = &[
     ("virtualedit", "ve", Kind::String, 0, ""),
 ];
 
-thread_local! {
-    /// Current option values, keyed by canonical name. Lazily seeded from the
-    /// table defaults on first access.
-    static option_values: RefCell<HashMap<String, typval_T>> = RefCell::new(HashMap::new());
-}
-
 /// Port of `findoption()` (`option.c`) — resolve an option name or abbreviation
 /// to its `OPTIONS` row.
 fn findoption(
@@ -229,18 +227,12 @@ fn findoption(
         .find(|(n, abbr, _, _, _)| *n == name || *abbr == name)
 }
 
-/// Port of `set_option_value()` (`option.c`) reduced — store option `canon`'s
-/// value.
-fn set_option_value(canon: &str, tv: typval_T) {
-    option_values.with(|m| {
-        m.borrow_mut().insert(canon.to_string(), tv);
-    });
-}
-
 /// Port of `get_option_value()` (`option.c`) reduced — the value of `&name` (or
-/// its abbreviation). Unknown options yield "" (the empty string).
+/// its abbreviation): `get_varp()`'s value, the local one where the option has
+/// one that is set (see [`option_optval::get_varp_scope`]). Unknown options
+/// yield "" (the empty string). The value store is `option_optval`'s.
 pub fn get_option_value(name: &str) -> typval_T {
-    let Some((canon, _, kind, default, sdefault)) = findoption(name) else {
+    let Some((canon, _, kind, _, _)) = findoption(name) else {
         return typval_T::from(String::new());
     };
     if let Some((lines, columns)) = SCREEN_SIZE_HOOK.with(|h| h.borrow().as_ref().map(|f| f())) {
@@ -255,15 +247,8 @@ pub fn get_option_value(name: &str) -> typval_T {
             return typval_T::from(v);
         }
     }
-    option_values.with(|m| {
-        m.borrow()
-            .get(*canon)
-            .cloned()
-            .unwrap_or_else(|| match kind {
-                Kind::String => typval_T::from(sdefault.to_string()),
-                _ => typval_T::from(*default),
-            })
-    })
+    let opt_idx = option_optval::find_option(canon);
+    option_optval::optval_as_tv(option_optval::get_option_value(opt_idx, 0), true)
 }
 
 /// The host callback behind [`BUF_OPTION_HOOK`]: a string option's full name
@@ -302,8 +287,10 @@ thread_local! {
 
 /// Port of `do_set()` (`option.c`) — parse and apply a `:set` argument string:
 /// `set opt` / `set noopt` / `set opt!` / `set invopt` / `set opt=val` /
-/// `set opt:val` / `set opt?` (whitespace-separated, multiple per line).
-pub fn do_set(args: &str) {
+/// `set opt:val` / `set opt&` / `set opt<` / `set opt?` (whitespace-separated,
+/// multiple per line). `opt_flags` is `ex_set()`'s: 0 for `:set`, `OPT_LOCAL`
+/// for `:setlocal`, `OPT_GLOBAL` for `:setglobal`.
+pub fn do_set(args: &str, opt_flags: i32) {
     // Mirror the whole `:set` line to the host editor first (if a hook is
     // installed), then keep vimlrs' own option table in sync below so `&opt`
     // reads inside vimscript still see the value.
@@ -312,6 +299,10 @@ pub fn do_set(args: &str) {
             f(args);
         }
     });
+    // The value `get_varp_scope(opt, opt_flags)` names, which every operator
+    // below starts from.
+    let current = |opt_idx| optval_from_varp(opt_idx, get_varp_scope(opt_idx, opt_flags));
+    let is_true = |v: OptVal| matches!(v.data, OptValData::boolean(TriState::kTrue));
     for part in args.split_whitespace() {
         // `opt=val` / `opt:val`, plus the compound-assign operators `opt+=val`
         // (append), `opt^=val` (prepend), `opt-=val` (remove) — `do_set`'s
@@ -324,70 +315,108 @@ pub fn do_set(args: &str) {
                 None => (lhs, b'='),
             };
             if let Some((canon, _, kind, _, _)) = findoption(name) {
-                let tv = match (kind, op) {
-                    (Kind::String, b'+') => {
-                        let cur = tv_get_string(&get_option_value(canon));
-                        typval_T::from(if cur.is_empty() {
-                            val.to_string()
-                        } else {
-                            format!("{cur},{val}")
-                        })
-                    }
-                    (Kind::String, b'^') => {
-                        let cur = tv_get_string(&get_option_value(canon));
-                        typval_T::from(if cur.is_empty() {
-                            val.to_string()
-                        } else {
-                            format!("{val},{cur}")
-                        })
-                    }
-                    (Kind::String, b'-') => {
-                        let cur = tv_get_string(&get_option_value(canon));
-                        typval_T::from(
-                            cur.split(',')
+                let opt_idx = find_option(canon);
+                let value = match (kind, op) {
+                    (Kind::String, _) => {
+                        // c: a `:set` of a global-local string option works on
+                        // the global value (the local one is emptied by
+                        // `set_option`); `:setlocal` on its local value, or the
+                        // global one while the local one is unset.
+                        let scope = options[opt_idx].scope_flags;
+                        let global_local = scope & kOptScopeGlobal != 0
+                            && scope & (kOptScopeBuf | kOptScopeWin) != 0;
+                        let varp = match opt_flags {
+                            0 if global_local => OptVarp::Global,
+                            OPT_LOCAL if global_local => get_varp_scope(opt_idx, 0),
+                            _ => get_varp_scope(opt_idx, opt_flags),
+                        };
+                        let cur = match optval_from_varp(opt_idx, varp).data {
+                            OptValData::string(s) => s,
+                            _ => String::new(),
+                        };
+                        STRING_OPTVAL(match op {
+                            b'+' if cur.is_empty() => val.to_string(),
+                            b'+' => format!("{cur},{val}"),
+                            b'^' if cur.is_empty() => val.to_string(),
+                            b'^' => format!("{val},{cur}"),
+                            b'-' => cur
+                                .split(',')
                                 .filter(|s| *s != val)
                                 .collect::<Vec<_>>()
                                 .join(","),
-                        )
+                            _ => val.to_string(),
+                        })
                     }
-                    (Kind::String, _) => typval_T::from(val.to_string()),
                     (Kind::Number, _) => {
                         let n = val.trim().parse::<varnumber_T>().unwrap_or(0);
                         // c: `do_set_option_numeric` — `+=` adds, `^=` MULTIPLIES,
                         // `-=` subtracts (`set tw+=10`, `set sw^=2`).
-                        let cur = tv_get_number(&get_option_value(canon));
-                        typval_T::from(match op {
+                        let cur = match current(opt_idx).data {
+                            OptValData::number(n) => n,
+                            _ => 0,
+                        };
+                        NUMBER_OPTVAL(match op {
                             b'+' => cur.wrapping_add(n),
                             b'^' => cur.wrapping_mul(n),
                             b'-' => cur.wrapping_sub(n),
                             _ => n,
                         })
                     }
-                    (_, b'=') => typval_T::from(val.trim().parse::<varnumber_T>().unwrap_or(0)),
+                    (Kind::Bool, b'=') => BOOLEAN_OPTVAL(TRISTATE_FROM_INT(
+                        val.trim().parse::<varnumber_T>().unwrap_or(0),
+                    )),
                     // Compound op on a bool option: no-op.
                     _ => continue,
                 };
-                set_option_value(canon, tv);
+                set_option(opt_idx, value, opt_flags);
             }
             continue;
         }
         // `opt!` (toggle a bool) / `opt?` (query — no-op here).
         if let Some(name) = part.strip_suffix('!') {
             if let Some((canon, _, Kind::Bool, _, _)) = findoption(name) {
-                let cur = tv_get_bool(&get_option_value(canon)) != 0;
-                set_option_value(canon, typval_T::from(varnumber_T::from(!cur)));
+                let opt_idx = find_option(canon);
+                let on = is_true(current(opt_idx));
+                set_option(opt_idx, BOOLEAN_OPTVAL(TRISTATE_FROM_INT(i64::from(!on))), opt_flags);
             }
             continue;
         }
         // `opt&` / `opt&vim` / `opt&vi` — back to the default (`do_set_option`'s
-        // `nextchar == '&'` branch, `set_option_default`). Every row of this
-        // table has one default for both, so the three spellings agree.
+        // `nextchar == '&'` branch, `set_option_default`): the local value
+        // unless `:setglobal`, the global one unless `:setlocal`. Every row of
+        // this table has one default for both, so the three spellings agree.
         if let Some((name, _)) = part
             .split_once('&')
             .filter(|(_, how)| matches!(*how, "" | "vim" | "vi"))
         {
             if let Some((canon, ..)) = findoption(name) {
-                option_values.with(|m| m.borrow_mut().remove(*canon));
+                let opt_idx = find_option(canon);
+                let def_val = options[opt_idx].def_val.clone();
+                if opt_flags & OPT_GLOBAL == 0 {
+                    set_option(opt_idx, def_val.clone(), OPT_LOCAL);
+                }
+                if opt_flags & OPT_LOCAL == 0 {
+                    set_option(opt_idx, def_val, OPT_GLOBAL);
+                }
+            }
+            continue;
+        }
+        // `opt<` — the local value from the global one (`nextchar == '<'`).
+        // `:setlocal` of a global-local option instead unsets the local value
+        // (`NO_LOCAL_UNDOLEVEL`, -1, ''), so `get_varp()` goes back to the
+        // global value.
+        if let Some(name) = part.strip_suffix('<') {
+            if let Some((canon, ..)) = findoption(name) {
+                let opt_idx = find_option(canon);
+                let scope = options[opt_idx].scope_flags;
+                let global_local =
+                    scope & kOptScopeGlobal != 0 && scope & (kOptScopeBuf | kOptScopeWin) != 0;
+                let value = if global_local && opt_flags == OPT_LOCAL {
+                    NIL_OPTVAL()
+                } else {
+                    optval_from_varp(opt_idx, OptVarp::Global)
+                };
+                set_option(opt_idx, value, opt_flags);
             }
             continue;
         }
@@ -397,20 +426,21 @@ pub fn do_set(args: &str) {
         // `noopt` / `invopt` (bool off / invert).
         if let Some(name) = part.strip_prefix("no") {
             if let Some((canon, _, Kind::Bool, _, _)) = findoption(name) {
-                set_option_value(canon, typval_T::from(0));
+                set_option(find_option(canon), BOOLEAN_OPTVAL(TriState::kFalse), opt_flags);
                 continue;
             }
         }
         if let Some(name) = part.strip_prefix("inv") {
             if let Some((canon, _, Kind::Bool, _, _)) = findoption(name) {
-                let cur = tv_get_bool(&get_option_value(canon)) != 0;
-                set_option_value(canon, typval_T::from(varnumber_T::from(!cur)));
+                let opt_idx = find_option(canon);
+                let on = is_true(current(opt_idx));
+                set_option(opt_idx, BOOLEAN_OPTVAL(TRISTATE_FROM_INT(i64::from(!on))), opt_flags);
                 continue;
             }
         }
         // Bare `opt` — turn a boolean on (number/string forms are queries).
         if let Some((canon, _, Kind::Bool, _, _)) = findoption(part) {
-            set_option_value(canon, typval_T::from(1));
+            set_option(find_option(canon), BOOLEAN_OPTVAL(TriState::kTrue), opt_flags);
         }
     }
 }
@@ -428,7 +458,7 @@ mod tests {
                 SEEN.with(|s| s.borrow_mut().push(a.to_string()))
             }));
         });
-        super::do_set("number tw=80");
+        super::do_set("number tw=80", 0);
         SEEN.with(|s| assert_eq!(s.borrow().as_slice(), &["number tw=80".to_string()]));
         // and vimlrs' own option table still tracks it (dual-write):
         assert!(super::findoption("tw").is_some());
@@ -522,13 +552,13 @@ mod tests {
     #[test]
     fn set_and_get_bool_and_number() {
         let ic = || tv_get_bool(&get_option_value("ignorecase")) != 0;
-        do_set("ignorecase");
+        do_set("ignorecase", 0);
         assert!(ic());
-        do_set("noic"); // abbreviation + no-prefix
+        do_set("noic", 0); // abbreviation + no-prefix
         assert!(!ic());
-        do_set("ic!"); // toggle
+        do_set("ic!", 0); // toggle
         assert!(ic());
-        do_set("tabstop=4");
+        do_set("tabstop=4", 0);
         assert_eq!(
             crate::ported::eval::typval::tv_get_number_chk(&get_option_value("ts"), None),
             4

@@ -7313,3 +7313,56 @@ Parity case: `call_args_limit_and_name.vim`.
   `:let` and user-function calls already match.
 - `v:version` is 801 and E711's text is Neovim's ("has not enough items"):
   engine identity, as R34-O2.
+
+## R52 — option scopes, a leading `:` in a name
+
+Oracle: vim 9.2.1150 (`/opt/homebrew/bin/vim`).
+
+### R52-1. A `:` at the start of an operand — ✅ FIXED
+
+`echo :abc` was `E15: Invalid expression`; vim reads `:abc` as a variable
+name (`E121: Undefined variable: :abc`) because `get_id_len()` only treats a
+`:` as the end of a name once one character precedes it. So `echo 0 ?: 'z'`
+skips the name `:` and then misses the `:` — E109, and `echo 1 ?: 'z'` is E121.
+The port's `get_id_len` broke at a `:` in position 0, and the parser had no
+operand for a `:` token. Parity case: `colon_variable_name.vim`.
+
+### R52-2. `:setlocal`, `:setglobal`, `&l:opt`, `&g:opt` — ✅ FIXED
+
+Every option had one value: `setlocal tw=79` changed `&g:tw`, `:setglobal`
+changed the local value, and `let &l:sw = 7` / `let &g:sw = 7` did nothing (the
+`l:` prefix reached `:set` as the option name). `getbufvar(b, '&ts')` and
+`setbufvar()` used a second value store that `&ts` never read. Now
+`option_optval` keeps a global and a local value per option, with each option's
+scope from `:help options.txt` (buffer-local, window-local, global-local), and
+`get_varp_scope()` picks the value:
+
+- `:set` / `:let &opt` write the value `get_varp()` names and copy it to the
+  global one; `:setlocal` / `:setglobal` write one value.
+- A global-local option's local value starts unset (`NO_LOCAL_UNDOLEVEL`,
+  -1 for 'scrolloff'/'sidescrolloff', `''` for 'virtualedit') and `&opt` reads
+  the global value until it is set; `setlocal opt<` unsets it, `set opt<`
+  copies the global value; `:set` of a global-local STRING option empties the
+  local value and works on the global one (vim; Neovim does this for every
+  global-local option).
+- `:set opt&` resets both values, `:setlocal opt&` the local one.
+- `:let &opt = 'abc'` on a number option is `E521` (`tv_to_optval()`).
+
+Parity case: `option_scopes.vim`.
+
+### R52-O1. Open, measured this round
+
+- `examples/parse_errors.vim` lines 24-26 expect Neovim's E116 text
+  (`…for function f`) for `eval('f(')`; since R51-6 this port prints vim's
+  (`…for function f(1`), so `cargo test --test examples` fails on them. The
+  expectation needs the owner's decision (the reference is vim).
+- A Boolean option keeps the Number it is given in vim (`let &ic = 2` reads
+  2); the port's TriState reads 1.
+- `set opt?` / `set opt` printing (`  tabstop=8`, `noignorecase`) is not
+  implemented; nor are the `:set` value errors (E518 unknown option, E521,
+  E474, E487) or E488 for `set ve!`.
+- `&nosuch` is E113 and `let &nosuch = 1` E355 in vim; here an option outside
+  the reduced table reads `''` and ignores writes, because most of vim's
+  options (`&cpo`) are not in the table and plugins save and restore them.
+- An error inside `:eval` is tagged `Vim(eval)` in vim; here it keeps the
+  previous command's tag (`:eval` parses to the generic expression statement).

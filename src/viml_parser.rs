@@ -326,7 +326,9 @@ fn parse_stmt_unplaced(line: &str) -> Result<Stmt, VimlError> {
         // aborts the enclosing function definition and leaks its body to global
         // scope (E461 on `l:` vars).
         "execute" => Ok(Stmt::Execute(parse_expr_list(rest)?)),
-        "set" | "setlocal" | "setglobal" => Ok(Stmt::Set(rest.to_string())),
+        "set" => Ok(Stmt::Set(rest.to_string())),
+        "setlocal" => Ok(Stmt::Setlocal(rest.to_string())),
+        "setglobal" => Ok(Stmt::Setglobal(rest.to_string())),
         "source" => Ok(Stmt::Source(rest.trim().to_string())),
         "unlet" => {
             // `:unlet[!] x y …` — the optional `!` suppresses the missing-var

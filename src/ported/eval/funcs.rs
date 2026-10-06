@@ -7272,14 +7272,22 @@ fn get_var_from(argvars: &[typval_T], name_idx: usize, htname: char) -> typval_T
         return crate::ported::eval::vars::eval_variable(scope).unwrap_or(deftv);
     }
     // c:3102 a leading `&` reads an OPTION rather than a variable; `&` alone is
-    // every buffer-/window-local option. Only the single-option form is modelled
-    // (there is one buffer, so its locals are the globals).
-    if let Some(opt) = varname.strip_prefix('&') {
-        if opt.is_empty() {
+    // every buffer-/window-local option (not modelled). c:3117
+    // `eval_option(&varname, rettv, true) == OK` — `&l:`/`&g:` pick the value;
+    // an option that does not exist is the `{def}` argument, without a message.
+    if varname.starts_with('&') {
+        use crate::ported::option_optval::{find_option_var_end, is_tty_option, kOptInvalid};
+        let known = match find_option_var_end(varname) {
+            (Some(name), opt_idx, _) => opt_idx != kOptInvalid || is_tty_option(&name),
+            (None, ..) => false,
+        };
+        if !known {
             return deftv;
         }
-        let tv = crate::ported::option::get_option_value(opt);
-        return if tv.v_type == VAR_UNKNOWN { deftv } else { tv };
+        let mut arg: &str = varname;
+        let mut tv = typval_T::from(String::new());
+        crate::ported::eval::eval_option(&mut arg, &mut tv, true);
+        return tv;
     }
     // c:3137 the ordinary hashtable lookup; absent → the `{def}` argument
     // (c:3160-3163).
@@ -7349,12 +7357,10 @@ fn setwinvar(varname: &str, varp: &typval_T, scope: &str) {
     if varname.is_empty() {
         return;
     }
-    // c:3619 `if (*varname == '&') { … set_option_from_tv(varname + 1, varp); }`.
-    // `set_option_from_tv` writes the `option_optval` store, which is not the
-    // one `&opt` reads back from in this port — `do_set` is, and it is the same
-    // entry point `:set` and `:let &opt =` already use, so the write is visible.
+    // c:3619 `if (*varname == '&') { … set_option_from_tv(varname + 1, varp); }`
+    // — the local value, as `set_option_from_tv` sets it with `OPT_LOCAL`.
     if let Some(opt) = varname.strip_prefix('&') {
-        crate::ported::option::do_set(&format!("{opt}={}", tv_get_string(varp)));
+        crate::ported::option_optval::set_option_from_tv(opt, varp);
         return;
     }
     // c:3633 `set_var(bufvarname, varname_len + 2, varp, true);`

@@ -495,6 +495,10 @@ pub enum Stmt {
     Execute(Vec<Expr>),
     /// `:set {args}` — set options (the raw argument text).
     Set(String),
+    /// `:setlocal {args}` — `:set` of the local values (`OPT_LOCAL`).
+    Setlocal(String),
+    /// `:setglobal {args}` — `:set` of the global values (`OPT_GLOBAL`).
+    Setglobal(String),
     /// `:source {file}` — read and run another `.vim` file in the current scope
     /// (its functions and globals persist). The raw (unquoted) filename.
     Source(String),

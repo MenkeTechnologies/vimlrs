@@ -947,6 +947,8 @@ fn slot_plan(stmts: &[(u32, Stmt)], in_function: bool) -> SlotPlan {
                 Stmt::Function { .. }
                 | Stmt::Execute(_)
                 | Stmt::Set(_)
+                | Stmt::Setlocal(_)
+                | Stmt::Setglobal(_)
                 | Stmt::Map(_)
                 | Stmt::CommandDef(_)
                 | Stmt::CommandDel(_)
@@ -1324,6 +1326,8 @@ impl Compiler {
             Stmt::Try { .. } => "try",
             Stmt::Source(_) => "source",
             Stmt::Set(_) => "set",
+            Stmt::Setlocal(_) => "setlocal",
+            Stmt::Setglobal(_) => "setglobal",
             Stmt::Function { .. } => "function",
             Stmt::DelFunction(_) => "delfunction",
             Stmt::Finish => "finish",
@@ -1597,9 +1601,17 @@ impl Compiler {
                 }
                 Ok(())
             }
-            Stmt::Set(args) => {
+            Stmt::Set(args) | Stmt::Setlocal(args) | Stmt::Setglobal(args) => {
+                // c: `ex_set()` — `do_set(eap->arg, flags)` with `OPT_LOCAL` for
+                // `:setlocal`, `OPT_GLOBAL` for `:setglobal`.
+                let opt_flags = match s {
+                    Stmt::Setlocal(_) => crate::ported::option_optval::OPT_LOCAL,
+                    Stmt::Setglobal(_) => crate::ported::option_optval::OPT_GLOBAL,
+                    _ => 0,
+                };
                 self.load_str(args);
-                self.emit(Op::CallBuiltin(h::VIML_SET, 1));
+                self.emit(Op::LoadInt(opt_flags as i64));
+                self.emit(Op::CallBuiltin(h::VIML_SET, 2));
                 self.emit(Op::Pop);
                 Ok(())
             }

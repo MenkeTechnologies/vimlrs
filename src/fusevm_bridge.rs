@@ -5769,25 +5769,67 @@ fn b_call(vm: &mut VM, argc: u8) -> Value {
 
 fn b_getopt(vm: &mut VM, _: u8) -> Value {
     let name = tv_get_string(&pop_tv(vm));
-    // The option name may carry a `&l:`/`&g:` scope prefix; strip it.
-    let name = name
-        .strip_prefix("l:")
-        .or_else(|| name.strip_prefix("g:"))
-        .unwrap_or(&name);
-    tv_to_value(crate::ported::option::get_option_value(name))
+    // c: `eval_option()` — `find_option_var_end()` turns a `g:`/`l:` prefix
+    // into `OPT_GLOBAL`/`OPT_LOCAL`, and `get_option_value(opt_idx,
+    // opt_flags)` reads that value.
+    use crate::ported::option_optval::{find_option, get_option_value, kOptInvalid, optval_as_tv};
+    let (opt_flags, name) = option_scope(&name);
+    let opt_idx = find_option(name);
+    // RUST-PORT NOTE: an option outside the reduced table reads "" rather
+    // than E113 — most of vim's options are not in it (`&cpo` is not), and
+    // a plugin's `let s:save_cpo = &cpo` must keep running.
+    if opt_flags == 0 || opt_idx == kOptInvalid {
+        return tv_to_value(crate::ported::option::get_option_value(name));
+    }
+    tv_to_value(optval_as_tv(get_option_value(opt_idx, opt_flags), true))
 }
 
+/// The `g:`/`l:` prefix of an `&opt` name as `OPT_GLOBAL`/`OPT_LOCAL` (0 for
+/// none), and the name after it — `find_option_var_end()`'s decoding.
+fn option_scope(name: &str) -> (i32, &str) {
+    use crate::ported::option_optval::{OPT_GLOBAL, OPT_LOCAL};
+    if let Some(rest) = name.strip_prefix("g:") {
+        (OPT_GLOBAL, rest)
+    } else if let Some(rest) = name.strip_prefix("l:") {
+        (OPT_LOCAL, rest)
+    } else {
+        (0, name)
+    }
+}
+
+/// `:set` / `:setlocal` / `:setglobal` — `do_set(arg, opt_flags)`.
 fn b_set(vm: &mut VM, _: u8) -> Value {
+    let opt_flags = tv_get_number_chk(&pop_tv(vm), None) as i32;
     let args = tv_get_string(&pop_tv(vm));
-    crate::ported::option::do_set(&args);
+    crate::ported::option::do_set(&args, opt_flags);
     Value::Undef
 }
 
-/// `:let &opt = value` — apply via `option::do_set` as `name=value`.
+/// `:let &opt = value` — c: `ex_let_option()`: `tv_to_optval()` converts the
+/// value for the option's type (E521 for a String that is not a number), and
+/// `set_option_value_handle_tty(name, opt_idx, newval, opt_flags)` stores it
+/// in the scope the `g:`/`l:` prefix names.
 fn b_setopt(vm: &mut VM, _: u8) -> Value {
-    let val = tv_get_string(&pop_tv(vm));
+    use crate::ported::option_optval::{
+        find_option, set_option_value_handle_tty, tv_to_optval,
+    };
+    let val = pop_tv(vm);
     let name = tv_get_string(&pop_tv(vm));
-    crate::ported::option::do_set(&format!("{name}={val}"));
+    let (opt_flags, name) = option_scope(&name);
+    let opt_idx = find_option(name);
+    // RUST-PORT NOTE: an option outside the reduced table is not E355 here —
+    // most of vim's options are not in it, and a plugin's `let &cpo =
+    // s:save_cpo` must keep running. See `b_getopt`.
+    if opt_idx == crate::ported::option_optval::kOptInvalid {
+        return Value::Undef;
+    }
+    let mut error = false;
+    let value = tv_to_optval(&val, opt_idx, name, &mut error);
+    if !error {
+        if let Some(e) = set_option_value_handle_tty(name, opt_idx, value, opt_flags) {
+            message::emsg(&e);
+        }
+    }
     Value::Undef
 }
 

@@ -14,28 +14,27 @@
 //! ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //! RUST-PORT NOTE (relationship to the sibling `option.rs`): the reduced
 //! `option.rs` ports the *untyped* `do_set` `:set` argument-string grammar plus
-//! the host-editor mirror hook, storing every value as a `typval_T`. THIS module
+//! the host-editor mirror hook. THIS module
 //! ports the *OptVal-typed* layer that eval's expression paths use — the same
 //! logical option store, but modeled with Neovim's real `OptVal` / `OptValType`
 //! / `OptValData` value type and the `find_option` / `optval_from_varp` /
 //! `set_option_value` call chain, so `&opt` reads and `:let &opt` writes go
-//! through the faithful C control flow rather than string parsing. The two are
-//! kept as separate value stores (each thread-local); the editor integration
-//! wave unifies them onto the buffer/window option variables.
+//! through the faithful C control flow rather than string parsing. There is ONE
+//! value store, this module's: `option.rs` reads and writes through it.
 //!
 //! RUST-PORT NOTE (reductions vs upstream):
 //!   * `OptIndex` is upstream a generated enum (`kOpt<Name>`) indexing the
 //!     `options[]` array built from `options.lua`; here it is a `usize` index
 //!     into the reduced `options` table with `kOptInvalid = usize::MAX`.
 //!   * `options[]` is the subset of number/string/boolean options eval reads
-//!     (see the table below). `flags`/`scope_flags`/per-buffer-per-window scopes
-//!     and the `did_set` side-effect callbacks (redraw, terminal, filetype
-//!     autocommands) are NOT modeled — `set_option_value` validates then stores
+//!     (see the table below). `scope_flags` is modeled (from `:help
+//!     options.txt`), with one buffer and one window; the `did_set` side-effect
+//!     callbacks (redraw, terminal, filetype autocommands) are NOT modeled — `set_option_value` validates then stores
 //!     the value so `&opt` reads observe it, but applies no editor side effects.
-//!   * The option value store — upstream the global option variables reached via
-//!     `get_varp_scope` + a `void *varp` — is a thread-local `OptIndex → OptVal`
-//!     map here; `optval_from_varp` reads it (its `varp` parameter is dropped)
-//!     and `get_option_value` calls it directly (no `get_varp_scope`).
+//!   * The option value store — upstream the global option variables and the
+//!     `b_p_*`/`w_p_*` fields reached via `get_varp_scope` + a `void *varp` — is
+//!     two thread-local `OptIndex → OptVal` maps here (global and local), and
+//!     `varp` is an [`OptVarp`] naming one of them.
 //!   * `find_option_hash` (the generated perfect hash) → a linear scan.
 //!   * `optval_free` is a no-op (Rust drops the owned `String`); `set_option`
 //!     (the validating setter with side effects) collapses into a store write.
@@ -72,7 +71,7 @@ pub enum TriState {
 
 /// Port of `TRISTATE_FROM_INT(val)` (`types_defs.h:55`):
 /// `((val) == 0 ? kFalse : ((val) >= 1 ? kTrue : kNone))`.
-fn TRISTATE_FROM_INT(val: varnumber_T) -> TriState {
+pub(crate) fn TRISTATE_FROM_INT(val: varnumber_T) -> TriState {
     // c:55
     if val == 0 {
         TriState::kFalse
@@ -128,7 +127,7 @@ pub struct OptVal {
 
 /// Port of `NIL_OPTVAL` (`option.h:53`):
 /// `((OptVal) { .type = kOptValTypeNil })`.
-fn NIL_OPTVAL() -> OptVal {
+pub(crate) fn NIL_OPTVAL() -> OptVal {
     // c:53
     OptVal {
         r#type: OptValType::kOptValTypeNil,
@@ -138,7 +137,7 @@ fn NIL_OPTVAL() -> OptVal {
 
 /// Port of `BOOLEAN_OPTVAL(b)` (`option.h:54`):
 /// `((OptVal) { .type = kOptValTypeBoolean, .data.boolean = b })`.
-fn BOOLEAN_OPTVAL(b: TriState) -> OptVal {
+pub(crate) fn BOOLEAN_OPTVAL(b: TriState) -> OptVal {
     // c:54
     OptVal {
         r#type: OptValType::kOptValTypeBoolean,
@@ -148,7 +147,7 @@ fn BOOLEAN_OPTVAL(b: TriState) -> OptVal {
 
 /// Port of `NUMBER_OPTVAL(n)` (`option.h:55`):
 /// `((OptVal) { .type = kOptValTypeNumber, .data.number = n })`.
-fn NUMBER_OPTVAL(n: OptInt) -> OptVal {
+pub(crate) fn NUMBER_OPTVAL(n: OptInt) -> OptVal {
     // c:55
     OptVal {
         r#type: OptValType::kOptValTypeNumber,
@@ -160,7 +159,7 @@ fn NUMBER_OPTVAL(n: OptInt) -> OptVal {
 /// `((OptVal) { .type = kOptValTypeString, .data.string = s })`. The
 /// `CSTR_AS_OPTVAL`/`CSTR_TO_OPTVAL` wrappers (`option.h:58`) collapse to this
 /// here — the owned `String` is both the "as" (borrow) and "to" (copy) form.
-fn STRING_OPTVAL(s: String) -> OptVal {
+pub(crate) fn STRING_OPTVAL(s: String) -> OptVal {
     // c:56
     OptVal {
         r#type: OptValType::kOptValTypeString,
@@ -203,8 +202,90 @@ pub(crate) struct vimoption_T {
     pub(crate) flags: u32,
     /// `OptValType type` — option type.
     pub(crate) r#type: OptValType,
+    /// `OptScopeFlags scope_flags` — which of [`kOptScopeGlobal`],
+    /// [`kOptScopeWin`], [`kOptScopeBuf`] the option has a value in. Global AND
+    /// buffer/window is a global-local option.
+    pub(crate) scope_flags: u8,
     /// `OptVal def_val` — default value.
     pub(crate) def_val: OptVal,
+}
+
+/// `kOptScopeGlobal` (`option_defs.h`, `OptScope`) as an `OptScopeFlags` bit:
+/// the option has a global value.
+pub const kOptScopeGlobal: u8 = 1 << 0;
+/// `kOptScopeWin` as an `OptScopeFlags` bit: the option has a window-local value.
+pub const kOptScopeWin: u8 = 1 << 1;
+/// `kOptScopeBuf` as an `OptScopeFlags` bit: the option has a buffer-local value.
+pub const kOptScopeBuf: u8 = 1 << 2;
+
+/// `#define NO_LOCAL_UNDOLEVEL (-123456)` (`undo.h`) — the "use the global value"
+/// marker in a buffer's 'undolevels'.
+pub const NO_LOCAL_UNDOLEVEL: OptInt = -123456;
+
+/// The scope of every option in `options[]` that is not global-only, as
+/// `:help options.txt` (vim 9.2) states it ("local to buffer", "local to
+/// window", "global or local to buffer/window"). Every other row is global.
+/// 'cmdheight' ("global or local to tab") stays global: with one tab page the
+/// two values never differ (`setlocal ch=3` reads 3 3 3 through `&l:`, `&g:`,
+/// `&`).
+const LOCAL_SCOPES: &[(&str, u8)] = &[
+    ("expandtab", kOptScopeBuf),
+    ("number", kOptScopeWin),
+    ("relativenumber", kOptScopeWin),
+    ("wrap", kOptScopeWin),
+    ("autoindent", kOptScopeBuf),
+    ("tabstop", kOptScopeBuf),
+    ("shiftwidth", kOptScopeBuf),
+    ("softtabstop", kOptScopeBuf),
+    ("textwidth", kOptScopeBuf),
+    ("scrolloff", kOptScopeGlobal | kOptScopeWin),
+    ("filetype", kOptScopeBuf),
+    ("syntax", kOptScopeBuf),
+    ("buftype", kOptScopeBuf),
+    ("fileformat", kOptScopeBuf),
+    ("iskeyword", kOptScopeBuf),
+    ("binary", kOptScopeBuf),
+    ("bomb", kOptScopeBuf),
+    ("cindent", kOptScopeBuf),
+    ("copyindent", kOptScopeBuf),
+    ("cursorline", kOptScopeWin),
+    ("endofline", kOptScopeBuf),
+    ("infercase", kOptScopeBuf),
+    ("lisp", kOptScopeBuf),
+    ("list", kOptScopeWin),
+    ("modeline", kOptScopeBuf),
+    ("modifiable", kOptScopeBuf),
+    ("preserveindent", kOptScopeBuf),
+    ("readonly", kOptScopeBuf),
+    ("smartindent", kOptScopeBuf),
+    ("swapfile", kOptScopeBuf),
+    ("undolevels", kOptScopeGlobal | kOptScopeBuf),
+    ("matchpairs", kOptScopeBuf),
+    ("linebreak", kOptScopeWin),
+    ("undofile", kOptScopeBuf),
+    ("conceallevel", kOptScopeWin),
+    ("foldlevel", kOptScopeWin),
+    ("iminsert", kOptScopeBuf),
+    ("imsearch", kOptScopeBuf),
+    ("numberwidth", kOptScopeWin),
+    ("sidescrolloff", kOptScopeGlobal | kOptScopeWin),
+    ("synmaxcol", kOptScopeBuf),
+    ("wrapmargin", kOptScopeBuf),
+    ("spellfile", kOptScopeBuf),
+    ("spelllang", kOptScopeBuf),
+    ("virtualedit", kOptScopeGlobal | kOptScopeWin),
+];
+
+/// Which value a `varp` points at: the global one, or the current
+/// buffer's/window's local one. RUST-PORT NOTE: stands in for the `void *varp`
+/// that `get_varp_scope` returns — there is one buffer and one window, so the
+/// local value is a second store rather than a field of `buf_T`/`win_T`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptVarp {
+    /// `p->var` — the global value.
+    Global,
+    /// `&curbuf->b_p_*` / `&curwin->w_p_*` — the local value.
+    Local,
 }
 
 /// The `options[]` array (`option.c`, generated from `options.lua`). RUST-PORT
@@ -219,6 +300,7 @@ pub(crate) static options: LazyLock<Vec<vimoption_T>> = LazyLock::new(|| {
         shortname,
         flags: 0,
         r#type: OptValType::kOptValTypeBoolean,
+        scope_flags: kOptScopeGlobal,
         def_val: BOOLEAN_OPTVAL(def),
     };
     let n = |fullname: &'static str, shortname: &'static str, def: OptInt| vimoption_T {
@@ -226,6 +308,7 @@ pub(crate) static options: LazyLock<Vec<vimoption_T>> = LazyLock::new(|| {
         shortname,
         flags: 0,
         r#type: OptValType::kOptValTypeNumber,
+        scope_flags: kOptScopeGlobal,
         def_val: NUMBER_OPTVAL(def),
     };
     let s = |fullname: &'static str, shortname: &'static str, def: &str| vimoption_T {
@@ -233,6 +316,7 @@ pub(crate) static options: LazyLock<Vec<vimoption_T>> = LazyLock::new(|| {
         shortname,
         flags: 0,
         r#type: OptValType::kOptValTypeString,
+        scope_flags: kOptScopeGlobal,
         def_val: STRING_OPTVAL(def.to_string()),
     };
     vec![
@@ -375,13 +459,26 @@ pub(crate) static options: LazyLock<Vec<vimoption_T>> = LazyLock::new(|| {
         s("spelllang", "spl", "en"),
         s("virtualedit", "ve", ""),
     ]
+    .into_iter()
+    .map(|mut opt| {
+        if let Some((_, scope)) = LOCAL_SCOPES.iter().find(|(name, _)| *name == opt.fullname) {
+            opt.scope_flags = *scope;
+        }
+        opt
+    })
+    .collect()
 });
 
 thread_local! {
-    /// The option value store. RUST-PORT NOTE: stands in for the global option
-    /// variables reached via `get_varp_scope`/`varp`; keyed by `OptIndex`,
-    /// lazily seeded from `def_val` on read.
+    /// The global option values. RUST-PORT NOTE: stands in for the global option
+    /// variables (`p->var`); keyed by `OptIndex`, lazily seeded from `def_val`
+    /// on read.
     static option_values: RefCell<HashMap<OptIndex, OptVal>> = RefCell::new(HashMap::new());
+    /// The local values of the current buffer and window (`b_p_*`/`w_p_*`).
+    /// Unwritten, a buffer- or window-local option reads its `def_val` (a new
+    /// buffer copies the global defaults) and a global-local one reads its
+    /// "unset" value, which sends `get_varp()` to the global value.
+    static option_values_local: RefCell<HashMap<OptIndex, OptVal>> = RefCell::new(HashMap::new());
 }
 
 // ── option.c ports ───────────────────────────────────────────────────────────
@@ -516,17 +613,65 @@ pub fn optval_copy(o: OptVal) -> OptVal {
     }
 }
 
+/// Port of `get_varp_scope()` from `vendor/option.c` (upstream `option.c`) —
+/// which value of option `opt_idx` the `opt_flags` scope names.
+///
+/// `OPT_GLOBAL` is the global value, `OPT_LOCAL` the local one (for a
+/// global-only option both are the global value). With neither, this is
+/// `get_varp()`: a global-local option uses its local value only when that is
+/// set — `b_p_ul != NO_LOCAL_UNDOLEVEL`, `w_p_so >= 0`, `w_p_siso >= 0`, a
+/// non-empty string — and every other local option its local value.
+pub fn get_varp_scope(opt_idx: OptIndex, opt_flags: i32) -> OptVarp {
+    let scope = options[opt_idx].scope_flags;
+    if scope & (kOptScopeBuf | kOptScopeWin) == 0 || opt_flags & OPT_GLOBAL != 0 {
+        return OptVarp::Global;
+    }
+    if opt_flags & OPT_LOCAL != 0 || scope & kOptScopeGlobal == 0 {
+        return OptVarp::Local;
+    }
+    let local_is_set = match optval_from_varp(opt_idx, OptVarp::Local).data {
+        OptValData::number(n) if options[opt_idx].fullname == "undolevels" => {
+            n != NO_LOCAL_UNDOLEVEL
+        }
+        OptValData::number(n) => n >= 0,
+        OptValData::boolean(b) => b != TriState::kNone,
+        OptValData::string(s) => !s.is_empty(),
+        OptValData::nil => false,
+    };
+    if local_is_set {
+        OptVarp::Local
+    } else {
+        OptVarp::Global
+    }
+}
+
 /// Port of `optval_from_varp()` from `vendor/option.c` (upstream `option.c:3424`).
-/// RUST-PORT NOTE: the `void *varp` dereference (`*(int*)varp` etc.) is replaced
-/// by a read from the thread-local `option_values` store, falling back to the
-/// option's `def_val`; the `varp` parameter and the `b_changed` special case are
-/// dropped (no buffer). The `type` switch is preserved.
-pub fn optval_from_varp(opt_idx: OptIndex) -> OptVal {
+/// RUST-PORT NOTE: the `void *varp` dereference (`*(int*)varp` etc.) is a read
+/// of the global or the local store that `varp` names, falling back to the
+/// option's `def_val` — or, for the local value of a global-local option, to
+/// its "unset" value (`NO_LOCAL_UNDOLEVEL`, -1, `kNone`, empty), which is what
+/// a new buffer or window starts with. The `b_changed` special case is dropped
+/// (no buffer). The `type` switch is preserved.
+pub fn optval_from_varp(opt_idx: OptIndex, varp: OptVarp) -> OptVal {
     // c:3433 OptValType type = option_get_type(opt_idx);
-    let r#type = options[opt_idx].r#type;
+    let opt = &options[opt_idx];
+    let r#type = opt.r#type;
 
     // c:3435 switch (type) — read the stored value (or the default) for opt_idx.
-    let stored = option_values.with(|m| m.borrow().get(&opt_idx).cloned());
+    let stored = match varp {
+        OptVarp::Global => option_values.with(|m| m.borrow().get(&opt_idx).cloned()),
+        OptVarp::Local => option_values_local.with(|m| m.borrow().get(&opt_idx).cloned()),
+    };
+    let global_local = varp == OptVarp::Local && opt.scope_flags & kOptScopeGlobal != 0;
+    let initial = || match (global_local, r#type) {
+        (false, _) => opt.def_val.clone(),
+        (true, OptValType::kOptValTypeNumber) if opt.fullname == "undolevels" => {
+            NUMBER_OPTVAL(NO_LOCAL_UNDOLEVEL)
+        }
+        (true, OptValType::kOptValTypeNumber) => NUMBER_OPTVAL(-1),
+        (true, OptValType::kOptValTypeBoolean) => BOOLEAN_OPTVAL(TriState::kNone),
+        (true, _) => STRING_OPTVAL(String::new()),
+    };
     match r#type {
         // c:3436 kOptValTypeNil: return NIL_OPTVAL;
         OptValType::kOptValTypeNil => NIL_OPTVAL(),
@@ -535,15 +680,12 @@ pub fn optval_from_varp(opt_idx: OptIndex) -> OptVal {
         // c:3440 kOptValTypeNumber: return NUMBER_OPTVAL(*(OptInt*)varp);
         | OptValType::kOptValTypeNumber
         // c:3442 kOptValTypeString: return STRING_OPTVAL(cstr_as_string(*(char**)varp));
-        | OptValType::kOptValTypeString => stored.unwrap_or_else(|| options[opt_idx].def_val.clone()),
+        | OptValType::kOptValTypeString => stored.unwrap_or_else(initial),
     }
 }
 
 /// Port of `get_option_value()` from `vendor/option.c` (upstream `option.c:3630`).
-/// RUST-PORT NOTE: `get_varp_scope` is collapsed — the value is read straight
-/// from `optval_from_varp(opt_idx)`.
 pub fn get_option_value(opt_idx: OptIndex, opt_flags: i32) -> OptVal {
-    let _ = opt_flags;
     // c:3632 if (opt_idx == kOptInvalid) { return NIL_OPTVAL; }
     if opt_idx == kOptInvalid {
         return NIL_OPTVAL();
@@ -551,19 +693,18 @@ pub fn get_option_value(opt_idx: OptIndex, opt_flags: i32) -> OptVal {
 
     // c:3636 vimoption_T *opt = &options[opt_idx];
     // c:3637 void *varp = get_varp_scope(opt, opt_flags);
+    let varp = get_varp_scope(opt_idx, opt_flags);
     // c:3639 return optval_copy(optval_from_varp(opt_idx, varp));
-    optval_copy(optval_from_varp(opt_idx))
+    optval_copy(optval_from_varp(opt_idx, varp))
 }
 
 /// Port of `set_option_value()` from `vendor/option.c` (upstream `option.c:4116`).
 /// RUST-PORT NOTE: the `sandbox` counter is not modeled standalone (see
-/// `vars.c`'s `check_secure` port), so the `kOptFlagSecure` guard is inert here;
-/// the validating `set_option` (with `did_set` side effects) collapses to a
-/// store write. Returns `Some(msg)` on error, `None` on success.
+/// `vars.c`'s `check_secure` port), so the `kOptFlagSecure` guard is inert here.
+/// Returns `Some(msg)` on error, `None` on success.
 pub fn set_option_value(opt_idx: OptIndex, value: OptVal, opt_flags: i32) -> Option<String> {
     // c:4118 assert(opt_idx != kOptInvalid);
     assert!(opt_idx != kOptInvalid);
-    let _ = opt_flags;
 
     // c:4121 uint32_t flags = options[opt_idx].flags;
     let flags = options[opt_idx].flags;
@@ -572,11 +713,48 @@ pub fn set_option_value(opt_idx: OptIndex, value: OptVal, opt_flags: i32) -> Opt
     // RUST-PORT NOTE: sandbox == 0 here, so this never fires.
     let _ = (flags, kOptFlagSecure);
 
-    // c:4128 return set_option(opt_idx, optval_copy(value), …);
-    // RUST-PORT NOTE: store the value (no side effects).
-    option_values.with(|m| {
-        m.borrow_mut().insert(opt_idx, optval_copy(value));
-    });
+    // c:4128 return set_option(opt_idx, optval_copy(value), opt_flags, …);
+    set_option(opt_idx, optval_copy(value), opt_flags)
+}
+
+/// Port of `set_option()` from `vendor/option.c` — store `value` in the scope
+/// `opt_flags` names. RUST-PORT NOTE: the validation and `did_set_*` side
+/// effects are not modeled; what is kept is where the value lands, which
+/// follows vim 9.2 (the reference) rather than Neovim where the two differ:
+///
+/// * `OPT_LOCAL` / `OPT_GLOBAL` write the value `get_varp_scope` names.
+/// * Neither (`:set`, `:let &opt`): the value `get_varp()` names is written and
+///   then copied to the global value, so `setlocal ul=5 | set ul=9` leaves 9 in
+///   both. A global-local STRING option instead takes the value globally and
+///   has its local value emptied (`setlocal ve=all | set ve=block` reads `''`
+///   through `&l:ve`) — Neovim empties the local value of every global-local
+///   option here, vim only of the string ones.
+pub fn set_option(opt_idx: OptIndex, value: OptVal, opt_flags: i32) -> Option<String> {
+    let scope = options[opt_idx].scope_flags;
+    // c: "If NIL_OPTVAL, the option value is cleared" — the value goes back to
+    // what it was before anything was stored (for the local value of a
+    // global-local option, unset).
+    let store = |varp: OptVarp, v: OptVal| {
+        let slot = match varp {
+            OptVarp::Global => &option_values,
+            OptVarp::Local => &option_values_local,
+        };
+        slot.with(|m| match v.r#type {
+            OptValType::kOptValTypeNil => m.borrow_mut().remove(&opt_idx),
+            _ => m.borrow_mut().insert(opt_idx, v),
+        })
+    };
+    let both = opt_flags & (OPT_LOCAL | OPT_GLOBAL) == 0;
+    let has_local = scope & (kOptScopeBuf | kOptScopeWin) != 0;
+    if both && has_local && scope & kOptScopeGlobal != 0 && value.r#type == OptValType::kOptValTypeString {
+        store(OptVarp::Global, value);
+        store(OptVarp::Local, STRING_OPTVAL(String::new()));
+        return None;
+    }
+    store(get_varp_scope(opt_idx, opt_flags), value.clone());
+    if both && has_local {
+        store(OptVarp::Global, value);
+    }
     None
 }
 
@@ -607,7 +785,7 @@ pub fn set_option_value_handle_tty(
 /// Port of `tv_to_optval()` from `vendor/eval/vars.c` (upstream `vars.c:3196`) —
 /// convert a `typval_T` to the `OptVal` for option `opt_idx`. Sets `*error` on a
 /// type error.
-fn tv_to_optval(tv: &typval_T, opt_idx: OptIndex, option: &str, error: &mut bool) -> OptVal {
+pub(crate) fn tv_to_optval(tv: &typval_T, opt_idx: OptIndex, option: &str, error: &mut bool) -> OptVal {
     // c:3198 OptVal value = NIL_OPTVAL;
     let mut value = NIL_OPTVAL();
     // c:3200 bool err = false;

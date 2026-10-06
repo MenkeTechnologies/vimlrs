@@ -5329,7 +5329,10 @@ pub fn eval_option(arg: &mut &str, rettv: &mut typval_T, evaluate: bool) -> i32 
     if b.get(i) == Some(&b'+') || b.get(i) == Some(&b'<') {
         i += 1; // has("+opt") / &<opt
     }
+    // c:6303-6310 (`find_option_var_end`) — `g:` is OPT_GLOBAL, `l:` OPT_LOCAL.
+    let mut opt_flags = 0;
     if (b.get(i) == Some(&b'g') || b.get(i) == Some(&b'l')) && b.get(i + 1) == Some(&b':') {
+        opt_flags = if b[i] == b'g' { OPT_GLOBAL } else { OPT_LOCAL };
         i += 2; // &g: / &l: scope prefix
     }
     let name_start = i;
@@ -5346,7 +5349,16 @@ pub fn eval_option(arg: &mut &str, rettv: &mut typval_T, evaluate: bool) -> i32 
     let name = &src[name_start..i];
     *arg = &src[i..];
     if evaluate {
-        *rettv = crate::ported::option::get_option_value(name); // c:3407
+        use crate::ported::option_optval::{find_option, get_option_value, kOptInvalid, optval_as_tv};
+        let opt_idx = find_option(name);
+        // c:3407 `get_option_value(opt_idx, opt_flags)` — a scoped read goes to
+        // the store; an unscoped one through `option::get_option_value`, which
+        // also answers the host editor's buffer and screen.
+        *rettv = if opt_flags != 0 && opt_idx != kOptInvalid {
+            optval_as_tv(get_option_value(opt_idx, opt_flags), true)
+        } else {
+            crate::ported::option::get_option_value(name)
+        };
     }
     OK
 }
