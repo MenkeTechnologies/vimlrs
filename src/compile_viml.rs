@@ -3897,7 +3897,7 @@ impl Compiler {
     fn coalesce(&mut self, a: &Expr, b: &Expr) -> Result<(), VimlError> {
         self.expr(a)?;
         self.emit(Op::Dup);
-        self.emit(Op::CallBuiltin(h::VIML_TRUTHY, 1));
+        self.emit(Op::CallBuiltin(h::VIML_TV2BOOL, 1));
         let jf = self.emit(Op::JumpIfFalse(0));
         let jend = self.emit(Op::Jump(0));
         let lelse = self.b.current_pos();

@@ -603,6 +603,10 @@ pub const VIML_SHIFT_R: u16 = 3630;
 /// skipped. c: eval5 `return FAIL` before `eval6(arg, &var2, …)` "to avoid side
 /// effects after an error" (`vendor/eval.c` eval5).
 pub const VIML_LHS_CHECK_FAILED: u16 = 3631;
+/// `??` — push `Bool(tv2bool(value))`. c: eval1's `op_falsy` arm tests the
+/// left operand with `tv2bool()` (`vendor/eval.c:1905`), not the `tv_get_number`
+/// of `?:`, so a non-empty String, List, Dict or Blob is truthy.
+pub const VIML_TV2BOOL: u16 = 3632;
 /// `json_encode()`
 pub const VIML_FN_JSON_ENCODE: u16 = 3186;
 /// `json_decode()`
@@ -2616,6 +2620,11 @@ fn b_setenv(vm: &mut VM, _: u8) -> Value {
 fn b_truthy(vm: &mut VM, _: u8) -> Value {
     // VimL truthiness: tv_get_number(tv) != 0 (the `:if`/`!`/`&&`/`||` test).
     Value::Bool(tv_get_number_chk(&pop_tv(vm), None) != 0)
+}
+
+/// See [`VIML_TV2BOOL`].
+fn b_tv2bool(vm: &mut VM, _: u8) -> Value {
+    Value::Bool(crate::ported::eval::typval::tv2bool(&pop_tv(vm)))
 }
 
 fn b_boolnum(vm: &mut VM, _: u8) -> Value {
@@ -7014,6 +7023,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_SETVAR, b_setvar);
     vm.register_builtin(VIML_SETENV, b_setenv);
     vm.register_builtin(VIML_TRUTHY, |vm, n| eval_op(|| b_truthy(vm, n)));
+    vm.register_builtin(VIML_TV2BOOL, b_tv2bool);
     vm.register_builtin(VIML_BOOLNUM, |vm, n| eval_op(|| b_boolnum(vm, n)));
     vm.register_builtin(VIML_TONUMBER, |vm, n| eval_op(|| b_tonumber(vm, n)));
     vm.register_builtin(VIML_ADD, b_add);
