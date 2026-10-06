@@ -1,0 +1,11 @@
+1
+E121: Undefined variable: :abc
+E121: Undefined variable: :x
+3
+E121: Undefined variable: :
+E121: Undefined variable: :
+E109: Missing ':' after '?'
+E121: Undefined variable: :
+E109: Missing ':' after '?'
+E15: Invalid expression: ") : 'z'"
+end

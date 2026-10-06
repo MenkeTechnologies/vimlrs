@@ -742,9 +742,10 @@ pub fn get_id_len(s: &str) -> i32 {
     let mut p = 0;
     while p < b.len() && eval_isnamec(b[p]) {
         if b[p] == b':' {
+            // c: `len > 1 || (len == 1 && vim_strchr(namespace_char, **arg) == NULL)`
+            // — a `:` at the very start (len 0) is part of the name.
             let len = p;
-            let is_ns = len == 1 && b"abglstvw".contains(&b[0]);
-            if len > 1 || !is_ns {
+            if len > 1 || (len == 1 && !b"abglstvw".contains(&b[0])) {
                 break;
             }
         }

@@ -4111,7 +4111,45 @@ impl Parser {
                 }
             }
             Tok::HashBrace => self.literal_dict(),
-            Tok::Ident(name) => {
+            // c: eval7's default arm takes any text `get_name_len()` measures as a
+            // name, and `get_id_len()` keeps a `:` at the very start (its
+            // "xx:" check only fires once `len >= 1`). So `:` and `:abc` are
+            // variable names: `echo :abc` is `E121: Undefined variable: :abc`
+            // and `echo 0 ?: 1` skips the name `:` and then misses the `:`, E109.
+            Tok::Colon => {
+                let start = at.unwrap_or(0);
+                let len = crate::ported::eval::get_id_len(self.src.get(start..).unwrap_or(":")) as usize;
+                let end = start + len.max(1);
+                // The name ends inside the lexer's tokens only at a boundary
+                // the lexer also drew; consume every token it covers.
+                while self.toks.get(self.i).is_some_and(|t| {
+                    !matches!(t.kind, Tok::Eof) && t.span >= start && t.end <= end
+                }) {
+                    self.i += 1;
+                }
+                let name = self.src[start..end].to_string();
+                self.name_operand(name, at, at_tok)
+            }
+            Tok::Ident(name) => self.name_operand(name, at, at_tok),
+            // c (`eval9` → `eval_leader`/default): the token that cannot start an
+            // operand is still unread when E15 quotes the rest, so it heads the
+            // quoted text (`echo 1 + * 2` is `"* 2"`, `echo )` is `")"`).
+            _ => {
+                self.i = at_tok;
+                Err(self.invexpr())
+            }
+        }
+    }
+
+    /// The operand that is a variable or function name: a call when `(` follows,
+    /// otherwise a variable (or a vim9 keyword literal).
+    fn name_operand(
+        &mut self,
+        name: String,
+        at: Option<usize>,
+        at_tok: usize,
+    ) -> Result<Expr, VimlError> {
+            {
                 if matches!(self.peek(), Tok::LParen) {
                     self.advance();
                     // c: `emsg_funcname(…, name)` prints `name` up to its NUL:
@@ -4168,14 +4206,6 @@ impl Parser {
                     Ok(Expr::Var(name))
                 }
             }
-            // c (`eval9` → `eval_leader`/default): the token that cannot start an
-            // operand is still unread when E15 quotes the rest, so it heads the
-            // quoted text (`echo 1 + * 2` is `"* 2"`, `echo )` is `")"`).
-            _ => {
-                self.i = at_tok;
-                Err(self.invexpr())
-            }
-        }
     }
 
     /// Lower an interpolated string's raw parts into an [`Expr::Interp`]: each
