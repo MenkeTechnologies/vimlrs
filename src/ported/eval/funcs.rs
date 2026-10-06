@@ -2693,8 +2693,8 @@ fn vim_vsnprintf_typval(argvars: &[typval_T], rettv: &mut typval_T) {
         let conv = conv_b as char;
         // c (default case): an unrecognized conversion keeps the whole
         // character, `utfc_ptr2len(p)` bytes of it.
-        let conv_len = (crate::ported::mbyte::utfc_ptr2len(&bytes[i..]).max(1) as usize)
-            .min(bytes.len() - i);
+        let conv_len =
+            (crate::ported::mbyte::utfc_ptr2len(&bytes[i..]).max(1) as usize).min(bytes.len() - i);
         let conv_text = &bytes[i..i + conv_len];
         i += conv_len;
         if conv == '%' {
@@ -2781,7 +2781,10 @@ fn vim_vsnprintf_typval(argvars: &[typval_T], rettv: &mut typval_T) {
             let text: Vec<u8> = if conv == 'c' {
                 vec![cur.map_or(0, |t| printf_nr(t)) as u8]
             } else {
-                cur.map(encode_tv2echo).unwrap_or_default().as_bytes().to_vec()
+                cur.map(encode_tv2echo)
+                    .unwrap_or_default()
+                    .as_bytes()
+                    .to_vec()
             };
             let (len, visible) = match (conv, prec) {
                 ('c', _) => (1, 1),
