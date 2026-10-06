@@ -1503,31 +1503,57 @@ pub fn f_min(argvars: &[typval_T], rettv: &mut typval_T) {
     max_min(argvars, rettv, false);
 }
 
-/// Port of `max_min()` from `Src/eval/funcs.c` — the shared `max`/`min` body
-/// over a List's items or a Dict's values; `domax` picks the direction. Empty
-/// (or a non-collection) → 0.
+/// Port of `max_min()` — the shared `max`/`min` body over a List's items or a
+/// Dict's values. RUST-PORT NOTE: follows vim 9.2 (`evalfunc.c`), the
+/// reference, not Neovim's number fold: the items are compared with the `>` /
+/// `<` of an expression (`typval_compare2`), the first winner is kept on a tie,
+/// and the result is a COPY of that item — `max([1, 2.5])` is 2.5,
+/// `min([v:true, 2])` is v:true, `max([[1], 2])` is E691 and 0. An empty
+/// List or Dict is 0; any other argument is E712.
 fn max_min(argvars: &[typval_T], rettv: &mut typval_T, domax: bool) {
-    let pick = |acc: varnumber_T, v: varnumber_T| if domax { acc.max(v) } else { acc.min(v) };
-    let n = match (argvars[0].v_type, &argvars[0].vval) {
-        (VAR_LIST, v_list(Some(l))) => {
-            let l = l.borrow();
-            let mut it = l.lv_items.iter().map(|x| tv_get_number_chk(&x.li_tv, None));
-            match it.next() {
-                Some(first) => it.fold(first, pick),
-                None => 0,
-            }
+    use crate::ported::eval::{typval_compare, EXPR_GREATER, EXPR_SMALLER};
+    *rettv = typval_T::from(0 as varnumber_T);
+    let items: Vec<typval_T> = match (argvars[0].v_type, &argvars[0].vval) {
+        (VAR_LIST, v_list(l)) => l
+            .as_ref()
+            .map(|l| {
+                l.borrow()
+                    .lv_items
+                    .iter()
+                    .map(|x| x.li_tv.clone())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        (VAR_DICT, v_dict(d)) => d
+            .as_ref()
+            .map(|d| d.borrow().dv_hashtab.values().cloned().collect())
+            .unwrap_or_default(),
+        _ => {
+            let what = if domax { "max()" } else { "min()" };
+            crate::ported::message::semsg(&format!(
+                "E712: Argument of {what} must be a List or Dictionary"
+            ));
+            return;
         }
-        (VAR_DICT, v_dict(Some(d))) => {
-            let d = d.borrow();
-            let mut it = d.dv_hashtab.values().map(|v| tv_get_number_chk(v, None));
-            match it.next() {
-                Some(first) => it.fold(first, pick),
-                None => 0,
-            }
-        }
-        _ => 0,
     };
-    rettv.vval = v_number(n);
+    let op = if domax { EXPR_GREATER } else { EXPR_SMALLER };
+    let mut best: Option<&typval_T> = None;
+    for tv in &items {
+        let Some(b) = best else {
+            best = Some(tv);
+            continue;
+        };
+        let mut res = tv.clone();
+        if typval_compare(&mut res, b, op, false) == FAIL {
+            return;
+        }
+        if tv_get_number_chk(&res, None) != 0 {
+            best = Some(tv);
+        }
+    }
+    if let Some(b) = best {
+        *rettv = b.clone();
+    }
 }
 
 // Port of `f_count()` from `Src/eval/funcs.c` (subset) — occurrences of

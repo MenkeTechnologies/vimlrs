@@ -1,0 +1,15 @@
+" max()/min() compare items as the > and < operators do and return a copy of
+" the winning item (vim 9.2 max_min with typval_compare2); E712 otherwise.
+echo string(max(['3', 2])) string(min([v:true, 2])) string(max([v:false])) string(max({'a': v:true}))
+echo string(max([v:null])) string(min(['x', 5]))
+echo string(max([1.5]))
+echo string(max([1, 2.5, 2])) string(max([3, 2.5])) string(min([1, 0.5])) string(max([2, 2.0])) string(max([2.0, 2]))
+echo string(max([2, '3'])) string(max(['3', '3'])) string(max([[1], 2]))
+echo string(max([{}, 2]))
+echo string(max([])) string(max({})) string(max(v:null)) string(max(0z0102))
+echo string(max('abc'))
+echo string(max([1, 'x', 0])) string(min([-1, 'x', 0]))
+echo string(max([function('len'), 1]))
+echo string(max([0z01, 1]))
+echo string(max({'a': 1.5, 'b': 2}))
+echo string(max([v:none]))

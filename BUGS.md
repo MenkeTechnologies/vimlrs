@@ -7375,6 +7375,15 @@ without one ran it (`E471: Argument required: One`), and `Z!` without `-bang`
 ran it (`E477: No ! allowed: Z!`); each error carries the command line as
 `append_command()` adds it. Parity case: `user_command_args.vim`.
 
+### R52-6. max() and min() — ✅ FIXED
+
+The port folded the items as Numbers (Neovim). vim 9.2's `max_min()` compares
+them with the `>`/`<` of an expression (`typval_compare2`) and returns a copy of
+the winning item, so `max([1, 2.5])` is 2.5, `max(['3', 2])` is `'3'`,
+`min([v:true, 2])` is v:true, `max([2, 2.0])` keeps the first, a List item is
+E691 (result 0), and any argument but a List or Dict is E712.
+Parity case: `max_min_compare.vim`.
+
 ### R52-O1. Open, measured this round
 
 - `examples/parse_errors.vim` lines 24-26 expect Neovim's E116 text
@@ -7397,5 +7406,7 @@ ran it (`E477: No ! allowed: Z!`); each error carries the command line as
   argument in vim (`Z | echo 1` is E488 for `-nargs=0`); here the parser splits
   the line before the command's attributes are known. An error from a user
   command inside `:try` is tagged with the previous command's name.
+- `string(funcref('F'))` is `function('g:F')` in vim (`partial_tv2string` adds
+  `g:` when the partial holds a `pt_func`); `partial_T` here has no `pt_func`.
 - An error inside `:eval` is tagged `Vim(eval)` in vim; here it keeps the
   previous command's tag (`:eval` parses to the generic expression statement).
