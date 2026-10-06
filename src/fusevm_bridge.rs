@@ -6870,7 +6870,7 @@ pub fn install_screen_size_hook(f: Box<dyn Fn() -> (HostNum, HostNum)>) {
 /// Install the host's buffer-option reader (see
 /// `crate::ported::option::BUF_OPTION_HOOK`): `&{name}` for a string option
 /// reads the host's current buffer when it returns a value.
-pub fn install_buf_option_hook(f: Box<dyn Fn(&str) -> Option<String>>) {
+pub fn install_buf_option_hook(f: crate::ported::option::BufOptionHook) {
     crate::ported::option::BUF_OPTION_HOOK.with(|h| *h.borrow_mut() = Some(f));
 }
 

@@ -266,14 +266,17 @@ pub fn get_option_value(name: &str) -> typval_T {
     })
 }
 
+/// The host callback behind [`BUF_OPTION_HOOK`]: a string option's full name
+/// to the host buffer's value, `None` when the host does not own it.
+pub type BufOptionHook = Box<dyn Fn(&str) -> Option<String>>;
+
 thread_local! {
     /// Host hook giving the current buffer's value of a string option the
     /// embedding editor owns (by full name), what `&opt` reads before this
     /// table: a session tests `if &buftype ==# 'terminal'` after the host opened
     /// the buffer. EXTENSION — installed by
     /// [`crate::fusevm_bridge::install_buf_option_hook`]; `None` falls through.
-    #[allow(clippy::type_complexity)]
-    pub static BUF_OPTION_HOOK: std::cell::RefCell<Option<Box<dyn Fn(&str) -> Option<String>>>> =
+    pub static BUF_OPTION_HOOK: std::cell::RefCell<Option<BufOptionHook>> =
         const { std::cell::RefCell::new(None) };
 
     /// Host hook giving the embedding editor's screen `(lines, columns)`, what
