@@ -7277,3 +7277,32 @@ It returned its input for every pair but a latin1 subset (`iconv('é',
 latin1/latin9 ↔ UTF-8 internally, every other pair through iconv(3) with `?`
 for what cannot be converted, an illegal byte to latin1 failing to `''`.
 Parity case: `iconv_convert.vim`.
+
+### R51-6. More than 20 call arguments; the name in a parse-time E116 — ✅ FIXED
+
+`F(…21 arguments…)` ran with 21 (a builtin was E118). `get_func_arguments()`
+reads at most `MAX_FUNC_ARGS` and `get_func_tv()` reports the unclosed list as
+E740. Both E740 and a parse-time E116 now name the function the way
+`emsg_funcname()` prints it: the source from the name on in an expression or
+a method call, the bare name for `:call`'s outermost function.
+Parity case: `call_args_limit_and_name.vim`.
+
+### R51-O1. Open, measured this round
+
+- A call whose argument fails reports E116 for EVERY enclosing call in vim
+  (`echo 1 + F(F(1 2))` prints two); here only the innermost.
+- A Funcref variable called with bad arguments (`G(1 2)`) is named by its
+  function (`F`) in vim; here by the source text. Inside a lambda body the
+  failure surfaces as E116 for the call that holds the lambda.
+- An `:echo` argument's E116 text stops at a `|` here; vim's runs to the end
+  of the line.
+- A partial's bound arguments count toward `MAX_FUNC_ARGS` in vim (E116).
+- Each evaluation of a lambda expression is a new `<lambda>N` in vim
+  (`get_lambda_tv` → `get_lambda_name()`); here the number is fixed when the
+  expression is compiled, so a lambda built in a loop keeps one name.
+- `:function {name}` listing and its E123, `:delcommand` (E184), `:command`
+  attribute errors (E181), `function! 5x()` (E129, after which vim runs the
+  body as commands) are not reported.
+- `js_encode()`/`js_decode()` do not exist (Neovim has neither).
+- `v:version` is 801 and E711's text is Neovim's ("has not enough items"):
+  engine identity, as R34-O2.

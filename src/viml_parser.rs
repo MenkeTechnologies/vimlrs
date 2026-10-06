@@ -70,6 +70,10 @@ fn with_cmd_tail<T>(cmd: &str, tail: &str, f: impl FnOnce() -> T) -> T {
     out
 }
 
+/// c: `MAX_FUNC_ARGS` (`eval/typval_defs.h`) — the most arguments a call may
+/// pass.
+const MAX_FUNC_ARGS: usize = 20;
+
 /// `arg` (a subslice of the command being parsed) extended to the end of its
 /// source line, trimmed; just `arg` trimmed when no tail is known.
 fn text_to_eol(arg: &str) -> String {
@@ -379,7 +383,7 @@ fn parse_stmt_unplaced(line: &str) -> Result<Stmt, VimlError> {
         "call" => {
             // An argument list that does not parse is reported when the `:call`
             // runs (see `parse_cmd_expr`): `call len(1 2)` is E116 there.
-            let mut e = parse_cmd_expr(strip_legacy_trailing_comment(rest))?;
+            let mut e = parse_cmd_expr_for(strip_legacy_trailing_comment(rest), true)?;
             if let Expr::Call { emsg_name, .. } = &mut e {
                 *emsg_name = None;
             }
@@ -3234,8 +3238,15 @@ fn let_target_expr(target: &LetTarget) -> Result<Expr, VimlError> {
 /// A curly-brace name still fails the parse, for the reason given at
 /// [`Parser::operand_invexpr`].
 fn parse_cmd_expr(src: &str) -> Result<Expr, VimlError> {
+    parse_cmd_expr_for(src, false)
+}
+
+/// [`parse_cmd_expr`], with `call_cmd` set when `src` is the argument of `:call`
+/// (see [`Parser::call_cmd`]).
+fn parse_cmd_expr_for(src: &str, call_cmd: bool) -> Result<Expr, VimlError> {
     let (toks, _, lex_err) = crate::viml_lexer::lex_prefix(src);
     let mut p = Parser::new(toks, src);
+    p.call_cmd = call_cmd;
     p.lex_err = lex_err;
     let e = match p.eval1() {
         Ok(e) => p.guard_deferred(e),
@@ -3520,6 +3531,11 @@ struct Parser {
     /// — no trailing `})`. Empty at the top level, where the buffer ends with
     /// the source.
     clip: Vec<usize>,
+    /// Parsing the argument of `:call`, whose OUTERMOST function name
+    /// `trans_function_name` hands `get_func_tv` as an allocated, NUL-terminated
+    /// copy — so its E116/E740 names the function alone, where the same call in
+    /// an expression quotes the source from the name on.
+    call_cmd: bool,
 }
 
 impl Parser {
@@ -3536,6 +3552,7 @@ impl Parser {
             deferred_e15: Vec::new(),
             lex_err: None,
             clip: Vec::new(),
+            call_cmd: false,
         }
     }
 
@@ -4097,9 +4114,16 @@ impl Parser {
             Tok::Ident(name) => {
                 if matches!(self.peek(), Tok::LParen) {
                     self.advance();
+                    // c: `emsg_funcname(…, name)` prints `name` up to its NUL:
+                    // the rest of the expression text, or the bare name for
+                    // `:call`'s outermost function.
+                    let shown = match at {
+                        Some(s) if !(self.call_cmd && at_tok == 0) => self.src_from(s),
+                        _ => name.clone(),
+                    };
                     let args = self.arg_list(
                         &Tok::RParen,
-                        &format!("E116: Invalid arguments for function {name}"),
+                        &format!("E116: Invalid arguments for function {shown}"),
                         "E15: Invalid expression: \"%s\"",
                     )?;
                     Ok(Expr::Call {
@@ -4336,14 +4360,18 @@ impl Parser {
                         };
                         continue;
                     }
+                    let name_at = self.peek_span();
                     let name = match self.advance() {
                         Tok::Ident(n) => n,
                         _ => return Err(self.invexpr()),
                     };
+                    // c: `eval_method` hands `call_func_rettv` a pointer into
+                    // the source, so E116/E740 quote from the name on.
+                    let shown = name_at.map_or_else(|| name.clone(), |s| self.src_from(s));
                     self.eat(&Tok::LParen)?;
                     let args = self.arg_list(
                         &Tok::RParen,
-                        &format!("E116: Invalid arguments for function {name}"),
+                        &format!("E116: Invalid arguments for function {shown}"),
                         "E15: Invalid expression: \"%s\"",
                     )?;
                     base = Expr::Method {
@@ -4857,6 +4885,16 @@ impl Parser {
                     return Err(VimlError::msg(ran_out.replace("%s", self.rest())))
                 }
                 Err(e) => return Err(e),
+            }
+            // c: `get_func_arguments` reads at most `MAX_FUNC_ARGS` (20); a list
+            // that is not closed by then fails, and `get_func_tv` reports it as
+            // E740 rather than E116 because `argcount == MAX_FUNC_ARGS`.
+            if args.len() == MAX_FUNC_ARGS && !matches!(self.peek(), Tok::RParen) {
+                if let Some(name) = ran_out.strip_prefix("E116: Invalid arguments for function ") {
+                    return Err(VimlError::msg(format!(
+                        "E740: Too many arguments for function {name}"
+                    )));
+                }
             }
             // The rest is read BEFORE the separator is consumed: vim quotes the
             // offending token itself (`[1 2]` is `…: 2]`, not `…: ]`).
