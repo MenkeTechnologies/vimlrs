@@ -7350,6 +7350,15 @@ scope from `:help options.txt` (buffer-local, window-local, global-local), and
 
 Parity case: `option_scopes.vim`.
 
+### R52-3. A `:let`/`:for` unpack item that is not a variable name — ✅ FIXED
+
+`let [l[0], l[1]] = [9, 8]`, `let [d.a, d['b']] = …`, `let [g:a, $FOO, @r, &ts]
+= …` and `for [d.k, d.v] in …` stored into variables literally named `l[0]`,
+`d.a`. `ex_let_vars()` hands every item to `ex_let_one()`, so each item is now
+parsed as a `:let` target (`viml_parser::let_target`) and stored the way that
+target is; the first item that fails (`E684`, `E46`, `E741`) ends the unpack and
+the later items keep their values. Parity case: `let_unpack_targets.vim`.
+
 ### R52-O1. Open, measured this round
 
 - `examples/parse_errors.vim` lines 24-26 expect Neovim's E116 text
@@ -7364,5 +7373,9 @@ Parity case: `option_scopes.vim`.
 - `&nosuch` is E113 and `let &nosuch = 1` E355 in vim; here an option outside
   the reduced table reads `''` and ignores writes, because most of vim's
   options (`&cpo`) are not in the table and plugins save and restore them.
+- `E741` for a locked unpack item quotes only the item (`ll[0]`); vim's
+  `ll_name` runs to the end of the line (`ll[0], b] = [9, 9]`).
+- `let [a; b] = 5` is `E1535: List or Tuple required` in vim 9.2; here
+  Neovim's `E714: List required` (no Tuple type).
 - An error inside `:eval` is tagged `Vim(eval)` in vim; here it keeps the
   previous command's tag (`:eval` parses to the generic expression statement).

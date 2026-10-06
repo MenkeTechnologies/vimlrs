@@ -2394,7 +2394,7 @@ impl Compiler {
         self.get_var(&list_var);
         self.get_var(&idx_var);
         self.emit(Op::CallBuiltin(h::VIML_INDEX, 2));
-        let mut unpack_failed = None;
+        let mut unpack_failed = Vec::new();
         match vars {
             ForVars::One(name) => self.set_var(name),
             ForVars::List { names, rest } => {
@@ -2408,20 +2408,8 @@ impl Compiler {
                 self.emit(Op::LoadInt(names.len() as i64 + i64::from(rest.is_some())));
                 self.emit(Op::LoadInt(i64::from(rest.is_some())));
                 self.emit(Op::CallBuiltin(h::VIML_UNPACK_CHECK, 3));
-                unpack_failed = Some(self.emit(Op::JumpIfFalse(0)));
-                for (i, name) in names.iter().enumerate() {
-                    self.get_var(&item_var);
-                    self.emit(Op::LoadInt(i as i64));
-                    self.emit(Op::CallBuiltin(h::VIML_INDEX, 2));
-                    self.set_var(name);
-                }
-                if let Some(r) = rest {
-                    self.get_var(&item_var);
-                    self.emit(Op::LoadInt(names.len() as i64)); // from
-                    self.emit(Op::LoadUndef); // to = end
-                    self.emit(Op::CallBuiltin(h::VIML_SLICE, 3));
-                    self.set_var(r);
-                }
+                unpack_failed.push(self.emit(Op::JumpIfFalse(0)));
+                unpack_failed.extend(self.unpack_stores(&item_var, names, rest)?);
             }
         }
 
@@ -2439,7 +2427,7 @@ impl Compiler {
 
         let l_end = self.b.current_pos();
         self.b.patch_jump(jf, l_end);
-        if let Some(j) = unpack_failed {
+        for j in unpack_failed {
             self.b.patch_jump(j, l_end);
         }
         for j in ctx.breaks {
@@ -2929,6 +2917,62 @@ impl Compiler {
         Ok(())
     }
 
+    /// Store the items of the List in hidden variable `list` into the targets
+    /// of a `[a, b; rest]` unpack. Returns the jumps taken when a store fails.
+    ///
+    /// c: `ex_let_vars` hands each item to `ex_let_one`, so an item is any
+    /// `:let` target — `l[0]`, `d.k`, `&opt`, `$ENV`, `@r` — not only a variable
+    /// name, and the first item that fails ends the unpack (`return FAIL`), so
+    /// the items after it keep their values.
+    fn unpack_stores(
+        &mut self,
+        list: &str,
+        names: &[String],
+        rest: &Option<String>,
+    ) -> Result<Vec<usize>, VimlError> {
+        let mut failed = Vec::new();
+        let items = names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (name, i as i64, false))
+            .chain(rest.iter().map(|r| (r, names.len() as i64, true)));
+        for (name, i, is_rest) in items {
+            match crate::viml_parser::let_target(name, name)? {
+                LetTarget::Var(var) => {
+                    self.get_var(list);
+                    self.emit(Op::LoadInt(i));
+                    if is_rest {
+                        self.emit(Op::LoadUndef); // to = end
+                        self.emit(Op::CallBuiltin(h::VIML_SLICE, 3));
+                    } else {
+                        self.emit(Op::CallBuiltin(h::VIML_INDEX, 2));
+                    }
+                    self.set_var(&var);
+                }
+                target => {
+                    let base = Box::new(Expr::Var(list.to_string()));
+                    let item = if is_rest {
+                        Expr::Slice {
+                            base,
+                            from: Some(Box::new(Expr::Number(i))),
+                            to: None,
+                        }
+                    } else {
+                        Expr::Index {
+                            base,
+                            index: Box::new(Expr::Number(i)),
+                        }
+                    };
+                    self.emit(Op::CallBuiltin(h::VIML_ERR_COUNT, 0));
+                    self.let_stmt(&target, &item)?;
+                    self.emit(Op::CallBuiltin(h::VIML_ERRS_AFTER, 1));
+                    failed.push(self.emit(Op::JumpIfTrue(0)));
+                }
+            }
+        }
+        Ok(failed)
+    }
+
     fn let_stmt(&mut self, target: &LetTarget, expr: &Expr) -> Result<(), VimlError> {
         match target {
             // A SLOTTED local cannot be locked: `slot_plan` refuses to slot anything
@@ -2988,21 +3032,12 @@ impl Compiler {
                 // `exists()` reports afterwards — the C returns FAIL before its
                 // assignment loop, so jumping past the stores is the same shape.
                 let jf = self.emit(Op::JumpIfFalse(0));
-                for (i, name) in names.iter().enumerate() {
-                    self.get_var(&tmp);
-                    self.emit(Op::LoadInt(i as i64));
-                    self.emit(Op::CallBuiltin(h::VIML_INDEX, 2));
-                    self.set_var(name);
-                }
-                if let Some(r) = rest {
-                    self.get_var(&tmp);
-                    self.emit(Op::LoadInt(names.len() as i64)); // from
-                    self.emit(Op::LoadUndef); // to = end
-                    self.emit(Op::CallBuiltin(h::VIML_SLICE, 3));
-                    self.set_var(r);
-                }
+                let failed = self.unpack_stores(&tmp, names, rest)?;
                 let after = self.b.current_pos();
                 self.b.patch_jump(jf, after);
+                for j in failed {
+                    self.b.patch_jump(j, after);
+                }
                 Ok(())
             }
             LetTarget::Index { base, index, src } => {

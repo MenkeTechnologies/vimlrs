@@ -2809,8 +2809,8 @@ fn parse_let(rest: &str) -> Result<Stmt, VimlError> {
             Some((h, r)) => (h, Some(r.trim().to_string())),
             None => (inner, None),
         };
-        let names = head
-            .split(',')
+        let names = split_top_commas(head)
+            .into_iter()
             .map(|n| n.trim().to_string())
             .filter(|n| !n.is_empty())
             .collect();
@@ -2818,7 +2818,42 @@ fn parse_let(rest: &str) -> Result<Stmt, VimlError> {
             names,
             rest: rest_name,
         }
-    } else if let Some(name) = lhs.strip_prefix('&') {
+    } else {
+        let_target(lhs, rest)?
+    };
+    // Plain `=` stores the RHS directly; `op=` desugars to `target = target op rhs`
+    // (`tv_op` semantics), reusing the same store path so it stays JIT-eligible.
+    let rhs = strip_legacy_trailing_comment(rhs);
+    let expr = match op {
+        None => parse_cmd_expr(rhs)?,
+        Some(op) => {
+            let cur = let_target_expr(&target)?;
+            let rhs = parse_cmd_expr(rhs)?;
+            // c: `ex_let` evaluates `{expr}` BEFORE it reads the target, so an
+            // expression that does not parse is the only error
+            // (`let nosuch += * 2` is E15, not E121).
+            if let Expr::ScriptError(_) = rhs {
+                return Ok(Stmt::Let { target, expr: rhs });
+            }
+            Expr::Arith {
+                op,
+                lhs: Box::new(cur),
+                rhs: Box::new(rhs),
+                // c: `ex_let_one` applies the operator with `eexe_mod_op`, not with
+                // the expression operator — see `Expr::Arith::mod_op`.
+                mod_op: true,
+            }
+        }
+    };
+    Ok(Stmt::Let { target, expr })
+}
+
+/// The target of a `:let` that is not a list: `&opt`, `$ENV`, `@r`,
+/// `base[idx]`, `base[a:b]`, `base.key`, or a variable. `rest` is the `:let`
+/// argument from the target on, which subscripted targets quote in E741.
+/// c: `ex_let_one()`, also called for each item of `let [a, b] = …`.
+pub(crate) fn let_target(lhs: &str, rest: &str) -> Result<LetTarget, VimlError> {
+    Ok(if let Some(name) = lhs.strip_prefix('&') {
         LetTarget::Option(name.to_string())
     } else if let Some(name) = lhs.strip_prefix('$') {
         LetTarget::Env(name.to_string())
@@ -2885,32 +2920,7 @@ fn parse_let(rest: &str) -> Result<Stmt, VimlError> {
         }
     } else {
         LetTarget::Var(lhs.to_string())
-    };
-    // Plain `=` stores the RHS directly; `op=` desugars to `target = target op rhs`
-    // (`tv_op` semantics), reusing the same store path so it stays JIT-eligible.
-    let rhs = strip_legacy_trailing_comment(rhs);
-    let expr = match op {
-        None => parse_cmd_expr(rhs)?,
-        Some(op) => {
-            let cur = let_target_expr(&target)?;
-            let rhs = parse_cmd_expr(rhs)?;
-            // c: `ex_let` evaluates `{expr}` BEFORE it reads the target, so an
-            // expression that does not parse is the only error
-            // (`let nosuch += * 2` is E15, not E121).
-            if let Expr::ScriptError(_) = rhs {
-                return Ok(Stmt::Let { target, expr: rhs });
-            }
-            Expr::Arith {
-                op,
-                lhs: Box::new(cur),
-                rhs: Box::new(rhs),
-                // c: `ex_let_one` applies the operator with `eexe_mod_op`, not with
-                // the expression operator — see `Expr::Arith::mod_op`.
-                mod_op: true,
-            }
-        }
-    };
-    Ok(Stmt::Let { target, expr })
+    })
 }
 
 /// Split a `:unlet` argument list on top-level whitespace, keeping `[…]`

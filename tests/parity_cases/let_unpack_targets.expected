@@ -1,0 +1,19 @@
+1
+[9, 8, 3]
+[7, 6, 3]
+{'a': 1, 'b': 2}
+[7, 6, 5]
+1 e r 4
+{'v': 2, 'k': 1}
+{'v': 4, 'k': 3}
+[5, 6]
+E688: More targets than List items
+E687: Less targets than List items
+1 2 [3, 4]
+1 2
+E741: Value is locked: c1
+{'a': 2, 'v': 4, 'k': 3}
+E684: List index out of range: 5
+E121: Undefined variable: b
+E46: Cannot change read-only variable "v:count"
+[1, 2]
