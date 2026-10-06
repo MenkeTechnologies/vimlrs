@@ -7304,5 +7304,12 @@ Parity case: `call_args_limit_and_name.vim`.
   attribute errors (E181), `function! 5x()` (E129, after which vim runs the
   body as commands) are not reported.
 - `js_encode()`/`js_decode()` do not exist (Neovim has neither).
+- `try | call add(locked, 1) | catch | … | endtry`: after a BUILTIN called
+  by `:call` reports an error inside a `:try`, `call_func` runs
+  `update_force_abort()` (`vendor/eval/userfunc.c:1798`), so `aborting()` is
+  true while `did_throw` is not yet, and `ex_call` leaves `nextcmd` unset — the
+  `| catch …` on the same line is dropped and the exception escapes (vim and
+  Neovim alike). Here the catch on the line runs. Multi-line `:try`, `:echo`,
+  `:let` and user-function calls already match.
 - `v:version` is 801 and E711's text is Neovim's ("has not enough items"):
   engine identity, as R34-O2.
