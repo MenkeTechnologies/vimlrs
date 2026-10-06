@@ -7222,7 +7222,7 @@ and nothing here, R30-O1).
 - `string()`/`:echo` of a NaN or an infinity: `nan`/`inf` in vim 9.2,
   `str2float('nan')` here and in Neovim (R34-O2, unchanged).
 - `printf('%.2s', 'héllo')`: vim and Neovim cut at the byte (`h` plus a lone
-  `0xc3`); this port keeps a character boundary.
+  `0xc3`); this port kept a character boundary. Fixed in R51-3.
 - `<SID>Priv()` in an expression is `E121: Undefined variable: SID` in vim; here
   it calls the function.
 - `:exe 'if 0 | …'` at script level leaks the conditional into the rest of the
@@ -7230,3 +7230,40 @@ and nothing here, R30-O1).
   text.
 
 ### R49-O1, R47-O1, R47-O2, R47-O4, R46-O2, R30-O1 — unchanged
+
+## R51 — `??`, exception command tags, printf() bytes, `:for` over a Blob, method-call lambdas
+
+Oracle: vim 9.2.1150 (`/opt/homebrew/bin/vim`). The `ORACLE` stamp now names
+that binary; re-recording the whole corpus under it changed no `.expected`.
+
+### R51-1. `:for` over a Blob, `expr->{lambda}(args)`, `-1->abs()` — ✅ FIXED
+
+Finished from an interrupted session. `eval_for_line()` walks a COPY of a Blob
+(`vendor/eval.c:1478-1482`), so assigning into it inside the loop does not
+change the items; `expr->{args -> body}(more)` calls the lambda with `expr`
+first (`eval_lambda()`, E107/E274); a number literal takes its `-`/`+` leaders
+before the subscripts (`eval7_leader(…, numeric_only)`), so `-1->abs()` is 1.
+Parity cases: `for_iteration.vim`, `method_call_forms.vim`,
+`tolerant_exit_status.vim`.
+
+### R51-2. `??` read its left operand as a Number — ✅ FIXED
+
+`'a' ?? 'f'` was `f`: the falsy operator used the `:if` test
+(`tv_get_number`). eval1's `op_falsy` arm uses `tv2bool()`, so a non-empty
+String/List/Dict/Blob is kept. Parity case: `falsy_operator_tv2bool.vim`.
+
+### R51-3. printf() built a `String` — ✅ FIXED
+
+`%c` of 233 was the two bytes of `é`, `%c` of 0 left a NUL in the value,
+`%.2s` of `héllo` stopped at a character boundary, a non-UTF-8 `%s` argument
+became U+FFFD, and the `0` flag was ignored for `%s`. The formatter now renders
+bytes as `vim_vsnprintf_typval` does, and `f_printf` ends the value at a NUL.
+Parity case: `printf_bytes.vim`.
+
+### R51-4. Exception tag of `:delfunction` and other commands — ✅ FIXED
+
+A command missing from the tag table kept the previous command's name, so
+`delfunc Nope` inside `:try` threw `Vim(try):E117…`. `:function`,
+`:delfunction`, `:finish`, `:command`, `:delcommand`, `:autocmd`, `:augroup`,
+`:doautocmd`, `:colorscheme`, `:highlight`, `:syntax`, `:filetype` are tagged.
+Parity case: `exception_cmdname.vim`.
