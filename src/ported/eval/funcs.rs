@@ -1073,8 +1073,45 @@ pub fn f_substitute(argvars: &[typval_T], rettv: &mut typval_T) {
     // — a Funcref/Partial {sub} is CALLED per match, never read as text.
     let out = if matches!(argvars[2].v_type, VAR_FUNC | VAR_PARTIAL) {
         let expr = &argvars[2];
+        // The `expr != NULL` branch of `vim_regsub_both()` (regexp.c): call
+        // `expr` for one match and render what it returns.
         crate::viml_regex::regex_substitute_fn(&s, &pat, &flags, &mut |subs| {
-            regsub_call_expr(expr, subs)
+            let (name, argskip) = match (expr.v_type, &expr.vval) {
+                (VAR_PARTIAL, v_partial(Some(p))) => (p.pt_name.to_string(), p.pt_argv.len()),
+                _ => (tv_get_string(expr), 0),
+            };
+            // c: `argv[0].v_type = VAR_LIST; argv[0].vval.v_list = &matchList.sl_list;`
+            let mut argv = vec![typval_T {
+                v_type: VAR_LIST,
+                v_lock: VarLockStatus::VAR_UNLOCKED,
+                vval: v_list(Some(tv_list_alloc(10))),
+            }];
+            // c: `funcexe.fe_argv_func = fill_submatch_list;` — only a user
+            // function has a `ufunc_T` for it to run against; a builtin gets
+            // the List unfilled (empty): `function('len')` answers `0`.
+            if let Some(fp) = crate::ported::eval::userfunc::find_func(&name) {
+                // The returned argcount drops the List when the callee takes no
+                // submatches argument.
+                let argcount = fill_submatch_list(&argv[0], argskip, &fp, subs);
+                argv.truncate(argcount - argskip);
+            }
+            let rettv = match crate::ported::eval::typval::CALL_FUNC_HOOK
+                .with(|h| *h.borrow())
+                .and_then(|f| f(expr, &argv))
+            {
+                Some(tv) => tv,
+                // c: `if (rettv.v_type == VAR_UNKNOWN)` — "something failed, no
+                // need to report another error".
+                None => return String::new(),
+            };
+            if matches!(rettv.v_type, VAR_FUNC | VAR_PARTIAL) {
+                // c: `tv_get_string_buf_chk` → `str_errors[VAR_FUNC]` (E729).
+                crate::ported::eval::typval::tv_check_str(&rettv);
+                return String::new();
+            }
+            tv_get_string_buf_chk(&rettv)
+                .map(|s| s.to_string())
+                .unwrap_or_default()
         })
     } else {
         let sub = tv_get_string(&argvars[2]);
@@ -1083,71 +1120,36 @@ pub fn f_substitute(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.vval = v_string(out.into());
 }
 
-/// The Funcref branch of `vim_regsub_both()` (`regexp.c`): call `expr` for one
-/// match and render what it returns.
+/// Port of `fill_submatch_list()` from `regexp.c` — put the ten submatches in
+/// `listarg` (C: `argv[argskip]`), the List `vim_regsub_both()` passes to the
+/// `{sub}` function, and return the argument count to call it with.
 ///
-/// The submatches reach the callee through `fill_submatch_list()`, which only
-/// supplies them to a user function that can take one more argument than the
-/// partial already binds:
+/// When the function cannot take one more argument than the partial already
+/// binds, the List is not filled and `argskip` comes back, so the call drops
+/// it. `subs` stands for `rsm.sm_match`: the current match's submatches, an
+/// unset group being the empty string.
 ///
-/// ```c
-/// if (!fp->uf_varargs && fp->uf_args.ga_len <= argskip)
-///     // called function doesn't take a submatches argument
-///     return argskip;
-/// ```
-///
-/// A lambda is always `uf_varargs` (`get_lambda_tv`), so `{-> 'X'}` gets the
-/// List and ignores it. A builtin has no `ufunc_T`, so `fe_argv_func` never runs
-/// for it and it receives the List UNFILLED — empty: `function('len')` answers
-/// `0`. The result is read with `tv_get_string_buf_chk`, so a List, Dict or
-/// Funcref is the per-type string error and contributes nothing.
-fn regsub_call_expr(expr: &typval_T, subs: &[String]) -> String {
-    let (name, argskip) = match (expr.v_type, &expr.vval) {
-        (VAR_PARTIAL, v_partial(Some(p))) => (p.pt_name.to_string(), p.pt_argv.len()),
-        _ => (tv_get_string(expr), 0),
-    };
-    // (pass the List, fill it) — a builtin gets it, but empty.
-    let (takes_list, fill) = match crate::ported::eval::userfunc::find_func(&name) {
-        Some(fp) => {
-            let t = fp.uf_varargs || name.starts_with("<lambda>") || fp.uf_args.len() > argskip;
-            (t, t)
-        }
-        None => (true, false),
-    };
-    let list = tv_list_alloc(10);
-    if fill {
+/// RUST-PORT NOTE: a lambda is created with `uf_varargs` set (`get_lambda_tv`);
+/// the `<lambda>` name test covers a lambda whose `ufunc_T` comes back from
+/// `find_func` without that flag.
+fn fill_submatch_list(
+    listarg: &typval_T,
+    argskip: usize,
+    fp: &crate::ported::eval::userfunc::ufunc_T,
+    subs: &[String],
+) -> usize {
+    if !fp.uf_varargs && !fp.uf_name.starts_with("<lambda>") && fp.uf_args.len() <= argskip {
+        // c: "called function doesn't take a submatches argument"
+        return argskip;
+    }
+    if let v_list(Some(list)) = &listarg.vval {
         let mut l = list.borrow_mut();
         // c: "There are always 10 list items in staticList10_T."
         for i in 0..10 {
             tv_list_append_string(&mut l, subs.get(i).map_or("", String::as_str));
         }
     }
-    let argv: Vec<typval_T> = if takes_list {
-        vec![typval_T {
-            v_type: VAR_LIST,
-            v_lock: VarLockStatus::VAR_UNLOCKED,
-            vval: v_list(Some(list)),
-        }]
-    } else {
-        Vec::new()
-    };
-    let rettv = match crate::ported::eval::typval::CALL_FUNC_HOOK
-        .with(|h| *h.borrow())
-        .and_then(|f| f(expr, &argv))
-    {
-        Some(tv) => tv,
-        // c: `if (rettv.v_type == VAR_UNKNOWN)` — "something failed, no need to
-        // report another error".
-        None => return String::new(),
-    };
-    if matches!(rettv.v_type, VAR_FUNC | VAR_PARTIAL) {
-        // c: `tv_get_string_buf_chk` → `str_errors[VAR_FUNC]` (E729).
-        crate::ported::eval::typval::tv_check_str(&rettv);
-        return String::new();
-    }
-    tv_get_string_buf_chk(&rettv)
-        .map(|s| s.to_string())
-        .unwrap_or_default()
+    argskip + 1
 }
 
 // Port of `f_join()` from `Src/eval/funcs.c` — join a List with a separator
