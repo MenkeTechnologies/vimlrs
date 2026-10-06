@@ -1,0 +1,41 @@
+1
+0z010203 0z020301 0z0102 0z0102
+E979: Blob index out of range: 5
+0
+E896: Argument of extend() must be a List, Dictionary or Blob
+0
+E896: Argument of extend() must be a List, Dictionary or Blob
+0
+E896: Argument of extendnew() must be a List, Dictionary or Blob
+0
+E899: Argument of insert() must be a List or Blob
+0
+E1251: List, Tuple, Dictionary, Blob or String required for argument 1
+0
+E741: Value is locked: extend() argument
+0
+end
+E897: List or Blob required
+1
+E899: Argument of insert() must be a List or Blob
+0
+E896: Argument of remove() must be a List, Dictionary or Blob
+0
+E1206: Dictionary required for argument 1
+[]
+E1206: Dictionary required for argument 1 []
+E1251: List, Tuple, Dictionary, Blob or String required for argument 1
+0
+function('len')
+E706: Argument of count() must be a List, String or Dictionary
+0
+E897: List or Blob required
+-1
+E896: Argument of extend() must be a List, Dictionary or Blob
+0
+E896: Argument of extend() must be a List, Dictionary or Blob
+0
+E1250: Argument of filter() must be a List, String, Dictionary or Blob
+1
+E1250: Argument of map() must be a List, String, Dictionary or Blob
+v:null

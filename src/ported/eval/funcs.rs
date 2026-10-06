@@ -3104,7 +3104,7 @@ pub fn f_insert(argvars: &[typval_T], rettv: &mut typval_T) {
             return;
         }
         _ => {
-            emsg("E897: List or Blob required");
+            emsg("E899: Argument of insert() must be a List or Blob");
             return;
         }
     };
@@ -3179,7 +3179,8 @@ pub fn f_items(argvars: &[typval_T], rettv: &mut typval_T) {
         VAR_LIST => tv_list2items(argvars, rettv),
         VAR_BLOB => tv_blob2items(argvars, rettv),
         VAR_DICT => tv_dict2items(argvars, rettv),
-        _ => emsg("E1225: List, Dictionary, Blob or String required for argument 1"),
+        // c (vim 9.2): `check_for_list_or_tuple_or_dict_or_blob_or_string_arg`.
+        _ => emsg("E1251: List, Tuple, Dictionary, Blob or String required for argument 1"),
     }
 }
 

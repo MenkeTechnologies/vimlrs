@@ -277,11 +277,70 @@ fn extend(argvars: &[typval_T], rettv: &mut typval_T, arg_errmsg: &str, is_new: 
         extend_list(argvars, arg_errmsg, is_new, rettv);
     } else if argvars[0].v_type == VAR_DICT && argvars[1].v_type == VAR_DICT {
         extend_dict(argvars, arg_errmsg, is_new, rettv);
+    } else if argvars[0].v_type == VAR_BLOB && argvars[1].v_type == VAR_BLOB {
+        // c (vim 9.2 `blob.c`, the reference; Neovim has no Blob extend()):
+        // `blob_extend_func` — insert Blob 2 into Blob 1 before {expr3}
+        // (default: the end; negative counts from the end), E979 outside
+        // 0..=len, E741 for a locked Blob unless extendnew().
+        use crate::ported::eval::typval_defs_h::typval_vval_union::v_blob;
+        let (v_blob(b1), v_blob(b2)) = (&argvars[0].vval, &argvars[1].vval) else {
+            return;
+        };
+        let Some(b1) = b1 else {
+            emsg("E1581: Cannot extend a null blob");
+            return;
+        };
+        if !is_new
+            && crate::ported::eval::typval::value_check_lock(
+                b1.borrow().bv_lock,
+                Some(arg_errmsg),
+                crate::ported::eval::typval::TV_TRANSLATE,
+            )
+        {
+            return;
+        }
+        let mut bytes = b1.borrow().bv_ga.clone();
+        let add = b2
+            .as_ref()
+            .map(|b| b.borrow().bv_ga.clone())
+            .unwrap_or_default();
+        if !add.is_empty() {
+            let len = bytes.len() as varnumber_T;
+            let mut before = len;
+            if argvars.get(2).is_some_and(|a| a.v_type != VAR_UNKNOWN) {
+                let mut error = false;
+                before =
+                    crate::ported::eval::typval::tv_get_number_chk(&argvars[2], Some(&mut error));
+                if error {
+                    return; // c: type error; errmsg already given
+                }
+                if before < 0 {
+                    before += len;
+                }
+                if before < 0 || before > len {
+                    crate::ported::message::semsg(&format!(
+                        "E979: Blob index out of range: {before}"
+                    ));
+                    return;
+                }
+            }
+            let at = before as usize;
+            bytes.splice(at..at, add);
+        }
+        if is_new {
+            // c: `b1 = blob_copy(b1)` — the result is a new Blob.
+            crate::ported::eval::typval::tv_blob_alloc_ret(rettv)
+                .borrow_mut()
+                .bv_ga = bytes;
+        } else {
+            b1.borrow_mut().bv_ga = bytes;
+            *rettv = argvars[0].clone();
+        }
     } else {
-        // c: semsg(e_listdictarg, is_new ? "extendnew()" : "extend()");
+        // c: semsg(_(e_argument_of_str_must_be_list_dictionary_or_blob), func_name);
         let name = if is_new { "extendnew" } else { "extend" };
         emsg(&format!(
-            "E712: Argument of {name}() must be a List or Dictionary"
+            "E896: Argument of {name}() must be a List, Dictionary or Blob"
         ));
     }
 }

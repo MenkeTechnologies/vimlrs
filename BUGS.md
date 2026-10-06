@@ -7397,6 +7397,14 @@ counts. `join('abc')` is `E1529` and `''`, `join(l, 3)` is E1174 (vim's
 'd')` reports E1531 and still returns the default.
 Parity case: `range_join_get_args.vim`.
 
+### R52-8. extend() of a Blob; extend/insert/items argument errors — ✅ FIXED
+
+`extend(0z01, 0z0203)` was E712 (Neovim has no Blob extend()); vim 9.2's
+`blob_extend_func` inserts Blob 2 before `{expr3}` (default the end, negative
+from the end, E979 outside 0..len, E741 on a locked Blob, a new Blob for
+extendnew()). The argument errors now use vim's texts: E896 for extend(), E899
+for insert(), E1251 for items(). Parity case: `extend_blob_and_arg_errors.vim`.
+
 ### R52-O1. Open, measured this round
 
 - `examples/parse_errors.vim` lines 24-26 expect Neovim's E116 text
