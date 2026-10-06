@@ -5438,7 +5438,17 @@ fn sort_compare_funcref(
     let args = vec![a.clone(), b.clone()];
     let r = match partial {
         Some(p) => call_funcref_self(p, args, selfdict.cloned())?,
-        None => with_self(selfdict.cloned(), || call_user_function(name, args))?,
+        // c: `call_func` reaches builtins as well as user functions, and a
+        // name that is neither is `user_func_error` — `E117: Unknown function`.
+        None => match with_self(selfdict.cloned(), || call_named(name, args)) {
+            Some(r) => r,
+            None => {
+                if !func_exists_hook(name) {
+                    message::semsg(&format!("E117: Unknown function: {name}"));
+                }
+                return None;
+            }
+        },
     };
     let raised = message::did_emsg.with(|d| d.get()) > before;
     if name.starts_with("<lambda>") && (LAST_CALL_FAILED.with(|c| c.get()) || raised) {

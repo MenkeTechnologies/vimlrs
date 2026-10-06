@@ -7405,6 +7405,13 @@ from the end, E979 outside 0..len, E741 on a locked Blob, a new Blob for
 extendnew()). The argument errors now use vim's texts: E896 for extend(), E899
 for insert(), E1251 for items(). Parity case: `extend_blob_and_arg_errors.vim`.
 
+### R52-9. sort()/uniq() with a function name — ✅ FIXED
+
+`sort(l, 'nosuch')` reported only E702; `call_func` reports the unknown name
+first (`E117: Unknown function: nosuch`). A builtin given by name (`sort(l,
+'max')`) was looked up among user functions only; it is now called like any
+function. Parity case: `sort_func_name.vim`.
+
 ### R52-O1. Open, measured this round
 
 - `examples/parse_errors.vim` lines 24-26 expect Neovim's E116 text
@@ -7429,5 +7436,11 @@ for insert(), E1251 for items(). Parity case: `extend_blob_and_arg_errors.vim`.
   command inside `:try` is tagged with the previous command's name.
 - `string(funcref('F'))` is `function('g:F')` in vim (`partial_tv2string` adds
   `g:` when the partial holds a `pt_func`); `partial_T` here has no `pt_func`.
+- vim 9.2's `item_compare2` sets `item_compare_func_err` only for a result that
+  is not a Number; a FAILED call (unknown function, an error reported) is
+  `ITEM_COMPARE_FAIL`, "greater", so `uniq(l, 'nosuch')` is E117 without E882.
+  Here a failed call is a compare error as well. Matching it needs the lambda
+  failure value and `did_emsg` behaviour under `:silent!` (which vim does not
+  count), which `sort_comparator.vim` pins.
 - An error inside `:eval` is tagged `Vim(eval)` in vim; here it keeps the
   previous command's tag (`:eval` parses to the generic expression statement).
