@@ -1324,6 +1324,18 @@ impl Compiler {
             Stmt::Try { .. } => "try",
             Stmt::Source(_) => "source",
             Stmt::Set(_) => "set",
+            Stmt::Function { .. } => "function",
+            Stmt::DelFunction(_) => "delfunction",
+            Stmt::Finish => "finish",
+            Stmt::CommandDef(_) => "command",
+            Stmt::CommandDel(_) => "delcommand",
+            Stmt::Autocmd(_) => "autocmd",
+            Stmt::Augroup(_) => "augroup",
+            Stmt::Doautocmd(_) => "doautocmd",
+            Stmt::Colorscheme(_) => "colorscheme",
+            Stmt::Highlight(_) => "highlight",
+            Stmt::Syntax(_) => "syntax",
+            Stmt::Filetype(_) => "filetype",
             // `:silent CMD` is a modifier, not a command: vim tags an error
             // inside it with the command it modifies (`silent echo [][0]` is
             // `Vim(echo):E684`, verified), so look through it.
