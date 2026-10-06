@@ -5911,6 +5911,17 @@ fn is_host_editor_cmd(line: &str) -> bool {
         word,
         "edit"
             | "e"
+            | "file"
+            | "f"
+            | "fi"
+            | "fil"
+            | "terminal"
+            | "te"
+            | "ter"
+            | "term"
+            | "termi"
+            | "termin"
+            | "termina"
             | "ed"
             | "ex"
             | "badd"
@@ -6854,6 +6865,13 @@ pub fn fire_normal_hook(keys: &str) -> bool {
 /// `&lines` / `&columns` then read (see `option::SCREEN_SIZE_HOOK`).
 pub fn install_screen_size_hook(f: Box<dyn Fn() -> (HostNum, HostNum)>) {
     crate::ported::option::SCREEN_SIZE_HOOK.with(|h| *h.borrow_mut() = Some(f));
+}
+
+/// Install the host's buffer-option reader (see
+/// `crate::ported::option::BUF_OPTION_HOOK`): `&{name}` for a string option
+/// reads the host's current buffer when it returns a value.
+pub fn install_buf_option_hook(f: Box<dyn Fn(&str) -> Option<String>>) {
+    crate::ported::option::BUF_OPTION_HOOK.with(|h| *h.borrow_mut() = Some(f));
 }
 
 /// The `(height, width)` of window `nr` as `find_win_by_nr_or_id()` resolves
@@ -8267,6 +8285,17 @@ mod tests {
         );
     }
 
+    /// `:file {name}` renames the host's buffer and `:terminal` opens one of
+    /// its terminal buffers, so both are offered to the host first — a session
+    /// renames a restored terminal buffer back with `file term://…`.
+    #[test]
+    fn file_and_terminal_reach_the_host() {
+        for line in ["file term://~//1:cat", "f x.txt", "fil", "terminal cat", "term", "te"] {
+            assert!(is_host_editor_cmd(line), "{line}");
+        }
+        assert!(!is_host_editor_cmd("filetype on"), "`:filetype` is not `:file`");
+    }
+
     /// `store_session_globals`: what nvim 0.12 writes for these globals with
     /// `'sessionoptions'` "globals" — only mixed-case names, only Numbers,
     /// Strings and Floats, a Number space-padded, a String escaped.
@@ -8290,6 +8319,19 @@ mod tests {
                 "let Ratio = -1.500000"
             ]
         );
+    }
+
+    /// `&buftype` reads the host's buffer once it owns the option, so a
+    /// session's `if &buftype ==# 'terminal'` sees the buffer the host opened;
+    /// options the host does not answer for keep vimlrs's own value.
+    #[test]
+    fn buf_option_hook_answers_for_the_host_buffer() {
+        assert_eq!(run("echo &buftype == ''").trim(), "1");
+        install_buf_option_hook(Box::new(|name| (name == "buftype").then(|| "terminal".to_string())));
+        assert_eq!(run("echo &buftype &bt").trim(), "terminal terminal");
+        assert_eq!(run("if &buftype ==# 'terminal' | echo 'yes' | endif").trim(), "yes");
+        assert_eq!(run("echo &fileformat").trim(), "unix");
+        crate::ported::option::BUF_OPTION_HOOK.with(|h| *h.borrow_mut() = None);
     }
 
     /// `&columns` / `&lines` are vim's 80x24 standalone and the host's screen

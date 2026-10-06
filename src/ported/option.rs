@@ -97,6 +97,7 @@ const OPTIONS: &[(&str, &str, Kind, varnumber_T, &str)] = &[
     //     the value is locale-independent by construction; that makes the
     //     LC_ALL=C reading a vim/nvim split, not a gap here.
     ("encoding", "enc", Kind::String, 0, "utf-8"),
+    ("buftype", "bt", Kind::String, 0, ""),
     ("fileformat", "ff", Kind::String, 0, "unix"),
     ("iskeyword", "isk", Kind::String, 0, "@,48-57,_,192-255"),
     ("isprint", "isp", Kind::String, 0, "@,161-255"),
@@ -249,6 +250,11 @@ pub fn get_option_value(name: &str) -> typval_T {
             _ => {}
         }
     }
+    if let Kind::String = kind {
+        if let Some(v) = BUF_OPTION_HOOK.with(|h| h.borrow().as_ref().and_then(|f| f(canon))) {
+            return typval_T::from(v);
+        }
+    }
     option_values.with(|m| {
         m.borrow()
             .get(*canon)
@@ -261,6 +267,15 @@ pub fn get_option_value(name: &str) -> typval_T {
 }
 
 thread_local! {
+    /// Host hook giving the current buffer's value of a string option the
+    /// embedding editor owns (by full name), what `&opt` reads before this
+    /// table: a session tests `if &buftype ==# 'terminal'` after the host opened
+    /// the buffer. EXTENSION — installed by
+    /// [`crate::fusevm_bridge::install_buf_option_hook`]; `None` falls through.
+    #[allow(clippy::type_complexity)]
+    pub static BUF_OPTION_HOOK: std::cell::RefCell<Option<Box<dyn Fn(&str) -> Option<String>>>> =
+        const { std::cell::RefCell::new(None) };
+
     /// Host hook giving the embedding editor's screen `(lines, columns)`, what
     /// `&lines` / `&columns` read: a `:mksession` script sizes its windows from
     /// them (`exe 'vert 1resize ' . ((&columns * 30 + 99) / 199)`). EXTENSION —

@@ -276,6 +276,7 @@ pub(crate) static options: LazyLock<Vec<vimoption_T>> = LazyLock::new(|| {
         // other makes the two answers contradict. `option_tables_agree` in
         // `option.rs` fails the build's test run if they drift.
         s("encoding", "enc", "utf-8"),
+        s("buftype", "bt", ""),
         s("fileformat", "ff", "unix"),
         s("iskeyword", "isk", "@,48-57,_,192-255"),
         s("isprint", "isp", "@,161-255"),
