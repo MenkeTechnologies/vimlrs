@@ -746,7 +746,11 @@ pub fn set_option(opt_idx: OptIndex, value: OptVal, opt_flags: i32) -> Option<St
     };
     let both = opt_flags & (OPT_LOCAL | OPT_GLOBAL) == 0;
     let has_local = scope & (kOptScopeBuf | kOptScopeWin) != 0;
-    if both && has_local && scope & kOptScopeGlobal != 0 && value.r#type == OptValType::kOptValTypeString {
+    if both
+        && has_local
+        && scope & kOptScopeGlobal != 0
+        && value.r#type == OptValType::kOptValTypeString
+    {
         store(OptVarp::Global, value);
         store(OptVarp::Local, STRING_OPTVAL(String::new()));
         return None;
@@ -785,7 +789,12 @@ pub fn set_option_value_handle_tty(
 /// Port of `tv_to_optval()` from `vendor/eval/vars.c` (upstream `vars.c:3196`) —
 /// convert a `typval_T` to the `OptVal` for option `opt_idx`. Sets `*error` on a
 /// type error.
-pub(crate) fn tv_to_optval(tv: &typval_T, opt_idx: OptIndex, option: &str, error: &mut bool) -> OptVal {
+pub(crate) fn tv_to_optval(
+    tv: &typval_T,
+    opt_idx: OptIndex,
+    option: &str,
+    error: &mut bool,
+) -> OptVal {
     // c:3198 OptVal value = NIL_OPTVAL;
     let mut value = NIL_OPTVAL();
     // c:3200 bool err = false;

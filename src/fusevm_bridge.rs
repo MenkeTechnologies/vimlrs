@@ -5810,9 +5810,7 @@ fn b_set(vm: &mut VM, _: u8) -> Value {
 /// `set_option_value_handle_tty(name, opt_idx, newval, opt_flags)` stores it
 /// in the scope the `g:`/`l:` prefix names.
 fn b_setopt(vm: &mut VM, _: u8) -> Value {
-    use crate::ported::option_optval::{
-        find_option, set_option_value_handle_tty, tv_to_optval,
-    };
+    use crate::ported::option_optval::{find_option, set_option_value_handle_tty, tv_to_optval};
     let val = pop_tv(vm);
     let name = tv_get_string(&pop_tv(vm));
     let (opt_flags, name) = option_scope(&name);

@@ -4120,13 +4120,16 @@ impl Parser {
             // and `echo 0 ?: 1` skips the name `:` and then misses the `:`, E109.
             Tok::Colon => {
                 let start = at.unwrap_or(0);
-                let len = crate::ported::eval::get_id_len(self.src.get(start..).unwrap_or(":")) as usize;
+                let len =
+                    crate::ported::eval::get_id_len(self.src.get(start..).unwrap_or(":")) as usize;
                 let end = start + len.max(1);
                 // The name ends inside the lexer's tokens only at a boundary
                 // the lexer also drew; consume every token it covers.
-                while self.toks.get(self.i).is_some_and(|t| {
-                    !matches!(t.kind, Tok::Eof) && t.span >= start && t.end <= end
-                }) {
+                while self
+                    .toks
+                    .get(self.i)
+                    .is_some_and(|t| !matches!(t.kind, Tok::Eof) && t.span >= start && t.end <= end)
+                {
                     self.i += 1;
                 }
                 let name = self.src[start..end].to_string();
@@ -4151,63 +4154,63 @@ impl Parser {
         at: Option<usize>,
         at_tok: usize,
     ) -> Result<Expr, VimlError> {
-            {
-                if matches!(self.peek(), Tok::LParen) {
-                    self.advance();
-                    // c: `emsg_funcname(…, name)` prints `name` up to its NUL:
-                    // the rest of the expression text, or the bare name for
-                    // `:call`'s outermost function.
-                    let shown = match at {
-                        Some(s) if !(self.call_cmd && at_tok == 0) => self.src_from(s),
-                        _ => name.clone(),
-                    };
-                    let args = self.arg_list(
-                        &Tok::RParen,
-                        &format!("E116: Invalid arguments for function {shown}"),
-                        "E15: Invalid expression: \"%s\"",
-                    )?;
-                    Ok(Expr::Call {
-                        name,
-                        args,
-                        emsg_name: at.map(|s| self.src_from(s)),
-                    })
-                } else if vim9_active() {
-                    // vim9 keyword literals (`vim9.txt`): in a `:vim9script` script
-                    // or a `def…enddef` body, bare `true`/`false`/`null` are the
-                    // boolean/special constants — equal to `v:true`/`v:false`/`v:null`
-                    // (binary-verified: `true == v:true`, `type(true) == 6`,
-                    // `type(null) == 7`). In legacy mode they stay ordinary names
-                    // (bare `true` → E121 undefined variable), so this only fires
-                    // under `vim9_active()`.
-                    // The `null_*` names are vim9 predefined constants
-                    // (`vim9.txt`, "Predefined variables"). Each is the null
-                    // value of its type; oracle-verified against Vim 9.2 they
-                    // are observably the empty literal of that type
-                    // (`type(null_string) == 1 && null_string == ''`,
-                    // `type(null_list) == 3 && string(null_list) == '[]'`,
-                    // `null_blob` → `0z`, `null_function`/`null_partial` →
-                    // `function('')`). `null_channel`/`null_job` need channel
-                    // and job value types vimlrs does not have, so they stay
-                    // ordinary names rather than being faked.
-                    match name.as_str() {
-                        "true" => Ok(Expr::Var("v:true".to_string())),
-                        "false" => Ok(Expr::Var("v:false".to_string())),
-                        "null" => Ok(Expr::Var("v:null".to_string())),
-                        "null_string" => Ok(Expr::Str(String::new())),
-                        "null_list" => Ok(Expr::List(Vec::new())),
-                        "null_dict" => Ok(Expr::Dict(Vec::new())),
-                        "null_blob" => Ok(Expr::Call {
-                            name: "list2blob".to_string(),
-                            args: vec![Expr::List(Vec::new())],
-                            emsg_name: None,
-                        }),
-                        "null_function" | "null_partial" => Ok(Expr::NullFunc),
-                        _ => Ok(Expr::Var(name)),
-                    }
-                } else {
-                    Ok(Expr::Var(name))
+        {
+            if matches!(self.peek(), Tok::LParen) {
+                self.advance();
+                // c: `emsg_funcname(…, name)` prints `name` up to its NUL:
+                // the rest of the expression text, or the bare name for
+                // `:call`'s outermost function.
+                let shown = match at {
+                    Some(s) if !(self.call_cmd && at_tok == 0) => self.src_from(s),
+                    _ => name.clone(),
+                };
+                let args = self.arg_list(
+                    &Tok::RParen,
+                    &format!("E116: Invalid arguments for function {shown}"),
+                    "E15: Invalid expression: \"%s\"",
+                )?;
+                Ok(Expr::Call {
+                    name,
+                    args,
+                    emsg_name: at.map(|s| self.src_from(s)),
+                })
+            } else if vim9_active() {
+                // vim9 keyword literals (`vim9.txt`): in a `:vim9script` script
+                // or a `def…enddef` body, bare `true`/`false`/`null` are the
+                // boolean/special constants — equal to `v:true`/`v:false`/`v:null`
+                // (binary-verified: `true == v:true`, `type(true) == 6`,
+                // `type(null) == 7`). In legacy mode they stay ordinary names
+                // (bare `true` → E121 undefined variable), so this only fires
+                // under `vim9_active()`.
+                // The `null_*` names are vim9 predefined constants
+                // (`vim9.txt`, "Predefined variables"). Each is the null
+                // value of its type; oracle-verified against Vim 9.2 they
+                // are observably the empty literal of that type
+                // (`type(null_string) == 1 && null_string == ''`,
+                // `type(null_list) == 3 && string(null_list) == '[]'`,
+                // `null_blob` → `0z`, `null_function`/`null_partial` →
+                // `function('')`). `null_channel`/`null_job` need channel
+                // and job value types vimlrs does not have, so they stay
+                // ordinary names rather than being faked.
+                match name.as_str() {
+                    "true" => Ok(Expr::Var("v:true".to_string())),
+                    "false" => Ok(Expr::Var("v:false".to_string())),
+                    "null" => Ok(Expr::Var("v:null".to_string())),
+                    "null_string" => Ok(Expr::Str(String::new())),
+                    "null_list" => Ok(Expr::List(Vec::new())),
+                    "null_dict" => Ok(Expr::Dict(Vec::new())),
+                    "null_blob" => Ok(Expr::Call {
+                        name: "list2blob".to_string(),
+                        args: vec![Expr::List(Vec::new())],
+                        emsg_name: None,
+                    }),
+                    "null_function" | "null_partial" => Ok(Expr::NullFunc),
+                    _ => Ok(Expr::Var(name)),
                 }
+            } else {
+                Ok(Expr::Var(name))
             }
+        }
     }
 
     /// Lower an interpolated string's raw parts into an [`Expr::Interp`]: each

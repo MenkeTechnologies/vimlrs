@@ -5349,7 +5349,9 @@ pub fn eval_option(arg: &mut &str, rettv: &mut typval_T, evaluate: bool) -> i32 
     let name = &src[name_start..i];
     *arg = &src[i..];
     if evaluate {
-        use crate::ported::option_optval::{find_option, get_option_value, kOptInvalid, optval_as_tv};
+        use crate::ported::option_optval::{
+            find_option, get_option_value, kOptInvalid, optval_as_tv,
+        };
         let opt_idx = find_option(name);
         // c:3407 `get_option_value(opt_idx, opt_flags)` — a scoped read goes to
         // the store; an unscoped one through `option::get_option_value`, which

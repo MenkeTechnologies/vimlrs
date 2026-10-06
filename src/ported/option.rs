@@ -12,14 +12,14 @@
 
 #[cfg(test)]
 use crate::ported::eval::typval::tv_get_bool;
-#[cfg(test)]
-use std::collections::HashMap;
+use crate::ported::eval::typval_defs_h::{typval_T, varnumber_T};
 use crate::ported::option_optval::{
     self, find_option, get_varp_scope, kOptScopeBuf, kOptScopeGlobal, kOptScopeWin, options,
-    optval_from_varp, set_option, OptVal, OptValData, OptVarp, TriState, BOOLEAN_OPTVAL, NIL_OPTVAL,
-    NUMBER_OPTVAL, OPT_GLOBAL, OPT_LOCAL, STRING_OPTVAL, TRISTATE_FROM_INT,
+    optval_from_varp, set_option, OptVal, OptValData, OptVarp, TriState, BOOLEAN_OPTVAL,
+    NIL_OPTVAL, NUMBER_OPTVAL, OPT_GLOBAL, OPT_LOCAL, STRING_OPTVAL, TRISTATE_FROM_INT,
 };
-use crate::ported::eval::typval_defs_h::{typval_T, varnumber_T};
+#[cfg(test)]
+use std::collections::HashMap;
 
 /// Option kind, for parsing `:set` values.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -377,7 +377,11 @@ pub fn do_set(args: &str, opt_flags: i32) {
             if let Some((canon, _, Kind::Bool, _, _)) = findoption(name) {
                 let opt_idx = find_option(canon);
                 let on = is_true(current(opt_idx));
-                set_option(opt_idx, BOOLEAN_OPTVAL(TRISTATE_FROM_INT(i64::from(!on))), opt_flags);
+                set_option(
+                    opt_idx,
+                    BOOLEAN_OPTVAL(TRISTATE_FROM_INT(i64::from(!on))),
+                    opt_flags,
+                );
             }
             continue;
         }
@@ -426,7 +430,11 @@ pub fn do_set(args: &str, opt_flags: i32) {
         // `noopt` / `invopt` (bool off / invert).
         if let Some(name) = part.strip_prefix("no") {
             if let Some((canon, _, Kind::Bool, _, _)) = findoption(name) {
-                set_option(find_option(canon), BOOLEAN_OPTVAL(TriState::kFalse), opt_flags);
+                set_option(
+                    find_option(canon),
+                    BOOLEAN_OPTVAL(TriState::kFalse),
+                    opt_flags,
+                );
                 continue;
             }
         }
@@ -434,13 +442,21 @@ pub fn do_set(args: &str, opt_flags: i32) {
             if let Some((canon, _, Kind::Bool, _, _)) = findoption(name) {
                 let opt_idx = find_option(canon);
                 let on = is_true(current(opt_idx));
-                set_option(opt_idx, BOOLEAN_OPTVAL(TRISTATE_FROM_INT(i64::from(!on))), opt_flags);
+                set_option(
+                    opt_idx,
+                    BOOLEAN_OPTVAL(TRISTATE_FROM_INT(i64::from(!on))),
+                    opt_flags,
+                );
                 continue;
             }
         }
         // Bare `opt` — turn a boolean on (number/string forms are queries).
         if let Some((canon, _, Kind::Bool, _, _)) = findoption(part) {
-            set_option(find_option(canon), BOOLEAN_OPTVAL(TriState::kTrue), opt_flags);
+            set_option(
+                find_option(canon),
+                BOOLEAN_OPTVAL(TriState::kTrue),
+                opt_flags,
+            );
         }
     }
 }
