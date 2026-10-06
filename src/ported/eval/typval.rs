@@ -2259,12 +2259,19 @@ pub fn tv_list_join(gap: &mut String, l: &list_T, sep: &str) -> i32 {
 /// "join({list} [, {sep}])" — join a List into a String (items rendered as by
 /// `:echo`, so nested Lists/Dicts render structurally, unlike `tv_get_string`).
 pub fn f_join(argvars: &[typval_T], rettv: &mut typval_T) {
-    // c: if (argvars[0].v_type != VAR_LIST) { emsg(e_listreq); return; }
+    // c (vim 9.2 `list.c`, the reference): `rettv->v_type = VAR_STRING` first,
+    // so a failed argument check leaves the NULL String (`''`), then
+    // `check_for_list_or_tuple_arg(argvars, 0)` and
+    // `check_for_opt_string_arg(argvars, 1)` (E1174 for a Number separator).
+    rettv.v_type = VAR_STRING;
+    rettv.vval = v_string(VimStr::new());
     if argvars[0].v_type != VAR_LIST {
-        emsg("E714: List required");
+        semsg("E1529: List or Tuple required for argument 1");
         return;
     }
-    rettv.v_type = VAR_STRING;
+    if tv_check_for_opt_string_arg(argvars, 1) == FAIL {
+        return;
+    }
     // c: sep defaults to " "; a type error in {sep} yields a NULL string.
     let sep = if argvars.len() < 2 {
         " ".to_string()

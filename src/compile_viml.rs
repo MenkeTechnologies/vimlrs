@@ -2285,6 +2285,17 @@ impl Compiler {
             self.emit(Op::CallBuiltin(h::VIML_TONUMBER, 1));
         }
         self.emit(Op::SetSlot(bound_slot)); // bound = <expr> (once)
+                                            // c: `f_range()` validates before it builds anything — E726, E727, E1510
+                                            // — and a failed `range()` leaves the `:for` inactive.
+        self.emit(Op::GetSlot(slot));
+        self.emit(Op::GetSlot(bound_slot));
+        if args.len() == 1 {
+            self.emit(Op::LoadInt(1));
+            self.emit(Op::Sub); // `range(n)` ends at n - 1
+        }
+        self.emit(Op::LoadInt(step));
+        self.emit(Op::CallBuiltin(h::VIML_RANGE_CHECK, 3));
+        let range_failed = self.emit(Op::JumpIfFalse(0));
 
         let to_test = self.emit(Op::Jump(0));
         let l_body = self.b.current_pos();
@@ -2303,6 +2314,7 @@ impl Compiler {
         self.emit(cmp);
         self.emit(Op::JumpIfTrue(l_body)); // backedge = the loop test
         let l_end = self.b.current_pos();
+        self.b.patch_jump(range_failed, l_end);
         for j in ctx.breaks {
             self.b.patch_jump(j, l_end);
         }

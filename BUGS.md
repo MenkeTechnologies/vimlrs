@@ -7384,6 +7384,19 @@ the winning item, so `max([1, 2.5])` is 2.5, `max(['3', 2])` is `'3'`,
 E691 (result 0), and any argument but a List or Dict is E712.
 Parity case: `max_min_compare.vim`.
 
+### R52-7. range(), join(), has_key(), get() argument checks — ✅ FIXED
+
+`range(1, 'y')` PANICKED (`end + 1` overflowed); `range(0, 9999999999)` tried
+to build ten billion items (vim: `E1510: Value too large: 10000000000`), and so
+did `for i in range(0, 9999999999)` through the native counter loop; a failed
+`range()` was 0 instead of `[]`. vim 9.2's `f_range()` checks are now shared by
+`f_range` and the native loop (`fusevm_bridge::range_len`): E726, E1510 for a
+stride outside an `int` or more than `INT_MAX` items, E727 with unsigned
+counts. `join('abc')` is `E1529` and `''`, `join(l, 3)` is E1174 (vim's
+`check_for_opt_string_arg`), `has_key([], 1)` is E1206, and `get(v:null, 1,
+'d')` reports E1531 and still returns the default.
+Parity case: `range_join_get_args.vim`.
+
 ### R52-O1. Open, measured this round
 
 - `examples/parse_errors.vim` lines 24-26 expect Neovim's E116 text

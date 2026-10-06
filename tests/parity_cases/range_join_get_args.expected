@@ -1,0 +1,37 @@
+1
+E1174: String required for argument 2
+E1174: String required for argument 2
+E1529: List or Tuple required for argument 1
+''
+E1206: Dictionary required for argument 1
+0
+[]
+[]
+E1510: Value too large: 9223372036854775808
+[]
+E1510: Value too large: 9999999999
+[]
+[]
+E727: Start past end []
+E1510: Value too large: 9223372036854775808
+[]
+E1531: Argument of get() must be a List, Tuple, Dictionary or Blob
+'d'
+E1531: Argument of get() must be a List, Tuple, Dictionary or Blob 0
+end
+E727: Start past end
+E726: Stride is zero
+E1510: Value too large: 10000000000
+E727: Start past end
+e
+E727: Start past end
+E726: Stride is zero
+E1510: Value too large: 10000000000
+E727: Start past end
+e
+1,[2],{}
+E1529: List or Tuple required for argument 1
+1 1
+E1531: Argument of get() must be a List, Tuple, Dictionary or Blob 0
+E1531: Argument of get() must be a List, Tuple, Dictionary or Blob
+'d'

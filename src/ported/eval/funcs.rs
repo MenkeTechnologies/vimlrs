@@ -1156,52 +1156,37 @@ fn fill_submatch_list(
 // (default " "). `f_join` lives in its real home file,
 // `src/ported/eval/typval.rs` (eval/typval.c).
 
-/// Port of `f_range()` from `Src/eval/funcs.c`.
-///
-/// "range({expr} [, {max} [, {stride}]])" — `range(n)` is `0..n-1`;
-/// `range(a, b[, s])` is `a, a+s, …` up to and including `b`.
+/// Port of `f_range()` (vim 9.2 `evalfunc.c`, the reference): the List of
+/// `{start}`..`{end}` by `{stride}`. Every failure leaves an empty List; the
+/// argument checks are [`crate::fusevm_bridge::range_len`], which the native
+/// `for VAR in range(…)` loop shares.
 pub fn f_range(argvars: &[typval_T], rettv: &mut typval_T) {
-    let a0 = tv_get_number_chk(&argvars[0], None);
+    // c: `rettv_list_alloc(rettv)` comes first.
+    let l = tv_list_alloc_ret(rettv, 0);
+    let mut error = false;
+    let a0 = tv_get_number_chk(&argvars[0], Some(&mut error));
     let (start, end, stride) = match argvars.len() {
-        1 => (0, a0 - 1, 1),
-        2 => (a0, tv_get_number_chk(&argvars[1], None), 1),
+        1 => (0, a0.wrapping_sub(1), 1),
+        2 => (a0, tv_get_number_chk(&argvars[1], Some(&mut error)), 1),
         _ => (
             a0,
-            tv_get_number_chk(&argvars[1], None),
-            tv_get_number_chk(&argvars[2], None),
+            tv_get_number_chk(&argvars[1], Some(&mut error)),
+            tv_get_number_chk(&argvars[2], Some(&mut error)),
         ),
     };
-    // c: `if (stride == 0) { emsg(_("E726: Stride is zero")); return; }` — a zero
-    // stride is an error, not an empty list (the loop would never terminate).
-    if stride == 0 {
-        emsg("E726: Stride is zero");
-        return;
+    if error {
+        return; // c: type error; errmsg already given
     }
-    // c: `if (stride > 0 ? end + 1 < start : end - 1 > start)` — a range that
-    // runs the wrong way is E727, not an empty list: `range(10, 5, 1)` errors.
-    // (`end + 1 == start` is the legitimate empty range, e.g. `range(0)`.)
-    if if stride > 0 {
-        end + 1 < start
-    } else {
-        end - 1 > start
-    } {
-        emsg("E727: Start past end");
+    let Some(len) = crate::fusevm_bridge::range_len(start, end, stride) else {
         return;
-    }
-    let l = tv_list_alloc_ret(rettv, 0);
+    };
     let mut lb = l.borrow_mut();
-    if stride > 0 {
-        let mut i = start;
-        while i <= end {
-            tv_list_append_number(&mut lb, i);
-            i += stride;
+    let mut i = start;
+    for k in 0..len {
+        if k > 0 {
+            i = i.wrapping_add(stride);
         }
-    } else {
-        let mut i = start;
-        while i >= end {
-            tv_list_append_number(&mut lb, i);
-            i += stride;
-        }
+        tv_list_append_number(&mut lb, i);
     }
 }
 
@@ -1452,10 +1437,11 @@ pub fn f_get(argvars: &[typval_T], rettv: &mut typval_T) {
             tv_dict_find(&d.borrow(), &tv_get_string(&argvars[1])).cloned()
         }
         (VAR_LIST, _) | (VAR_DICT, _) => None,
-        // c: else semsg(e_listdictblobarg, "get()").
+        // c: else semsg(e_listdictblobarg, "get()") — and then, with no item
+        // found, `{default}` is still the result.
         _ => {
             emsg("E1531: Argument of get() must be a List, Tuple, Dictionary or Blob");
-            return;
+            None
         }
     };
     match found.or(default) {
@@ -1466,6 +1452,10 @@ pub fn f_get(argvars: &[typval_T], rettv: &mut typval_T) {
 
 /// Port of `f_has_key()` from `Src/eval/funcs.c`.
 pub fn f_has_key(argvars: &[typval_T], rettv: &mut typval_T) {
+    // c: `if (check_for_dict_arg(argvars, 0) == FAIL) return;`
+    if crate::ported::eval::typval::tv_check_for_dict_arg(argvars, 0) == FAIL {
+        return;
+    }
     let present = match (argvars[0].v_type, &argvars[0].vval) {
         (VAR_DICT, v_dict(Some(d))) => {
             tv_dict_find(&d.borrow(), &tv_get_string(&argvars[1])).is_some()

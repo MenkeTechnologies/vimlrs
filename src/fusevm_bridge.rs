@@ -574,6 +574,9 @@ pub const VIML_UNLET_RANGE: u16 = 3618;
 pub const VIML_ERR_COUNT: u16 = 3619;
 /// Pop a baseline from `VIML_ERR_COUNT`; push `Bool(an error was reported since)`.
 pub const VIML_ERRS_AFTER: u16 = 3620;
+/// The checks `f_range()` makes before it builds a List, for the native
+/// `for VAR in range(…)` loop that never builds one — see `b_range_check`.
+pub const VIML_RANGE_CHECK: u16 = 3633;
 /// A lambda expression's value — see `b_make_lambda`.
 pub const VIML_MAKE_LAMBDA: u16 = 3621;
 /// `:echoerr`: pop an argument and the message so far, push the message with the
@@ -4080,6 +4083,68 @@ fn b_err_count(_vm: &mut VM, _: u8) -> Value {
     Value::Int(message::err_count.with(|c| c.get()) as i64)
 }
 
+/// The number of items `range(start, end, stride)` has, or `None` after
+/// reporting why it has none — c: `f_range()` (vim 9.2 `evalfunc.c`): E726 for
+/// a zero stride, E1510 for a stride outside an `int` or more than `INT_MAX`
+/// items, E727 when `end` is more than one step before `start`. The counts are
+/// unsigned ("Subtract unsigned to avoid an overflow"), so a range spanning the
+/// whole Number type neither overflows nor wraps. Shared by `f_range` and the
+/// native `for VAR in range(…)` loop, which never builds the List.
+pub fn range_len(start: i64, end: i64, stride: i64) -> Option<u64> {
+    if stride == 0 {
+        message::emsg("E726: Stride is zero");
+        return None;
+    }
+    // c: "The stride is stored in "lv_stride", which is an int."
+    if stride < i64::from(i32::MIN) || stride > i64::from(i32::MAX) {
+        message::semsg(&format!("E1510: Value too large: {stride}"));
+        return None;
+    }
+    if if stride > 0 { end < start } else { end > start } {
+        // c: "One step before the start gives an empty list, further away is
+        // an error."
+        let back = if stride > 0 {
+            (start as u64).wrapping_sub(end as u64)
+        } else {
+            (end as u64).wrapping_sub(start as u64)
+        };
+        if back > 1 {
+            message::emsg("E727: Start past end");
+            return None;
+        }
+        return Some(0);
+    }
+    let span = if stride > 0 {
+        (end as u64).wrapping_sub(start as u64)
+    } else {
+        (start as u64).wrapping_sub(end as u64)
+    };
+    let count = span / stride.unsigned_abs();
+    // c: "The number of items is "count" + 1 and must fit in "lv_len"."
+    if count >= i32::MAX as u64 {
+        let shown = if count < u64::MAX {
+            count + 1
+        } else {
+            u64::MAX
+        };
+        message::semsg(&format!("E1510: Value too large: {shown}"));
+        return None;
+    }
+    Some(count + 1)
+}
+
+/// `for VAR in range(…)` compiled to a counter loop: stack `start`, `end`,
+/// `stride` (already Numbers). c: `f_range()` (vim 9.2) — E726 for a zero
+/// stride, E727 when `end` is more than one step before `start`, E1510 for
+/// more than `INT_MAX` items — and the `:for` does not run when it fails
+/// (`eval_for_line` leaves the loop inactive). Pushes `Bool(ok)`.
+fn b_range_check(vm: &mut VM, _: u8) -> Value {
+    let stride = tv_get_number_chk(&pop_tv(vm), None);
+    let end = tv_get_number_chk(&pop_tv(vm), None);
+    let start = tv_get_number_chk(&pop_tv(vm), None);
+    Value::Bool(in_callee(|| range_len(start, end, stride)).is_some())
+}
+
 fn b_errs_after(vm: &mut VM, _: u8) -> Value {
     let base = tv_get_number_chk(&pop_tv(vm), None) as u64;
     Value::Bool(message::err_count.with(|c| c.get()) > base)
@@ -7266,6 +7331,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_UNLET_RANGE, b_unlet_range);
     vm.register_builtin(VIML_ERR_COUNT, b_err_count);
     vm.register_builtin(VIML_ERRS_AFTER, b_errs_after);
+    vm.register_builtin(VIML_RANGE_CHECK, b_range_check);
     vm.register_builtin(VIML_MAKE_LAMBDA, b_make_lambda);
     vm.register_builtin(VIML_ECHOERR_ARG, b_echoerr_arg);
     vm.register_builtin(VIML_ECHOERR_END, b_echoerr_end);
