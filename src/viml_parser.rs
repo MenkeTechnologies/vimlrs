@@ -396,7 +396,7 @@ fn parse_stmt_unplaced(line: &str) -> Result<Stmt, VimlError> {
         "defer" => Ok(Stmt::Defer(parse_expr(strip_legacy_trailing_comment(
             rest,
         ))?)),
-        "eval" => Ok(Stmt::Expr(parse_cmd_expr(strip_legacy_trailing_comment(
+        "eval" => Ok(Stmt::Eval(parse_cmd_expr(strip_legacy_trailing_comment(
             rest,
         ))?)),
         // Abbreviations, as explicit sets rather than prefix tests, because the

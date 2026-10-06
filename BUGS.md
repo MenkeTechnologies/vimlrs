@@ -7412,6 +7412,13 @@ first (`E117: Unknown function: nosuch`). A builtin given by name (`sort(l,
 'max')`) was looked up among user functions only; it is now called like any
 function. Parity case: `sort_func_name.vim`.
 
+### R52-10. The exception tag of `:eval` — ✅ FIXED
+
+`:eval` parsed to the generic expression statement, which has no command
+name, so `try | … | eval [1][5]` threw with the previous command's tag. It is
+now its own statement, tagged `Vim(eval):`. Parity case:
+`eval_cmd_exception_tag.vim`.
+
 ### R52-O1. Open, measured this round
 
 - `examples/parse_errors.vim` lines 24-26 expect Neovim's E116 text
@@ -7442,5 +7449,3 @@ function. Parity case: `sort_func_name.vim`.
   Here a failed call is a compare error as well. Matching it needs the lambda
   failure value and `did_emsg` behaviour under `:silent!` (which vim does not
   count), which `sort_comparator.vim` pins.
-- An error inside `:eval` is tagged `Vim(eval)` in vim; here it keeps the
-  previous command's tag (`:eval` parses to the generic expression statement).

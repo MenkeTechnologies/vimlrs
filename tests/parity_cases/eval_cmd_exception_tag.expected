@@ -1,0 +1,7 @@
+0
+Vim(eval):E684: List index out of range: 5
+1
+Vim(eval):E121: Undefined variable: nosuch
+[1, 2]
+Vim(eval):E15: Invalid expression: "1 +"
+Vim(eval):E684: List index out of range: 0 1

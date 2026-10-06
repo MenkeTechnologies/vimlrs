@@ -389,6 +389,9 @@ pub enum Stmt {
     Defer(Expr),
     /// A bare expression (REPL / `-e`).
     Expr(Expr),
+    /// `:eval {expr}` — evaluate and discard; compiled as [`Stmt::Expr`], but an
+    /// error inside it is tagged `Vim(eval):`.
+    Eval(Expr),
 
     /// `:if … :elseif … :else … :endif`. Each arm is `(condition, body)`; the
     /// optional trailing `else` body has no condition.

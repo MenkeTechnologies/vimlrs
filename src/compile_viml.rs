@@ -1037,7 +1037,9 @@ fn slot_plan(stmts: &[(u32, Stmt)], in_function: bool) -> SlotPlan {
                 Stmt::LetList(vs) => vs.iter().for_each(|(_, e)| walk_expr(e, cx)),
                 // `:defer`'s arguments are evaluated where they are written, so
                 // they are walked like any other statement's expression.
-                Stmt::Call(e) | Stmt::Expr(e) | Stmt::Throw(e) | Stmt::Defer(e) => walk_expr(e, cx),
+                Stmt::Call(e) | Stmt::Expr(e) | Stmt::Eval(e) | Stmt::Throw(e) | Stmt::Defer(e) => {
+                    walk_expr(e, cx)
+                }
                 Stmt::Return(Some(e)) => walk_expr(e, cx),
                 Stmt::While { cond, body } => {
                     walk_expr(cond, cx);
@@ -1213,7 +1215,7 @@ fn slot_plan(stmts: &[(u32, Stmt)], in_function: bool) -> SlotPlan {
                     es.iter().for_each(|e| scoped_e(e, in_function, out))
                 }
                 Stmt::LetList(vs) => vs.iter().for_each(|(_, e)| scoped_e(e, in_function, out)),
-                Stmt::Call(e) | Stmt::Expr(e) | Stmt::Throw(e) | Stmt::Defer(e) => {
+                Stmt::Call(e) | Stmt::Expr(e) | Stmt::Eval(e) | Stmt::Throw(e) | Stmt::Defer(e) => {
                     scoped_e(e, in_function, out)
                 }
                 Stmt::Return(Some(e)) => scoped_e(e, in_function, out),
@@ -1311,6 +1313,7 @@ impl Compiler {
             Stmt::Let { .. } => "let",
             Stmt::Const { .. } => "const",
             Stmt::Call(_) => "call",
+            Stmt::Eval(_) => "eval",
             Stmt::Defer(_) => "defer",
             Stmt::Return(_) => "return",
             Stmt::Break(_) => "break",
@@ -1533,7 +1536,7 @@ impl Compiler {
                 self.emit(Op::Pop);
                 Ok(())
             }
-            Stmt::Expr(e) => {
+            Stmt::Expr(e) | Stmt::Eval(e) => {
                 // Mark the error count first (as `:echo` does) so a deferred
                 // `VIML_RAISE` inside the expression can tell whether an
                 // earlier operand already errored — Vim's single-pass eval
