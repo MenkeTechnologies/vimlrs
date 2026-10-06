@@ -8290,10 +8290,20 @@ mod tests {
     /// renames a restored terminal buffer back with `file term://…`.
     #[test]
     fn file_and_terminal_reach_the_host() {
-        for line in ["file term://~//1:cat", "f x.txt", "fil", "terminal cat", "term", "te"] {
+        for line in [
+            "file term://~//1:cat",
+            "f x.txt",
+            "fil",
+            "terminal cat",
+            "term",
+            "te",
+        ] {
             assert!(is_host_editor_cmd(line), "{line}");
         }
-        assert!(!is_host_editor_cmd("filetype on"), "`:filetype` is not `:file`");
+        assert!(
+            !is_host_editor_cmd("filetype on"),
+            "`:filetype` is not `:file`"
+        );
     }
 
     /// `store_session_globals`: what nvim 0.12 writes for these globals with
@@ -8327,9 +8337,14 @@ mod tests {
     #[test]
     fn buf_option_hook_answers_for_the_host_buffer() {
         assert_eq!(run("echo &buftype == ''").trim(), "1");
-        install_buf_option_hook(Box::new(|name| (name == "buftype").then(|| "terminal".to_string())));
+        install_buf_option_hook(Box::new(|name| {
+            (name == "buftype").then(|| "terminal".to_string())
+        }));
         assert_eq!(run("echo &buftype &bt").trim(), "terminal terminal");
-        assert_eq!(run("if &buftype ==# 'terminal' | echo 'yes' | endif").trim(), "yes");
+        assert_eq!(
+            run("if &buftype ==# 'terminal' | echo 'yes' | endif").trim(),
+            "yes"
+        );
         assert_eq!(run("echo &fileformat").trim(), "unix");
         crate::ported::option::BUF_OPTION_HOOK.with(|h| *h.borrow_mut() = None);
     }
