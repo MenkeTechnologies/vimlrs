@@ -2476,7 +2476,8 @@ fn vim_vsnprintf_typval(argvars: &[typval_T], rettv: &mut typval_T) {
         }
     };
     rettv.v_type = VAR_STRING;
-    let fmt = tv_get_string(&argvars[0]);
+    let fmt_raw = tv_get_string_buf_chk(&argvars[0]).unwrap_or_default();
+    let fmt = fmt_raw.to_string();
     // c (`vim_vsnprintf_typval` → `parse_fmt_types`, Src/strings.c:1101):
     // `$`-style (positional) conversions are validated in a pre-pass over the
     // whole format before anything renders — E1500 (mixed), E1501 (unused
@@ -2489,8 +2490,8 @@ fn vim_vsnprintf_typval(argvars: &[typval_T], rettv: &mut typval_T) {
         rettv.vval = v_string(VimStr::new());
         return;
     }
-    let bytes: Vec<char> = fmt.chars().collect();
-    let mut out = String::new();
+    let bytes: &[u8] = fmt_raw.as_bytes();
+    let mut out: Vec<u8> = Vec::new();
     let mut i = 0usize;
     let mut arg = 1usize;
     // c (`vim_vsnprintf_typval`, via `tvs_get_number`/`tvs_get_string`): reading
@@ -2500,7 +2501,7 @@ fn vim_vsnprintf_typval(argvars: &[typval_T], rettv: &mut typval_T) {
     let mut missing = false;
     let mut used_max = 0usize;
     while i < bytes.len() {
-        if bytes[i] != '%' {
+        if bytes[i] != b'%' {
             out.push(bytes[i]);
             i += 1;
             continue;
@@ -2515,11 +2516,11 @@ fn vim_vsnprintf_typval(argvars: &[typval_T], rettv: &mut typval_T) {
             let mut n = 0usize;
             let mut got = false;
             while i < bytes.len() && bytes[i].is_ascii_digit() {
-                n = n * 10 + (bytes[i] as usize - '0' as usize);
+                n = n * 10 + (bytes[i] - b'0') as usize;
                 got = true;
                 i += 1;
             }
-            if got && i < bytes.len() && bytes[i] == '$' {
+            if got && i < bytes.len() && bytes[i] == b'$' {
                 i += 1; // past '$'
                 explicit_idx = Some(n);
             } else {
@@ -2532,13 +2533,13 @@ fn vim_vsnprintf_typval(argvars: &[typval_T], rettv: &mut typval_T) {
         let mut plus = false;
         let mut space = false;
         let mut alt = false; // `#` alternate form
-        while i < bytes.len() && matches!(bytes[i], '-' | '0' | '+' | ' ' | '#') {
+        while i < bytes.len() && matches!(bytes[i], b'-' | b'0' | b'+' | b' ' | b'#') {
             match bytes[i] {
-                '-' => left = true,
-                '0' => zero = true,
-                '+' => plus = true,
-                ' ' => space = true,
-                '#' => alt = true,
+                b'-' => left = true,
+                b'0' => zero = true,
+                b'+' => plus = true,
+                b' ' => space = true,
+                b'#' => alt = true,
                 _ => {}
             }
             i += 1;
@@ -2547,7 +2548,7 @@ fn vim_vsnprintf_typval(argvars: &[typval_T], rettv: &mut typval_T) {
         // or, c (`skip_to_arg`): `*N$` takes it from positional argument N. A
         // negative value means left-justify, as in C.
         let mut width = 0usize;
-        if i < bytes.len() && bytes[i] == '*' {
+        if i < bytes.len() && bytes[i] == b'*' {
             i += 1;
             let mut wsrc = arg;
             let mut positional_w = false;
@@ -2556,11 +2557,11 @@ fn vim_vsnprintf_typval(argvars: &[typval_T], rettv: &mut typval_T) {
                 let mut n = 0usize;
                 let mut got = false;
                 while i < bytes.len() && bytes[i].is_ascii_digit() {
-                    n = n * 10 + (bytes[i] as usize - '0' as usize);
+                    n = n * 10 + (bytes[i] - b'0') as usize;
                     got = true;
                     i += 1;
                 }
-                if got && i < bytes.len() && bytes[i] == '$' {
+                if got && i < bytes.len() && bytes[i] == b'$' {
                     i += 1;
                     wsrc = n;
                     positional_w = true;
@@ -2590,16 +2591,16 @@ fn vim_vsnprintf_typval(argvars: &[typval_T], rettv: &mut typval_T) {
             }
         } else {
             while i < bytes.len() && bytes[i].is_ascii_digit() {
-                width = width * 10 + (bytes[i] as usize - '0' as usize);
+                width = width * 10 + (bytes[i] - b'0') as usize;
                 i += 1;
             }
         }
         // Precision. `.*` takes the precision from the next argument — or,
         // c (`skip_to_arg`): `.*N$` from positional argument N.
         let mut prec: Option<usize> = None;
-        if i < bytes.len() && bytes[i] == '.' {
+        if i < bytes.len() && bytes[i] == b'.' {
             i += 1;
-            if i < bytes.len() && bytes[i] == '*' {
+            if i < bytes.len() && bytes[i] == b'*' {
                 i += 1;
                 let mut psrc = arg;
                 let mut positional_p = false;
@@ -2608,11 +2609,11 @@ fn vim_vsnprintf_typval(argvars: &[typval_T], rettv: &mut typval_T) {
                     let mut n = 0usize;
                     let mut got = false;
                     while i < bytes.len() && bytes[i].is_ascii_digit() {
-                        n = n * 10 + (bytes[i] as usize - '0' as usize);
+                        n = n * 10 + (bytes[i] - b'0') as usize;
                         got = true;
                         i += 1;
                     }
-                    if got && i < bytes.len() && bytes[i] == '$' {
+                    if got && i < bytes.len() && bytes[i] == b'$' {
                         i += 1;
                         psrc = n;
                         positional_p = true;
@@ -2638,7 +2639,7 @@ fn vim_vsnprintf_typval(argvars: &[typval_T], rettv: &mut typval_T) {
             } else {
                 let mut p = 0usize;
                 while i < bytes.len() && bytes[i].is_ascii_digit() {
-                    p = p * 10 + (bytes[i] as usize - '0' as usize);
+                    p = p * 10 + (bytes[i] - b'0') as usize;
                     i += 1;
                 }
                 prec = Some(p);
@@ -2671,10 +2672,10 @@ fn vim_vsnprintf_typval(argvars: &[typval_T], rettv: &mut typval_T) {
         // `%zd` formats in nvim but is "unknown" in Vim — and this engine is
         // ported from Neovim, so it follows nvim here.
         let length_modifier = match bytes.get(i).copied() {
-            Some('h' | 'l' | 'z') => {
-                let m = bytes[i] as u8;
+            Some(b'h' | b'l' | b'z') => {
+                let m = bytes[i];
                 i += 1;
-                if m == b'l' && bytes.get(i) == Some(&'l') {
+                if m == b'l' && bytes.get(i) == Some(&b'l') {
                     i += 1;
                     b'L'
                 } else {
@@ -2683,13 +2684,19 @@ fn vim_vsnprintf_typval(argvars: &[typval_T], rettv: &mut typval_T) {
             }
             _ => 0u8,
         };
-        let Some(conv) = bytes.get(i).copied() else {
-            out.push('%');
+        let Some(conv_b) = bytes.get(i).copied() else {
+            out.push(b'%');
             break;
         };
-        i += 1;
+        let conv = conv_b as char;
+        // c (default case): an unrecognized conversion keeps the whole
+        // character, `utfc_ptr2len(p)` bytes of it.
+        let conv_len = (crate::ported::mbyte::utfc_ptr2len(&bytes[i..]).max(1) as usize)
+            .min(bytes.len() - i);
+        let conv_text = &bytes[i..i + conv_len];
+        i += conv_len;
         if conv == '%' {
-            out.push('%');
+            out.push(b'%');
             continue;
         }
         // c (`vim_vsnprintf_typval` default case, via `format_typeof`): a
@@ -2705,11 +2712,11 @@ fn vim_vsnprintf_typval(argvars: &[typval_T], rettv: &mut typval_T) {
             b'L' => type_bytes.extend_from_slice(b"ll"),
             m => type_bytes.push(m),
         }
-        type_bytes.push(conv as u8);
+        type_bytes.push(conv_b);
         if crate::ported::strings::format_typeof(&type_bytes)
             == crate::ported::strings::FormatType::Unknown
         {
-            out.push(conv);
+            out.extend_from_slice(conv_text);
             continue;
         }
         // c (`format_typeof` synonyms): `%D`/`%U`/`%O` are the old long-int
@@ -2759,41 +2766,59 @@ fn vim_vsnprintf_typval(argvars: &[typval_T], rettv: &mut typval_T) {
                 "inf".to_string()
             }
         };
+        // c: `%c`|        // c: `%c`, `%s` and `%S` render BYTES (`str_arg`/`str_arg_l`), and the
+        // shared padding code fills a right-justified field with
+        // `zero_padding ? '0' : ' '` — the `0` flag applies to them as well
+        // (`printf('%05s', 'ab')` is `000ab`).
+        if matches!(conv, 'c' | 's' | 'S') {
+            // c: `%s`/`%S` fetch the argument through `tv_str()`, which for a
+            // non-string typval returns `encode_tv2echo()` — so List/Dict/
+            // Funcref/Blob stringify instead of raising E730. `%c` is
+            // `char_arg = (char)tvs_get_number(…)`: ONE byte, the value
+            // truncated, and the precision does not apply.
+            let text: Vec<u8> = if conv == 'c' {
+                vec![cur.map_or(0, |t| printf_nr(t)) as u8]
+            } else {
+                cur.map(encode_tv2echo).unwrap_or_default().as_bytes().to_vec()
+            };
+            let (len, visible) = match (conv, prec) {
+                ('c', _) => (1, 1),
+                // c: `%S` takes whole characters while their cells fit the
+                // precision, and the width then counts cells
+                // (`min_field_width += str_arg_l - i`).
+                ('S', _) => {
+                    let (mut p, mut cells) = (0usize, 0usize);
+                    while p < text.len() && text[p] != 0 {
+                        let cell = crate::ported::mbyte::utf_ptr2cells(&text[p..]) as usize;
+                        if prec.is_some_and(|pr| cells + cell > pr) {
+                            break;
+                        }
+                        cells += cell;
+                        p = (p + crate::ported::mbyte::utfc_ptr2len(&text[p..]).max(1) as usize)
+                            .min(text.len());
+                    }
+                    (p, cells)
+                }
+                // c: `str_arg_l = xstrnlen(str_arg, precision)` — a byte count,
+                // which may end inside a character.
+                (_, Some(p)) => (text.len().min(p), text.len().min(p)),
+                (_, None) => (text.len(), text.len()),
+            };
+            if explicit_idx.is_none() {
+                arg += 1;
+            }
+            let pad = width.saturating_sub(visible);
+            if !left {
+                out.extend(std::iter::repeat(if zero { b'0' } else { b' ' }).take(pad));
+            }
+            out.extend_from_slice(&text[..len]);
+            if left {
+                out.extend(std::iter::repeat(b' ').take(pad));
+            }
+            continue;
+        }
         let core = match conv {
             'd' | 'i' => cur.map_or(0, |t| printf_nr(t)).to_string(),
-            // c: `%s`/`%S` fetch the argument through `tv_str()`, which for a
-            // non-string typval returns `encode_tv2echo()` — so List/Dict/Funcref/
-            // Blob stringify (`[1, 2, 3]`, `{'a': 1}`, `type`) instead of raising
-            // E730 as `tv_get_string_buf_chk` would. `%S` differs from `%s` only in
-            // that width/precision count screen cells; the value renders the same.
-            's' | 'S' => {
-                let mut s = cur.map(encode_tv2echo).unwrap_or_default().to_string();
-                if let (Some(p), 'S') = (prec, conv) {
-                    // c: for `%S` the precision is in screen cells: whole
-                    // characters are taken while their cells fit
-                    // (`printf('%.1S', 'éa')` is `é`).
-                    let mut cells = 0usize;
-                    let end = s
-                        .char_indices()
-                        .find(|&(_, ch)| {
-                            cells += crate::ported::mbyte::utf_char2cells(ch as i32) as usize;
-                            cells > p
-                        })
-                        .map_or(s.len(), |(i, _)| i);
-                    s.truncate(end);
-                } else if let Some(p) = prec {
-                    // c: precision caps the byte count; keep it a char boundary so
-                    // multi-byte container output never splits mid-codepoint.
-                    if s.len() > p {
-                        let mut end = p;
-                        while end > 0 && !s.is_char_boundary(end) {
-                            end -= 1;
-                        }
-                        s.truncate(end);
-                    }
-                }
-                s
-            }
             'f' | 'F' => {
                 let v = cur.map_or(0.0, tv_get_float);
                 if !v.is_finite() {
@@ -2809,12 +2834,6 @@ fn vim_vsnprintf_typval(argvars: &[typval_T], rettv: &mut typval_T) {
             'o' => format!("{:o}", cur.map_or(0, |t| printf_nr(t))),
             'b' | 'B' => format!("{:b}", cur.map_or(0, |t| printf_nr(t))),
             'u' => (cur.map_or(0, |t| printf_nr(t)) as u64).to_string(),
-            'c' => {
-                // c: `%c` emits a single byte — the value truncated to `char`
-                // (`str[0] = (char)uj`), i.e. `value & 0xFF`.
-                let byte = (cur.map_or(0, |t| printf_nr(t)) & 0xFF) as u32;
-                char::from_u32(byte).unwrap_or('\u{0}').to_string()
-            }
             'g' | 'G' => {
                 // C `%g`: `prec` significant digits (default 6), trailing zeros
                 // stripped, `%e`/`%f` chosen by exponent.
@@ -2855,9 +2874,9 @@ fn vim_vsnprintf_typval(argvars: &[typval_T], rettv: &mut typval_T) {
                     }
                 }
             }
-            other => {
-                out.push('%');
-                out.push(other);
+            _ => {
+                out.push(b'%');
+                out.extend_from_slice(conv_text);
                 continue;
             }
         };
@@ -2925,34 +2944,26 @@ fn vim_vsnprintf_typval(argvars: &[typval_T], rettv: &mut typval_T) {
         } else {
             ("", core)
         };
-        // Pad to width (width counts the sign). c: `%s` width is the byte length
-        // (`strlen`); `%S` counts screen cells (`mb_string2cells`); numeric
-        // conversions are ASCII so bytes and cells coincide.
-        let visible = if conv == 'S' {
-            core.chars()
-                .map(|ch| crate::ported::mbyte::utf_char2cells(ch as i32) as usize)
-                .sum()
-        } else {
-            core.len()
-        };
-        let len = sign.len() + visible;
+        // Pad to width (width counts the sign). The numeric conversions are
+        // ASCII, so their byte length is their width.
+        let len = sign.len() + core.len();
         if len >= width {
-            out.push_str(sign);
-            out.push_str(&core);
+            out.extend_from_slice(sign.as_bytes());
+            out.extend_from_slice(core.as_bytes());
         } else {
             let pad = width - len;
             if left {
-                out.push_str(sign);
-                out.push_str(&core);
-                out.extend(std::iter::repeat(' ').take(pad));
-            } else if zero && conv != 's' {
-                out.push_str(sign);
-                out.extend(std::iter::repeat('0').take(pad));
-                out.push_str(&core);
+                out.extend_from_slice(sign.as_bytes());
+                out.extend_from_slice(core.as_bytes());
+                out.extend(std::iter::repeat(b' ').take(pad));
+            } else if zero {
+                out.extend_from_slice(sign.as_bytes());
+                out.extend(std::iter::repeat(b'0').take(pad));
+                out.extend_from_slice(core.as_bytes());
             } else {
-                out.extend(std::iter::repeat(' ').take(pad));
-                out.push_str(sign);
-                out.push_str(&core);
+                out.extend(std::iter::repeat(b' ').take(pad));
+                out.extend_from_slice(sign.as_bytes());
+                out.extend_from_slice(core.as_bytes());
             }
         }
     }
@@ -2969,6 +2980,11 @@ fn vim_vsnprintf_typval(argvars: &[typval_T], rettv: &mut typval_T) {
         emsg("E767: Too many arguments to printf()");
         rettv.vval = v_string(VimStr::new());
         return;
+    }
+    // c: `f_printf` stores the buffer as a C string, so a NUL written by `%c`
+    // ends the value there (`printf('%c|', 0)` is the empty string).
+    if let Some(nul) = out.iter().position(|&b| b == 0) {
+        out.truncate(nul);
     }
     rettv.vval = v_string(out.into());
 }
