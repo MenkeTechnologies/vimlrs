@@ -278,8 +278,9 @@ pub const VIML_LET_LIST_ONE: u16 = 3615;
 /// `:for` — the value the loop walks, computed once from `{object}`. Port of
 /// `eval_for_line()`'s type switch plus `next_for_item()`'s String step
 /// (`vendor/eval.c:1466-1497`, `1527-1536`): a String becomes the List of its
-/// `utfc_ptr2len` pieces (a base character with its composing marks), a List or
-/// Blob is walked as it is, and anything else is `E1098` with nothing to walk.
+/// `utfc_ptr2len` pieces (a base character with its composing marks), a List is
+/// walked as it is, a Blob is walked as a copy taken here (c:1482), and
+/// anything else is `E1098` with nothing to walk.
 /// Stack: the object.
 pub const VIML_FOR_ITEMS: u16 = 3616;
 /// `:const` — push `Bool(NAME may be bound)`, having reported E995 if a
@@ -2990,7 +2991,19 @@ fn b_const_free(vm: &mut VM, _: u8) -> Value {
 fn b_for_items(vm: &mut VM, _: u8) -> Value {
     let tv = pop_tv(vm);
     match (tv.v_type, &tv.vval) {
-        (VAR_LIST | VAR_BLOB, _) => tv_to_value(tv),
+        (VAR_LIST, _) => tv_to_value(tv),
+        // c:1478-1482 "Make a copy, so that the iteration still works when the
+        // blob is changed." A NULL blob walks as it is: nothing.
+        (VAR_BLOB, v_blob(Some(b))) => {
+            let mut btv = typval_T {
+                v_type: VAR_BLOB,
+                v_lock: VAR_UNLOCKED,
+                vval: v_blob(None),
+            };
+            crate::ported::eval::typval::tv_blob_copy(Some(b), &mut btv);
+            tv_to_value(btv)
+        }
+        (VAR_BLOB, _) => tv_to_value(tv),
         (VAR_STRING, v_string(s)) => {
             let bytes = s.as_bytes();
             let l = tv_list_alloc(-1);

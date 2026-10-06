@@ -1,0 +1,28 @@
+1
+a|é|b|
+é 3
+x 1
+x
+y
+changed
+1
+2
+3
+0z010209
+1
+2
+3
+1 2
+3 4
+1 [2, 3]
+4 []
+1 2 []
+3 4 [5]
+1 2
+E688: More targets than List items
+after short item
+1 2
+E687: Less targets than List items
+after long item
+not iterable
+done

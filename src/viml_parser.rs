@@ -3995,7 +3995,28 @@ impl Parser {
             }
         }
         self.check_number_junk();
+        let number_literal = matches!(self.peek(), Tok::Number(_) | Tok::Float(_));
         let mut e = self.primary()?;
+        // c: the number case of eval7 — "Apply prefixed "-" and "+" now.
+        // Matters especially when "->" follows." `eval7_leader(…, numeric_only
+        // = true, …)` walks the leaders right to left and stops at the first
+        // `!`, so `-1->abs()` is `abs(-1)` and `!-1->abs()` is `!abs(-1)`.
+        if number_literal {
+            while let Some(&op) = leaders.last() {
+                match op {
+                    UnaryOp::Not => break,
+                    UnaryOp::Neg => {
+                        e = Expr::Unary {
+                            op,
+                            expr: Box::new(e),
+                        }
+                    }
+                    // `+` changes nothing about a number it is applied to.
+                    UnaryOp::Plus => {}
+                }
+                leaders.pop();
+            }
+        }
         e = self.postfix(e)?;
         for op in leaders.into_iter().rev() {
             e = Expr::Unary {
@@ -4263,6 +4284,37 @@ impl Parser {
                 }
                 Tok::Arrow => {
                     self.advance();
+                    // c: `eval_lambda()` — `expr->{args -> body}(more)` calls the
+                    // lambda with `expr` prepended to the arguments.
+                    if matches!(self.peek(), Tok::LBrace) {
+                        self.advance();
+                        if !self.at_lambda() {
+                            return Err(self.invexpr());
+                        }
+                        let callee = self.lambda()?;
+                        if !matches!(self.peek(), Tok::LParen) {
+                            // c: `semsg(_(e_missingparen), "lambda")`.
+                            return Err(VimlError::msg("E107: Missing parentheses: lambda"));
+                        }
+                        if !self.lparen_abuts_prev() {
+                            // c: `emsg(_(e_nowhitespace))`.
+                            return Err(VimlError::msg(
+                                "E274: No white space allowed before parenthesis",
+                            ));
+                        }
+                        self.advance();
+                        let mut args = vec![base];
+                        args.extend(self.arg_list(
+                            &Tok::RParen,
+                            "E116: Invalid arguments for function",
+                            "E15: Invalid expression: \"%s\"",
+                        )?);
+                        base = Expr::CallExpr {
+                            callee: Box::new(callee),
+                            args,
+                        };
+                        continue;
+                    }
                     let name = match self.advance() {
                         Tok::Ident(n) => n,
                         _ => return Err(self.invexpr()),
