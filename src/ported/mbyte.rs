@@ -14,7 +14,9 @@
 //! tables, because Neovim's answer to the same question is a utf8proc property
 //! query and utf8proc is not a dependency of this crate.
 //!
-//! Not ported: iconv.
+//! The encoding-name tables, `enc_canonize()` and the conversion `iconv()` is
+//! built on are ported at the end; a conversion that is not latin1/latin9 <->
+//! UTF-8 goes through the C library's iconv(3), as in the C.
 //!
 //! RUST-PORT NOTE: C walks `const char *` pointers into a NUL-terminated buffer,
 //! so reads past the last byte land on the terminating NUL (`0x00`). Here the
@@ -1381,4 +1383,606 @@ mod tests {
         assert_eq!(utf_class_tab(0x2fa1f), 0x4e00); // last CJK interval, last cp
         assert_eq!(utf_class_tab(0x2fa20), 2); // one past it
     }
+}
+
+// ── encoding names and conversion (`vendor/mbyte.c:146-2850`) ──────────────
+//
+// The canonical-name table, the alias table, `enc_canonize()`, and the
+// converter `iconv()` (the Vimscript function) is built on: an internal
+// latin1/latin9 ↔ UTF-8 conversion, everything else through the C library's
+// iconv(3) exactly as the C calls it.
+
+/// `ENC_*` property bits of an encoding (`mbyte_defs.h`).
+pub const ENC_8BIT: i32 = 0x01;
+pub const ENC_DBCS: i32 = 0x02;
+pub const ENC_UNICODE: i32 = 0x04;
+pub const ENC_ENDIAN_B: i32 = 0x10;
+pub const ENC_ENDIAN_L: i32 = 0x20;
+pub const ENC_2BYTE: i32 = 0x40;
+pub const ENC_4BYTE: i32 = 0x80;
+pub const ENC_2WORD: i32 = 0x100;
+pub const ENC_LATIN1: i32 = 0x200;
+pub const ENC_LATIN9: i32 = 0x400;
+pub const ENC_MACROMAN: i32 = 0x800;
+
+/// Port of `enc_canon_table[]` (`vendor/mbyte.c:151`): canonical name and
+/// properties. The codepage column is Windows-only and not carried.
+const enc_canon_table: &[(&str, i32)] = &[
+    ("latin1", ENC_8BIT + ENC_LATIN1),
+    ("iso-8859-2", ENC_8BIT),
+    ("iso-8859-3", ENC_8BIT),
+    ("iso-8859-4", ENC_8BIT),
+    ("iso-8859-5", ENC_8BIT),
+    ("iso-8859-6", ENC_8BIT),
+    ("iso-8859-7", ENC_8BIT),
+    ("iso-8859-8", ENC_8BIT),
+    ("iso-8859-9", ENC_8BIT),
+    ("iso-8859-10", ENC_8BIT),
+    ("iso-8859-11", ENC_8BIT),
+    ("iso-8859-13", ENC_8BIT),
+    ("iso-8859-14", ENC_8BIT),
+    ("iso-8859-15", ENC_8BIT + ENC_LATIN9),
+    ("koi8-r", ENC_8BIT),
+    ("koi8-u", ENC_8BIT),
+    ("utf-8", ENC_UNICODE),
+    ("ucs-2", ENC_UNICODE + ENC_ENDIAN_B + ENC_2BYTE),
+    ("ucs-2le", ENC_UNICODE + ENC_ENDIAN_L + ENC_2BYTE),
+    ("utf-16", ENC_UNICODE + ENC_ENDIAN_B + ENC_2WORD),
+    ("utf-16le", ENC_UNICODE + ENC_ENDIAN_L + ENC_2WORD),
+    ("ucs-4", ENC_UNICODE + ENC_ENDIAN_B + ENC_4BYTE),
+    ("ucs-4le", ENC_UNICODE + ENC_ENDIAN_L + ENC_4BYTE),
+    ("debug", ENC_DBCS),
+    ("euc-jp", ENC_DBCS),
+    ("sjis", ENC_DBCS),
+    ("euc-kr", ENC_DBCS),
+    ("euc-cn", ENC_DBCS),
+    ("euc-tw", ENC_DBCS),
+    ("big5", ENC_DBCS),
+    ("cp437", ENC_8BIT),
+    ("cp737", ENC_8BIT),
+    ("cp775", ENC_8BIT),
+    ("cp850", ENC_8BIT),
+    ("cp852", ENC_8BIT),
+    ("cp855", ENC_8BIT),
+    ("cp857", ENC_8BIT),
+    ("cp860", ENC_8BIT),
+    ("cp861", ENC_8BIT),
+    ("cp862", ENC_8BIT),
+    ("cp863", ENC_8BIT),
+    ("cp865", ENC_8BIT),
+    ("cp866", ENC_8BIT),
+    ("cp869", ENC_8BIT),
+    ("cp874", ENC_8BIT),
+    ("cp932", ENC_DBCS),
+    ("cp936", ENC_DBCS),
+    ("cp949", ENC_DBCS),
+    ("cp950", ENC_DBCS),
+    ("cp1250", ENC_8BIT),
+    ("cp1251", ENC_8BIT),
+    ("cp1253", ENC_8BIT),
+    ("cp1254", ENC_8BIT),
+    ("cp1255", ENC_8BIT),
+    ("cp1256", ENC_8BIT),
+    ("cp1257", ENC_8BIT),
+    ("cp1258", ENC_8BIT),
+    ("macroman", ENC_8BIT + ENC_MACROMAN),
+    ("hp-roman8", ENC_8BIT),
+];
+
+/// Port of `enc_alias_table[]` (`vendor/mbyte.c:274`): alias → index into
+/// [`enc_canon_table`].
+const enc_alias_table: &[(&str, usize)] = &[
+    ("ansi", 0),
+    ("iso-8859-1", 0),
+    ("latin2", 1),
+    ("latin3", 2),
+    ("latin4", 3),
+    ("cyrillic", 4),
+    ("arabic", 5),
+    ("greek", 6),
+    ("hebrew", 7),
+    ("latin5", 8),
+    ("turkish", 8),
+    ("latin6", 9),
+    ("nordic", 9),
+    ("thai", 10),
+    ("latin7", 11),
+    ("latin8", 12),
+    ("latin9", 13),
+    ("utf8", 16),
+    ("unicode", 17),
+    ("ucs2", 17),
+    ("ucs2be", 17),
+    ("ucs-2be", 17),
+    ("ucs2le", 18),
+    ("utf16", 19),
+    ("utf16be", 19),
+    ("utf-16be", 19),
+    ("utf16le", 20),
+    ("ucs4", 21),
+    ("ucs4be", 21),
+    ("ucs-4be", 21),
+    ("ucs4le", 22),
+    ("utf32", 21),
+    ("utf-32", 21),
+    ("utf32be", 21),
+    ("utf-32be", 21),
+    ("utf32le", 22),
+    ("utf-32le", 22),
+    ("932", 45),
+    ("949", 47),
+    ("936", 46),
+    ("gbk", 46),
+    ("950", 48),
+    ("eucjp", 24),
+    ("unix-jis", 24),
+    ("ujis", 24),
+    ("shift-jis", 25),
+    ("pck", 25),
+    ("euckr", 26),
+    ("5601", 26),
+    ("euccn", 27),
+    ("gb2312", 27),
+    ("euctw", 28),
+    ("japan", 24),
+    ("korea", 26),
+    ("prc", 27),
+    ("zh-cn", 27),
+    ("chinese", 27),
+    ("zh-tw", 28),
+    ("taiwan", 28),
+    ("cp950", 29),
+    ("950", 29),
+    ("mac", 57),
+    ("mac-roman", 57),
+];
+
+/// Port of `enc_canon_search()` (`vendor/mbyte.c:353`).
+fn enc_canon_search(name: &str) -> Option<usize> {
+    enc_canon_table.iter().position(|&(n, _)| n == name)
+}
+
+/// Port of `enc_canon_props()` (`vendor/mbyte.c:366`): the properties of a
+/// canonical encoding name, 0 when it is not known.
+pub fn enc_canon_props(name: &str) -> i32 {
+    if let Some(i) = enc_canon_search(name) {
+        enc_canon_table[i].1
+    } else if name.starts_with("2byte-") {
+        ENC_DBCS
+    } else if name.starts_with("8bit-") || name.starts_with("iso-8859-") {
+        ENC_8BIT
+    } else {
+        0
+    }
+}
+
+/// Port of `enc_skip()` (`vendor/mbyte.c:2313`): skip vim's `2byte-`/`8bit-`
+/// head of an encoding name.
+pub fn enc_skip(p: &str) -> &str {
+    p.strip_prefix("2byte-")
+        .or_else(|| p.strip_prefix("8bit-"))
+        .unwrap_or(p)
+}
+
+/// Port of `enc_alias_search()` (`vendor/mbyte.c:2389`).
+fn enc_alias_search(name: &str) -> Option<usize> {
+    enc_alias_table
+        .iter()
+        .find(|&&(n, _)| n == name)
+        .map(|&(_, i)| i)
+}
+
+/// Port of `enc_canonize()` (`vendor/mbyte.c:2329`): the canonical name for
+/// `enc` — lower case, `_` → `-`, `2byte-`/`8bit-` and `microsoft-` dropped,
+/// `iso8859n` → `iso-8859-n`, `latin-N` → `latinN`, an alias resolved. A name
+/// that is not recognized comes back with only those edits.
+pub fn enc_canonize(enc: &str) -> String {
+    if enc == "default" {
+        // c: `fenc_default`, set from `enc_locale()` by `set_init_1()`.
+        return enc_locale().unwrap_or_else(|| "latin1".to_string());
+    }
+    let r: String = enc
+        .chars()
+        .map(|c| {
+            if c == '_' {
+                '-'
+            } else {
+                c.to_ascii_lowercase()
+            }
+        })
+        .collect();
+    let skipped = r.len() - enc_skip(&r).len();
+    let (head, p) = r.split_at(skipped);
+    let mut p = p.to_string();
+    if let Some(rest) = p.strip_prefix("microsoft-cp") {
+        p = format!("cp{rest}");
+    }
+    if let Some(rest) = p.strip_prefix("iso8859") {
+        p = format!("iso-8859{rest}");
+    }
+    if p.starts_with("iso-8859") && p.as_bytes().get(8) != Some(&b'-') {
+        p = format!("iso-8859-{}", &p[8..]);
+    }
+    if let Some(rest) = p.strip_prefix("latin-") {
+        p = format!("latin{rest}");
+    }
+    if enc_canon_search(&p).is_some() {
+        p
+    } else if let Some(i) = enc_alias_search(&p) {
+        enc_canon_table[i].0.to_string()
+    } else {
+        format!("{head}{p}")
+    }
+}
+
+/// Port of `enc_locale()` (`vendor/mbyte.c:2405`): the canonical encoding of
+/// the current locale, from `nl_langinfo(CODESET)` or else the locale name.
+pub fn enc_locale() -> Option<String> {
+    // SAFETY: nl_langinfo/setlocale return pointers to static NUL-terminated
+    // strings (or NULL), read immediately.
+    let cstr = |p: *const libc::c_char| -> Option<String> {
+        if p.is_null() {
+            return None;
+        }
+        let s = unsafe { std::ffi::CStr::from_ptr(p) }
+            .to_string_lossy()
+            .into_owned();
+        (!s.is_empty()).then_some(s)
+    };
+    let s = cstr(unsafe { libc::nl_langinfo(libc::CODESET) })
+        .or_else(|| cstr(unsafe { libc::setlocale(libc::LC_CTYPE, std::ptr::null()) }))
+        .or_else(|| {
+            ["LC_ALL", "LC_CTYPE", "LANG"]
+                .iter()
+                .find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()))
+        })?;
+    let b = s.as_bytes();
+    let mut buf = String::new();
+    let copy_from = match s.find('.') {
+        // c: "ja_JP.EUC" → "euc-jp" and the like.
+        Some(dot)
+            if dot > 2
+                && b.get(dot + 1..dot + 4)
+                    .is_some_and(|e| e.eq_ignore_ascii_case(b"EUC"))
+                && !b
+                    .get(dot + 4)
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'-')
+                && b[dot - 3] == b'_' =>
+        {
+            buf.push_str("euc-");
+            for c in [b[dot - 2], b[dot - 1]] {
+                if c.is_ascii_alphanumeric() {
+                    buf.push(c.to_ascii_lowercase() as char);
+                }
+            }
+            None
+        }
+        Some(dot) => Some(dot + 1),
+        None => Some(0),
+    };
+    if let Some(from) = copy_from {
+        for &c in b[from..].iter().take(49) {
+            match c {
+                b'_' | b'-' => buf.push('-'),
+                c if c.is_ascii_alphanumeric() => buf.push(c.to_ascii_lowercase() as char),
+                _ => break,
+            }
+        }
+    }
+    Some(enc_canonize(&buf))
+}
+
+/// An iconv(3) conversion descriptor.
+#[allow(non_camel_case_types)]
+pub type iconv_t = *mut libc::c_void;
+
+// iconv(3) itself: part of the C library on glibc and musl, `libiconv` on
+// macOS (the system copy in /usr/lib).
+#[cfg_attr(target_os = "macos", link(name = "iconv"))]
+extern "C" {
+    fn iconv_open(tocode: *const libc::c_char, fromcode: *const libc::c_char) -> iconv_t;
+    fn iconv(
+        cd: iconv_t,
+        inbuf: *mut *mut libc::c_char,
+        inbytesleft: *mut libc::size_t,
+        outbuf: *mut *mut libc::c_char,
+        outbytesleft: *mut libc::size_t,
+    ) -> libc::size_t;
+    fn iconv_close(cd: iconv_t) -> libc::c_int;
+}
+
+/// `vimconv_T.vc_type` (`mbyte_defs.h`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ConvType {
+    CONV_NONE,
+    CONV_TO_UTF8,
+    CONV_9_TO_UTF8,
+    CONV_TO_LATIN1,
+    CONV_TO_LATIN9,
+    CONV_ICONV,
+}
+
+/// Port of `vimconv_T` (`mbyte_defs.h`): one prepared conversion. The iconv
+/// descriptor is closed when the value is dropped (the C's
+/// `convert_setup(&vimconv, NULL, NULL)`).
+pub struct vimconv_T {
+    pub vc_type: ConvType,
+    pub vc_fail: bool,
+    vc_fd: Option<iconv_t>,
+}
+
+impl Drop for vimconv_T {
+    fn drop(&mut self) {
+        if let Some(fd) = self.vc_fd.take() {
+            // SAFETY: `fd` came from a successful iconv_open and is closed once.
+            unsafe { iconv_close(fd) };
+        }
+    }
+}
+
+thread_local! {
+    /// c: `my_iconv_open`'s `static WorkingStatus iconv_working`:
+    /// `None` unknown, `Some(true)` working, `Some(false)` broken.
+    static iconv_working: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Port of `my_iconv_open()` (`vendor/mbyte.c:2472`): `iconv_open()`, plus a
+/// one-time probe for the broken glibc iconv whose output pointer comes back
+/// NULL.
+fn my_iconv_open(to: &str, from: &str) -> Option<iconv_t> {
+    if iconv_working.with(|w| w.get()) == Some(false) {
+        return None;
+    }
+    let to = std::ffi::CString::new(enc_skip(to)).ok()?;
+    let from = std::ffi::CString::new(enc_skip(from)).ok()?;
+    // SAFETY: both arguments are valid NUL-terminated strings.
+    let fd = unsafe { iconv_open(to.as_ptr(), from.as_ptr()) };
+    if fd as isize == -1 {
+        return None;
+    }
+    if iconv_working.with(|w| w.get()).is_none() {
+        let mut tobuf = [0 as libc::c_char; 400];
+        let mut p = tobuf.as_mut_ptr();
+        let mut tolen: libc::size_t = tobuf.len();
+        // SAFETY: a reset call (NULL input) writing into a 400-byte buffer.
+        unsafe {
+            iconv(
+                fd,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut p,
+                &mut tolen,
+            )
+        };
+        if p.is_null() {
+            iconv_working.with(|w| w.set(Some(false)));
+            // SAFETY: `fd` is open and is not used again.
+            unsafe { iconv_close(fd) };
+            return None;
+        }
+        iconv_working.with(|w| w.set(Some(true)));
+    }
+    Some(fd)
+}
+
+/// Port of `convert_setup_ext()` (`vendor/mbyte.c:2624`) with both
+/// `*_unicode_is_utf8` true, i.e. `convert_setup()`: prepare a conversion
+/// between two canonical names. `None` is the C's FAIL (no way to convert).
+pub fn convert_setup_ext(from: &str, to: &str) -> Option<vimconv_T> {
+    let mut vc = vimconv_T {
+        vc_type: ConvType::CONV_NONE,
+        vc_fail: false,
+        vc_fd: None,
+    };
+    // c: no conversion when one of the names is empty or they are equal.
+    if from.is_empty() || to.is_empty() || from == to {
+        return Some(vc);
+    }
+    let from_prop = enc_canon_props(from);
+    let to_prop = enc_canon_props(to);
+    let from_is_utf8 = from_prop & ENC_UNICODE != 0;
+    let to_is_utf8 = to_prop & ENC_UNICODE != 0;
+    vc.vc_type = if from_prop & ENC_LATIN1 != 0 && to_is_utf8 {
+        ConvType::CONV_TO_UTF8
+    } else if from_prop & ENC_LATIN9 != 0 && to_is_utf8 {
+        ConvType::CONV_9_TO_UTF8
+    } else if from_is_utf8 && to_prop & ENC_LATIN1 != 0 {
+        ConvType::CONV_TO_LATIN1
+    } else if from_is_utf8 && to_prop & ENC_LATIN9 != 0 {
+        ConvType::CONV_TO_LATIN9
+    } else {
+        vc.vc_fd = my_iconv_open(
+            if to_is_utf8 { "utf-8" } else { to },
+            if from_is_utf8 { "utf-8" } else { from },
+        );
+        if vc.vc_fd.is_none() {
+            return None;
+        }
+        ConvType::CONV_ICONV
+    };
+    Some(vc)
+}
+
+/// Port of `iconv_string()` (`vendor/mbyte.c:2509`) without the incomplete-
+/// tail handling (`unconvlenp` is always NULL for `iconv()`): convert with
+/// iconv(3), writing `?` (two for a double-width character) for what cannot be
+/// converted and skipping it. `None` when the conversion fails outright.
+fn iconv_string(vcp: &vimconv_T, s: &[u8]) -> Option<Vec<u8>> {
+    let fd = vcp.vc_fd?;
+    let mut result: Vec<u8> = Vec::new();
+    let mut from = 0usize;
+    let mut done = 0usize;
+    let mut len = 0usize;
+    let mut e2big = false;
+    loop {
+        if len == 0 || e2big {
+            // c: allocate enough room for most conversions; grow on E2BIG.
+            len += (s.len() - from) * 2 + 40;
+            result.resize(len, 0);
+        }
+        let mut inp = s[from..].as_ptr() as *mut libc::c_char;
+        let mut inlen: libc::size_t = s.len() - from;
+        let mut outp = result[done..].as_mut_ptr() as *mut libc::c_char;
+        let mut outlen: libc::size_t = len - done - 2;
+        // SAFETY: the in/out pointers and lengths describe live buffers.
+        let r = unsafe { iconv(fd, &mut inp, &mut inlen, &mut outp, &mut outlen) };
+        let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        from = s.len() - inlen;
+        let mut to = len - 2 - outlen;
+        if r != usize::MAX {
+            result.truncate(to);
+            return Some(result);
+        }
+        e2big = errno == libc::E2BIG;
+        if !vcp.vc_fail && (errno == libc::EILSEQ || errno == libc::EINVAL) {
+            // c: can't convert: insert a '?' and skip a character.
+            result[to] = b'?';
+            to += 1;
+            if utf_ptr2cells(&s[from..]) > 1 {
+                result[to] = b'?';
+                to += 1;
+            }
+            from += utfc_ptr2len_len(&s[from..]).max(1) as usize;
+        } else if !e2big {
+            return None;
+        }
+        done = to;
+    }
+}
+
+/// Port of `utf_ptr2len_len()` (`vendor/mbyte.c:946`): like `utf_ptr2len` but
+/// never reads past `p.len()`; an incomplete sequence still reports the length
+/// its lead byte announces.
+pub fn utf_ptr2len_len(p: &[u8]) -> i32 {
+    let len = utf8len_tab[p.first().copied().unwrap_or(0) as usize] as usize;
+    if len == 1 {
+        return 1;
+    }
+    let m = len.min(p.len());
+    if p[1..m].iter().any(|&b| b & 0xc0 != 0x80) {
+        return 1;
+    }
+    len as i32
+}
+
+/// Port of `utfc_ptr2len_len()` (`vendor/mbyte.c:1008`): `utfc_ptr2len`
+/// within `p.len()` bytes. Uses the crate's `utf_iscomposing` approximation of
+/// `utf_composinglike`, as `utfc_ptr2len` does.
+pub fn utfc_ptr2len_len(p: &[u8]) -> i32 {
+    let size = p.len();
+    if size < 1 || p[0] == 0 {
+        return 0;
+    }
+    if p[0] < 0x80 && (size == 1 || p[1] < 0x80) {
+        return 1;
+    }
+    let mut len = utf_ptr2len_len(p) as usize;
+    if (len == 1 && p[0] >= 0x80) || len > size {
+        return 1;
+    }
+    while len < size {
+        if p[len] < 0x80 {
+            break;
+        }
+        let next = utf_ptr2len_len(&p[len..]) as usize;
+        if next > size - len {
+            break;
+        }
+        match char::from_u32(utf_ptr2char(&p[len..]) as u32) {
+            Some(ch) if crate::ported::strings::utf_iscomposing(ch) => len += next,
+            _ => break,
+        }
+    }
+    len as i32
+}
+
+/// Port of `string_convert_ext()` (`vendor/mbyte.c:2698`) with
+/// `unconvlenp == NULL`, i.e. `string_convert()`. `None` is the C's NULL
+/// (an illegal byte for the internal UTF-8 → latin conversions, or an iconv
+/// failure).
+pub fn string_convert_ext(vcp: &vimconv_T, ptr: &[u8]) -> Option<Vec<u8>> {
+    // c: `lenp == NULL` — the text is a C string.
+    let len = ptr.iter().position(|&b| b == 0).unwrap_or(ptr.len());
+    let ptr = &ptr[..len];
+    if len == 0 {
+        return Some(Vec::new());
+    }
+    let mut d: Vec<u8> = Vec::with_capacity(len * 2);
+    match vcp.vc_type {
+        ConvType::CONV_TO_UTF8 => {
+            for &c in ptr {
+                if c < 0x80 {
+                    d.push(c);
+                } else {
+                    d.push(0xc0 + (c >> 6));
+                    d.push(0x80 + (c & 0x3f));
+                }
+            }
+        }
+        ConvType::CONV_9_TO_UTF8 => {
+            for &b in ptr {
+                let c: i32 = match b {
+                    0xa4 => 0x20ac,
+                    0xa6 => 0x0160,
+                    0xa8 => 0x0161,
+                    0xb4 => 0x017d,
+                    0xb8 => 0x017e,
+                    0xbc => 0x0152,
+                    0xbd => 0x0153,
+                    0xbe => 0x0178,
+                    b => b as i32,
+                };
+                let mut buf = [0u8; 6];
+                let n = utf_char2bytes(c, &mut buf) as usize;
+                d.extend_from_slice(&buf[..n]);
+            }
+        }
+        ConvType::CONV_TO_LATIN1 | ConvType::CONV_TO_LATIN9 => {
+            let mut i = 0usize;
+            while i < len {
+                let l = utf_ptr2len_len(&ptr[i..]) as usize;
+                if l == 1 {
+                    if utf8len_tab_zero[ptr[i] as usize] == 0 {
+                        // c: illegal utf-8 byte cannot be converted.
+                        return None;
+                    }
+                    d.push(ptr[i]);
+                } else {
+                    let mut c = utf_ptr2char(&ptr[i..]);
+                    if vcp.vc_type == ConvType::CONV_TO_LATIN9 {
+                        c = match c {
+                            0x20ac => 0xa4,
+                            0x0160 => 0xa6,
+                            0x0161 => 0xa8,
+                            0x017d => 0xb4,
+                            0x017e => 0xb8,
+                            0x0152 => 0xbc,
+                            0x0153 => 0xbd,
+                            0x0178 => 0xbe,
+                            0xa4 | 0xa6 | 0xa8 | 0xb4 | 0xb8 | 0xbc | 0xbd | 0xbe => 0x100,
+                            c => c,
+                        };
+                    }
+                    let composing = char::from_u32(c as u32)
+                        .is_some_and(crate::ported::strings::utf_iscomposing);
+                    if !composing {
+                        if c < 0x100 {
+                            d.push(c as u8);
+                        } else if vcp.vc_fail {
+                            return None;
+                        } else {
+                            d.push(0xbf);
+                            if utf_char2cells(c) > 1 {
+                                d.push(b'?');
+                            }
+                        }
+                    }
+                }
+                i += l;
+            }
+        }
+        ConvType::CONV_ICONV => return iconv_string(vcp, ptr),
+        ConvType::CONV_NONE => return None,
+    }
+    Some(d)
 }

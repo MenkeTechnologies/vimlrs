@@ -7267,3 +7267,13 @@ A command missing from the tag table kept the previous command's name, so
 `:delfunction`, `:finish`, `:command`, `:delcommand`, `:autocmd`, `:augroup`,
 `:doautocmd`, `:colorscheme`, `:highlight`, `:syntax`, `:filetype` are tagged.
 Parity case: `exception_cmdname.vim`.
+
+### R51-5. `iconv()` converted almost nothing — ✅ FIXED
+
+It returned its input for every pair but a latin1 subset (`iconv('é',
+'utf-8', 'latin1')` was still two bytes; `'€'` to latin1 was `?`, vim gives
+0xbf). Ported `enc_canonize()` with the canonical and alias tables,
+`convert_setup()`, `string_convert()` and `iconv_string()` (`vendor/mbyte.c`):
+latin1/latin9 ↔ UTF-8 internally, every other pair through iconv(3) with `?`
+for what cannot be converted, an illegal byte to latin1 failing to `''`.
+Parity case: `iconv_convert.vim`.

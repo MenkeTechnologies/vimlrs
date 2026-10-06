@@ -8999,39 +8999,27 @@ pub fn f_hostname(_argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.vval = v_string(name.into());
 }
 
-/// Port of `f_iconv()` (Neovim eval/funcs.c → mbyte.c `string_convert`) —
-/// convert `{expr}` from `{from}` to `{to}`. vimlrs holds strings as UTF-8
-/// internally, so identity and UTF-8↔UTF-8 conversions return the input; an
-/// unsupported pairing also returns the input unchanged (Vim's "no conversion"
-/// fallback), with characters left as-is.
+/// Port of `f_iconv()` (`vendor/mbyte.c:2582`) — convert `{string}` from
+/// `{from}` to `{to}`. The names are canonized; a pair `convert_setup()` cannot
+/// handle (or an equal pair) returns the text unchanged, and a conversion that
+/// fails returns the empty string.
 pub fn f_iconv(argvars: &[typval_T], rettv: &mut typval_T) {
+    use crate::ported::mbyte::{
+        convert_setup_ext, enc_canonize, enc_skip, string_convert_ext, ConvType,
+    };
     rettv.v_type = VAR_STRING;
-    let s = tv_get_string(&argvars[0]);
-    let canon = |e: &str| -> &'static str {
-        match e.to_ascii_lowercase().as_str() {
-            "utf-8" | "utf8" | "unicode" => "utf-8",
-            "latin1" | "iso-8859-1" | "8bit-iso-8859-1" => "latin1",
-            _ => "other",
-        }
+    let s = tv_get_string_buf_chk(&argvars[0]).unwrap_or_default();
+    let from = enc_canonize(enc_skip(&tv_get_string_buf(&argvars[1])));
+    let to = enc_canonize(enc_skip(&tv_get_string_buf(&argvars[2])));
+    let out: VimStr = match convert_setup_ext(&from, &to) {
+        Some(vc) if vc.vc_type != ConvType::CONV_NONE => string_convert_ext(&vc, s.as_bytes())
+            .unwrap_or_default()
+            .into(),
+        // c: "If the encodings are equal, no conversion needed." — also the
+        // result when convert_setup() failed and left CONV_NONE.
+        _ => s,
     };
-    let from = canon(&tv_get_string(&argvars[1]));
-    let to = canon(&tv_get_string(&argvars[2]));
-    // c: same encoding (or both UTF-8 aliases) → no conversion needed.
-    let out = if from == to {
-        s
-    } else if from == "latin1" && to == "utf-8" {
-        // Latin-1 byte values map 1:1 onto the first 256 codepoints; our chars
-        // already are those codepoints, so the text passes through.
-        s
-    } else if from == "utf-8" && to == "latin1" {
-        // Representable codepoints (<= 0xFF) pass through; others become '?'.
-        s.chars()
-            .map(|c| if (c as u32) <= 0xFF { c } else { '?' })
-            .collect()
-    } else {
-        s
-    };
-    rettv.vval = v_string(out.into());
+    rettv.vval = v_string(out);
 }
 
 // ── argc()/argv()/argidx() — eval/funcs.c (full table). Standalone, vimlrs has
