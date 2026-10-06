@@ -7366,6 +7366,15 @@ the later items keep their values. Parity case: `let_unpack_targets.vim`.
 reads its width argument. E767 now has vim's wording (`…for printf()`).
 Parity case: `printf_percent_width.vim`.
 
+### R52-5. User-command argument checks and `-count` — ✅ FIXED
+
+`Cnt 7` with `-count=3` gave `<count>` 3 and `<args>` `7`; `do_one_cmd` takes a
+number at the start of the argument as the count. `-nargs=0` with an argument
+ran the command (vim: `E488: Trailing characters: 1: Z 1`), `-nargs=1`/`+`
+without one ran it (`E471: Argument required: One`), and `Z!` without `-bang`
+ran it (`E477: No ! allowed: Z!`); each error carries the command line as
+`append_command()` adds it. Parity case: `user_command_args.vim`.
+
 ### R52-O1. Open, measured this round
 
 - `examples/parse_errors.vim` lines 24-26 expect Neovim's E116 text
@@ -7384,5 +7393,9 @@ Parity case: `printf_percent_width.vim`.
   `ll_name` runs to the end of the line (`ll[0], b] = [9, 9]`).
 - `let [a; b] = 5` is `E1535: List or Tuple required` in vim 9.2; here
   Neovim's `E714: List required` (no Tuple type).
+- A user command without `-bar` takes a following `|` as part of its
+  argument in vim (`Z | echo 1` is E488 for `-nargs=0`); here the parser splits
+  the line before the command's attributes are known. An error from a user
+  command inside `:try` is tagged with the previous command's name.
 - An error inside `:eval` is tagged `Vim(eval)` in vim; here it keeps the
   previous command's tag (`:eval` parses to the generic expression statement).

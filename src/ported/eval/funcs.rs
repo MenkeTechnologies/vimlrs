@@ -9850,6 +9850,9 @@ pub struct ucmd_T {
     pub range_all: bool,
     /// `uc_def` — the default `-count=N` / `-range=N`, read by `<count>`.
     pub def: varnumber_T,
+    /// `-count` (`EX_COUNT` with `ADDR_OTHER`): a number at the start of the
+    /// argument is the count.
+    pub count: bool,
 }
 
 thread_local! {
@@ -10025,8 +10028,40 @@ fn uc_check_code(code: &str, cmd: &ucmd_T, args: &str, bang: bool) -> Option<Str
 /// Each `<` opens a code that ends at the next `>`; one that is not a code
 /// keeps its `<` and scanning resumes right after it.
 pub fn do_ucmd(name: &str, args: &str, bang: bool) -> Option<String> {
-    let uc = find_ucmd(name)?;
-    let bang = bang && uc.bang;
+    let mut uc = find_ucmd(name)?;
+    // c: `do_one_cmd` reports its own errors with the command line appended
+    // (`append_command`), and runs nothing.
+    let cmdline = format!(
+        "{name}{}{}{args}",
+        if bang { "!" } else { "" },
+        if args.is_empty() { "" } else { " " }
+    );
+    let fail = |msg: &str| {
+        crate::ported::message::emsg(&format!("{msg}: {cmdline}"));
+        Some(String::new())
+    };
+    // c: `if (ea.forceit && !(ea.argt & EX_BANG)) errormsg = _(e_nobang);`
+    if bang && !uc.bang {
+        return fail("E477: No ! allowed");
+    }
+    // c: `if ((ea.argt & EX_COUNT) && ascii_isdigit(*ea.arg) …)` — a number
+    // at the start of the argument is the count (`getdigits`), and the
+    // argument goes on after it.
+    let mut args = args;
+    if uc.count && args.starts_with(|c: char| c.is_ascii_digit()) {
+        let digits = args.bytes().take_while(u8::is_ascii_digit).count();
+        uc.def = args[..digits].parse().unwrap_or(varnumber_T::MAX);
+        args = args[digits..].trim_start();
+    }
+    // c: no `EX_EXTRA` (`-nargs=0`) and something other than a comment is
+    // `e_trailing_arg`; `EX_NEEDARG` (`-nargs=1`, `-nargs=+`) and nothing
+    // is `e_argreq`.
+    if uc.nargs == '0' && !args.is_empty() && !args.starts_with('"') {
+        return fail(&format!("E488: Trailing characters: {args}"));
+    }
+    if matches!(uc.nargs, '1' | '+') && args.is_empty() {
+        return fail("E471: Argument required");
+    }
     let rep = uc.rep.as_str();
     let mut out = String::new();
     let mut p = 0;
@@ -10063,6 +10098,7 @@ pub fn ex_command(arg: &str) {
         range_all: false,
         // c: `uc_scan_attr` leaves `def` at -1 unless `-count`/`-range=N` sets it.
         def: -1,
+        count: false,
     };
     // c: parse the leading `-attr[=val]` command attributes (`uc_scan_attr`).
     while let Some(r) = s.strip_prefix('-') {
@@ -10080,8 +10116,10 @@ pub fn ex_command(arg: &str) {
             }
         } else if attr == "count" {
             cmd.def = 0;
+            cmd.count = true;
         } else if let Some(v) = attr.strip_prefix("count=") {
             cmd.def = v.parse().unwrap_or(0);
+            cmd.count = true;
         }
         // -complete=/-buffer/-bar/… are accepted and ignored.
         s = r[end..].trim_start();

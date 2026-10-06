@@ -1,0 +1,29 @@
+1
+['a', 'b c']
+x "y"
+1 5
+0 3
+E492: Not an editor command: Q
+1 1
+['1', '2']
+2 0 2
+ok
+abc
+E488: Trailing characters: 1: Z 1
+E471: Argument required: One
+E471: Argument required: Plus
+cnt 0 
+cnt 7 
+E488: Trailing characters: x: Cnt 7x
+cnt 3 
+cnt2 0
+cnt2 4
+cnta 3 foo
+cnta 2 foo 3
+z
+zb
+after2
+end
+E477: No ! allowed: Nb!
+9223372036854775807
+12
