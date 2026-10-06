@@ -8217,7 +8217,10 @@ mod tests {
         assert_eq!(run("echo winheight(0) winwidth(0)").trim(), "46 120");
         assert_eq!(run("echo winheight(2) winwidth(-1)").trim(), "-1 -1");
         // aliases.vim: `let s:l = 40 - ((39 * winheight(0) + 41) / 82)`
-        assert_eq!(run("echo 40 - ((39 * winheight(0) + 41) / 82)").trim(), "18");
+        assert_eq!(
+            run("echo 40 - ((39 * winheight(0) + 41) / 82)").trim(),
+            "18"
+        );
     }
 
     /// A window modifier stays on the command line the host receives:
@@ -8239,7 +8242,8 @@ mod tests {
             SEEN.with(|s| s.borrow_mut().push(line.to_string()));
             true
         }));
-        let path = std::env::temp_dir().join(format!("vimlrs-winmod-host-{}.vim", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("vimlrs-winmod-host-{}.vim", std::process::id()));
         std::fs::write(
             &path,
             "exe 'vert 1resize ' . 30\nsilent! vertical resize 20\ntab split\n2resize 5\nsil! 10,20fold\nargglobal\n%argdel\n$argadd c.txt\n",
@@ -8250,7 +8254,16 @@ mod tests {
         let seen = SEEN.with(|s| s.borrow().clone());
         assert_eq!(
             seen,
-            ["vert 1resize 30", "vertical resize 20", "tab split", "2resize 5", "10,20fold", "argglobal", "%argdel", "$argadd c.txt"]
+            [
+                "vert 1resize 30",
+                "vertical resize 20",
+                "tab split",
+                "2resize 5",
+                "10,20fold",
+                "argglobal",
+                "%argdel",
+                "$argadd c.txt"
+            ]
         );
     }
 
@@ -8271,7 +8284,11 @@ mod tests {
         lines.sort();
         assert_eq!(
             lines,
-            ["let Count =  3 ", "let Name = \"a\\\"b\\nc\\\\d\"", "let Ratio = -1.500000"]
+            [
+                "let Count =  3 ",
+                "let Name = \"a\\\"b\\nc\\\\d\"",
+                "let Ratio = -1.500000"
+            ]
         );
     }
 

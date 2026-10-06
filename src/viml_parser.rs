@@ -200,8 +200,23 @@ pub const PHASE3_BUILTINS: &[&str] = &[
 /// The window modifiers vim accepts before a command (`:vertical resize 30`,
 /// `:tab split`, `:topleft copen`).
 const WINDOW_MODIFIERS: &[&str] = &[
-    "vertical", "vert", "horizontal", "hor", "tab", "aboveleft", "abo", "belowright", "bel",
-    "botright", "bo", "topleft", "to", "leftabove", "lefta", "rightbelow", "rightb",
+    "vertical",
+    "vert",
+    "horizontal",
+    "hor",
+    "tab",
+    "aboveleft",
+    "abo",
+    "belowright",
+    "bel",
+    "botright",
+    "bo",
+    "topleft",
+    "to",
+    "leftabove",
+    "lefta",
+    "rightbelow",
+    "rightb",
 ];
 
 /// The window modifiers in `line`'s leading modifier run, each followed by a
@@ -213,7 +228,9 @@ fn window_modifiers(line: &str) -> String {
     let mut keep_count = false;
     for token in prefix.split_whitespace() {
         let word = token.trim_end_matches('!');
-        if WINDOW_MODIFIERS.contains(&word) || (keep_count && word.bytes().all(|b| b.is_ascii_digit())) {
+        if WINDOW_MODIFIERS.contains(&word)
+            || (keep_count && word.bytes().all(|b| b.is_ascii_digit()))
+        {
             out.push_str(token);
             out.push(' ');
         }
@@ -1696,7 +1713,9 @@ fn split_commands(line: &str) -> Vec<&str> {
 fn wincmd_arg_end(seg: &str) -> Option<usize> {
     let body = seg.trim_start_matches([' ', '\t', ':']);
     let body = body.trim_start_matches(|c: char| c.is_ascii_digit());
-    let word_end = body.find(|c: char| !c.is_ascii_alphabetic()).unwrap_or(body.len());
+    let word_end = body
+        .find(|c: char| !c.is_ascii_alphabetic())
+        .unwrap_or(body.len());
     if !matches!(&body[..word_end], "winc" | "wincm" | "wincmd") {
         return None;
     }
@@ -1705,7 +1724,9 @@ fn wincmd_arg_end(seg: &str) -> Option<usize> {
     let mut chars = arg.char_indices();
     let (_, first) = chars.next()?;
     let len = if first == 'g' || first == '\x07' {
-        chars.next().map_or(first.len_utf8(), |(i, c)| i + c.len_utf8())
+        chars
+            .next()
+            .map_or(first.len_utf8(), |(i, c)| i + c.len_utf8())
     } else {
         first.len_utf8()
     };
@@ -4884,8 +4905,14 @@ mod tests {
     /// `:mksession` writes `wincmd _ | wincmd |` — and a later `|` separates.
     #[test]
     fn wincmd_takes_a_bar_as_its_argument() {
-        assert_eq!(split_commands("wincmd _ | wincmd |"), ["wincmd _ ", " wincmd |"]);
-        assert_eq!(split_commands("2wincmd | | echo 1"), ["2wincmd | ", " echo 1"]);
+        assert_eq!(
+            split_commands("wincmd _ | wincmd |"),
+            ["wincmd _ ", " wincmd |"]
+        );
+        assert_eq!(
+            split_commands("2wincmd | | echo 1"),
+            ["2wincmd | ", " echo 1"]
+        );
         assert_eq!(split_commands("winc gf | echo 1"), ["winc gf ", " echo 1"]);
         assert_eq!(split_commands("echo 1 | echo 2"), ["echo 1 ", " echo 2"]);
     }
@@ -5133,8 +5160,14 @@ mod tests {
 
         // Statements vimlrs evaluates keep their own parse, and a call stays a
         // call even when the name is a command word (`list(…)` is not `:list`).
-        assert!(with_ex_lines(|| matches!(parse_stmt("let s:l = 1").unwrap(), Stmt::Let { .. })));
-        assert!(with_ex_lines(|| matches!(parse_stmt("set so=0").unwrap(), Stmt::Set(_))));
+        assert!(with_ex_lines(|| matches!(
+            parse_stmt("let s:l = 1").unwrap(),
+            Stmt::Let { .. }
+        )));
+        assert!(with_ex_lines(|| matches!(
+            parse_stmt("set so=0").unwrap(),
+            Stmt::Set(_)
+        )));
         assert!(!ex("list(1)"), "a word followed by `(` is a call");
         assert!(!ex("undefinedword"), "not in the command table");
 

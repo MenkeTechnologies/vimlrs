@@ -35,7 +35,11 @@ pub fn store_session_globals() -> Vec<String> {
                         }
                     }
                     // c:548-552: a String is quoted, a Number padded with spaces.
-                    let q = if tv.v_type == VarType::VAR_STRING { '"' } else { ' ' };
+                    let q = if tv.v_type == VarType::VAR_STRING {
+                        '"'
+                    } else {
+                        ' '
+                    };
                     lines.push(format!("let {key} = {q}{p}{q}"));
                 }
                 VarType::VAR_FLOAT => {
