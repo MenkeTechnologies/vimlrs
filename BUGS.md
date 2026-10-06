@@ -7359,6 +7359,13 @@ parsed as a `:let` target (`viml_parser::let_target`) and stored the way that
 target is; the first item that fails (`E684`, `E46`, `E741`) ends the unpack and
 the later items keep their values. Parity case: `let_unpack_targets.vim`.
 
+### R52-4. printf() `%5%` and E767 — ✅ FIXED
+
+`%%` ignored its width and flags; `vim_vsnprintf_typval` handles `%` in the
+`%c`/`%s` arm, so `printf('%5%')` is `    %`, `%-5%` and `%05%` pad, and `%*%`
+reads its width argument. E767 now has vim's wording (`…for printf()`).
+Parity case: `printf_percent_width.vim`.
+
 ### R52-O1. Open, measured this round
 
 - `examples/parse_errors.vim` lines 24-26 expect Neovim's E116 text

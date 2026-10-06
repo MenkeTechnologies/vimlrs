@@ -1,0 +1,12 @@
+1
+[    %][%    ][0000%][%][  %]
+E767: Too many arguments for printf()
+E1500: Cannot mix positional and non-positional arguments: [%1$5%]
+E766: Insufficient arguments for printf()
+a
+E767: Too many arguments for printf()
+b
+E1500: Cannot mix positional and non-positional arguments: %1$d %d
+c
+E767: Too many arguments for printf()
+ x

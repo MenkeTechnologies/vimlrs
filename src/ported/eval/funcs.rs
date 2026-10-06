@@ -2697,8 +2697,18 @@ fn vim_vsnprintf_typval(argvars: &[typval_T], rettv: &mut typval_T) {
             (crate::ported::mbyte::utfc_ptr2len(&bytes[i..]).max(1) as usize).min(bytes.len() - i);
         let conv_text = &bytes[i..i + conv_len];
         i += conv_len;
+        // c: `case '%':` shares the `%c`/`%s` arm — `str_arg = p`, one byte —
+        // so the width, `-` and `0` flags pad it (`%5%` is `    %`) and the
+        // precision does not apply.
         if conv == '%' {
+            let pad = width.saturating_sub(1);
+            if !left {
+                out.extend(std::iter::repeat(if zero { b'0' } else { b' ' }).take(pad));
+            }
             out.push(b'%');
+            if left {
+                out.extend(std::iter::repeat(b' ').take(pad));
+            }
             continue;
         }
         // c (`vim_vsnprintf_typval` default case, via `format_typeof`): a
@@ -2982,7 +2992,7 @@ fn vim_vsnprintf_typval(argvars: &[typval_T], rettv: &mut typval_T) {
         return;
     }
     if used_max + 1 < argvars.len() {
-        emsg("E767: Too many arguments to printf()");
+        emsg("E767: Too many arguments for printf()");
         rettv.vval = v_string(VimStr::new());
         return;
     }
