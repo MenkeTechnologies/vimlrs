@@ -1,18 +1,12 @@
 1
 20
-E740: Too many arguments for function F(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21)
 a
 E740: Too many arguments for function F
 b
-E740: Too many arguments for function F(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21) + 1
 c
-E740: Too many arguments for function len(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21)
 d
 21
-E116: Invalid arguments for function F(1 2) 'tail'
 e
 E116: Invalid arguments for function F
 f
-E116: Invalid arguments for function F(1 2) 'tail'
-E116: Invalid arguments for function len(1 2) 'tail'
 g

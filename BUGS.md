@@ -7282,9 +7282,13 @@ Parity case: `iconv_convert.vim`.
 
 `F(…21 arguments…)` ran with 21 (a builtin was E118). `get_func_arguments()`
 reads at most `MAX_FUNC_ARGS` and `get_func_tv()` reports the unclosed list as
-E740. Both E740 and a parse-time E116 now name the function the way
-`emsg_funcname()` prints it: the source from the name on in an expression or
-a method call, the bare name for `:call`'s outermost function.
+E740. Both E740 and a parse-time E116 name the bare function, as Neovim 0.12.4
+prints them (`E740: Too many arguments for function F`). vim 9.2 instead quotes
+the source from the name on in an expression or a method call
+(`…function F(1,…,21) + 1`); the owner chose Neovim's wording, the vendored C
+being the spec (README), so the parity case keeps only the lines where the two
+engines agree (`:call`, and the 20/21-argument counts) and
+`examples/parse_errors.vim` pins Neovim's text.
 Parity case: `call_args_limit_and_name.vim`.
 
 ### R51-O1. Open, measured this round
@@ -7421,10 +7425,6 @@ now its own statement, tagged `Vim(eval):`. Parity case:
 
 ### R52-O1. Open, measured this round
 
-- `examples/parse_errors.vim` lines 24-26 expect Neovim's E116 text
-  (`…for function f`) for `eval('f(')`; since R51-6 this port prints vim's
-  (`…for function f(1`), so `cargo test --test examples` fails on them. The
-  expectation needs the owner's decision (the reference is vim).
 - A Boolean option keeps the Number it is given in vim (`let &ic = 2` reads
   2); the port's TriState reads 1.
 - `set opt?` / `set opt` printing (`  tabstop=8`, `noignorecase`) is not
