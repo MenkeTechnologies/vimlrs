@@ -385,7 +385,7 @@ fn parse_stmt_unplaced(line: &str) -> Result<Stmt, VimlError> {
         "call" => {
             // An argument list that does not parse is reported when the `:call`
             // runs (see `parse_cmd_expr`): `call len(1 2)` is E116 there.
-            let mut e = parse_cmd_expr_for(strip_legacy_trailing_comment(rest), true)?;
+            let mut e = parse_cmd_expr(strip_legacy_trailing_comment(rest))?;
             if let Expr::Call { emsg_name, .. } = &mut e {
                 *emsg_name = None;
             }
@@ -3250,15 +3250,8 @@ fn let_target_expr(target: &LetTarget) -> Result<Expr, VimlError> {
 /// A curly-brace name still fails the parse, for the reason given at
 /// [`Parser::operand_invexpr`].
 fn parse_cmd_expr(src: &str) -> Result<Expr, VimlError> {
-    parse_cmd_expr_for(src, false)
-}
-
-/// [`parse_cmd_expr`], with `call_cmd` set when `src` is the argument of `:call`
-/// (see [`Parser::call_cmd`]).
-fn parse_cmd_expr_for(src: &str, call_cmd: bool) -> Result<Expr, VimlError> {
     let (toks, _, lex_err) = crate::viml_lexer::lex_prefix(src);
     let mut p = Parser::new(toks, src);
-    p.call_cmd = call_cmd;
     p.lex_err = lex_err;
     let e = match p.eval1() {
         Ok(e) => p.guard_deferred(e),
@@ -3543,11 +3536,6 @@ struct Parser {
     /// — no trailing `})`. Empty at the top level, where the buffer ends with
     /// the source.
     clip: Vec<usize>,
-    /// Parsing the argument of `:call`, whose OUTERMOST function name
-    /// `trans_function_name` hands `get_func_tv` as an allocated, NUL-terminated
-    /// copy — so its E116/E740 names the function alone, where the same call in
-    /// an expression quotes the source from the name on.
-    call_cmd: bool,
 }
 
 impl Parser {
@@ -3564,7 +3552,6 @@ impl Parser {
             deferred_e15: Vec::new(),
             lex_err: None,
             clip: Vec::new(),
-            call_cmd: false,
         }
     }
 
@@ -4143,9 +4130,9 @@ impl Parser {
                     self.i += 1;
                 }
                 let name = self.src[start..end].to_string();
-                self.name_operand(name, at, at_tok)
+                self.name_operand(name, at)
             }
-            Tok::Ident(name) => self.name_operand(name, at, at_tok),
+            Tok::Ident(name) => self.name_operand(name, at),
             // c (`eval9` → `eval_leader`/default): the token that cannot start an
             // operand is still unread when E15 quotes the rest, so it heads the
             // quoted text (`echo 1 + * 2` is `"* 2"`, `echo )` is `")"`).
@@ -4158,25 +4145,13 @@ impl Parser {
 
     /// The operand that is a variable or function name: a call when `(` follows,
     /// otherwise a variable (or a vim9 keyword literal).
-    fn name_operand(
-        &mut self,
-        name: String,
-        at: Option<usize>,
-        at_tok: usize,
-    ) -> Result<Expr, VimlError> {
+    fn name_operand(&mut self, name: String, at: Option<usize>) -> Result<Expr, VimlError> {
         {
             if matches!(self.peek(), Tok::LParen) {
                 self.advance();
-                // c: `emsg_funcname(…, name)` prints `name` up to its NUL:
-                // the rest of the expression text, or the bare name for
-                // `:call`'s outermost function.
-                let shown = match at {
-                    Some(s) if !(self.call_cmd && at_tok == 0) => self.src_from(s),
-                    _ => name.clone(),
-                };
                 let args = self.arg_list(
                     &Tok::RParen,
-                    &format!("E116: Invalid arguments for function {shown}"),
+                    &format!("E116: Invalid arguments for function {name}"),
                     "E15: Invalid expression: \"%s\"",
                 )?;
                 Ok(Expr::Call {
@@ -4405,18 +4380,14 @@ impl Parser {
                         };
                         continue;
                     }
-                    let name_at = self.peek_span();
                     let name = match self.advance() {
                         Tok::Ident(n) => n,
                         _ => return Err(self.invexpr()),
                     };
-                    // c: `eval_method` hands `call_func_rettv` a pointer into
-                    // the source, so E116/E740 quote from the name on.
-                    let shown = name_at.map_or_else(|| name.clone(), |s| self.src_from(s));
                     self.eat(&Tok::LParen)?;
                     let args = self.arg_list(
                         &Tok::RParen,
-                        &format!("E116: Invalid arguments for function {shown}"),
+                        &format!("E116: Invalid arguments for function {name}"),
                         "E15: Invalid expression: \"%s\"",
                     )?;
                     base = Expr::Method {
