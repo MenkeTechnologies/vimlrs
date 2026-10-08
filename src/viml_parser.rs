@@ -1171,7 +1171,7 @@ impl Lines {
                 k = j;
                 continue;
             }
-            if let Some((prefix, trim, _eval, marker)) = heredoc_opener(raw[k]) {
+            if let Some((prefix, trim, eval, marker)) = heredoc_opener(raw[k]) {
                 // With `trim`, the end marker may be indented to match the `:let`
                 // command line; record that indent so it can be skipped.
                 let cmd_indent: String = raw[k].chars().take_while(|c| c.is_whitespace()).collect();
@@ -1208,7 +1208,13 @@ impl Lines {
                 }
                 let items: Vec<String> = body
                     .iter()
-                    .map(|l| format!("'{}'", l.replace('\'', "''")))
+                    .map(|l| {
+                        if eval {
+                            heredoc_eval_item(l)
+                        } else {
+                            format!("'{}'", l.replace('\'', "''"))
+                        }
+                    })
                     .collect();
                 collapsed.push((lineno, format!("{prefix}= [{}]", items.join(", "))));
                 k = j;
@@ -3010,6 +3016,34 @@ fn split_top_commas(s: &str) -> Vec<&str> {
         }
     }
     out.push(&s[start..]);
+    out
+}
+
+/// One `:let =<< eval` heredoc line as the source of the List item it becomes:
+/// a `$'…'` interpolated string with the same `{expr}` parts, since the C runs
+/// `eval_all_expr_in_str` on the line just as an interpolated string's body.
+/// The literal parts are re-escaped for `$'…'` (`'` `{` `}` doubled). A line
+/// the split rejects (a stray `}`, an unclosed `{`) is passed through quoted so
+/// that the `:let` itself reports it when it runs.
+fn heredoc_eval_item(line: &str) -> String {
+    let Ok(parts) = crate::viml_lexer::heredoc_eval_parts(line) else {
+        return format!("$'{}'", line.replace('\'', "''"));
+    };
+    let mut out = String::from("$'");
+    for part in parts {
+        match part {
+            InterpPart::Lit(bytes) => {
+                let text = String::from_utf8_lossy(&bytes);
+                out.push_str(&text.replace('\'', "''").replace('{', "{{").replace('}', "}}"));
+            }
+            InterpPart::Expr(src) => {
+                out.push('{');
+                out.push_str(&src);
+                out.push('}');
+            }
+        }
+    }
+    out.push('\'');
     out
 }
 

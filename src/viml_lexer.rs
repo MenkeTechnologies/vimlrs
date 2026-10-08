@@ -201,6 +201,13 @@ pub fn lex(src: &str) -> Result<Vec<Token>, VimlError> {
     Lexer::new(src).run()
 }
 
+/// Split one line of a `:let =<< eval` heredoc into literal and `{expr}` parts,
+/// by the same rules as an interpolated string's body — c: `heredoc_get` runs
+/// `eval_all_expr_in_str` on each line — except that a quote is ordinary text.
+pub fn heredoc_eval_parts(line: &str) -> Result<Vec<InterpPart>, VimlError> {
+    Lexer::new(line).interp_body(None)
+}
+
 /// Lex as much of `src` as tokenizes, stopping (without error) at the first
 /// byte that does not start a token. Returns the tokens lexed so far (ending in
 /// [`Tok::Eof`] whose span is the stop offset) plus that stop offset.
@@ -648,11 +655,23 @@ impl<'a> Lexer<'a> {
         let double = self.peek2() == b'"';
         self.pos += 2; // skip `$` and the opening quote
         let quote = if double { b'"' } else { b'\'' };
+        Ok(Tok::InterpStr(self.interp_body(Some(quote))?))
+    }
+
+    /// The body of an interpolated string, split into literal and `{expr}`
+    /// parts. `quote` is the closing quote of a `$'…'`/`$"…"`; `None` is a
+    /// `:let =<< eval` heredoc line (`eval_all_expr_in_str`), which runs to the
+    /// end of the line and takes every other byte literally.
+    fn interp_body(&mut self, quote: Option<u8>) -> Result<Vec<InterpPart>, VimlError> {
+        let double = quote == Some(b'"');
         let mut parts: Vec<InterpPart> = Vec::new();
         let mut lit: Vec<u8> = Vec::new();
         loop {
             let c = self.peek();
             if c == 0 {
+                if quote.is_none() {
+                    break;
+                }
                 return Err(VimlError::msg(if double {
                     "E114: Missing quote"
                 } else {
@@ -665,7 +684,7 @@ impl<'a> Lexer<'a> {
                 self.push_double_escape(&mut lit)?;
                 continue;
             }
-            if c == quote {
+            if Some(c) == quote {
                 // A doubled `''` inside a `$'…'` body is a literal quote.
                 if !double && self.peek2() == b'\'' {
                     lit.push(b'\'');
@@ -708,7 +727,7 @@ impl<'a> Lexer<'a> {
         if !lit.is_empty() {
             parts.push(InterpPart::Lit(lit));
         }
-        Ok(Tok::InterpStr(parts))
+        Ok(parts)
     }
 
     /// Scan the source of one `{expr}` region: the opening `{` is already

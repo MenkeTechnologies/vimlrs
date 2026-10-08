@@ -7533,3 +7533,13 @@ parameter reader accepted only names. `get_function_args` (shared by
 as `..` plus an adjacent `.`; it is now accepted as the last parameter and
 recorded as `"..."`, as a `:function`'s is, so the extras land in
 `a:0`/`a:000`. Parity case: `lambda_varargs.vim`.
+
+### R53-7. `:let =<< eval` did not evaluate — ✅ FIXED
+
+The heredoc collapse recognised the `eval` keyword and then ignored it, so
+`{expr}` stayed literal text. `heredoc_get` runs `eval_all_expr_in_str` on each
+line (after `trim`): `{expr}` is replaced by its value, `{{`/`}}` are literal
+braces and a quote is ordinary text. Each line is now split by the
+interpolated-string scanner in a heredoc mode (`heredoc_eval_parts`, the same
+body loop with no closing quote) and re-emitted as a `$'…'` item. Parity case:
+`heredoc_eval.vim`.
