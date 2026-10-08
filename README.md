@@ -15,7 +15,7 @@
 **VimL (Vimscript) in Rust** — the first compiled **standalone** VimL interpreter,
 run outside Vim. A faithful port of Neovim's C eval engine, hosted on the
 [`fusevm`](https://github.com/MenkeTechnologies/fusevm) bytecode VM with a
-three-tier Cranelift JIT — the same engine behind `zshrs`, `stryke`, `awkrs`, and `elisp`.
+three-tier Cranelift JIT — the shared engine behind every fusevm language host.
 
 ## What it is
 
