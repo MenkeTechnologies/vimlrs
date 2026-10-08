@@ -7515,3 +7515,12 @@ followed by NUL, `:` or `(` would pass for an error or interrupt exception and
 is `E608: Cannot :throw exceptions with 'Vim' prefix`. The predicate is now
 `ex_eval::user_exception_fakes_vim`, shared by the ported `throw_exception`
 and the bridge. Parity case: `throw_vim_prefix.vim`.
+
+### R53-5. A lambda calling a Funcref local by name was not a closure — ✅ FIXED
+
+`collect_free_vars` skipped call names, so `{x -> f(g(x))}` inside a lambda
+or function whose locals `f`/`g` are Funcrefs was a plain Funcref, and the call
+was `E117: Unknown function: g` once the frame was gone. The C runs
+`check_vars` on a call's name too (`eval_func`, `eval.c:1708-1710`, while the
+body is skipped), so the names of `name(…)` and `x->name(…)` now count.
+Parity case: `lambda_closure_call_name.vim`.

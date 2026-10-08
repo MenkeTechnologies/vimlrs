@@ -145,23 +145,16 @@ pub fn deferred_key(def: &UserFuncDef) -> String {
 /// Collect the function-scope variable names referenced in `e` that are not in
 /// `bound` — the names `check_vars` tests when a lambda is created, to decide
 /// whether it is a closure. A nested lambda's own params extend `bound` for
-/// its body. Function-call names are not variables and are not collected.
+/// its body. A call's NAME is collected too: `eval_func` runs `check_vars` on
+/// it while the body is skipped (`vendor/eval.c:1708-1710`), so `{x -> f(x)}`
+/// inside a function whose local `f` is a Funcref is a closure over `f`.
 fn collect_free_vars(
     e: &Expr,
     bound: &mut Vec<String>,
     out: &mut std::collections::BTreeSet<String>,
 ) {
     match e {
-        Expr::Var(n) => {
-            // c: `check_vars` counts only a name whose scope is the running
-            // function's locals or arguments: bare names, `l:` and `a:`. The
-            // other scopes (`g:`/`b:`/`w:`/`t:`/`v:`/`s:`) are the same from
-            // inside the lambda.
-            let capturable = !n.contains(':') || n.starts_with("a:") || n.starts_with("l:");
-            if capturable && !bound.contains(n) {
-                out.insert(n.clone());
-            }
-        }
+        Expr::Var(n) => capture_name(n, bound, out),
         Expr::Lambda { params, body, .. } => {
             let base = bound.len();
             bound.extend(params.iter().cloned());
@@ -210,13 +203,17 @@ fn collect_free_vars(
             args.iter().for_each(|a| collect_free_vars(a, bound, out));
         }
         Expr::Interp(segs) => segs.iter().for_each(|s| collect_free_vars(s, bound, out)),
-        Expr::Call { args, .. } => args.iter().for_each(|a| collect_free_vars(a, bound, out)),
+        Expr::Call { name, args, .. } => {
+            capture_name(name, bound, out);
+            args.iter().for_each(|a| collect_free_vars(a, bound, out));
+        }
         Expr::CallExpr { callee, args } => {
             collect_free_vars(callee, bound, out);
             args.iter().for_each(|a| collect_free_vars(a, bound, out));
         }
-        Expr::Method { base, args, .. } => {
+        Expr::Method { base, name, args } => {
             collect_free_vars(base, bound, out);
+            capture_name(name, bound, out);
             args.iter().for_each(|a| collect_free_vars(a, bound, out));
         }
         Expr::ScriptErrorGuard { inner, .. } => collect_free_vars(inner, bound, out),
@@ -230,6 +227,18 @@ fn collect_free_vars(
         | Expr::Env(_)
         | Expr::Register(_)
         | Expr::ScriptError(_) => {}
+    }
+}
+
+/// One name `check_vars` tests for [`collect_free_vars`].
+///
+/// c: `check_vars` counts only a name whose scope is the running function's
+/// locals or arguments: bare names, `l:` and `a:`. The other scopes
+/// (`g:`/`b:`/`w:`/`t:`/`v:`/`s:`) are the same from inside the lambda.
+fn capture_name(n: &str, bound: &[String], out: &mut std::collections::BTreeSet<String>) {
+    let capturable = !n.contains(':') || n.starts_with("a:") || n.starts_with("l:");
+    if capturable && !bound.iter().any(|b| b == n) {
+        out.insert(n.to_string());
     }
 }
 
