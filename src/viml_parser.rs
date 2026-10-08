@@ -368,7 +368,7 @@ fn parse_stmt_unplaced(line: &str) -> Result<Stmt, VimlError> {
         // later `:let` of it is E741. Any other target shape is left to `:let`.
         "const" => match parse_let(&strip_vim9_type(rest))? {
             Stmt::Let {
-                target: target @ (LetTarget::Var(_) | LetTarget::List { .. }),
+                target: target @ (LetTarget::Var(_) | LetTarget::List { op: None, .. }),
                 expr,
             } if !matches!(expr, Expr::Arith { mod_op: true, .. }) => {
                 Ok(Stmt::Const { target, expr })
@@ -2814,10 +2814,15 @@ fn parse_let(rest: &str) -> Result<Stmt, VimlError> {
             .map(|n| n.trim().to_string())
             .filter(|n| !n.is_empty())
             .collect();
-        LetTarget::List {
+        // The operator travels with the unpack: it is applied per target when
+        // the items are stored, never to the right-hand List as a whole.
+        let list = LetTarget::List {
             names,
             rest: rest_name,
-        }
+            op,
+        };
+        let rhs = parse_cmd_expr(strip_legacy_trailing_comment(rhs))?;
+        return Ok(Stmt::Let { target: list, expr: rhs });
     } else {
         let_target(lhs, rest)?
     };
@@ -3219,7 +3224,7 @@ fn split_top_colon(s: &str) -> Option<(&str, &str)> {
 
 /// The current value of a compound-assignment target, as an expression. List
 /// unpack targets cannot take a compound operator (`E734`).
-fn let_target_expr(target: &LetTarget) -> Result<Expr, VimlError> {
+pub(crate) fn let_target_expr(target: &LetTarget) -> Result<Expr, VimlError> {
     Ok(match target {
         LetTarget::Var(n) => Expr::Var(n.clone()),
         LetTarget::Option(n) => Expr::Option(n.clone()),

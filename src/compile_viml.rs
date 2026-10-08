@@ -2465,7 +2465,7 @@ impl Compiler {
                 self.emit(Op::LoadInt(i64::from(rest.is_some())));
                 self.emit(Op::CallBuiltin(h::VIML_UNPACK_CHECK, 3));
                 unpack_failed.push(self.emit(Op::JumpIfFalse(0)));
-                unpack_failed.extend(self.unpack_stores(&item_var, names, rest)?);
+                unpack_failed.extend(self.unpack_stores(&item_var, names, rest, None)?);
             }
         }
 
@@ -2920,7 +2920,7 @@ impl Compiler {
         let mut binds: Vec<(&str, Option<(i64, bool)>)> = Vec::new();
         match target {
             LetTarget::Var(name) => binds.push((name, None)),
-            LetTarget::List { names, rest } => {
+            LetTarget::List { names, rest, .. } => {
                 // c: `ex_let_vars` checks the target count before binding.
                 self.get_var(&tmp);
                 self.emit(Op::LoadInt(names.len() as i64 + i64::from(rest.is_some())));
@@ -2980,11 +2980,16 @@ impl Compiler {
     /// `:let` target — `l[0]`, `d.k`, `&opt`, `$ENV`, `@r` — not only a variable
     /// name, and the first item that fails ends the unpack (`return FAIL`), so
     /// the items after it keep their values.
+    ///
+    /// `op` is the operator of `let [a, b] += list`: `ex_let_one` applies it to
+    /// each target with its item as the operand, through the same compound
+    /// store a single `let a += x` uses.
     fn unpack_stores(
         &mut self,
         list: &str,
         names: &[String],
         rest: &Option<String>,
+        op: Option<ArithOp>,
     ) -> Result<Vec<usize>, VimlError> {
         let mut failed = Vec::new();
         let items = names
@@ -2994,7 +2999,7 @@ impl Compiler {
             .chain(rest.iter().map(|r| (r, names.len() as i64, true)));
         for (name, i, is_rest) in items {
             match crate::viml_parser::let_target(name, name)? {
-                LetTarget::Var(var) => {
+                LetTarget::Var(var) if op.is_none() => {
                     // c: `ex_let_vars` stops at the first `ex_let_one` that
                     // fails (E704 for a Funcref under a lowercase name), so the
                     // later targets keep their values. A slot cannot fail.
@@ -3029,6 +3034,15 @@ impl Compiler {
                             base,
                             index: Box::new(Expr::Number(i)),
                         }
+                    };
+                    let item = match op {
+                        None => item,
+                        Some(op) => Expr::Arith {
+                            op,
+                            lhs: Box::new(crate::viml_parser::let_target_expr(&target)?),
+                            rhs: Box::new(item),
+                            mod_op: true,
+                        },
                     };
                     self.emit(Op::CallBuiltin(h::VIML_ERR_COUNT, 0));
                     self.let_stmt(&target, &item)?;
@@ -3078,7 +3092,7 @@ impl Compiler {
                 self.emit(Op::Pop);
                 Ok(())
             }
-            LetTarget::List { names, rest } => {
+            LetTarget::List { names, rest, op } => {
                 // `:let [a, b; rest] = expr` — evaluate once into a hidden temp,
                 // then index each name and slice the remainder.
                 let n = self.hidden;
@@ -3099,7 +3113,7 @@ impl Compiler {
                 // `exists()` reports afterwards — the C returns FAIL before its
                 // assignment loop, so jumping past the stores is the same shape.
                 let jf = self.emit(Op::JumpIfFalse(0));
-                let failed = self.unpack_stores(&tmp, names, rest)?;
+                let failed = self.unpack_stores(&tmp, names, rest, *op)?;
                 let after = self.b.current_pos();
                 self.b.patch_jump(jf, after);
                 for j in failed {

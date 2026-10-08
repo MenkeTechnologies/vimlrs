@@ -275,6 +275,11 @@ pub enum LetTarget {
         names: Vec<String>,
         /// Trailing `; rest` name, if present (gets the remaining items).
         rest: Option<String>,
+        /// The operator of `let [a, b] += list` (`+= -= *= /= %= .=`), `None`
+        /// for a plain `=`. c: `ex_let_vars` hands it to every `ex_let_one`, so
+        /// it applies item by item: `a += list[0]`, `b += list[1]`, and the
+        /// `; rest` target gets the remaining items as one List operand.
+        op: Option<ArithOp>,
     },
     /// `let base[idx1:idx2] = list` — list range assignment. Omitted `idx1`
     /// defaults to 0; omitted `idx2` means "to the end".

@@ -1,0 +1,18 @@
+0
+11 22
+10 21
+20 63
+5 9
+2 1
+x1 y2
+x1a y2b
+6 [2, [3]]
+[101, 2] {'k': 0}
+Vim(let):E688: More targets than List items
+Vim(let):E687: Less targets than List items
+6 1
+Vim(let):E121: Undefined variable: nosuch
+7 0
+1 9
+Vim(let):E741: Value is locked: q
+10 [1]

@@ -7494,3 +7494,15 @@ Still open: vim adds a lambda argument to `l:` only, `DI_FLAGS_RO|DI_FLAGS_FIX`,
 so `{x -> a:x}` is `E121: Undefined variable: a:x` and `let x = 5` inside the
 lambda is E46; the port binds it in both `a:` and `l:`, writable, because
 `di_flags` is not modelled on scope entries.
+
+### R53-3. `let [a, b] += list` ignored the operator — ✅ FIXED
+
+`parse_let` built the compound form as `target = target op rhs`, and
+`let_target_expr` has no value for a List target, so the whole `:let` was
+dropped silently: `let [a, b] += [10, 20]` left `a`/`b` unchanged. vim's
+`ex_let_vars` passes the operator to every `ex_let_one`, so each target is
+combined with its own item (`a += 10`, `b += 20`) and a `; rest` target with
+the List of the remaining items. `LetTarget::List` now carries the operator and
+`unpack_stores` routes each item through the ordinary compound store (lock
+check, `eexe_mod_op`), after the same E687/E688 count check as `=`. Parity
+case: `let_unpack_compound.vim`.
