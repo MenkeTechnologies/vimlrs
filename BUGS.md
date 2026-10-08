@@ -3184,7 +3184,7 @@ and the C's own `get_yank_type` name is already taken by the reduced form in
 
 ## Still open
 
-### R27-O1. A Funcref has a string value here, and callback resolution depends on it
+### R27-O1. A Funcref has a string value here, and callback resolution depends on it — ✅ FIXED in R53-1
 
 The remaining half of R26-O3, carved out because the fix is not local. `c:4604`
 groups `VAR_FUNC` with `VAR_PARTIAL`/`VAR_LIST`/`VAR_DICT`/`VAR_BLOB`/
@@ -7449,3 +7449,22 @@ now its own statement, tagged `Vim(eval):`. Parity case:
   Here a failed call is a compare error as well. Matching it needs the lambda
   failure value and `did_emsg` behaviour under `:silent!` (which vim does not
   count), which `sort_comparator.vim` pins.
+
+## R53 — a Funcref in string context, Funcref variable names
+
+Oracle: vim 9.2.1150 (`/opt/homebrew/bin/vim`).
+
+### R53-1. A Funcref in string context is E729 (R27-O1) — ✅ FIXED
+
+`tv_get_string_buf_chk` returned a `VAR_FUNC`'s name, so `'x' . F` was
+`'xstrlen'`, `strlen(F)` 6 and `setreg('b', F)` stored the name; vim and
+Neovim answer `E729: Using a Funcref as a String`. The `VAR_FUNC` arm is gone
+(it now goes through `str_errors[]`, like a Partial). The callers that want a
+function's NAME read it the way the C callers do — `v_string` for a Funcref,
+`partial_name()` for a Partial — through `typval::tv_func_name`:
+`callback_from_typval`, `tv_dict_get_callback`, `parse_sort_uniq_args`,
+`f_reduce`, `f_substitute`'s `{sub}`, the bridge's `call_funcref_self`, and the
+E116/E117 names of `call()` and a call through a Funcref variable. Those were
+found by tracing every `VAR_FUNC` that reached `tv_get_string_buf_chk` while
+running the parity corpus and `examples/`. Parity case:
+`funcref_in_string_context.vim`.

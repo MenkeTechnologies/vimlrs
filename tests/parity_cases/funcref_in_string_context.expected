@@ -1,0 +1,23 @@
+1
+Vim(echo):E729: Using a Funcref as a String
+Vim(echo):E729: Using a Funcref as a String
+Vim(echo):E729: Using a Funcref as a String
+''
+Vim(echo):E729: Using a Funcref as a String
+''
+strlen
+function('strlen') function('G', [1])
+3 3 2 6
+E118: Too many arguments for function: G
+[1, 2]
+[1, 2, 3]
+6
+aBc
+4 4
+strlen G
+strlen
+Vim(echo):E703: Using a Funcref as a Number
+Vim(echo):E729: Using a Funcref as a String
+Vim(echo):E729: Using a Funcref as a String
+Vim(echo):E729: Using a Funcref as a String
+end

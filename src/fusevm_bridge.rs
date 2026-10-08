@@ -95,8 +95,8 @@ use crate::ported::eval::typval::{
     tv_list_slice_or_index, CALL_FUNC_HOOK, FUNC_EXISTS_HOOK, SORT_FUNCREF_HOOK,
 };
 use crate::ported::eval::typval::{
-    tv_get_float, tv_get_number_chk, tv_get_string, tv_get_string_buf_chk, tv_list_alloc,
-    tv_list_append_tv,
+    tv_func_name, tv_get_float, tv_get_number_chk, tv_get_string, tv_get_string_buf_chk,
+    tv_list_alloc, tv_list_append_tv,
 };
 use crate::ported::eval::typval_defs_h::{
     blob_T, listitem_T, typval_T, typval_vval_union, typval_vval_union::*, varnumber_T,
@@ -2004,10 +2004,7 @@ fn b_args_e116(vm: &mut VM, _: u8) -> Value {
         name
     } else {
         match eval_variable(&bare) {
-            Some(v) if matches!(v.v_type, VAR_FUNC | VAR_PARTIAL) => match (&v.v_type, &v.vval) {
-                (VAR_PARTIAL, v_partial(Some(p))) => p.pt_name.clone(),
-                _ => tv_get_string(&v),
-            },
+            Some(v) if matches!(v.v_type, VAR_FUNC | VAR_PARTIAL) => tv_func_name(&v),
             _ => name,
         }
     };
@@ -5612,7 +5609,7 @@ fn call_funcref_self(
                 with_scoped(scoped, || call_named(&p.pt_name, args))
             })
         }
-        _ => with_self(selfdict, || call_named(&tv_get_string(funcref), extra)),
+        _ => with_self(selfdict, || call_named(&tv_func_name(funcref), extra)),
     }
 }
 
@@ -5835,7 +5832,7 @@ fn b_call(vm: &mut VM, argc: u8) -> Value {
         None => {
             message::semsg(&format!(
                 "E117: Unknown function: {}",
-                tv_get_string(&args[0])
+                tv_func_name(&args[0])
             ));
             Value::Undef
         }

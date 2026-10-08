@@ -163,7 +163,6 @@ pub fn tv_get_string_buf_chk(tv: &typval_T) -> Option<crate::vimstr::VimStr> {
         (VAR_FLOAT, v_float(f)) => Some(crate::ported::eval::encode::vim_float_g(*f, None).into()),
         // c: return tv->vval.v_string == NULL ? "" : v_string;
         (VAR_STRING, v_string(s)) => Some(s.clone()),
-        (VAR_FUNC, v_string(s)) => Some(s.clone()),
         // c: STRCPY(buf, encode_bool_var_names[tv->vval.v_bool]);
         (VAR_BOOL, v_bool(b)) => Some(
             if *b == kBoolVarTrue {
@@ -191,7 +190,9 @@ pub fn tv_get_string_buf_chk(tv: &typval_T) -> Option<crate::vimstr::VimStr> {
         // `str_errors[]` (c:4135) is a per-type table, and the type is part of
         // the message contract — a Dict in string context is E731 and a Blob is
         // E976, not the E730 a List gets. `tv_check_str` already encodes exactly
-        // this table, so route through it rather than keep a second copy.
+        // this table, so route through it rather than keep a second copy. A
+        // Funcref is in that list too (E729): a caller that wants a function's
+        // NAME reads `v_string`/`partial_name()` itself, as the C callers do.
         _ => {
             tv_check_str(tv);
             None
@@ -206,6 +207,19 @@ pub fn tv_get_string_buf_chk(tv: &typval_T) -> Option<crate::vimstr::VimStr> {
 /// when to prefer it.
 pub fn tv_get_string(tv: &typval_T) -> String {
     tv_get_string_buf_chk(tv).unwrap_or_default().to_string()
+}
+
+/// The function name a callable typval refers to, read the way the C callers
+/// read it: `tv->vval.v_string` for a `VAR_FUNC`, `partial_name()` for a
+/// `VAR_PARTIAL`, and `tv_get_string()` for anything else (a String naming the
+/// function). A Funcref must not go through `tv_get_string()` here: in string
+/// context it is `E729: Using a Funcref as a String`.
+pub fn tv_func_name(tv: &typval_T) -> String {
+    match (tv.v_type, &tv.vval) {
+        (VAR_FUNC, v_string(s)) => s.to_string(),
+        (VAR_PARTIAL, v_partial(Some(p))) => crate::ported::eval::partial_name(p).to_string(),
+        _ => tv_get_string(tv),
+    }
 }
 
 /// Port of `tv_equal()` from `Src/eval/typval.c` (the `ic == false` path).
@@ -2588,7 +2602,7 @@ fn parse_sort_uniq_args(argvars: &[typval_T], info: &mut sortinfo_T) -> i32 {
     }
     let a1 = &argvars[1];
     if a1.v_type == VAR_FUNC {
-        info.item_compare_func = Some(tv_get_string(a1));
+        info.item_compare_func = Some(tv_func_name(a1));
     } else if a1.v_type == VAR_PARTIAL {
         info.item_compare_partial = Some(a1.clone());
     } else {
@@ -2831,7 +2845,7 @@ pub fn tv_dict_get_callback(d: &dict_T, key: &str, result: &mut Callback) -> boo
     // c: callback_from_typval — VAR_FUNC / VAR_STRING name → a funcref Callback.
     match tv.v_type {
         VAR_FUNC | VAR_STRING => {
-            *result = Callback::Funcref(tv_get_string(tv));
+            *result = Callback::Funcref(tv_func_name(tv));
             true
         }
         _ => {
@@ -2846,7 +2860,7 @@ pub fn tv_dict_get_callback(d: &dict_T, key: &str, result: &mut Callback) -> boo
 pub fn callback_from_typval(callback: &mut Callback, tv: &typval_T) -> bool {
     match tv.v_type {
         VAR_FUNC => {
-            *callback = Callback::Funcref(tv_get_string(tv));
+            *callback = Callback::Funcref(tv_func_name(tv));
             true
         }
         VAR_STRING => {
