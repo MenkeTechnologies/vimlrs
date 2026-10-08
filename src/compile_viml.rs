@@ -593,7 +593,8 @@ fn compile_function_body(
     // the body names them without `a:`. That is not an assignment: no
     // `set_var_const`, hence no E704 for a lowercase Funcref argument
     // (`map(fs, {i, v -> v()})`).
-    for arg in lambda_args {
+    // `...` is not a named argument: the extras stay in `a:000` only.
+    for arg in lambda_args.iter().filter(|a| *a != "...") {
         c.get_var(&format!("a:{arg}"));
         c.load_str(arg);
         c.emit(Op::CallBuiltin(h::VIML_LAMBDA_ARG, 2));

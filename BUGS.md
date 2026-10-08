@@ -7524,3 +7524,12 @@ was `E117: Unknown function: g` once the frame was gone. The C runs
 `check_vars` on a call's name too (`eval_func`, `eval.c:1708-1710`, while the
 body is skipped), so the names of `name(…)` and `x->name(…)` now count.
 Parity case: `lambda_closure_call_name.vim`.
+
+### R53-6. A lambda could not take `...` — ✅ FIXED
+
+`{... -> a:0}` and `{a, ... -> a:000}` were `E15`: the lambda lookahead and
+parameter reader accepted only names. `get_function_args` (shared by
+`:function` and `get_lambda_tv`) takes a trailing `...`, which the lexer reads
+as `..` plus an adjacent `.`; it is now accepted as the last parameter and
+recorded as `"..."`, as a `:function`'s is, so the extras land in
+`a:0`/`a:000`. Parity case: `lambda_varargs.vim`.

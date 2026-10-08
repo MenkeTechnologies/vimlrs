@@ -4488,14 +4488,18 @@ impl Parser {
 
     /// Lookahead (just past the opening `{`) deciding lambda vs dict: a lambda
     /// is `{ -> …}` or `{ ident (, ident)* -> …}` — a top-level `->` reached
-    /// through only bare names and commas. Anything else (a `:` key, a string
-    /// key, `}`) is a dict.
+    /// through only bare names and commas, optionally ending in `...`
+    /// (`get_function_args` sets `mustend` after it). Anything else (a `:`
+    /// key, a string key, `}`) is a dict.
     fn at_lambda(&self) -> bool {
         let mut j = self.i;
         if matches!(self.toks.get(j).map(|t| &t.kind), Some(Tok::Arrow)) {
             return true; // {-> body}
         }
         loop {
+            if self.at_varargs(j) {
+                return matches!(self.toks.get(j + 2).map(|t| &t.kind), Some(Tok::Arrow));
+            }
             if !matches!(self.toks.get(j).map(|t| &t.kind), Some(Tok::Ident(_))) {
                 return false;
             }
@@ -4655,10 +4659,28 @@ impl Parser {
     }
 
     /// Parse a lambda `{params -> body}` (the opening `{` already consumed).
+    /// Whether the tokens at `j` spell a `...` varargs parameter. The lexer
+    /// reads `...` as `..` followed by an adjacent `.`.
+    fn at_varargs(&self, j: usize) -> bool {
+        match (self.toks.get(j), self.toks.get(j + 1)) {
+            (Some(a), Some(b)) => {
+                matches!(a.kind, Tok::DotDot) && matches!(b.kind, Tok::Dot) && a.end == b.span
+            }
+            _ => false,
+        }
+    }
+
     fn lambda(&mut self) -> Result<Expr, VimlError> {
         let mut params = Vec::new();
         if !matches!(self.peek(), Tok::Arrow) {
             loop {
+                // c: `get_function_args` — `...` is the last parameter.
+                if self.at_varargs(self.i) {
+                    self.advance();
+                    self.advance();
+                    params.push("...".to_string());
+                    break;
+                }
                 match self.advance() {
                     Tok::Ident(n) => params.push(n),
                     other => {
