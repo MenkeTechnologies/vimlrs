@@ -476,6 +476,13 @@ pub fn get_exception_string(value: &str, type_: except_type_T, cmdname: Option<&
     }
 }
 
+/// The `ET_USER` test at the top of `throw_exception()` (`Src/ex_eval.c:452-455`):
+/// a user value starting with `Vim` followed by NUL, `:` or `(` would pass for
+/// an interrupt or error exception, so `:throw` refuses it with E608.
+pub fn user_exception_fakes_vim(value: &str) -> bool {
+    value.starts_with("Vim") && matches!(value.as_bytes().get(3), None | Some(b':') | Some(b'('))
+}
+
 /// Port of `throw_exception()` from `Src/ex_eval.c:447`.
 ///
 /// Throw a new exception. `value` is the exception string for a user or
@@ -486,9 +493,7 @@ pub fn get_exception_string(value: &str, type_: except_type_T, cmdname: Option<&
 fn throw_exception(value: String, type_: except_type_T, cmdname: Option<&str>) -> i32 {
     // c:452 Disallow faking Interrupt/error exceptions as user exceptions.
     if type_ == except_type_T::ET_USER {
-        if value.starts_with("Vim")
-            && matches!(value.as_bytes().get(3), None | Some(b':') | Some(b'('))
-        {
+        if user_exception_fakes_vim(&value) {
             emsg("E608: Cannot :throw exceptions with 'Vim' prefix"); // c:456
             current_exception.with(|c| *c.borrow_mut() = None); // fail: c:526
             return FAIL;

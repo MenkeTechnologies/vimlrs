@@ -7506,3 +7506,12 @@ the List of the remaining items. `LetTarget::List` now carries the operator and
 `unpack_stores` routes each item through the ordinary compound store (lock
 check, `eexe_mod_op`), after the same E687/E688 count check as `=`. Parity
 case: `let_unpack_compound.vim`.
+
+### R53-4. `:throw 'Vim:…'` was thrown instead of refused — ✅ FIXED
+
+`b_throw` set the exception without the check at the top of the C
+`throw_exception` (`ex_eval.c:452-455`): a user value that starts with `Vim`
+followed by NUL, `:` or `(` would pass for an error or interrupt exception and
+is `E608: Cannot :throw exceptions with 'Vim' prefix`. The predicate is now
+`ex_eval::user_exception_fakes_vim`, shared by the ported `throw_exception`
+and the bridge. Parity case: `throw_vim_prefix.vim`.

@@ -1,0 +1,12 @@
+1
+'Vim' -> Vim(throw):E608: Cannot :throw exceptions with 'Vim' prefix
+'Vim:x' -> Vim(throw):E608: Cannot :throw exceptions with 'Vim' prefix
+'Vim(echo):E1: y' -> Vim(throw):E608: Cannot :throw exceptions with 'Vim' prefix
+'Vimx' -> Vimx
+'vim:x' -> vim:x
+' Vim:x' ->  Vim:x
+'Vi' -> Vi
+refused Vim(throw):E608: Cannot :throw exceptions with 'Vim' prefix
+Vim(throw):E608: Cannot :throw exceptions with 'Vim' prefix
+E608: Cannot :throw exceptions with 'Vim' prefix
+end

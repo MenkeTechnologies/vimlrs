@@ -2322,6 +2322,12 @@ fn b_throw(vm: &mut VM, _: u8) -> Value {
     if eval_failed_since_mark() {
         return Value::Undef;
     }
+    // c: `throw_exception` refuses a user value that would pass for an error or
+    // interrupt exception; the E608 is an ordinary error of the `:throw`.
+    if crate::ported::ex_eval::user_exception_fakes_vim(&v) {
+        message::emsg("E608: Cannot :throw exceptions with 'Vim' prefix");
+        return Value::Undef;
+    }
     set_throw_point();
     // c: throw_exception — set current_exception and v:exception.
     V_EXCEPTION.with(|e| *e.borrow_mut() = v.clone());
