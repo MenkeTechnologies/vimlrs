@@ -27,10 +27,10 @@ call assert_equal(12, Multiplier()(4))
 function! Const(v) abort
   return {-> a:v}
 endfunction
-let one = Const(1)
-let two = Const(2)
-call assert_equal(1, one())
-call assert_equal(2, two())
+let One = Const(1)
+let Two = Const(2)
+call assert_equal(1, One())
+call assert_equal(2, Two())
 
 " ── a captured closure works inside map()/filter() ──
 function! ScaleAll(list, by) abort

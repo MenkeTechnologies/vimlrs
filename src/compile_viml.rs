@@ -257,7 +257,15 @@ fn build_user_func_def(
         vim9: flags.vim9,
         dict: flags.dict,
         abort: flags.abort,
-        chunk: compile_function_body(body, exc, def_line, flags.abort, flags.vim9, flags.closure)?,
+        chunk: compile_function_body(
+            body,
+            exc,
+            def_line,
+            flags.abort,
+            flags.vim9,
+            flags.closure,
+            &[],
+        )?,
         closure: flags.closure,
         scoped: None,
     })
@@ -547,6 +555,7 @@ fn compile_function_body(
     abort: bool,
     vim9: bool,
     closure: bool,
+    lambda_args: &[String],
 ) -> Result<fusevm::Chunk, VimlError> {
     let mut c = Compiler::new(true, exc);
     // vim numbers a function body's lines from 1 at the first line AFTER the
@@ -569,6 +578,17 @@ fn compile_function_body(
     // reason: a bare name it never assigns may be its defining function's.
     if !exc && !vim9 && !closure {
         (c.slots, c.int_slots) = slot_plan(body, true);
+    }
+    // c: `call_user_func` (`vendor/eval/userfunc.c:1158-1162`) adds a lambda's
+    // named arguments straight to its `l:` dict (`tv_copy` + `hash_add`), so
+    // the body names them without `a:`. That is not an assignment: no
+    // `set_var_const`, hence no E704 for a lowercase Funcref argument
+    // (`map(fs, {i, v -> v()})`).
+    for arg in lambda_args {
+        c.get_var(&format!("a:{arg}"));
+        c.load_str(arg);
+        c.emit(Op::CallBuiltin(h::VIML_LAMBDA_ARG, 2));
+        c.emit(Op::Pop);
     }
     // c: `ex_docmd.c:647-651` resets `did_emsg` after every command of a function
     // body — `&& !func_has_abort(real_cookie)`. Without the `abort` attribute the
@@ -2406,12 +2426,33 @@ impl Compiler {
         let jf = self.emit(Op::JumpIfFalse(0));
 
         // item = list[idx]; bind it to the loop variable(s).
+        // c: `next_for_item` is `ex_let_vars(...) == OK`: a store that fails
+        // (E704 for a Funcref item under a lowercase name) ENDS the loop. A
+        // slotted variable only ever holds a Number, so its store cannot fail.
+        let store_checked =
+            matches!(vars, ForVars::One(name) if !self.slots.contains_key(self.slot_key(name)));
+        // The store is part of the `:for` command, so its errors are tagged
+        // `Vim(for):` even after the body has run other commands.
+        if self.exc {
+            self.load_str("for");
+            self.emit(Op::CallBuiltin(h::VIML_SET_CMDNAME, 1));
+            self.emit(Op::Pop);
+        }
+        if store_checked {
+            self.emit(Op::CallBuiltin(h::VIML_ERR_COUNT, 0));
+        }
         self.get_var(&list_var);
         self.get_var(&idx_var);
         self.emit(Op::CallBuiltin(h::VIML_INDEX, 2));
         let mut unpack_failed = Vec::new();
         match vars {
-            ForVars::One(name) => self.set_var(name),
+            ForVars::One(name) => {
+                self.set_var(name);
+                if store_checked {
+                    self.emit(Op::CallBuiltin(h::VIML_ERRS_AFTER, 1));
+                    unpack_failed.push(self.emit(Op::JumpIfTrue(0)));
+                }
+            }
             ForVars::List { names, rest } => {
                 // c: `next_for_item` is `ex_let_vars(...) == OK`, so an item
                 // that is not a List, or has the wrong number of elements for
@@ -2954,6 +2995,13 @@ impl Compiler {
         for (name, i, is_rest) in items {
             match crate::viml_parser::let_target(name, name)? {
                 LetTarget::Var(var) => {
+                    // c: `ex_let_vars` stops at the first `ex_let_one` that
+                    // fails (E704 for a Funcref under a lowercase name), so the
+                    // later targets keep their values. A slot cannot fail.
+                    let checked = !self.slots.contains_key(self.slot_key(&var));
+                    if checked {
+                        self.emit(Op::CallBuiltin(h::VIML_ERR_COUNT, 0));
+                    }
                     self.get_var(list);
                     self.emit(Op::LoadInt(i));
                     if is_rest {
@@ -2963,6 +3011,10 @@ impl Compiler {
                         self.emit(Op::CallBuiltin(h::VIML_INDEX, 2));
                     }
                     self.set_var(&var);
+                    if checked {
+                        self.emit(Op::CallBuiltin(h::VIML_ERRS_AFTER, 1));
+                        failed.push(self.emit(Op::JumpIfTrue(0)));
+                    }
                 }
                 target => {
                     let base = Box::new(Expr::Var(list.to_string()));
@@ -3422,23 +3474,12 @@ impl Compiler {
                 // body is `return {expr}`. Its parameters are bound as bare
                 // locals (so the body names them without `a:`).
                 let name = next_lambda_name();
-                // A lambda body is one expression on one line, so every
-                // statement of the synthesized body reports line 1 — which is
-                // what vim reports for a throw inside `{x -> …}`.
-                let mut stmts: Block = params
-                    .iter()
-                    .map(|p| {
-                        (
-                            1,
-                            Stmt::Let {
-                                target: LetTarget::Var(p.clone()),
-                                expr: Expr::Var(format!("a:{p}")),
-                            },
-                        )
-                    })
-                    .collect();
-                stmts.push((1, Stmt::Return(Some((**body).clone()))));
-                let chunk = compile_function_body(&stmts, self.exc, 0, false, *vim9, true)?;
+                // A lambda body is one expression on one line, so the
+                // synthesized body reports line 1 — which is what vim reports
+                // for a throw inside `{x -> …}`.
+                let stmts: Block = vec![(1, Stmt::Return(Some((**body).clone())))];
+                let chunk =
+                    compile_function_body(&stmts, self.exc, 0, false, *vim9, true, params)?;
                 LAMBDA_FUNCS.with(|f| {
                     f.borrow_mut().push(UserFuncDef {
                         name: name.clone(),

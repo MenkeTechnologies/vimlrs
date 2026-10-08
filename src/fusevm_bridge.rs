@@ -579,6 +579,8 @@ pub const VIML_ERRS_AFTER: u16 = 3620;
 pub const VIML_RANGE_CHECK: u16 = 3633;
 /// A lambda expression's value — see `b_make_lambda`.
 pub const VIML_MAKE_LAMBDA: u16 = 3621;
+/// Bind one lambda argument as a bare local — see `b_lambda_arg`.
+pub const VIML_LAMBDA_ARG: u16 = 3634;
 /// `:echoerr`: pop an argument and the message so far, push the message with the
 /// argument appended — see `b_echoerr_arg`.
 pub const VIML_ECHOERR_ARG: u16 = 3622;
@@ -2559,6 +2561,22 @@ fn is_vim9_def_frame() -> bool {
 fn b_setvar(vm: &mut VM, _: u8) -> Value {
     let name = tv_get_string(&pop_tv(vm));
     let val = pop_tv(vm);
+    // c: `set_var_const` (vars.c:2823-2844) resolves the scope, then refuses a
+    // Funcref stored under a name that could not be called (E704) or that would
+    // hide a function (E705) — before any read-only or lock check, so
+    // `let a:x = F` is E704, not E46. A name with no scope (`a:X` at script
+    // level) is left to `set_var`'s E461. A vim9 `:def` reports this when the
+    // function is compiled, which this runtime check does not model.
+    if matches!(val.v_type, VAR_FUNC | VAR_PARTIAL)
+        && !is_vim9_def_frame()
+        && crate::ported::eval::vars::find_var_ht_dict(&name, name.len())
+            .is_some_and(|(_, varname)| !varname.is_empty())
+    {
+        let new_var = crate::ported::eval::vars::find_var(&name, true).is_none();
+        if crate::ported::eval::vars::var_wrong_func_name(&name, new_var) {
+            return Value::Undef;
+        }
+    }
     // c: `set_var_const` (vars.c:2860) calls `value_check_lock(di->di_tv.v_lock,
     // name, TV_CSTRING)` before overwriting — reassigning a `:lockvar`-ed or
     // `:const` variable is E741 and changes nothing. The check lives here rather
@@ -2606,6 +2624,20 @@ fn b_setvar(vm: &mut VM, _: u8) -> Value {
             return Value::Undef;
         }
     }
+    set_var(&name, name.len(), val, false);
+    Value::Undef
+}
+
+/// `VIML_LAMBDA_ARG` — bind a lambda's named argument as a bare local. Stack:
+/// the argument's value, then its name.
+///
+/// c: `call_user_func` (`vendor/eval/userfunc.c:1158-1162`) puts the argument
+/// straight into the lambda's `l:` dict, so none of `set_var_const`'s checks
+/// apply: `{i, v -> v()}` binds a Funcref under a lowercase name without E704,
+/// and a vim9 lambda's argument never falls back to a script variable.
+fn b_lambda_arg(vm: &mut VM, _: u8) -> Value {
+    let name = tv_get_string(&pop_tv(vm));
+    let val = pop_tv(vm);
     set_var(&name, name.len(), val, false);
     Value::Undef
 }
@@ -7340,6 +7372,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_ERRS_AFTER, b_errs_after);
     vm.register_builtin(VIML_RANGE_CHECK, b_range_check);
     vm.register_builtin(VIML_MAKE_LAMBDA, b_make_lambda);
+    vm.register_builtin(VIML_LAMBDA_ARG, b_lambda_arg);
     vm.register_builtin(VIML_ECHOERR_ARG, b_echoerr_arg);
     vm.register_builtin(VIML_ECHOERR_END, b_echoerr_end);
     vm.register_builtin(VIML_EXEC_STMT_FN, b_exec_stmt_fn);

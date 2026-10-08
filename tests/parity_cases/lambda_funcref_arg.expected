@@ -1,0 +1,7 @@
+0
+[2]
+[3]
+[function('<lambda>4')]
+AB
+ok
+Vim(let):E704: Funcref variable name must start with a capital: s

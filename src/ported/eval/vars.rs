@@ -966,7 +966,8 @@ pub fn do_unlet(name: &str, _name_len: usize, forceit: bool) -> i32 {
 /// Port of `var_wrong_func_name()` from `Src/eval/vars.c` — true (with E704) when
 /// `name` is an invalid Funcref variable name: it must start with a capital, or
 /// be a `w:`/`b:`/`s:`/`t:` scope or an autoload (`#`) name.
-pub fn var_wrong_func_name(name: &str, _new_var: bool) -> bool {
+/// A NEW variable must also not hide a function of the same name (E705).
+pub fn var_wrong_func_name(name: &str, new_var: bool) -> bool {
     let b = name.as_bytes();
     let scoped = b.first().is_some_and(|c| b"wbst".contains(c)) && b.get(1) == Some(&b':');
     let lead = if b.first().is_some_and(|&c| c != 0) && b.get(1) == Some(&b':') {
@@ -977,6 +978,14 @@ pub fn var_wrong_func_name(name: &str, _new_var: bool) -> bool {
     if !scoped && !lead.is_ascii_uppercase() && !name.contains('#') {
         crate::ported::message::semsg(&format!(
             "E704: Funcref variable name must start with a capital: {name}"
+        ));
+        return true;
+    }
+    // c: Don't allow hiding a function. When "v" is not NULL we might be
+    // assigning another function to the same var, the type is checked below.
+    if new_var && crate::ported::eval::userfunc::function_exists(name, false) {
+        crate::ported::message::semsg(&format!(
+            "E705: Variable name conflicts with existing function: {name}"
         ));
         return true;
     }

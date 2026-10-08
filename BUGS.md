@@ -7468,3 +7468,29 @@ E116/E117 names of `call()` and a call through a Funcref variable. Those were
 found by tracing every `VAR_FUNC` that reached `tv_get_string_buf_chk` while
 running the parity corpus and `examples/`. Parity case:
 `funcref_in_string_context.vim`.
+
+### R53-2. A Funcref under a name it could not be called by is E704/E705 — ✅ FIXED
+
+`let s = function('len')` stored the Funcref; vim refuses it in
+`set_var_const` with `E704: Funcref variable name must start with a capital`,
+and a new variable named like an existing user function with `E705`, before
+any read-only or lock check (so `let a:x = F` inside a function is E704, not
+E46). `b_setvar` now calls the ported `var_wrong_func_name` (which gained the
+E705 half) for a `VAR_FUNC`/`VAR_PARTIAL` value outside a vim9 `:def`. A
+`:for` or `:let [a, b] = …` whose store fails stops there, as
+`next_for_item`/`ex_let_vars` do, and the `:for` store's error is tagged
+`Vim(for):`.
+
+A lambda's named arguments are NOT assignments: `call_user_func`
+(`vendor/eval/userfunc.c:1158-1162`) adds them straight to `l:`. The port used
+to synthesize `let v = a:v` for each, which made `map(fs, {i, v -> v()})` E704
+once the check existed; they are now bound by `VIML_LAMBDA_ARG`, which skips
+`set_var_const`'s checks (and the vim9 script-variable fallback).
+`examples/closures.vim` stored closures in `one`/`two`, which vim itself
+rejects with E704 — renamed to `One`/`Two`. Parity cases:
+`funcref_variable_name.vim`, `lambda_funcref_arg.vim`.
+
+Still open: vim adds a lambda argument to `l:` only, `DI_FLAGS_RO|DI_FLAGS_FIX`,
+so `{x -> a:x}` is `E121: Undefined variable: a:x` and `let x = 5` inside the
+lambda is E46; the port binds it in both `a:` and `l:`, writable, because
+`di_flags` is not modelled on scope entries.

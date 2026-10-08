@@ -1,0 +1,28 @@
+1
+Vim(let):E704: Funcref variable name must start with a capital: s
+Vim(let):E704: Funcref variable name must start with a capital: g:t
+list ok
+dict ok
+0 0 1 1 1
+Vim(let):E705: Variable name conflicts with existing function: Strlen2
+Strlen ok
+Vim(let):E704: Funcref variable name must start with a capital: strlen
+Vim(let):E704: Funcref variable name must start with a capital: q
+Vim(let):E704: Funcref variable name must start with a capital: v:count
+Vim(let):E461: Illegal variable name: a:x
+Vim(let):E704: Funcref variable name must start with a capital: lam
+Vim(let):E704: Funcref variable name must start with a capital: b
+1 0
+Vim(let):E704: Funcref variable name must start with a capital: s
+Vim(let):E704: Funcref variable name must start with a capital: l:t
+Vim(let):E704: Funcref variable name must start with a capital: a:x
+Vim(let):E461: Illegal variable name: a:X
+for 1
+Vim(for):E704: Funcref variable name must start with a capital: x
+2
+Vim(for):E704: Funcref variable name must start with a capital: y
+1 2
+E704: Funcref variable name must start with a capital: m
+3
+E704: Funcref variable name must start with a capital: z
+end
