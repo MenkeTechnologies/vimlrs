@@ -4522,6 +4522,19 @@ fn call_user_function_raw(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
         message::emsg(&format!("E118: Too many arguments for function: {name}"));
         return Some(tv_num(0));
     }
+    // c: `call_user_func_check` (`vendor/eval/userfunc.c:1420-1425`) — only a
+    // `dict` function gets `self`, and calling one without a Dictionary is
+    // E725. Any other function ignores the dict it was handed (`d.plain()`,
+    // `call(F, [], d)`, a lambda).
+    let selfdict = PENDING_SELF.with(|s| s.borrow_mut().take());
+    let selfdict = match (func.dict, selfdict) {
+        (true, None) => {
+            message::emsg(&format!("E725: Calling dict function without Dictionary: {name}"));
+            return Some(tv_num(0));
+        }
+        (true, selfdict) => selfdict,
+        (false, _) => None,
+    };
 
     // Push the (empty) a:/l: frame first, then bind params into it one at a time.
     // Binding incrementally lets an omitted parameter's default expression read
@@ -4537,8 +4550,8 @@ fn call_user_function_raw(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
         })
     });
     // c: `fc_selfdict` becomes the function-local `self` for a `dict` function.
-    // Taken (not read) so a nested call inside the body does not inherit it.
-    if let Some(selftv) = PENDING_SELF.with(|s| s.borrow_mut().take()) {
+    // Taken (not read, above) so a nested call inside the body does not inherit it.
+    if let Some(selftv) = selfdict {
         crate::ported::eval::vars::funccal_stack.with(|s| {
             if let Some(top) = s.borrow_mut().last_mut() {
                 tv_dict_add_tv(&mut top.fc_l_vars.borrow_mut(), "self", selftv);
@@ -5626,8 +5639,10 @@ fn call_funcref(funcref: &typval_T, extra: Vec<typval_T>) -> Option<typval_T> {
 }
 
 /// [`call_funcref`] with an explicit `self` dict — what a `d.key(...)` member
-/// call and `call(F, args, dict)` supply. A Partial's own bound dict
-/// (`pt_dict`) wins over the caller's, as in `call_func`.
+/// call and `call(F, args, dict)` supply. c: `call_func` (`userfunc.c:1712`)
+/// lets a Partial's own dict win only when the script bound it explicitly
+/// (`function(F, d)`) or no dict was supplied; one bound automatically by
+/// reading `d.Fn` yields to the caller's.
 fn call_funcref_self(
     funcref: &typval_T,
     extra: Vec<typval_T>,
@@ -5642,8 +5657,12 @@ fn call_funcref_self(
                 v_lock: crate::ported::eval::typval_defs_h::VarLockStatus::VAR_UNLOCKED,
                 vval: v_dict(Some(d)),
             });
+            let selfdict = match bound {
+                Some(own) if selfdict.is_none() || !p.pt_auto => Some(own),
+                _ => selfdict,
+            };
             let scoped = p.pt_scoped.clone();
-            with_self(bound.or(selfdict), || {
+            with_self(selfdict, || {
                 with_scoped(scoped, || call_named(&p.pt_name, args))
             })
         }

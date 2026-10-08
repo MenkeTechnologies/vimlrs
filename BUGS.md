@@ -7543,3 +7543,18 @@ braces and a quote is ordinary text. Each line is now split by the
 interpolated-string scanner in a heredoc mode (`heredoc_eval_parts`, the same
 body loop with no closing quote) and re-emitted as a `$'…'` item. Parity case:
 `heredoc_eval.vim`.
+
+### R53-8. `self` for the wrong functions, and `call()`'s dict lost to `d.Fn` — ✅ FIXED
+
+Two halves of `call_func`/`call_user_func_check` (`userfunc.c:1420-1425`,
+`1712`):
+
+- `self` was bound for any function handed a dict, so `call('Plain', [], d)`
+  and `call({-> self}, [], d)` saw it; the C binds it only for a `dict`
+  function, and calling a `dict` function with no Dictionary is `E725:
+  Calling dict function without Dictionary`, which was an E121 on `self`.
+- `call_funcref_self` let a Partial's dict always win, so `call(d.Fn, [], e)`
+  ran with `d`. A dict bound automatically by reading `d.Fn` (`pt_auto`)
+  yields to the one supplied; only `function(F, d)` keeps its own.
+
+Parity case: `call_selfdict.vim`.
