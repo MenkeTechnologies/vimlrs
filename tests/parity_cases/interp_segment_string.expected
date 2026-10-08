@@ -1,0 +1,15 @@
+1
+1.5|-7|v:true|v:null|[1, 'a']|{'k': 'v'}|s
+[0z01]
+E976: Using a Blob as a String
+ab
+m1
+E729: Using a Funcref as a String
+ab
+m2
+E976: Using a Blob as a String
+r= pq
+E976: Using a Blob as a String
+['line  end']
+t
+caught Vim(echo):E976: Using a Blob as a String

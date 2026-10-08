@@ -7558,3 +7558,40 @@ Two halves of `call_func`/`call_user_func_check` (`userfunc.c:1420-1425`,
   yields to the one supplied; only `function(F, d)` keeps its own.
 
 Parity case: `call_selfdict.vim`.
+
+### R53-9. An interpolated `{expr}` was echo-formatted, not `eval_to_string`'d — ✅ FIXED
+
+`b_str_interp` used `encode_tv2echo`, so `$'a{0z01}b'` was `a0z01b` and a
+Funcref printed its name. `eval_one_expr_in_str` (`vendor/eval/vars.c:640`)
+takes `eval_to_string(…, false)`, i.e. `typval2string`: a List/Dict as
+`string()`, anything else through `tv_get_string` — E976 for a Blob, E729 for a
+Funcref, the segment contributing "". `eval_interp_string` still returns OK,
+so the command around it runs (`:echo` prints `ab`, `:let` assigns), inside a
+`:try` too. A String segment is passed through untouched, which keeps raw
+non-UTF-8 bytes (`string_escape_bytes.vim`). Parity case:
+`interp_segment_string.vim`.
+
+### R53-O. Still open from this round (vim and Neovim agree, vimlrs differs)
+
+- **An error in a one-line `:try` skips its own `:catch`/`:endtry`.** C
+  `ex_call`/`ex_throw` set `eap->nextcmd` only when `!aborting()`, so in
+  `try | call add(locked, 1) | catch | … | endtry` (or `throw [1]`) the rest of
+  the line is dropped and every later line runs inside the unterminated `:try`
+  until the script ends. vimlrs compiles the `:try` structurally and catches.
+  Matching it needs line-level `|` continuation in the compiler — a design
+  decision.
+- **A failing lambda body yields 0 where vimlrs yields -1.** `call_user_func`
+  evaluates a lambda's expression straight into `rettv` and returns -1 only
+  when `rettv` is still `VAR_UNKNOWN`; a failed call (`{-> Nosuch()}()`) leaves
+  Number 0 there, a failed operator (`len([1] . '')`) leaves nothing. vimlrs
+  returns -1 for both; telling them apart needs the evaluator's partial result.
+- **Lambda arguments are read-only and `l:`-only in the C** (`DI_FLAGS_RO`,
+  no `a:` entry): `{x -> execute('let x = 5') . x}` is E46 and `{x -> a:x}` is
+  E121. vimlrs binds them in `a:` and `l:`, writable — `di_flags` is not
+  modelled on scope entries.
+- **Script-local functions are not `<SNR>N_` names.** `string(function('s:F'))`
+  is `function('<SNR>1_F')` in vim; vimlrs keeps `s:F`. Needs a script-ID model.
+- **`function('D.get')`** then calling it is `E1085: Not a callable type` in
+  both engines; vimlrs reports E117 on the variable.
+- **`has('patch-8.0.0')`** is 1 in both engines; vimlrs answers 0 for every
+  `patch-*` by design (it is neither Vim nor Neovim).

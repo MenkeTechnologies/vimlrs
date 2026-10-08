@@ -337,7 +337,7 @@ pub const VIML_ECHON: u16 = 3061;
 pub const VIML_SET_RESULT: u16 = 3062;
 /// `$ENV`
 pub const VIML_GETENV: u16 = 3063;
-/// interpolated-string segment → echo-style string conversion (`$'…{e}…'`).
+/// interpolated-string segment → its text, as `eval_to_string` gives it (`$'…{e}…'`).
 pub const VIML_STR_INTERP: u16 = 3067;
 /// `&option`
 pub const VIML_GETOPT: u16 = 3064;
@@ -3694,14 +3694,24 @@ fn b_getenv(vm: &mut VM, _: u8) -> Value {
     Value::str(std::env::var(&name).unwrap_or_default())
 }
 
-/// Convert one interpolated-string segment to text using Vim's echo-style
-/// conversion (`:help interpolated-string`): a String value is inserted
-/// verbatim (no surrounding quotes), Numbers/Floats/Lists/Dicts render as they
-/// would under `:echo`. Always yields a String, so the whole interpolation is a
-/// String regardless of the embedded expressions' types.
+/// Convert one interpolated-string segment to text. c: `eval_one_expr_in_str`
+/// (`vendor/eval/vars.c:640`) takes `eval_to_string(…, false, …)`, which is
+/// `typval2string(&tv, false)`: a List or Dict renders as `string()` does,
+/// anything else goes through `tv_get_string` — so a Blob is E976 and a Funcref
+/// E729, and the segment contributes "" while the rest of the string is still
+/// built. Always yields a String.
 fn b_str_interp(vm: &mut VM, _: u8) -> Value {
     let v = pop_tv(vm);
-    tv_to_value(tv_str(encode_tv2echo(&v)))
+    // A String is its own text; handing it back untouched keeps raw bytes that
+    // are not UTF-8 (`$"\xff"`), which a `String` round trip would replace.
+    if v.v_type == VAR_STRING {
+        return tv_to_value(v);
+    }
+    // c: `eval_interp_string` returns OK whatever `eval_one_expr_in_str`
+    // reported, so the command around it still runs (`:echo` prints, `:let`
+    // assigns), even inside a `:try`: the error does not fail the evaluation.
+    let text = in_command_error(|| crate::ported::eval::typval2string(&v, false));
+    tv_to_value(tv_str(text))
 }
 /// One `:echoerr` argument onto the message — the `CMD_echoerr` arm of
 /// `ex_execute()` (`vendor/eval.c`): a String through `encode_tv2echo`, any other
