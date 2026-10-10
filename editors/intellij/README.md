@@ -11,7 +11,7 @@
 
 ## `[BUILT FOR VIMLRS]`
 
-A JetBrains-platform plugin that drives the LSP and DAP servers compiled into the `viml` binary — a standalone VimL (Vimscript) interpreter on the fusevm bytecode VM. Hand-rolled lexer for instant highlighting, semantic-token overlay from the LSP, hover cards, a full breakpoint debugger over DAP, run configs that auto-create from any `.vim` / vimrc-family file, and Extract / Rename refactors routed through the LSP. Talks to the in-tree `src/lsp.rs` + `src/dap.rs` over JSON-RPC; no upstream `lsp-server` / `dap-types` crates anywhere in the build.
+A JetBrains-platform plugin that drives the LSP and DAP servers compiled into the `viml` binary — a standalone VimL (Vimscript) interpreter on the fusevm bytecode VM. Hand-rolled lexer for instant highlighting, completion, hover and diagnostics from the LSP, a breakpoint debugger over DAP, and run configs that auto-create from any `.vim` / vimrc-family file. Talks to the in-tree `src/lsp.rs` + `src/dap.rs` over JSON-RPC.
 
 ### [`vimlrs`](https://github.com/MenkeTechnologies/vimlrs) · [`fusevm`](https://github.com/MenkeTechnologies/fusevm) · [`strykelang`](https://github.com/MenkeTechnologies/strykelang)
 
@@ -41,9 +41,9 @@ A JetBrains-platform plugin that drives the LSP and DAP servers compiled into th
 
 vimlrs ships an **LSP server** and **DAP debug adapter** built into the `viml` binary (`viml --lsp`, `viml --dap`, both over stdio). This plugin is the JetBrains-side driver:
 
-- Spawns the LSP / DAP servers on demand, frames JSON-RPC over stdio, and renders responses through the IDE's native UI affordances (gutter breakpoints, intentions popup, refactor menu, semantic-tokens layer).
-- Adds **zero new language code paths**. Everything the user sees in the editor comes from one of two sources: the hand-rolled `VimlrsLexer.kt` (instant first-paint highlighting) or the `textDocument/semanticTokens` overlay (LSP-driven full classification).
-- No upstream `lsp-server` / `lsp-types` / `dap-types` / `lsp4ij` dependencies on the Rust side. JetBrains' own `LspServerSupportProvider` is the only LSP4J consumer; everything else is hand-framed JSON-RPC on top of `serde_json`. Same on the DAP side.
+- Spawns the LSP / DAP servers on demand, frames JSON-RPC over stdio, and renders responses through the IDE's native UI affordances (gutter breakpoints, completion popup, hover, diagnostics).
+- Adds **zero new language code paths**. Highlighting comes from the hand-rolled `VimlrsLexer.kt`; completion, hover, document symbols and diagnostics come from the LSP server.
+- On the Rust side the LSP server is built on the `lsp-server` / `lsp-types` crates; the DAP server is hand-framed JSON-RPC on top of `serde_json`. JetBrains' own `LspServerSupportProvider` is the plugin-side LSP client.
 
 ---
 
@@ -57,7 +57,7 @@ editors/intellij/build/distributions/vimlrs-intellij-<version>.zip
 
 After install: restart the IDE → open any `.vim` file (or `vimrc` / `.vimrc` / `_vimrc` / `gvimrc` / `.gvimrc` / `.exrc` / `init.vim`) → the LSP starts automatically → the debugger activates the first time you click Debug.
 
-The `vimlrs` binary must be on `$PATH`, or configured under *Settings → Tools → Vimlrs → vimlrs executable*. The plugin resolves the executable via `VimlrsSettings.vimlrsExecutable` first, then falls back to `which vimlrs`.
+The `viml` binary must be on `$PATH`, or configured under *Settings → Tools → Vimlrs → vimlrs executable*. The plugin resolves the executable via `VimlrsSettings.vimlrsExecutable` first, then falls back to a `$PATH` lookup of `viml`.
 
 ---
 
@@ -66,7 +66,7 @@ The `vimlrs` binary must be on `$PATH`, or configured under *Settings → Tools 
 | Surface | Behavior |
 |---------|----------|
 | File association | `.vim` plus the `vimrc` / `gvimrc` / `exrc` / `init.vim` family (configurable; see [§0x08](#0x08-configuration)) |
-| Lexer | Hand-rolled in `VimlrsLexer.kt` — instant first-paint highlighting before the LSP semantic-tokens response lands |
+| Lexer | Hand-rolled in `VimlrsLexer.kt` — instant highlighting; the server does not provide semantic tokens |
 | Color slots | One stable `VIMLRS_*` `TextAttributesKey` per token category under *Settings → Editor → Color Scheme → vimlrs* |
 | Brace matching | `{` / `}`, `(` / `)`, `[` / `]` via `VimlrsBraceMatcher.kt` |
 | Comments | Cmd/Ctrl-`/` for `"` line comments via `VimlrsCommenter.kt` (VimL has no block-comment form) |
@@ -99,26 +99,21 @@ The LSP server is in-process inside the `viml` binary — `viml --lsp` spawns it
 
 | Capability | Trigger / scope |
 |------------|-----------------|
-| `completion` | builtins, keywords, options, scope vars, in-file functions |
-| `hover` | markdown cards for builtins / commands / options / special variables |
-| `definition` / `references` | function names declared in the open document |
-| `documentSymbol` | `function Foo`, `let` decls, `command` / `augroup` blocks |
-| `foldingRange` | `if … endif`, `function … endfunction`, `while … endwhile` blocks |
-| `rename` | scope vars, function names, command names |
-| `semanticTokens/full` | token classes mirroring the lexer; the standard LSP token types map to the `VIMLRS_*` color keys |
-| `formatting` | trailing-whitespace strip, indent normalize, final-newline guarantee |
-| `publishDiagnostics` | Vim-style `E121: Undefined variable` etc. on `didOpen` / `didChange` / `didSave` |
+| `completion` | builtins, ex commands, `v:` variables |
+| `hover` | signature and description cards for the same names |
+| `documentSymbol` | symbols declared in the open document |
+| `publishDiagnostics` | per-line parse errors on `didOpen` / `didChange`; cleared on `didClose` |
 
 ### Transport
 
-- **Stdio**, Content-Length-framed JSON-RPC. Hand-rolled framer on top of `serde_json` — no `lsp-server` / `lsp-types` crates.
-- Optional `VIMLRS_LSP_LOG=<path>` env var dumps every request/response to a file for debugging.
+- **Stdio**, Content-Length-framed JSON-RPC via the `lsp-server` / `lsp-types` crates.
+- Any other request is answered with `MethodNotFound`; definition, references, folding, rename, formatting, semantic tokens and code actions are not implemented.
 
 ---
 
 ## [0x04] CODE ACTIONS
 
-LSP `refactor.extract` code actions surface under **Alt-Enter** (intentions popup). The IntelliJ Refactor menu (Ctrl-T) routes via `VimlrsRefactoringSupportProvider.kt` so Extract Method / Variable / Constant on the platform's binding all reach the LSP. Failure modes (no LSP, no matching action) surface as balloon notifications instead of silent dead keys.
+The plugin routes the IntelliJ Refactor menu (Ctrl-T) through `VimlrsRefactoringSupportProvider.kt` to LSP code-action requests for Extract Method / Variable / Constant. The server advertises no code-action capability, so these requests currently find no action. Failure modes (no LSP, no matching action) surface as balloon notifications instead of silent dead keys.
 
 ---
 
@@ -164,7 +159,7 @@ vimlrs side (`src/dap.rs`): DAP requests handled include `initialize`, `launch`,
 
 ## [0x07] REFACTOR / RENAME
 
-**Shift-F6** on a scope variable, function name, or command renames it across the workspace via `textDocument/rename`. Implementation: plugin handler in `VimlrsRenameHandler.kt`; server-side rename in `src/lsp.rs::rename`.
+**Shift-F6** is handled by `VimlrsRenameHandler.kt`, which sends `textDocument/rename` to the LSP server. `src/lsp.rs` does not implement `textDocument/rename`, so the request is answered with `MethodNotFound`.
 
 ---
 
@@ -174,14 +169,14 @@ vimlrs side (`src/dap.rs`): DAP requests handled include `initialize`, `launch`,
 
 | Section     | Setting                                | Default              | Notes |
 |-------------|----------------------------------------|----------------------|-------|
-| Interpreter | vimlrs executable                      | first `vimlrs` on `$PATH` | absolute path or blank |
+| Interpreter | vimlrs executable                      | first `viml` on `$PATH` | absolute path or blank |
 | LSP         | Enable LSP                             | on                   | master toggle |
 | LSP         | Extra LSP args                         | empty                | passed after `--lsp` |
 | LSP         | LSP environment                        | empty                | `KEY=VAL` pairs (e.g. `RUST_LOG=info`) |
 | LSP         | Auto-restart LSP on settings change    | on                   | restart picks up new env |
 | LSP         | Show builtin hovers                    | on                   | server-provided cards |
-| LSP         | Log LSP traffic to file                | off                  | sets `VIMLRS_LSP_LOG=<path>` |
-| Editor      | Disable lexer highlighting             | off                  | rely only on LSP semantic tokens |
+| LSP         | Log LSP traffic to file                | off                  | sets `VIMLRS_LSP_LOG=<path>` in the server environment (the server does not read it) |
+| Editor      | Disable lexer highlighting             | off                  | turns the hand-rolled lexer highlighting off |
 | Editor      | File extensions                        | `vim`                | comma-separated; the vimrc dotfiles always match |
 
 Color scheme entries: *Settings → Editor → Color Scheme → vimlrs*.
@@ -194,7 +189,7 @@ The plugin writes an append-only log under `~/.vimlrs/` (or `$VIMLRS_HOME/` when
 
 | File | Source | Contents |
 |------|--------|----------|
-| `~/.vimlrs/vimlrs-plugin.log` | Kotlin (plugin) | LSP command line built, DAP `send` / receive, rename / semantic-token routing, breakpoint handler steps |
+| `~/.vimlrs/vimlrs-plugin.log` | Kotlin (plugin) | LSP command line built, DAP `send` / receive, rename routing, breakpoint handler steps |
 
 Tail with `tail -f ~/.vimlrs/vimlrs-plugin.log`.
 
@@ -236,6 +231,8 @@ editors/intellij/
     │   ├── VimlrsCommenter.kt                # `"` line comments
     │   ├── VimlrsQuoteHandler.kt             # " ' auto-pair
     │   ├── VimlrsSmartEnterProcessor.kt      # block / bracket completion
+    │   ├── VimlrsTypedHandler.kt             # skip-over for closing brackets
+    │   ├── VimlrsParserDefinition.kt         # flat parser definition over the lexer
     │   ├── VimlrsSpellcheckingStrategy.kt    # suppress typos on strings/comments
     │   ├── VimlrsSettings.kt                 # persistent settings
     │   ├── VimlrsSettingsConfigurable.kt
@@ -280,15 +277,15 @@ The Rust side lives in `vimlrs/src/lsp.rs` (LSP server, `viml --lsp`) and `vimlr
 
 ## [0x0C] VERSION COMPATIBILITY
 
-Plugin version tracks the vimlrs Cargo workspace version. `gradle.properties` controls the supported IDE range via `pluginSinceBuild` / `pluginUntilBuild`. Currently targets the `2025.2` SDK against builds `252..261.*` — every paid JetBrains IDE on **2025.2 +** loads it (RustRover, IDEA Ultimate, GoLand, PyCharm Pro, WebStorm, RubyMine, PhpStorm, CLion, Rider, DataGrip, Aqua). Community editions don't have the LSP API, so the plugin won't load there.
+`gradle.properties` carries the plugin version (`pluginVersion`) and controls the supported IDE range via `pluginSinceBuild` / `pluginUntilBuild`. Currently targets the `2025.2` SDK against builds `252..261.*` — every paid JetBrains IDE on **2025.2 +** loads it (RustRover, IDEA Ultimate, GoLand, PyCharm Pro, WebStorm, RubyMine, PhpStorm, CLion, Rider, DataGrip, Aqua). Community editions don't have the LSP API, so the plugin won't load there.
 
 ---
 
 ## [0x0D] LIMITATIONS
 
-- **No PSI tree** — every symbol-navigation feature (Cmd-click, Cmd-B, Find Usages, rename) routes through the LSP server. Disabling the LSP under Settings disables them all.
+- **No PSI tree** — the parser definition is flat (one leaf per lexer token). Symbol features route through the LSP server, which currently provides document symbols only; go-to-definition, Find Usages and rename are not implemented server-side.
 - **Debugger v1**: no conditional breakpoints, no hit-count breakpoints, no exception breakpoints, no watch expressions, no Set Value, single-thread only.
-- **Lexer is approximate** for the `"` comment-vs-string ambiguity in pathological cases (a `"` at command position is a comment; otherwise a string — Vim's own runtime syntax uses the same heuristic). Server-side semantic tokens fill in where the lexer is wrong.
+- **Lexer is approximate** for the `"` comment-vs-string ambiguity in pathological cases (a `"` at command position is a comment; otherwise a string — Vim's own runtime syntax uses the same heuristic).
 
 ---
 

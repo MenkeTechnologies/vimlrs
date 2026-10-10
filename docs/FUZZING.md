@@ -80,7 +80,7 @@ reduction — never that a finding is lost.
 
 `--no-shrink` reports findings exactly as generated.
 
-## Two modes
+## Modes
 
 `--stmts` fuzzes **statements** instead of expressions. A snippet is wrapped in
 `execute()`, which runs the commands and returns their output as a string, so it
@@ -110,6 +110,12 @@ after `^` is a literal star" is invisible, because every other subject answers t
 same for the correct reading and the wrong one. Each pattern is checked through
 `match`, `matchstr`, `matchend`, `matchlist`, `matchstrpos`, `substitute` (plain,
 `g`, `&`, `\=submatch()`), and `split` (with and without `keepempty`).
+
+`--dap` fuzzes the **debugger** rather than the language: it generates whole
+programs and drives each through a live `viml --dap` session, stepping with a
+seed-driven mix of verbs. A plain run of the program is its own oracle for
+debugger drift and for the depth each step verb promises; a session that never
+stops is counted separately and never as a pass.
 
 ## How a case is judged
 
