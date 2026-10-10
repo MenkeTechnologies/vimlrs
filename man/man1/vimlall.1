@@ -13,15 +13,13 @@ reference. For the concise command page see
 .BR viml (1).
 .PP
 .B viml
-is the first compiled standalone VimL (Vimscript) interpreter. Vimscript has
-only ever run embedded inside Vim or Neovim;
-.B viml
-takes the eval engine out of the editor and runs
+is a standalone VimL (Vimscript) interpreter. It takes the eval engine out
+of the editor and runs
 .B .vim
 scripts as ordinary programs. It is one of the languages hosted on the
 .B fusevm
 bytecode VM, alongside
-.BR zshrs ", " stryke ", " awkrs ", and " elisp .
+.BR zshrs ", " stryke ", and " awkrs .
 .SH INVOCATION
 .B viml
 [\fIOPTIONS\fR] [\fIFILE\fR ...]
@@ -36,7 +34,11 @@ for the full option list:
 .BR \-\-clear\-cache ,
 .BR \-\-lsp ,
 .BR \-\-dap ,
+.BR \-\-tiers ,
 .BR \-\-disasm ,
+.BR \-\-dump\-tokens ,
+.BR \-\-dump\-ast ,
+.BR \-\-dump\-bytecode ,
 .BR \-\-repl ,
 .BR \-V / \-\-version ,
 .BR \-h / \-\-help .

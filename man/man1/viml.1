@@ -14,7 +14,7 @@ viml \- VimL (Vimscript) interpreter that runs .vim scripts standalone, outside 
 \fB\-c\fR \fICMD\fR
 .SH DESCRIPTION
 .B viml
-is the first compiled standalone VimL interpreter: it takes Vim's eval engine
+is a standalone VimL interpreter: it takes Vim's eval engine
 out of the editor and runs
 .B .vim
 scripts as ordinary programs. The language semantics are ported faithfully from
@@ -30,9 +30,8 @@ bytecode, and lets the shared engine run it \(em the same engine (with a
 three-tier Cranelift JIT) behind
 .BR zshrs ,
 .BR stryke ,
-.BR awkrs ,
 and
-.BR elisp .
+.BR awkrs .
 The pipeline is:
 .PP
 .RS
@@ -121,6 +120,17 @@ When set, report how many loop traces were JIT-compiled.
 .TP
 .B VIMLRS_NO_JIT
 When set, force the bytecode interpreter baseline (disable the Cranelift JIT).
+.TP
+.B VIMLRS_REPL_MODE
+REPL edit mode, \fBemacs\fR or \fBvi\fR; overrides \fB[repl] mode\fR in
+\fB~/.vimlrs/config.toml\fR.
+.TP
+.B VIMLRS_NO_CONFIG
+When set, the REPL does not seed \fB~/.vimlrs/config.toml\fR on first run.
+.TP
+.B VIMLRS_AOT_RUNTIME_LIB
+Path to \fBlibvimlrs.a\fR, the runtime staticlib linked by
+\fB\-\-build \-\-native\fR.
 .SH EXIT STATUS
 .B viml
 exits 0 on success and non-zero if a file cannot be sourced, an expression fails
