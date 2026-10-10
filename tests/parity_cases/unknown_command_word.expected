@@ -1,0 +1,23 @@
+1
+E492: Not an editor command: nosuchcmd
+E492: Not an editor command: nosuchcmd arg
+E492: Not an editor command: foo = 1
+E492: Not an editor command:    nosuchcmd
+E492: Not an editor command: keepjumps   nosuchcmd arg
+1
+E492: Not an editor command:  nosuchcmd | echo 2
+next
+E492: Not an editor command: nosuchcmd
+
+E492: Not an editor command: nosuchcmd
+E492: Not an editor command:   nosuchcmd x 
+
+E492: Not an editor command:   nosuchcmd x 
+Vim:E492: Not an editor command:   nosuchcmd
+Vim:E492: Not an editor command: nosuchcmd
+Vim:E492: Not an editor command: nosuchcmd
+E492: Not an editor command: ^I nosuchcmd x
+continues
+E492: Not an editor command: Nosuchcmd x | echo 'swallowed'
+Vim(echo):E684: List index out of range: 1
+E492: Not an editor command:   nosuchcmd

@@ -538,9 +538,11 @@ pub enum Stmt {
     /// The raw argument (optional leading `!`, then the name) is resolved at
     /// run time, mirroring how `:call`/`exists('*…')` key the function table.
     DelFunction(String),
-    /// Invocation of a user command (`:Name args`): the whole raw line,
-    /// resolved against the user-command table at run time.
-    UserCmd(String),
+    /// Invocation of a user command (`:Name args`): the modifier-stripped line,
+    /// resolved against the user-command table at run time, and the command as
+    /// written (blanks, modifiers and the rest of the source line included) —
+    /// the text `E492: Not an editor command` quotes when no such command exists.
+    UserCmd(String, String),
     /// `:autocmd[!] {event} {pat} {cmd}` — register an autocommand (raw args).
     Autocmd(String),
     /// `:augroup {name}` / `:augroup END` — set the active autocommand group.

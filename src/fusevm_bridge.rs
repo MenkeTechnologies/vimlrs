@@ -6247,7 +6247,7 @@ fn exec_ex_or_stmt(line: &str) {
                 // skipped, as vim runs it without a word; an unknown one
                 // (`%foobar`, `!` with nothing to run it) is E492.
                 if !crate::viml_parser::names_builtin_ex_command(stmt) {
-                    message::semsg(&format!("E492: Not an editor command: {stmt}"));
+                    message::semsg(&format!("E492: Not an editor command: {line}"));
                 }
             } else {
                 let _ = run_source_nested(stmt);
@@ -6361,8 +6361,9 @@ fn b_filetype(vm: &mut VM, _: u8) -> Value {
     Value::Undef
 }
 
-/// User-command invocation: pop the raw line (`Name[!] args`), expand the
-/// command's replacement and run it; error E492 if there is no such command.
+/// User-command invocation: pop the command as written, then the line
+/// (`Name[!] args`), expand the command's replacement and run it; error E492
+/// (quoting the command as written) if there is no such command.
 fn b_usercmd(vm: &mut VM, _: u8) -> Value {
     let line = tv_get_string(&pop_tv(vm));
     let line = line.trim();
@@ -6376,6 +6377,7 @@ fn b_usercmd(vm: &mut VM, _: u8) -> Value {
     match crate::ported::eval::funcs::do_ucmd(name, args, bang) {
         Some(expanded) => {
             let _ = run_source_nested(&expanded);
+    let written = tv_get_string(&pop_tv(vm));
         }
         // `:Intercept …` — AOP command-intercept extension (vimlrs/zshrs-
         // original; no Vim counterpart). The parser routes every capitalized
@@ -6384,7 +6386,7 @@ fn b_usercmd(vm: &mut VM, _: u8) -> Value {
         None if name == "Intercept" => {
             crate::intercepts::ex_intercept(args);
         }
-        None => message::semsg(&format!("E492: Not an editor command: {name}")),
+        None => message::semsg(&format!("E492: Not an editor command: {written}")),
     }
     Value::Undef
 }

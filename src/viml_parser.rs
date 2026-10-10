@@ -111,6 +111,18 @@ fn errmsg_cmd_text(line: &str) -> String {
     }
 }
 
+/// The command as written, for `E492: Not an editor command: {text}`.
+///
+/// c: `do_one_cmd` appends `*cmdlinep` — everything from the start of this
+/// command to the end of the source line, blanks and modifiers included, and
+/// NOT cut at a `|` (the error is raised before `separate_nextcmd` runs).
+/// `line` is the modifier-stripped text, used only when no source line is known.
+fn unknown_cmd_text(line: &str) -> String {
+    CMD_TAIL
+        .with(|t| t.borrow().as_ref().map(|(_, _, tail)| tail.clone()))
+        .unwrap_or_else(|| line.to_string())
+}
+
 /// Run `f` with [`EX_LINES`] on, restoring the previous value afterwards.
 pub fn with_ex_lines<T>(f: impl FnOnce() -> T) -> T {
     let saved = EX_LINES.with(|c| c.replace(true));
@@ -583,13 +595,23 @@ fn parse_stmt_unplaced(line: &str) -> Result<Stmt, VimlError> {
         {
             Ok(Stmt::ExCmd(line.to_string()))
         }
+        // A lowercase word that is no Ex command cannot be a user command (those
+        // start uppercase) and legacy script has no expression statement, so it
+        // is `E492` however it continues — the report an undefined user command
+        // gets.
+        _ if ex_lines_active()
+            && cmd.starts_with(|c: char| c.is_ascii_lowercase())
+            && !line[cmd.len()..].starts_with('(') =>
+        {
+            Ok(Stmt::UserCmd(line.to_string(), unknown_cmd_text(line)))
+        }
         // A command word starting with an uppercase letter is a user-command
         // invocation (`:Foo args`), resolved at run time. A name immediately
         // followed by `(` is a funcref call expression, not a command.
         _ if cmd.starts_with(|c: char| c.is_ascii_uppercase())
             && !line[cmd.len()..].starts_with('(') =>
         {
-            Ok(Stmt::UserCmd(line.to_string()))
+            Ok(Stmt::UserCmd(line.to_string(), unknown_cmd_text(line)))
         }
         _ => Ok(Stmt::Expr(parse_expr(line)?)),
     }
@@ -1503,7 +1525,15 @@ fn parse_one(cur: &mut Lines) -> Result<Vec<Stmt>, VimlError> {
                     continue;
                 }
                 let seg_tail = tail.get(slice_offset(&line, seg)..).unwrap_or(seg);
-                out.push(with_cmd_tail(seg, seg_tail, || parse_stmt(seg))?);
+                let stmt = with_cmd_tail(seg, seg_tail, || parse_stmt(seg))?;
+                // An unknown command word swallows the rest of the line: vim
+                // reports it before it looks for the next `|`.
+                let unknown = matches!(&stmt, Stmt::UserCmd(l, _)
+                    if l.starts_with(|c: char| c.is_ascii_lowercase()));
+                out.push(stmt);
+                if unknown {
+                    break;
+                }
             }
             Ok(out)
         }
@@ -5067,7 +5097,7 @@ mod tests {
         // modifier (`silentfoo` is a user command, not `silent` + `foo`).
         assert!(matches!(
             parse_stmt("Silentcmd arg").unwrap(),
-            Stmt::UserCmd(_)
+            Stmt::UserCmd(..)
         ));
     }
 

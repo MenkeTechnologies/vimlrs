@@ -983,7 +983,7 @@ fn slot_plan(stmts: &[(u32, Stmt)], in_function: bool) -> SlotPlan {
                 | Stmt::CommandDef(_)
                 | Stmt::CommandDel(_)
                 | Stmt::DelFunction(_)
-                | Stmt::UserCmd(_)
+                | Stmt::UserCmd(..)
                 | Stmt::Autocmd(_)
                 | Stmt::Augroup(_)
                 | Stmt::Doautocmd(_)
@@ -1373,6 +1373,9 @@ impl Compiler {
             Stmt::Highlight(_) => "highlight",
             Stmt::Syntax(_) => "syntax",
             Stmt::Filetype(_) => "filetype",
+            // c: an unknown command has no `cmdname` for the exception tag
+            // (`Vim:E492:`); the previous command's tag must not stay.
+            Stmt::UserCmd(..) => "",
             // `:silent CMD` is a modifier, not a command: vim tags an error
             // inside it with the command it modifies (`silent echo [][0]` is
             // `Vim(echo):E684`, verified), so look through it.
@@ -1672,9 +1675,10 @@ impl Compiler {
                 self.emit(Op::Pop);
                 Ok(())
             }
-            Stmt::UserCmd(line) => {
+            Stmt::UserCmd(line, written) => {
                 self.load_str(line);
-                self.emit(Op::CallBuiltin(h::VIML_USERCMD, 1));
+                self.load_str(written);
+                self.emit(Op::CallBuiltin(h::VIML_USERCMD, 2));
                 self.emit(Op::Pop);
                 Ok(())
             }
