@@ -214,13 +214,20 @@ pub fn tv_get_string(tv: &typval_T) -> String {
 /// `VAR_PARTIAL`, and `tv_get_string()` for anything else (a String naming the
 /// function). A Funcref must not go through `tv_get_string()` here: in string
 /// context it is `E729: Using a Funcref as a String`.
-pub fn tv_func_name(tv: &typval_T) -> String {
-    match (tv.v_type, &tv.vval) {
-        (VAR_FUNC, v_string(s)) => s.to_string(),
-        (VAR_PARTIAL, v_partial(Some(p))) => crate::ported::eval::partial_name(p).to_string(),
-        _ => tv_get_string(tv),
-    }
+///
+/// A macro rather than a function: the C has no such helper — it spells the
+/// three cases out at each call site — and this keeps that shape.
+macro_rules! tv_func_name {
+    ($tv:expr) => {{
+        let tv: &typval_T = $tv;
+        match (tv.v_type, &tv.vval) {
+            (VAR_FUNC, v_string(s)) => s.to_string(),
+            (VAR_PARTIAL, v_partial(Some(p))) => crate::ported::eval::partial_name(p).to_string(),
+            _ => tv_get_string(tv),
+        }
+    }};
 }
+pub(crate) use tv_func_name;
 
 /// Port of `tv_equal()` from `Src/eval/typval.c` (the `ic == false` path).
 ///
@@ -2602,7 +2609,7 @@ fn parse_sort_uniq_args(argvars: &[typval_T], info: &mut sortinfo_T) -> i32 {
     }
     let a1 = &argvars[1];
     if a1.v_type == VAR_FUNC {
-        info.item_compare_func = Some(tv_func_name(a1));
+        info.item_compare_func = Some(tv_func_name!(a1));
     } else if a1.v_type == VAR_PARTIAL {
         info.item_compare_partial = Some(a1.clone());
     } else {
@@ -2845,7 +2852,7 @@ pub fn tv_dict_get_callback(d: &dict_T, key: &str, result: &mut Callback) -> boo
     // c: callback_from_typval — VAR_FUNC / VAR_STRING name → a funcref Callback.
     match tv.v_type {
         VAR_FUNC | VAR_STRING => {
-            *result = Callback::Funcref(tv_func_name(tv));
+            *result = Callback::Funcref(tv_func_name!(tv));
             true
         }
         _ => {
@@ -2860,7 +2867,7 @@ pub fn tv_dict_get_callback(d: &dict_T, key: &str, result: &mut Callback) -> boo
 pub fn callback_from_typval(callback: &mut Callback, tv: &typval_T) -> bool {
     match tv.v_type {
         VAR_FUNC => {
-            *callback = Callback::Funcref(tv_func_name(tv));
+            *callback = Callback::Funcref(tv_func_name!(tv));
             true
         }
         VAR_STRING => {

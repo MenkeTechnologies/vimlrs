@@ -1078,7 +1078,7 @@ pub fn f_substitute(argvars: &[typval_T], rettv: &mut typval_T) {
         crate::viml_regex::regex_substitute_fn(&s, &pat, &flags, &mut |subs| {
             let (name, argskip) = match (expr.v_type, &expr.vval) {
                 (VAR_PARTIAL, v_partial(Some(p))) => (p.pt_name.to_string(), p.pt_argv.len()),
-                _ => (crate::ported::eval::typval::tv_func_name(expr), 0),
+                _ => (crate::ported::eval::typval::tv_func_name!(expr), 0),
             };
             // c: `argv[0].v_type = VAR_LIST; argv[0].vval.v_list = &matchList.sl_list;`
             let mut argv = vec![typval_T {
@@ -3884,7 +3884,7 @@ pub fn f_reduce(argvars: &[typval_T], rettv: &mut typval_T) {
         return;
     }
     // c: VAR_FUNC → v_string; VAR_PARTIAL → partial_name(partial); else tv_get_string.
-    let func_name = crate::ported::eval::typval::tv_func_name(&argvars[1]);
+    let func_name = crate::ported::eval::typval::tv_func_name!(&argvars[1]);
     if func_name.is_empty() {
         emsg("E1132: Missing function argument");
         return;

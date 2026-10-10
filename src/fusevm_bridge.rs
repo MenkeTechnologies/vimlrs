@@ -2006,7 +2006,7 @@ fn b_args_e116(vm: &mut VM, _: u8) -> Value {
         name
     } else {
         match eval_variable(&bare) {
-            Some(v) if matches!(v.v_type, VAR_FUNC | VAR_PARTIAL) => tv_func_name(&v),
+            Some(v) if matches!(v.v_type, VAR_FUNC | VAR_PARTIAL) => tv_func_name!(&v),
             _ => name,
         }
     };
@@ -2334,7 +2334,7 @@ fn b_throw(vm: &mut VM, _: u8) -> Value {
     }
     // c: `throw_exception` refuses a user value that would pass for an error or
     // interrupt exception; the E608 is an ordinary error of the `:throw`.
-    if crate::ported::ex_eval::user_exception_fakes_vim(&v) {
+    if v.starts_with("Vim") && matches!(v.as_bytes().get(3), None | Some(b':') | Some(b'(')) {
         message::emsg("E608: Cannot :throw exceptions with 'Vim' prefix");
         return Value::Undef;
     }
@@ -5805,7 +5805,7 @@ fn call_funcref_self(
                 with_scoped(scoped, || call_named(&p.pt_name, args))
             })
         }
-        _ => with_self(selfdict, || call_named(&tv_func_name(funcref), extra)),
+        _ => with_self(selfdict, || call_named(&tv_func_name!(funcref), extra)),
     }
 }
 
@@ -6028,7 +6028,7 @@ fn b_call(vm: &mut VM, argc: u8) -> Value {
         None => {
             message::semsg(&format!(
                 "E117: Unknown function: {}",
-                tv_func_name(&args[0])
+                tv_func_name!(&args[0])
             ));
             Value::Undef
         }
