@@ -589,7 +589,8 @@ fn parse_stmt_unplaced(line: &str) -> Result<Stmt, VimlError> {
             || line.starts_with('\'')
             || (line.starts_with('%')
                 && line[1..].starts_with(|c: char| {
-                    c.is_ascii_alphabetic() || matches!(c, '>' | '<' | '!' | '&' | '~' | '@' | '*' | '=' | '#')
+                    c.is_ascii_alphabetic()
+                        || matches!(c, '>' | '<' | '!' | '&' | '~' | '@' | '*' | '=' | '#')
                 })) =>
         {
             Ok(Stmt::ExCmd(line.to_string()))
@@ -2876,7 +2877,10 @@ fn parse_let(rest: &str) -> Result<Stmt, VimlError> {
             op,
         };
         let rhs = parse_cmd_expr(strip_legacy_trailing_comment(rhs))?;
-        return Ok(Stmt::Let { target: list, expr: rhs });
+        return Ok(Stmt::Let {
+            target: list,
+            expr: rhs,
+        });
     } else {
         let_target(lhs, rest)?
     };
@@ -3082,7 +3086,12 @@ fn heredoc_eval_item(line: &str) -> String {
         match part {
             InterpPart::Lit(bytes) => {
                 let text = String::from_utf8_lossy(&bytes);
-                out.push_str(&text.replace('\'', "''").replace('{', "{{").replace('}', "}}"));
+                out.push_str(
+                    &text
+                        .replace('\'', "''")
+                        .replace('{', "{{")
+                        .replace('}', "}}"),
+                );
             }
             InterpPart::Expr(src) => {
                 out.push('{');

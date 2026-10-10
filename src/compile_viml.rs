@@ -3532,8 +3532,7 @@ impl Compiler {
                 // synthesized body reports line 1 — which is what vim reports
                 // for a throw inside `{x -> …}`.
                 let stmts: Block = vec![(1, Stmt::Return(Some((**body).clone())))];
-                let chunk =
-                    compile_function_body(&stmts, self.exc, 0, false, *vim9, true, params)?;
+                let chunk = compile_function_body(&stmts, self.exc, 0, false, *vim9, true, params)?;
                 LAMBDA_FUNCS.with(|f| {
                     f.borrow_mut().push(UserFuncDef {
                         name: name.clone(),

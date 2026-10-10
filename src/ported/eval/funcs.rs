@@ -2702,8 +2702,8 @@ fn vim_vsnprintf_typval(argvars: &[typval_T], rettv: &mut typval_T) {
             }
             _ => 0u8,
         };
-            out.push(b'%');
         let Some(conv_b) = bytes.get(i).copied() else {
+            out.push(b'%');
             break;
         };
         let conv = conv_b as char;
@@ -5070,7 +5070,10 @@ fn tv_lines_arg(tv: &typval_T) -> Vec<String> {
 pub fn set_cursorpos(lnum: varnumber_T, col: varnumber_T) {
     let len = curbuf_len();
     let l = lnum.clamp(1, len);
-    let line = get_buffer_lines(l, l).into_iter().next().unwrap_or_default();
+    let line = get_buffer_lines(l, l)
+        .into_iter()
+        .next()
+        .unwrap_or_default();
     let mut c = col.clamp(1, (line.len() as varnumber_T).max(1));
     while c > 1 && !line.is_char_boundary(c as usize - 1) {
         c -= 1;
@@ -10470,10 +10473,43 @@ pub fn do_excmd(line: &str) -> ExCmdResult {
     // range (`2resize 5`) or a buffer command's is not one.
     let line_addressed = matches!(
         cmd,
-        "" | "d" | "de" | "del" | "delete" | "s" | "su" | "sub" | "substitute" | "g" | "gl"
-            | "global" | "v" | "vglobal" | "m" | "mo" | "move" | "t" | "co" | "cop" | "copy" | "j"
-            | "jo" | "join" | "y" | "ya" | "yank" | "pu" | "put" | "sort" | "sor" | "normal"
-            | "norm" | "p" | "pr" | "print" | "nu" | "number"
+        "" | "d"
+            | "de"
+            | "del"
+            | "delete"
+            | "s"
+            | "su"
+            | "sub"
+            | "substitute"
+            | "g"
+            | "gl"
+            | "global"
+            | "v"
+            | "vglobal"
+            | "m"
+            | "mo"
+            | "move"
+            | "t"
+            | "co"
+            | "cop"
+            | "copy"
+            | "j"
+            | "jo"
+            | "join"
+            | "y"
+            | "ya"
+            | "yank"
+            | "pu"
+            | "put"
+            | "sort"
+            | "sor"
+            | "normal"
+            | "norm"
+            | "p"
+            | "pr"
+            | "print"
+            | "nu"
+            | "number"
     );
     if had_range && line_addressed && (l1 > len || l2 > len) {
         emsg(&format!("E16: Invalid range: {line}"));
@@ -10850,7 +10886,10 @@ fn ex_shift(lo: varnumber_T, hi: varnumber_T, indent: bool, count: usize) {
     let amount = count.max(1);
     let is_blank = |c: char| c == ' ' || c == '\t';
     for lnum in lo..=hi {
-        let line = get_buffer_lines(lnum, lnum).into_iter().next().unwrap_or_default();
+        let line = get_buffer_lines(lnum, lnum)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
         if line.is_empty() {
             continue;
         }
@@ -10865,7 +10904,11 @@ fn ex_shift(lo: varnumber_T, hi: varnumber_T, indent: bool, count: usize) {
             if extra > 0 && !indent {
                 times -= 1;
             }
-            levels = if indent { levels + times } else { levels.saturating_sub(times) };
+            levels = if indent {
+                levels + times
+            } else {
+                levels.saturating_sub(times)
+            };
             levels * sw
         } else if indent {
             cols + sw * amount
@@ -10881,7 +10924,10 @@ fn ex_shift(lo: varnumber_T, hi: varnumber_T, indent: bool, count: usize) {
         set_buffer_lines(lnum, vec![format!("{blanks}{text}")], false);
     }
     // c: the cursor ends on the last line shifted, at its first non-blank.
-    let last = get_buffer_lines(hi, hi).into_iter().next().unwrap_or_default();
+    let last = get_buffer_lines(hi, hi)
+        .into_iter()
+        .next()
+        .unwrap_or_default();
     let first_nonblank = last.len() - last.trim_start_matches(is_blank).len();
     set_cursorpos(hi, first_nonblank as varnumber_T + 1);
     let lines = (hi - lo + 1) as i64;

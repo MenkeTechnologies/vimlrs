@@ -3341,7 +3341,11 @@ fn blob_assign_range(
         return;
     }
     let empty2 = matches!(idx2.v_type, VAR_SPECIAL | VAR_UNKNOWN);
-    let n2 = if empty2 { len - 1 } else { tv_get_number_chk(idx2, None) };
+    let n2 = if empty2 {
+        len - 1
+    } else {
+        tv_get_number_chk(idx2, None)
+    };
     if !empty2 && (n2 < 0 || n2 >= len || n2 < n1) {
         message::semsg(&format!("E979: Blob index out of range: {n2}"));
         return;
@@ -3349,8 +3353,14 @@ fn blob_assign_range(
     match (value.v_type, &value.vval) {
         (VAR_BLOB, v_blob(src)) => {
             // Copy first: `let b[0:1] = b[1:2]` must not borrow `b` twice.
-            let src = src.as_ref().map(|s| s.borrow().bv_ga.clone()).unwrap_or_default();
-            let src = crate::ported::eval::typval_defs_h::blob_T { bv_ga: src, ..Default::default() };
+            let src = src
+                .as_ref()
+                .map(|s| s.borrow().bv_ga.clone())
+                .unwrap_or_default();
+            let src = crate::ported::eval::typval_defs_h::blob_T {
+                bv_ga: src,
+                ..Default::default()
+            };
             crate::ported::eval::typval::tv_blob_set_range(&mut b.borrow_mut(), n1, n2, &src);
         }
         (VAR_LIST, _) => {
@@ -4319,40 +4329,43 @@ fn b_unlet_range(vm: &mut VM, _: u8) -> Value {
         return Value::Undef;
     }
     let (empty1, empty2) = (empty & 1 != 0, empty & 2 != 0);
-    let resolved = eval_op(|| quietly(quiet, || match (base.v_type, &base.vval) {
-        (VAR_DICT, _) => {
-            message::emsg("E719: Cannot slice a Dictionary");
-            None
-        }
-        (VAR_LIST, v_list(Some(l))) => {
-            let list = l.borrow();
-            let mut n1 = if empty1 {
-                0
-            } else {
-                tv_get_number_chk(&idx1, None) as i32
-            };
-            let pos1 =
-                crate::ported::eval::typval::tv_list_check_range_index_one(&list, &mut n1, false)?;
-            let last = if empty2 {
+    let resolved = eval_op(|| {
+        quietly(quiet, || match (base.v_type, &base.vval) {
+            (VAR_DICT, _) => {
+                message::emsg("E719: Cannot slice a Dictionary");
                 None
-            } else {
-                let mut n2 = tv_get_number_chk(&idx2, None) as i32;
-                if crate::ported::eval::typval::tv_list_check_range_index_two(
-                    &list, &mut n1, pos1, &mut n2, false,
-                ) == crate::ported::eval_h::FAIL
-                {
-                    return None;
-                }
-                Some(n2 as usize)
-            };
-            Some(UnletTarget::ListItems(l.clone(), pos1, last))
-        }
-        (VAR_BLOB, _) => Some(UnletTarget::NoVariable),
-        _ => {
-            message::emsg("E689: Can only index a List, Dictionary or Blob");
-            None
-        }
-    }));
+            }
+            (VAR_LIST, v_list(Some(l))) => {
+                let list = l.borrow();
+                let mut n1 = if empty1 {
+                    0
+                } else {
+                    tv_get_number_chk(&idx1, None) as i32
+                };
+                let pos1 = crate::ported::eval::typval::tv_list_check_range_index_one(
+                    &list, &mut n1, false,
+                )?;
+                let last = if empty2 {
+                    None
+                } else {
+                    let mut n2 = tv_get_number_chk(&idx2, None) as i32;
+                    if crate::ported::eval::typval::tv_list_check_range_index_two(
+                        &list, &mut n1, pos1, &mut n2, false,
+                    ) == crate::ported::eval_h::FAIL
+                    {
+                        return None;
+                    }
+                    Some(n2 as usize)
+                };
+                Some(UnletTarget::ListItems(l.clone(), pos1, last))
+            }
+            (VAR_BLOB, _) => Some(UnletTarget::NoVariable),
+            _ => {
+                message::emsg("E689: Can only index a List, Dictionary or Blob");
+                None
+            }
+        })
+    });
     match resolved {
         Some(target) => unlet_var(target, &src),
         None => set_hard_err(),
@@ -4653,7 +4666,9 @@ fn call_user_function_raw(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
     let selfdict = PENDING_SELF.with(|s| s.borrow_mut().take());
     let selfdict = match (func.dict, selfdict) {
         (true, None) => {
-            message::emsg(&format!("E725: Calling dict function without Dictionary: {name}"));
+            message::emsg(&format!(
+                "E725: Calling dict function without Dictionary: {name}"
+            ));
             return Some(tv_num(0));
         }
         (true, selfdict) => selfdict,
