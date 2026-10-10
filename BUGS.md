@@ -7595,3 +7595,110 @@ non-UTF-8 bytes (`string_escape_bytes.vim`). Parity case:
   both engines; vimlrs reports E117 on the variable.
 - **`has('patch-8.0.0')`** is 1 in both engines; vimlrs answers 0 for every
   `patch-*` by design (it is neither Vim nor Neovim).
+
+## R54 — blob copies, an unknown command word, `:unlet!`, and the script-level fuzzer
+
+Round 54 added `tests/script_fuzz.rs` (see `docs/FUZZING.md`, "Script mode") and
+read the parity corpus for areas with no case at all: Blobs, Floats, JSON,
+`:unlet!`, `:throw`, unknown command words. Everything below was measured
+against vim 9.2 and Neovim 0.12 alike.
+
+### R54-1. `copy()`/`deepcopy()` of a Blob returned the SAME buffer — ✅ FIXED
+
+`f_copy` and `var_item_copy` fell through to `from.clone()`, which for a Blob is
+an `Rc` clone: `let c = copy(b) | let c[1] = 0x41` changed `b`. Both now take
+the `VAR_BLOB` arm and call `tv_blob_copy`. Parity case:
+`blob_copy_and_assign.vim`.
+
+### R54-2. Blob subscript and range assignment ignored `set_var_lval` — ✅ FIXED
+
+- `let b[len(b)] = x` appends one byte (`tv_blob_set_append`); it was E979.
+- A negative subscript is E979 *as written* when assigning — it is only
+  counted from the end when reading.
+- `let b[a:b] = 0z…` was E689 outright. It is now `get_lval`'s rules: `a` may
+  equal the length only with an omitted `b`, a given `b` must lie inside the
+  blob and not precede `a` (reported as `b`), the replacement must have the
+  same byte count (`E972`), and a non-Blob replacement is `E709` (Number) or
+  the List's Number-coercion error.
+- A value outside `0..=255` is `E1239`.
+
+### R54-3. A lowercase word that names no command was silently dropped — ✅ FIXED
+
+`nosuchcmd arg` failed `parse_expr` and was skipped by the tolerant parser;
+`nosuchcmd` alone was an expression statement (`E121`). Legacy script has no
+bare-expression statement, so a lowercase word outside the command table (user
+commands start uppercase) is `E492` in both forms. The message quotes the
+command **as written** — leading blanks, modifiers, everything to the end of the
+line after a `|` (`do_one_cmd` raises it before `separate_nextcmd`) — and the
+exception it becomes carries no `Vim(cmd):` tag. The rest of the line is not
+run. `Stmt::UserCmd` now carries that text; the script-cache format version moved
+to 8. Parity case: `unknown_command_word.vim`.
+
+### R54-4. `:unlet!` was not quiet — ✅ FIXED
+
+`ex_unlet` passes `GLV_QUIET` to `get_lval` when the bang is given, so a missing
+Dict key, an index out of range, an undefined base or a base that cannot be
+indexed report nothing (the failure still ends the command line). Only the plain
+name form honoured the bang. A failing base or subscript expression no longer
+adds an `E689` on top of its own error. Parity case: `unlet_bang_quiet.vim`.
+
+### R54-5. `:throw` of a value that cannot be a String — ✅ PARTLY FIXED
+
+`ex_throw` converts the argument with `tv_get_string()` after `eval0()` succeeded,
+so the conversion error (`E731`, `E976`, `E729`, `E730`) does not stop the empty
+exception being thrown: outside a `:try` the message prints and `E605:
+Exception not caught: ` follows. A missing argument is `E471`, with the command
+appended only when nothing follows it. Parity case: `throw_argument_errors.vim`.
+Still open: inside a `:try` vim does not let the innermost `:catch` take that
+exception (`:finally` runs, it propagates to an outer `:try` or ends the
+script); vimlrs catches it.
+
+### R54-6. Buffer Ex commands: `:>`/`:<`, out-of-range addresses, `cursor()` past the end — ✅ FIXED
+
+- `:>` and `:<` only knew spaces and refused to dedent a Tab. `shift_line()` +
+  `set_indent()` build the new indent: `'tabstop'` tabs plus spaces unless
+  `'expandtab'`, `'shiftround'` rounds to a multiple first, an empty line is
+  skipped (a blank one is shifted), the cursor ends on the last shifted line's
+  first non-blank, and more than `'report'` lines prints `N lines >ed M times`.
+  `%>`, `%<` and a bare `>` were also dropped by the parser.
+- While sourcing, an address past the last line is `E16: Invalid range: {cmd}`
+  (`do_one_cmd`); it was silently clamped.
+- `cursor(1, 99)` puts a Normal-mode cursor ON the last character
+  (`check_cursor_col()`), not one past it; a column inside a multibyte character
+  moves back to its first byte. Parity case: `ex_shift_and_range.vim`.
+
+### R54-O. Still open from this round (vim and Neovim agree, vimlrs differs)
+
+- **Curly-brace names are not supported.** `let {n} = 5`, `let a{n}b = 1`,
+  `echo {n}`, `function! F{n}()`: the parser fails and the tolerant reader drops
+  the line (or, for an expression, reports a different error). The ported
+  `make_expanded_name` exists; the parser/compiler have no node for a dynamic
+  name.
+- **Scope dictionaries are snapshots.** `let g:['a'] = 1`, `let s:['b'] = 1`,
+  `let d = g: | let d['x'] = 1` and `unlet g:['x']` do not write through:
+  reading a scope whole copies it. `g:`/`s:`/`b:`/`w:`/`t:`/`l:`/`a:` are `RefCell<dict_T>` thread-locals, not
+  the `Rc<RefCell<dict_T>>` a Dict value is.
+- **Variable names are not validated on assignment through a scope dict**
+  (`let g:['x y'] = 1` is `E461` in vim).
+- **`:function {name}` / `:function` list nothing.** The body text is not kept,
+  so `execute('function R')` is empty.
+- **An unclosed `:if`/`:while`/`:for`/`:try`/`:function` at end of file is
+  silent** (`E171`/`E170`/`E600`/`E126`); the whole construct is dropped by the
+  tolerant parser, which cannot yet tell "invalid" from "valid but unsupported".
+- **Evaluation does not stop at the first failure.** vim's `eval*()` return
+  `FAIL` as soon as an operand fails and the rest is never evaluated; this VM
+  finishes the expression, so `echo nosuch1 . nosuch2` reports both, `echo
+  [][nosuch]` adds an `E684`, `let b1[n1] = 1` with both undefined reports both,
+  and a later operand's side effects still run. `fuzz-parity` compares the first
+  error only for this reason; the script fuzzer keeps expressions well-typed.
+- **`unlet d.a.b` with `d.a` missing** quotes the rest of the lval in vim
+  (`E716: … "a.b"`); vimlrs reports `"a"` and then `E689`.
+- **A leading `:` on an unknown command** (`:nosuchcmd`) is stripped from the
+  `E492` text; vim quotes the line as written.
+- **`:substitute` and `:global` print nothing** where vim reports `N substitutions
+  on M lines` (and `N fewer lines`, `N more lines`) past `'report'`; `:undo`
+  does nothing (no undo tree); `:normal` insert commands (`A`, `i`, `o`) are not
+  run. The buffer Ex layer is an approximation (`do_excmd` in
+  `src/ported/eval/funcs.rs`), not a port of `ex_docmd.c`.
+- **`str2blob()`/`blob2str()`** exist in vim 9.2 only; the vendored Neovim has
+  neither, so they are `E117` here by the spec this port follows.

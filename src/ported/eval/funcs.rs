@@ -2702,8 +2702,8 @@ fn vim_vsnprintf_typval(argvars: &[typval_T], rettv: &mut typval_T) {
             }
             _ => 0u8,
         };
-        let Some(conv_b) = bytes.get(i).copied() else {
             out.push(b'%');
+        let Some(conv_b) = bytes.get(i).copied() else {
             break;
         };
         let conv = conv_b as char;
@@ -3164,6 +3164,9 @@ pub fn f_copy(argvars: &[typval_T], rettv: &mut typval_T) {
                 tv_dict_add_tv(&mut ob, &k, v);
             }
         }
+        // c (`var_item_copy`, `case VAR_BLOB`): `tv_blob_copy` — a new buffer, never the
+        // original's, so a write through the copy cannot show in the source.
+        (VAR_BLOB, v_blob(b)) => crate::ported::eval::typval::tv_blob_copy(b.as_ref(), rettv),
         _ => *rettv = argvars[0].clone(),
     }
 }
@@ -3178,9 +3181,6 @@ pub fn f_items(argvars: &[typval_T], rettv: &mut typval_T) {
         VAR_STRING => tv_string2items(argvars, rettv),
         VAR_LIST => tv_list2items(argvars, rettv),
         VAR_BLOB => tv_blob2items(argvars, rettv),
-        // c (`var_item_copy`, `case VAR_BLOB`): `tv_blob_copy` — a new buffer, never the
-        // original's, so a write through the copy cannot show in the source.
-        (VAR_BLOB, v_blob(b)) => crate::ported::eval::typval::tv_blob_copy(b.as_ref(), rettv),
         VAR_DICT => tv_dict2items(argvars, rettv),
         // c (vim 9.2): `check_for_list_or_tuple_or_dict_or_blob_or_string_arg`.
         _ => emsg("E1251: List, Tuple, Dictionary, Blob or String required for argument 1"),
@@ -3444,6 +3444,11 @@ pub(crate) fn var_item_copy(
                 ok.then_some(tv)
             }
         }
+        (VAR_BLOB, v_blob(b)) => {
+            let mut to = from.clone();
+            crate::ported::eval::typval::tv_blob_copy(b.as_ref(), &mut to);
+            Some(to)
+        }
         _ => Some(from.clone()),
     };
     *recurse -= 1;
@@ -3458,11 +3463,6 @@ pub fn f_deepcopy(argvars: &[typval_T], rettv: &mut typval_T) {
     let mut copies = (!noref).then(std::collections::HashMap::new);
     *rettv = var_item_copy(&argvars[0], &mut copies, &mut 0).unwrap_or_else(|| typval_T {
         v_type: argvars[0].v_type,
-        (VAR_BLOB, v_blob(b)) => {
-            let mut to = from.clone();
-            crate::ported::eval::typval::tv_blob_copy(b.as_ref(), &mut to);
-            Some(to)
-        }
         v_lock: crate::ported::eval::typval_defs_h::VarLockStatus::VAR_UNLOCKED,
         vval: if argvars[0].v_type == VAR_DICT {
             v_dict(None)
@@ -5063,14 +5063,18 @@ fn tv_lines_arg(tv: &typval_T) -> Vec<String> {
 }
 
 /// Port of `set_cursorpos()` (Neovim eval/funcs.c) — move the cursor to `lnum`,
-/// `col`, clamped to the current buffer (line 1..=last, column 1..=len+1).
+/// `col`, clamped to the current buffer: line 1..=last, and `check_cursor_col()`
+/// puts a Normal-mode cursor ON the last character, never past it (`cursor(1,
+/// 99)` on `foo bar` is column 7; an empty line is column 1). A column inside a
+/// multibyte character moves back to its first byte (`mb_adjust_cursor()`).
 pub fn set_cursorpos(lnum: varnumber_T, col: varnumber_T) {
     let len = curbuf_len();
     let l = lnum.clamp(1, len);
-    let linelen = get_buffer_lines(l, l)
-        .first()
-        .map_or(0, |s| s.len() as varnumber_T);
-    let c = col.clamp(1, linelen + 1);
+    let line = get_buffer_lines(l, l).into_iter().next().unwrap_or_default();
+    let mut c = col.clamp(1, (line.len() as varnumber_T).max(1));
+    while c > 1 && !line.is_char_boundary(c as usize - 1) {
+        c -= 1;
+    }
     if crate::fusevm_bridge::editor_set_cursor(l, c) {
         return;
     }
@@ -10459,6 +10463,22 @@ pub fn do_excmd(line: &str) -> ExCmdResult {
     let bang = rest[cmd_end..].starts_with('!');
     let args = rest[cmd_end + if bang { 1 } else { 0 }..].trim();
     let len = curbuf_len();
+    // c: `do_one_cmd` while sourcing — a line number past the last line is
+    // `E16: Invalid range`, not a clamp (interactively it clamps). `invalid_range()`
+    // applies the same bound to every command that takes a range.
+    // Only for the commands whose range is LINE numbers: a window command's
+    // range (`2resize 5`) or a buffer command's is not one.
+    let line_addressed = matches!(
+        cmd,
+        "" | "d" | "de" | "del" | "delete" | "s" | "su" | "sub" | "substitute" | "g" | "gl"
+            | "global" | "v" | "vglobal" | "m" | "mo" | "move" | "t" | "co" | "cop" | "copy" | "j"
+            | "jo" | "join" | "y" | "ya" | "yank" | "pu" | "put" | "sort" | "sor" | "normal"
+            | "norm" | "p" | "pr" | "print" | "nu" | "number"
+    );
+    if had_range && line_addressed && (l1 > len || l2 > len) {
+        emsg(&format!("E16: Invalid range: {line}"));
+        return ExCmdResult::Handled;
+    }
     let (lo, hi) = (l1.clamp(1, len), l2.clamp(1, len));
     match cmd {
         "d" | "de" | "del" | "delete" => {
@@ -10809,34 +10829,67 @@ fn ex_sort(lo: varnumber_T, hi: varnumber_T, reverse: bool, args: &str) {
     });
 }
 
-/// Port of `ex_operators()`/`shift_line()` (Neovim ex_cmds.c / ops.c) —
-/// indent (`>`) or dedent (`<`) lines `lo`..`hi` by `count` × 'shiftwidth'.
+/// Port of `op_shift()`/`shift_line()` (Neovim ops.c) — indent (`>`) or dedent
+/// (`<`) lines `lo`..`hi` by `count` × 'shiftwidth'.
+///
+/// An empty line is left alone (a blank one is shifted). The new indent is built
+/// by `set_indent()`: spaces under 'expandtab', otherwise as many 'tabstop'
+/// tabs as fit and spaces for the rest. 'shiftround' rounds to a multiple of
+/// 'shiftwidth' first. More than 'report' lines reports `N lines >ed M time(s)`.
 fn ex_shift(lo: varnumber_T, hi: varnumber_T, indent: bool, count: usize) {
-    let sw = {
-        let t = tv_get_number_chk(&get_option_value("shiftwidth"), None);
-        if t > 0 {
-            t as usize
-        } else {
-            8
-        }
+    let number = |name: &str| tv_get_number_chk(&get_option_value(name), None);
+    let ts = match number("tabstop") {
+        t if t > 0 => t as usize,
+        _ => 8,
     };
-    let amount = sw * count.max(1);
+    let sw = match number("shiftwidth") {
+        w if w > 0 => w as usize,
+        _ => ts,
+    };
+    let (round, expand) = (number("shiftround") != 0, number("expandtab") != 0);
+    let amount = count.max(1);
+    let is_blank = |c: char| c == ' ' || c == '\t';
     for lnum in lo..=hi {
-        let line = get_buffer_lines(lnum, lnum)
-            .into_iter()
-            .next()
-            .unwrap_or_default();
-        let new = if indent {
-            if line.trim().is_empty() {
-                line
-            } else {
-                format!("{}{}", " ".repeat(amount), line)
+        let line = get_buffer_lines(lnum, lnum).into_iter().next().unwrap_or_default();
+        if line.is_empty() {
+            continue;
+        }
+        // c: `get_indent()` — the screen width of the leading blanks.
+        let mut cols = 0;
+        for c in line.chars().take_while(|&c| is_blank(c)) {
+            cols += if c == '\t' { ts - cols % ts } else { 1 };
+        }
+        let cols = if round {
+            let (mut levels, extra) = (cols / sw, cols % sw);
+            let mut times = amount;
+            if extra > 0 && !indent {
+                times -= 1;
             }
+            levels = if indent { levels + times } else { levels.saturating_sub(times) };
+            levels * sw
+        } else if indent {
+            cols + sw * amount
         } else {
-            let drop = line.chars().take(amount).take_while(|c| *c == ' ').count();
-            line[drop..].to_string()
+            cols.saturating_sub(sw * amount)
         };
-        set_buffer_lines(lnum, vec![new], false);
+        let blanks = if expand {
+            " ".repeat(cols)
+        } else {
+            "\t".repeat(cols / ts) + &" ".repeat(cols % ts)
+        };
+        let text = line.trim_start_matches(is_blank);
+        set_buffer_lines(lnum, vec![format!("{blanks}{text}")], false);
+    }
+    // c: the cursor ends on the last line shifted, at its first non-blank.
+    let last = get_buffer_lines(hi, hi).into_iter().next().unwrap_or_default();
+    let first_nonblank = last.len() - last.trim_start_matches(is_blank).len();
+    set_cursorpos(hi, first_nonblank as varnumber_T + 1);
+    let lines = (hi - lo + 1) as i64;
+    if lines > number("report") {
+        let what = if lines == 1 { "line" } else { "lines" };
+        let times = if amount == 1 { "time" } else { "times" };
+        let op = if indent { '>' } else { '<' };
+        crate::fusevm_bridge::msg(&format!("{lines} {what} {op}ed {amount} {times}"));
     }
 }
 

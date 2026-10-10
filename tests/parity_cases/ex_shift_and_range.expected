@@ -1,0 +1,18 @@
+1
+4 lines >ed 1 time
+['	a', '', '	  c', '	d'] 4 2
+4 lines <ed 2 times
+['a', '', 'c', 'd']
+['a', '', '	 c', 'd']
+['        a', '', '	 c', 'd']
+['			a', '', '	 c', 'd']
+['	a', 'b', '	 c', 'd']
+['			a', '		b', '	 c', 'd']
+7
+[2, 1]
+E16: Invalid range: 9
+2
+E16: Invalid range: 1,9d
+E16: Invalid range: 2,9s/b/X/
+E16: Invalid range: $+1
+['foo bar', '', '	 c', 'd']

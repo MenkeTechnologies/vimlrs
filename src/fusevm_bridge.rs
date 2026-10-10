@@ -3656,6 +3656,28 @@ fn msg_put(body: &[u8], newline: bool) {
     MSG_COL.with(|c| c.set(!tail.is_empty()));
 }
 
+/// c: `msg()` — show `text` as a message of its own, through the same column
+/// model and capture rules as one `:echo` (so `execute('%>')` returns it).
+pub fn msg(text: &str) {
+    let mut body = crate::vimstr::VimStr::new();
+    message::msg_multiline(text.as_bytes(), &mut body);
+    if ECHO_SINK.with(|s| s.borrow().is_none()) {
+        msg_put(&body, true);
+        return;
+    }
+    let exec_capture = EXECUTE_DEPTH.with(|d| d.get()) > 0;
+    let mut line = crate::vimstr::VimStr::new();
+    if exec_capture {
+        line.push_char('\n');
+    }
+    line.push_bytes(&body);
+    if !exec_capture {
+        line.push_char('\n');
+    }
+    echo_write(&line);
+    exec_display(&body, true);
+}
+
 /// Write one error message under the same message-column model `:echo` uses.
 ///
 /// c: `emsg_multiline` reaches the display through `msg_start()`, which breaks the

@@ -584,9 +584,13 @@ fn parse_stmt_unplaced(line: &str) -> Result<Stmt, VimlError> {
         // `do_excmd` is safe.
         _ if line.starts_with(':')
             || line.starts_with('!')
+            || line.starts_with('>')
+            || line.starts_with('<')
             || line.starts_with('\'')
             || (line.starts_with('%')
-                && line[1..].starts_with(|c: char| c.is_ascii_alphabetic())) =>
+                && line[1..].starts_with(|c: char| {
+                    c.is_ascii_alphabetic() || matches!(c, '>' | '<' | '!' | '&' | '~' | '@' | '*' | '=' | '#')
+                })) =>
         {
             Ok(Stmt::ExCmd(line.to_string()))
         }
