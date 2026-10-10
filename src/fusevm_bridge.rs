@@ -3278,27 +3278,76 @@ fn b_setindex(vm: &mut VM, _: u8) -> Value {
         }
         (VAR_BLOB, v_blob(Some(b))) => {
             let len = crate::ported::eval::typval::tv_blob_len(&b.borrow()) as varnumber_T;
-            let mut i = tv_get_number_chk(&index, None);
-            if i < 0 {
-                i += len;
-            }
-            if i >= 0 && i < len {
-                crate::ported::eval::typval::tv_blob_set(
-                    &mut b.borrow_mut(),
-                    i as i32,
-                    tv_get_number_chk(&value, None) as u8,
-                );
+            // c (`get_lval`): a negative subscript is NOT counted from the end when
+            // assigning — it is E979 with the subscript as written. `i == len`
+            // appends one byte (`set_var_lval` → `tv_blob_set_append`).
+            let i = tv_get_number_chk(&index, None);
+            if i < 0 || i > len {
+                message::semsg(&format!("E979: Blob index out of range: {i}"));
             } else {
-                // `e_blobidx` (Neovim errors.h:98) carries the index:
-                // `E979: Blob index out of range: %` PRId64. It is the ORIGINAL
-                // subscript that is reported, not the negative-adjusted one.
-                let orig = tv_get_number_chk(&index, None);
-                message::semsg(&format!("E979: Blob index out of range: {orig}"));
+                blob_store_byte(b, i as i32, &value);
             }
         }
         _ => message::emsg("E689: Can only index a List, Dictionary or Blob"),
     }
     Value::Undef
+}
+
+/// Store `value` at byte `idx` of a blob (`idx <= len`; `len` appends). The value
+/// must be a Number in `0..=255` — `E1239` otherwise, as `set_var_lval` reports.
+fn blob_store_byte(
+    b: &std::rc::Rc<std::cell::RefCell<crate::ported::eval::typval_defs_h::blob_T>>,
+    idx: i32,
+    value: &typval_T,
+) {
+    let mut error = false;
+    let val = tv_get_number_chk(value, Some(&mut error));
+    if error {
+        return;
+    }
+    if !(0..=255).contains(&val) {
+        message::semsg(&format!("E1239: Invalid value for blob: 0x{val:X}"));
+        return;
+    }
+    crate::ported::eval::typval::tv_blob_set_append(&mut b.borrow_mut(), idx, val as u8);
+}
+
+/// `let blob[idx1:idx2] = blob` — overwrite bytes `idx1..=idx2` (`get_lval` +
+/// `set_var_lval`). `idx1` may equal the length only with an omitted `idx2`
+/// (the last byte, then `E972` for a non-empty replacement); a given `idx2`
+/// must lie inside the blob and not precede `idx1`, the replacement must have exactly that many bytes (`E972`),
+/// and a non-Blob replacement is `E709` for a Number or a Number coercion
+/// error for a List.
+fn blob_assign_range(
+    b: &std::rc::Rc<std::cell::RefCell<crate::ported::eval::typval_defs_h::blob_T>>,
+    idx1: &typval_T,
+    idx2: &typval_T,
+    value: &typval_T,
+) {
+    let len = crate::ported::eval::typval::tv_blob_len(&b.borrow()) as varnumber_T;
+    let n1 = tv_get_number_chk(idx1, None);
+    if n1 < 0 || n1 > len {
+        message::semsg(&format!("E979: Blob index out of range: {n1}"));
+        return;
+    }
+    let empty2 = matches!(idx2.v_type, VAR_SPECIAL | VAR_UNKNOWN);
+    let n2 = if empty2 { len - 1 } else { tv_get_number_chk(idx2, None) };
+    if !empty2 && (n2 < 0 || n2 >= len || n2 < n1) {
+        message::semsg(&format!("E979: Blob index out of range: {n2}"));
+        return;
+    }
+    match (value.v_type, &value.vval) {
+        (VAR_BLOB, v_blob(src)) => {
+            // Copy first: `let b[0:1] = b[1:2]` must not borrow `b` twice.
+            let src = src.as_ref().map(|s| s.borrow().bv_ga.clone()).unwrap_or_default();
+            let src = crate::ported::eval::typval_defs_h::blob_T { bv_ga: src, ..Default::default() };
+            crate::ported::eval::typval::tv_blob_set_range(&mut b.borrow_mut(), n1, n2, &src);
+        }
+        (VAR_LIST, _) => {
+            tv_get_number_chk(value, None);
+        }
+        _ => message::emsg("E709: [:] requires a List or Blob value"),
+    }
 }
 
 /// `let base[idx1:idx2] = list` — list range assignment via the ported
@@ -3335,6 +3384,10 @@ fn b_setrange(vm: &mut VM, _: u8) -> Value {
     // Blob, and that is E689. E709 belongs to the *assigned value* (c:1096), not
     // to the base; reporting it here answered `let x = 5 | let x[0:1] = [1,2]`
     // with E709 where both engines say E689.
+    if let (VAR_BLOB, v_blob(Some(b))) = (base.v_type, &base.vval) {
+        blob_assign_range(b, &idx1_tv, &idx2_tv, &value);
+        return Value::Undef;
+    }
     let dest = match (base.v_type, &base.vval) {
         (VAR_LIST, v_list(Some(l))) => l.clone(),
         _ => {

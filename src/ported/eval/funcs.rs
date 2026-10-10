@@ -3178,6 +3178,9 @@ pub fn f_items(argvars: &[typval_T], rettv: &mut typval_T) {
         VAR_STRING => tv_string2items(argvars, rettv),
         VAR_LIST => tv_list2items(argvars, rettv),
         VAR_BLOB => tv_blob2items(argvars, rettv),
+        // c (`var_item_copy`, `case VAR_BLOB`): `tv_blob_copy` — a new buffer, never the
+        // original's, so a write through the copy cannot show in the source.
+        (VAR_BLOB, v_blob(b)) => crate::ported::eval::typval::tv_blob_copy(b.as_ref(), rettv),
         VAR_DICT => tv_dict2items(argvars, rettv),
         // c (vim 9.2): `check_for_list_or_tuple_or_dict_or_blob_or_string_arg`.
         _ => emsg("E1251: List, Tuple, Dictionary, Blob or String required for argument 1"),
@@ -3455,6 +3458,11 @@ pub fn f_deepcopy(argvars: &[typval_T], rettv: &mut typval_T) {
     let mut copies = (!noref).then(std::collections::HashMap::new);
     *rettv = var_item_copy(&argvars[0], &mut copies, &mut 0).unwrap_or_else(|| typval_T {
         v_type: argvars[0].v_type,
+        (VAR_BLOB, v_blob(b)) => {
+            let mut to = from.clone();
+            crate::ported::eval::typval::tv_blob_copy(b.as_ref(), &mut to);
+            Some(to)
+        }
         v_lock: crate::ported::eval::typval_defs_h::VarLockStatus::VAR_UNLOCKED,
         vval: if argvars[0].v_type == VAR_DICT {
             v_dict(None)

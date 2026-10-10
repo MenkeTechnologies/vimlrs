@@ -1,0 +1,22 @@
+1
+0z0141FF 0z0102FF
+0z0102FF 0z0902FF
+0z0702FF
+0z01020307
+E979: Blob index out of range: 5
+E979: Blob index out of range: -1
+E1239: Invalid value for blob: 0x100
+E1239: Invalid value for blob: 0xFFFFFFFFFFFFFFFF
+E745: Using a List as a Number
+0z01020307
+E972: Blob value does not have the right number of bytes
+E979: Blob index out of range: -1
+E979: Blob index out of range: 0
+E709: [:] requires a List or Blob value
+E979: Blob index out of range: 5
+E979: Blob index out of range: 2
+E979: Blob index out of range: 9
+0z01990001
+E972: Blob value does not have the right number of bytes
+0z55990001
+0z55990001
