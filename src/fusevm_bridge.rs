@@ -6365,6 +6365,7 @@ fn b_filetype(vm: &mut VM, _: u8) -> Value {
 /// (`Name[!] args`), expand the command's replacement and run it; error E492
 /// (quoting the command as written) if there is no such command.
 fn b_usercmd(vm: &mut VM, _: u8) -> Value {
+    let written = tv_get_string(&pop_tv(vm));
     let line = tv_get_string(&pop_tv(vm));
     let line = line.trim();
     let alpha_end = line
@@ -6377,7 +6378,6 @@ fn b_usercmd(vm: &mut VM, _: u8) -> Value {
     match crate::ported::eval::funcs::do_ucmd(name, args, bang) {
         Some(expanded) => {
             let _ = run_source_nested(&expanded);
-    let written = tv_get_string(&pop_tv(vm));
         }
         // `:Intercept …` — AOP command-intercept extension (vimlrs/zshrs-
         // original; no Vim counterpart). The parser routes every capitalized
