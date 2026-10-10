@@ -1765,10 +1765,13 @@ impl Compiler {
                         // container then the index; the bridge removes the
                         // element in place (mirroring `do_unlet_var()`).
                         UnletArg::Item { base, index, src } => {
-                            self.expr(base)?;
+                            self.emit(Op::CallBuiltin(h::VIML_ERR_MARK, 0));
+                            self.emit(Op::Pop);
+                            self.quiet_if(*bang, |c| c.expr(base))?;
                             self.expr(index)?;
                             self.load_str(src);
-                            self.emit(Op::CallBuiltin(h::VIML_UNLET_INDEX, 3));
+                            self.emit(Op::LoadInt(*bang as i64));
+                            self.emit(Op::CallBuiltin(h::VIML_UNLET_INDEX, 4));
                         }
                         // `unlet base[i:j]` — the container, both indexes (0 for
                         // an omitted one), which were omitted, and the text.
@@ -1778,7 +1781,9 @@ impl Compiler {
                             idx2,
                             src,
                         } => {
-                            self.expr(base)?;
+                            self.emit(Op::CallBuiltin(h::VIML_ERR_MARK, 0));
+                            self.emit(Op::Pop);
+                            self.quiet_if(*bang, |c| c.expr(base))?;
                             for idx in [idx1, idx2] {
                                 match idx {
                                     Some(e) => self.expr(e)?,
@@ -1790,7 +1795,8 @@ impl Compiler {
                             let empty = (idx1.is_none() as i64) | ((idx2.is_none() as i64) << 1);
                             self.emit(Op::LoadInt(empty));
                             self.load_str(src);
-                            self.emit(Op::CallBuiltin(h::VIML_UNLET_RANGE, 5));
+                            self.emit(Op::LoadInt(*bang as i64));
+                            self.emit(Op::CallBuiltin(h::VIML_UNLET_RANGE, 6));
                         }
                     }
                     self.emit(Op::Pop);
@@ -2851,6 +2857,26 @@ impl Compiler {
             EXIT_BREAK => self.loops.last_mut().expect("in a loop").breaks.push(j),
             _ => self.loops.last_mut().expect("in a loop").continues.push(j),
         }
+    }
+
+    /// Compile `f` between `:silent!`'s enter and leave when `quiet` — the
+    /// `GLV_QUIET` of `:unlet!`, which resolves the variable without reporting.
+    fn quiet_if(
+        &mut self,
+        quiet: bool,
+        f: impl FnOnce(&mut Self) -> Result<(), VimlError>,
+    ) -> Result<(), VimlError> {
+        if !quiet {
+            return f(self);
+        }
+        self.emit(Op::LoadInt(1));
+        self.emit(Op::CallBuiltin(h::VIML_SILENT_ENTER, 1));
+        self.emit(Op::Pop);
+        f(self)?;
+        self.emit(Op::LoadInt(1));
+        self.emit(Op::CallBuiltin(h::VIML_SILENT_LEAVE, 1));
+        self.emit(Op::Pop);
+        Ok(())
     }
 
     /// Report `msg` as the current command's error at run time (`emsg()` from

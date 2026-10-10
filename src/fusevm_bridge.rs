@@ -2313,13 +2313,23 @@ thread_local! {
 }
 
 fn b_throw(vm: &mut VM, _: u8) -> Value {
-    let v = tv_get_string(&pop_tv(vm));
+    let tv = pop_tv(vm);
     // c: `ex_throw` throws only when `eval0()` on the argument succeeded. An
     // error while evaluating it has already become the exception (or been
     // reported), and throwing the half-evaluated value on top of it would
     // replace `Vim(throw):E684: List index out of range: 0` with a thrown
     // `v:null` — which is what `throw [][0]` used to catch.
     if eval_failed_since_mark() {
+        return Value::Undef;
+    }
+    // c: the argument is turned into a string AFTER `eval0()` succeeded, by
+    // `tv_get_string()`: a List, Dict, Funcref or Blob reports `E730`/`E731`/
+    // `E729`/`E976` and yields "". That error is not `eval0()`'s failure, so
+    // the (empty) exception is thrown regardless — outside a `:try` the message
+    // prints and the script ends with `E605: Exception not caught: `. Inside
+    // one the error has already become the pending exception, which stands.
+    let v = tv_get_string(&tv);
+    if PENDING_EXC.with(|p| p.borrow().is_some()) {
         return Value::Undef;
     }
     // c: `throw_exception` refuses a user value that would pass for an error or
@@ -4054,6 +4064,20 @@ fn b_unlet(vm: &mut VM, _: u8) -> Value {
     Value::Undef
 }
 
+/// Run `f` with error messages silenced when `quiet` — `GLV_QUIET`, which
+/// `:unlet!` hands to `get_lval()`.
+fn quietly<T>(quiet: bool, f: impl FnOnce() -> T) -> T {
+    use crate::ported::ex_eval::emsg_silent;
+    if quiet {
+        emsg_silent.with(|e| e.set(e.get() + 1));
+    }
+    let out = f();
+    if quiet {
+        emsg_silent.with(|e| e.set(e.get() - 1));
+    }
+    out
+}
+
 /// `:unlet base[index]` / `:unlet base.key` — remove one List item or Dict
 /// entry. Mirrors the two element branches of `do_unlet_var()`
 /// (vendor/eval/vars.c): list → `tv_list_item_remove`, dict → `tv_dict_item_remove`
@@ -4074,12 +4098,22 @@ fn b_unlet(vm: &mut VM, _: u8) -> Value {
 /// and lets the loop run on to `check_nextcmd`, so `try | unlet nosuchvar |
 /// catch | … | endtry` IS caught. Both engines agree on both.
 fn b_unlet_index(vm: &mut VM, _: u8) -> Value {
+    let quiet = tv_get_number_chk(&pop_tv(vm), None) != 0;
     let src = tv_get_string(&pop_tv(vm));
     let index = pop_tv(vm);
     let base = pop_tv(vm);
-    // The lval resolution (`get_lval`) aborts the line on error; what follows
-    // it is `do_unlet_var`, the callback, whose failures only set `error`.
-    let Some(target) = eval_op(|| unlet_lval(&base, &index)) else {
+    // c: `get_lval` evaluates the name and the subscript before it looks at
+    // either, and stops at the first failure (`E121` for the variable, the
+    // subscript expression's own error) — no `E689` on top of that.
+    if eval_failed_since_mark() {
+        return Value::Undef;
+    }
+    // The lval resolution (`get_lval`) aborts the line on error — `:unlet!` only
+    // silences the message (`GLV_QUIET`), the failure still ends the command line;
+    // what follows it is `do_unlet_var`, the callback, whose failures only set
+    // `error`.
+    let Some(target) = eval_op(|| quietly(quiet, || unlet_lval(&base, &index))) else {
+        set_hard_err();
         return Value::Undef;
     };
     unlet_var(target, &src);
@@ -4253,13 +4287,17 @@ fn b_errs_after(vm: &mut VM, _: u8) -> Value {
 /// argument as written. `get_lval_list` resolves both indexes (`E684`), a
 /// Dict is `E719`, then `do_unlet_var`'s `ll_range` branch removes the items.
 fn b_unlet_range(vm: &mut VM, _: u8) -> Value {
+    let quiet = tv_get_number_chk(&pop_tv(vm), None) != 0;
     let src = tv_get_string(&pop_tv(vm));
     let empty = tv_get_number_chk(&pop_tv(vm), None);
     let idx2 = pop_tv(vm);
     let idx1 = pop_tv(vm);
     let base = pop_tv(vm);
+    if eval_failed_since_mark() {
+        return Value::Undef;
+    }
     let (empty1, empty2) = (empty & 1 != 0, empty & 2 != 0);
-    let resolved = eval_op(|| match (base.v_type, &base.vval) {
+    let resolved = eval_op(|| quietly(quiet, || match (base.v_type, &base.vval) {
         (VAR_DICT, _) => {
             message::emsg("E719: Cannot slice a Dictionary");
             None
@@ -4292,9 +4330,10 @@ fn b_unlet_range(vm: &mut VM, _: u8) -> Value {
             message::emsg("E689: Can only index a List, Dictionary or Blob");
             None
         }
-    });
-    if let Some(target) = resolved {
-        unlet_var(target, &src);
+    }));
+    match resolved {
+        Some(target) => unlet_var(target, &src),
+        None => set_hard_err(),
     }
     Value::Undef
 }

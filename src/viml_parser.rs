@@ -427,9 +427,23 @@ fn parse_stmt_unplaced(line: &str) -> Result<Stmt, VimlError> {
         } else {
             Stmt::Return(Some(parse_cmd_expr(strip_legacy_trailing_comment(rest))?))
         }),
-        "throw" => Ok(Stmt::Throw(parse_cmd_expr(strip_legacy_trailing_comment(
-            rest,
-        ))?)),
+        "throw" => {
+            let arg = strip_legacy_trailing_comment(rest);
+            if !arg.trim().is_empty() {
+                return Ok(Stmt::Throw(parse_cmd_expr(arg)?));
+            }
+            // c: `:throw` is `EX_NEEDARG`. With nothing after it `do_one_cmd`
+            // reports `E471` with the command as written appended; with a `|`
+            // after it the argument was non-empty at that check and `ex_throw`
+            // reports the bare message itself.
+            let written = unknown_cmd_text(line);
+            let msg = if written.contains('|') {
+                "E471: Argument required".to_string()
+            } else {
+                format!("E471: Argument required: {written}")
+            };
+            Ok(Stmt::Throw(Expr::ScriptError(msg)))
+        }
         // `:command[!] …` defines a user command; `:delcommand` removes one.
         // (`command(`/`delcommand(` are not builtins, but guard anyway.)
         "command" if !line[cmd.len()..].starts_with('(') => {
