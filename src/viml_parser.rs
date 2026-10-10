@@ -2827,8 +2827,51 @@ fn parse_legacy_let(rest: &str) -> Result<Stmt, VimlError> {
     Ok(let_list(strip_legacy_trailing_comment(rest)).unwrap_or(Stmt::Expr(Expr::Number(0))))
 }
 
+/// Byte offset of the `=` that ends a `:let` target — the first one outside every
+/// bracket pair and string, so a subscript such as `l[0:(a == b)]` or
+/// `d['k=v']` does not end it early.
+fn find_let_eq(s: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    let (mut depth, mut i) = (0i32, 0);
+    while i < b.len() {
+        match b[i] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b'\'' => {
+                // `''` is a quote inside the string.
+                i += 1;
+                while i < b.len() {
+                    if b[i] == b'\'' {
+                        if b.get(i + 1) == Some(&b'\'') {
+                            i += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    i += 1;
+                }
+            }
+            b'"' => {
+                i += 1;
+                while i < b.len() && b[i] != b'"' {
+                    if b[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            // `@r` names a register; `@"` is the unnamed one, not a string.
+            b'@' => i += 1,
+            b'=' if depth <= 0 => return Some(i),
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
 fn parse_let(rest: &str) -> Result<Stmt, VimlError> {
-    let Some(eq) = rest.find('=') else {
+    let Some(eq) = find_let_eq(rest) else {
         // No `=`: `:let {var-name} …` lists the named variables. `:let` alone
         // and the whole-scope forms (`:let g:`) list a hashtable in its
         // iteration order, which is not modelled — those stay a no-op, as does
@@ -3274,6 +3317,9 @@ fn parse_unlet_arg(arg: &str) -> Result<UnletArg, VimlError> {
 fn split_top_colon(s: &str) -> Option<(&str, &str)> {
     let bytes = s.as_bytes();
     let mut depth = 0i32;
+    // Open `?`s at depth 0: the `:` that answers one belongs to the ternary
+    // (`d[c ? 'a' : 'b']`), not to a range.
+    let mut ternaries = 0u32;
     let mut quote: Option<u8> = None;
     let mut i = 0;
     while i < bytes.len() {
@@ -3286,8 +3332,19 @@ fn split_top_colon(s: &str) -> Option<(&str, &str)> {
             }
             None => match c {
                 b'\'' | b'"' => quote = Some(c),
-                b'[' | b'(' => depth += 1,
-                b']' | b')' => depth -= 1,
+                b'[' | b'(' | b'{' => depth += 1,
+                b']' | b')' | b'}' => depth -= 1,
+                // `?` right after a comparison operator is its ignore-case modifier
+                // (`==?`, `=~?`, `<?`, `is?`), not a ternary.
+                b'?' if depth == 0 => {
+                    let before = &s[..i];
+                    let modifier = before.ends_with(['=', '~', '<', '>', '!'])
+                        || before.ends_with("is")
+                        || before.ends_with("isnot");
+                    if !modifier {
+                        ternaries += 1;
+                    }
+                }
                 b':' if depth == 0 => {
                     // Skip a scope-prefix colon (`s:`/`g:`/`a:`/…): a single scope
                     // letter at a token boundary, followed by an identifier char —
@@ -3301,7 +3358,11 @@ fn split_top_colon(s: &str) -> Option<(&str, &str)> {
                         && (i == 1 || !is_ident(bytes[i - 2]))
                         && i + 1 < bytes.len()
                         && is_ident(bytes[i + 1]);
-                    if !scope_prefix {
+                    if scope_prefix {
+                        // part of a name
+                    } else if ternaries > 0 {
+                        ternaries -= 1;
+                    } else {
                         return Some((&s[..i], &s[i + 1..]));
                     }
                 }
