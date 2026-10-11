@@ -1,0 +1,15 @@
+0
+map([1, 2], 1) = [1, 1]
+map([1, 2], 7) = [7, 7]
+map({'a': 1}, 2.5) = {'a': 2.5}
+map([1], v:true) = [v:true]
+map([1], v:null) = [v:null]
+mapnew([0, 0], 3) = [3, 3]
+filter([1, 2], 1) = [1, 2]
+filter([1, 2], 0) = []
+filter(0z0102, 1) = 0z0102
+indexof([5, 6], 1) ! Vim(let):E1256: String or function required for argument 2
+map('ab', 1) ! Vim(let):E928: String required
+map([1, 2], []) ! Vim(let):E730: Using a List as a String
+map([1], {}) ! Vim(let):E731: Using a Dictionary as a String
+filter([1], 0z01) ! Vim(let):E976: Using a Blob as a String

@@ -5740,13 +5740,19 @@ fn call_func_hook(funcref: &typval_T, args: &[typval_T]) -> Option<typval_T> {
 /// value layer's `FILTER_MAP_EVAL_HOOK`): set v:key/v:val and evaluate the expr
 /// (string) or call the funcref → result.
 fn filter_map_eval(expr: &typval_T, key: &typval_T, val: &typval_T) -> Option<typval_T> {
-    let chunk = if expr.v_type == VAR_STRING {
-        match compile_expr_chunk(&tv_get_string(expr)) {
-            Ok(c) => Some(c),
-            Err(_) => return None,
+    // c: `eval_expr_typval` — a Funcref/Partial is called; ANY other type goes
+    // to `eval_expr_string`, which reads it with `tv_get_string_buf_chk`: a
+    // Number `1` is the expression "1" (`map([1], 1)` is `[1]`), and a List,
+    // Dict, Blob or Funcref-as-String is that conversion's error and a FAIL.
+    let chunk = match expr.v_type {
+        VAR_FUNC | VAR_PARTIAL => None,
+        _ => {
+            let src = tv_get_string_buf_chk(expr)?;
+            match compile_expr_chunk(&src.to_string()) {
+                Ok(c) => Some(c),
+                Err(_) => return None,
+            }
         }
-    } else {
-        None
     };
     // c: `filter_map_one` — `if (eval_expr_typval(expr, false, argv, 2, newtv)
     // == FAIL) { goto theend; }` (`Src/eval/list.c:58`), and the caller's loop
