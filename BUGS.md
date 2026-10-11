@@ -7702,3 +7702,67 @@ script); vimlrs catches it.
   `src/ported/eval/funcs.rs`), not a port of `ex_docmd.c`.
 - **`str2blob()`/`blob2str()`** exist in vim 9.2 only; the vendored Neovim has
   neither, so they are `E117` here by the spec this port follows.
+
+## R55 — float argument checks, Blob literal digit pairs, unterminated printf specs, `indexof()` checks, non-String `map()` expressions
+
+Measured against vim 9.2.1150 (`/opt/homebrew/bin/vim`) and Neovim 0.12.
+
+### R55-1. The float builtins reported the per-type float error — ✅ FIXED
+
+`float2nr()`, `pow()`, `fmod()`, `atan2()` and every `float_op_wrapper` builtin
+(`sqrt`, `round`, `floor`, `ceil`, `trunc`, `exp`, `log10`, trig, …) read their
+argument with `tv_get_float_chk()` (`typval.h`), whose only error is
+`E808: Number or Float required`. vimlrs called `tv_get_float()` — the
+per-type table (`E892` String, `E893` List, `E362` Bool, …) that arithmetic
+uses — so `sqrt('4')` was `E892`. `tv_get_float_chk` is now ported, the failed
+call yields `0.0` (`float2nr` leaves `0`), and the two-argument forms stop at
+the first bad argument. vim and Neovim agree. Parity case:
+`float_arg_number_or_float.vim`.
+
+### R55-2. Blob literals accepted an odd digit and any `.` — ✅ FIXED
+
+The lexer skipped every `.` after `0z` and silently stopped at an odd trailing
+digit, so `0z0` was `0z` followed by `E488: Trailing characters: 0` and
+`0z.01` / `0z01..02` were `0z01` / `0z0102`. The `0z` branch of
+`eval_number()` reads pairs, skips a `.` only between two pairs, and reports
+`E973: Blob literal should have an even number of hex characters` while
+evaluating — after the operands to its left have run. The lexer now follows it
+and emits the E973 as a deferred (run-time) error; `0z.01` is `0z` concatenated
+with `01` (`E976`). vim and Neovim agree. Parity case:
+`blob_literal_digit_pairs.vim`.
+
+### R55-3. A format ending inside a conversion spec printed a `%` — ✅ FIXED
+
+`printf('%')`, `printf('a%')`, `printf('%-5')`, `printf('%l')` returned the
+`%`; the C default case takes `str_arg_l = 0` when `*p` is NUL, so the
+unterminated spec contributes nothing (`''`, `'a'`, `''`, `''`). vim and Neovim
+agree. Parity case: `printf_unterminated_spec.vim`.
+
+### R55-4. `indexof()` skipped its argument checks — ✅ FIXED
+
+`f_indexof` answered `-1` for a non-List/Blob first argument, a non-String/Funcref
+second argument (`E1256`) and a non-Dict third argument (`E1206`). Argument 1's
+message follows vim, the stated reference, as `reverse()` does: vim 9.2
+`E1528: List or Tuple or Blob required for argument 1`, Neovim `E1226`.
+Parity case: `indexof_argument_checks.vim`.
+
+### R55-5. A non-String, non-Funcref `map()`/`filter()` expression evaluated to 0 — ✅ FIXED
+
+`eval_expr_typval()` sends anything that is not a Funcref/Partial to
+`eval_expr_string()`, which reads it with `tv_get_string_buf_chk()`: `map([1, 2], 7)`
+is `[7, 7]`, `filter([1, 2], 1)` keeps both, and a List/Dict/Blob expression is
+`E730`/`E731`/`E976`. The bridge's per-item hook compiled only a `VAR_STRING`
+and answered `0` for everything else (`[0, 0]`, `[]`, no error). The same hook
+serves `mapnew()`, `foreach()`'s Funcref form, `indexof()` and `readdir()`.
+vim and Neovim agree. Parity case: `map_filter_nonstring_expr.vim`.
+
+### R55-O. Measured this round, still open
+
+- `string(1.0/0.0)` is `inf` in vim and `str2float('inf')` here and in Neovim —
+  the deliberate split recorded in R31-N1.
+- `echo funcref('len')('abc')` / `F.name` on a Funcref: the remaining operands
+  still evaluate after the first failure (the R54-O "evaluation does not stop at
+  the first failure" class).
+- `eval('0z01.')` is `E976` in both engines (the left operand is stringified for
+  `.` before the missing right operand is noticed); vimlrs reports `E15`.
+- `list2str('a')`: vim `E1211`, Neovim `E474`, vimlrs no error.
