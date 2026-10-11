@@ -2705,8 +2705,10 @@ fn vim_vsnprintf_typval(argvars: &[typval_T], rettv: &mut typval_T) {
             }
             _ => 0u8,
         };
+        // c (default case): `str_arg = p; str_arg_l = 0; if (*p) str_arg_l++;`
+        // — a format that ends inside a specifier (`'%'`, `'%-5'`, `'%l'`)
+        // contributes nothing, not the `%`.
         let Some(conv_b) = bytes.get(i).copied() else {
-            out.push(b'%');
             break;
         };
         let conv = conv_b as char;
