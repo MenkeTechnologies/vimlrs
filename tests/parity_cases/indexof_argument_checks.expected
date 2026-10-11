@@ -1,0 +1,13 @@
+0
+indexof('x', 'v:val') ! Vim(let):E1528: List or Tuple or Blob required for argument 1
+indexof({}, 'v:val') ! Vim(let):E1528: List or Tuple or Blob required for argument 1
+indexof(v:null, 'v:val') ! Vim(let):E1528: List or Tuple or Blob required for argument 1
+indexof('', '') ! Vim(let):E1528: List or Tuple or Blob required for argument 1
+indexof([1], 1) ! Vim(let):E1256: String or function required for argument 2
+indexof([1], []) ! Vim(let):E1256: String or function required for argument 2
+indexof([1], 'v:val == 1', 1) ! Vim(let):E1206: Dictionary required for argument 3
+indexof([1], 'v:val == 1', 'x') ! Vim(let):E1206: Dictionary required for argument 3
+indexof([1], '') = -1
+indexof(0z0102, 'v:val == 2', {'startidx': 0}) = 1
+indexof([1, 2], {i, v -> v == 2}) = 1
+indexof([1, 2, 3], 'v:val > 1', {'startidx': -1}) = 2

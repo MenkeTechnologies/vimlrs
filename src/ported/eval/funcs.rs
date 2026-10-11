@@ -4644,9 +4644,25 @@ fn indexof_list(
 /// Port of `f_indexof()` — `vendor/eval/funcs.c:3086`. The index of the first
 /// List/Blob item for which `{expr}` (string or funcref, seeing `v:key`/`v:val`)
 /// is true, or -1. An optional `{opts}` Dict's `startidx` begins the scan later.
+///
+/// The three argument checks come first. For argument 1 the oracles disagree on
+/// the message and this follows vim, the stated reference (as `f_reverse`
+/// does): vim 9.2 `E1528: List or Tuple or Blob required`, Neovim's
+/// `tv_check_for_list_or_blob_arg` `E1226: List or Blob required`. Arguments 2
+/// and 3 (`E1256`, `E1206`) are the same in both.
 pub fn f_indexof(argvars: &[typval_T], rettv: &mut typval_T) {
     // c: rettv->vval.v_number = -1;
     *rettv = typval_T::from(-1 as varnumber_T);
+    // c: tv_check_for_list_or_blob_arg(argvars, 0) == FAIL || … → return;
+    if !matches!(argvars[0].v_type, VAR_LIST | VAR_BLOB) {
+        crate::ported::message::semsg("E1528: List or Tuple or Blob required for argument 1");
+        return;
+    }
+    if crate::ported::eval::typval::tv_check_for_string_or_func_arg(argvars, 1) == FAIL
+        || tv_check_for_opt_dict_arg(argvars, 2) == FAIL
+    {
+        return;
+    }
     let expr = &argvars[1];
     // c: empty string / NULL funcref expr → nothing to test.
     if expr.v_type == VAR_STRING && tv_get_string(expr).is_empty() {
