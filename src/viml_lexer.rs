@@ -428,29 +428,33 @@ impl<'a> Lexer<'a> {
         parsed.unwrap_or(i64::MAX)
     }
 
-    /// Lex a Blob literal `0z` followed by an even number of hex digits (Vim
-    /// also allows a `.` separating byte groups, e.g. `0z00.11`). Port of the
-    /// `0z` branch of `eval_number()` (`Src/eval.c`).
+    /// Lex a Blob literal `0z` followed by hex digit PAIRS. Port of the `0z`
+    /// branch of `eval_number()` (`Src/eval.c`): a `.` is skipped only BETWEEN
+    /// two pairs (`0z00.11`) — a leading one, a doubled one or a trailing one
+    /// ends the literal (`0z.01` is `0z` concatenated with `01`) — and an odd
+    /// digit is `E973`. The C raises that while evaluating, after the operands
+    /// to its left, so it is a [`Tok::DeferredErr`]; the rest of the digit run
+    /// (dots included) is consumed with it.
     fn lex_blob(&mut self) -> Tok {
-        self.pos += 2; // skip "0z"
+        self.pos += 2; // c: bp = *arg + 2
         let mut bytes = Vec::new();
-        loop {
-            let hi = self.peek();
-            if hi == b'.' {
-                self.pos += 1;
-                continue;
-            }
-            if !(hi as char).is_ascii_hexdigit() {
-                break;
-            }
-            let lo = self.peek2();
-            if !(lo as char).is_ascii_hexdigit() {
-                // odd trailing nibble — stop (Vim requires pairs)
-                break;
+        // c: for (; ascii_isxdigit(bp[0]); bp += 2)
+        while self.peek().is_ascii_hexdigit() {
+            if !self.peek2().is_ascii_hexdigit() {
+                while self.peek().is_ascii_hexdigit() || self.peek() == b'.' {
+                    self.pos += 1;
+                }
+                return Tok::DeferredErr(
+                    "E973: Blob literal should have an even number of hex characters".into(),
+                );
             }
             let s = &self.s[self.pos..self.pos + 2];
             bytes.push(u8::from_str_radix(s, 16).unwrap_or(0));
             self.pos += 2;
+            // c: if (bp[2] == '.' && ascii_isxdigit(bp[3])) bp++;
+            if self.peek() == b'.' && self.peek2().is_ascii_hexdigit() {
+                self.pos += 1;
+            }
         }
         Tok::Blob(bytes)
     }

@@ -1,0 +1,19 @@
+1
+0z0 ! Vim(let):E973: Blob literal should have an even number of hex characters
+0z012 ! Vim(let):E973: Blob literal should have an even number of hex characters
+0z01.0 ! Vim(let):E973: Blob literal should have an even number of hex characters
+0z0. ! Vim(let):E973: Blob literal should have an even number of hex characters
+0z01.2 ! Vim(let):E973: Blob literal should have an even number of hex characters
+[0z01, 0z2] ! Vim(let):E973: Blob literal should have an even number of hex characters
+0z01.02 = 0z0102
+0zAB.cd.EF = 0zABCDEF
+len(0z00.11.22) = 3
+0z0102 == 0z01.02 = 1
+0z.01 ! Vim(let):E976: Using a Blob as a String
+0z01..02 ! Vim(let):E976: Using a Blob as a String
+0zG ! Vim(let):E488: Trailing characters: G
+0z = 0z
+side
+Vim(let):E973: Blob literal should have an even number of hex characters
+E973: Blob literal should have an even number of hex characters
+0
