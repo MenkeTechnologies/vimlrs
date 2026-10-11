@@ -20,9 +20,9 @@ use crate::ported::eval::typval::{
 };
 use crate::ported::eval::typval::{
     tv_blob_alloc_ret, tv_blob_len, tv_dict_add_tv, tv_dict_find, tv_dict_len, tv_get_bool,
-    tv_get_float, tv_get_number_chk, tv_get_string, tv_list_alloc_ret, tv_list_append_number,
-    tv_list_append_string, tv_list_append_tv, tv_list_copy, tv_list_extend, tv_list_find_nr,
-    tv_list_flatten, tv_list_len, tv_list_ref,
+    tv_get_float, tv_get_float_chk, tv_get_number_chk, tv_get_string, tv_list_alloc_ret,
+    tv_list_append_number, tv_list_append_string, tv_list_append_tv, tv_list_copy, tv_list_extend,
+    tv_list_find_nr, tv_list_flatten, tv_list_len, tv_list_ref,
 };
 use crate::ported::eval::typval::{
     tv_dict_add_list, tv_dict_add_nr, tv_dict_add_str, tv_dict_alloc, tv_dict_alloc_ret,
@@ -297,7 +297,10 @@ pub fn f_str2float(argvars: &[typval_T], rettv: &mut typval_T) {
 ///
 /// "float2nr()" function — truncate a Float to a Number.
 pub fn f_float2nr(argvars: &[typval_T], rettv: &mut typval_T) {
-    let f = tv_get_float(&argvars[0]);
+    // c: if (!tv_get_float_chk(argvars, &f)) { return; }
+    let Some(f) = tv_get_float_chk(&argvars[0]) else {
+        return;
+    };
     // c: clamp to ±VARNUMBER_MAX (not i64::MIN) using DBL_EPSILON slack.
     let n = if f <= -(varnumber_T::MAX as f64) + f64::EPSILON {
         -varnumber_T::MAX
@@ -3032,13 +3035,20 @@ fn vim_vsnprintf_typval(argvars: &[typval_T], rettv: &mut typval_T) {
 /// functions. The caller supplies `op` (the C `fptr.func_float`).
 pub fn float_op_wrapper(argvars: &[typval_T], rettv: &mut typval_T, op: fn(f64) -> f64) {
     rettv.v_type = VAR_FLOAT;
-    rettv.vval = v_float(op(tv_get_float(&argvars[0])));
+    // c: tv_get_float_chk(argvars, &f) ? fptr.func_float(f) : 0.0
+    rettv.vval = v_float(tv_get_float_chk(&argvars[0]).map_or(0.0, op));
 }
 
 /// Port of `f_pow()` from `Src/eval/funcs.c` — `pow(x, y)`.
 pub fn f_pow(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.v_type = VAR_FLOAT;
-    rettv.vval = v_float(tv_get_float(&argvars[0]).powf(tv_get_float(&argvars[1])));
+    rettv.vval = v_float(
+        // c: tv_get_float_chk(argvars, &fx) && tv_get_float_chk(&argvars[1], &fy)
+        //    — the second is not read once the first has failed; 0.0 on failure.
+        tv_get_float_chk(&argvars[0])
+            .and_then(|x| tv_get_float_chk(&argvars[1]).map(|y| x.powf(y)))
+            .unwrap_or(0.0),
+    );
 }
 
 // ── bitwise (Src/eval/funcs.c) ──
@@ -3475,13 +3485,25 @@ pub fn f_deepcopy(argvars: &[typval_T], rettv: &mut typval_T) {
 /// Port of `f_fmod()` from `Src/eval/funcs.c` — floating-point remainder.
 pub fn f_fmod(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.v_type = VAR_FLOAT;
-    rettv.vval = v_float(tv_get_float(&argvars[0]) % tv_get_float(&argvars[1]));
+    rettv.vval = v_float(
+        // c: tv_get_float_chk(argvars, &fx) && tv_get_float_chk(&argvars[1], &fy)
+        //    — the second is not read once the first has failed; 0.0 on failure.
+        tv_get_float_chk(&argvars[0])
+            .and_then(|x| tv_get_float_chk(&argvars[1]).map(|y| x % y))
+            .unwrap_or(0.0),
+    );
 }
 
 /// Port of `f_atan2()` from `Src/eval/funcs.c`.
 pub fn f_atan2(argvars: &[typval_T], rettv: &mut typval_T) {
     rettv.v_type = VAR_FLOAT;
-    rettv.vval = v_float(tv_get_float(&argvars[0]).atan2(tv_get_float(&argvars[1])));
+    rettv.vval = v_float(
+        // c: tv_get_float_chk(argvars, &fx) && tv_get_float_chk(&argvars[1], &fy)
+        //    — the second is not read once the first has failed; 0.0 on failure.
+        tv_get_float_chk(&argvars[0])
+            .and_then(|x| tv_get_float_chk(&argvars[1]).map(|y| x.atan2(y)))
+            .unwrap_or(0.0),
+    );
 }
 
 // (tan/atan/asin/acos/sinh/cosh/tanh/log10 are `eval.lua` `func_float` entries

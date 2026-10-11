@@ -1,0 +1,19 @@
+1
+float2nr('x') Vim(let):E808: Number or Float required
+float2nr([]) Vim(let):E808: Number or Float required
+round('1.5') Vim(let):E808: Number or Float required
+sqrt({}) Vim(let):E808: Number or Float required
+floor(v:true) Vim(let):E808: Number or Float required
+ceil(v:null) Vim(let):E808: Number or Float required
+trunc(function('len')) Vim(let):E808: Number or Float required
+exp(0z00) Vim(let):E808: Number or Float required
+log10('x') Vim(let):E808: Number or Float required
+pow('2', []) Vim(let):E808: Number or Float required
+fmod(1, 'x') Vim(let):E808: Number or Float required
+atan2([], {}) Vim(let):E808: Number or Float required
+E808: Number or Float required
+0 0
+E808: Number or Float required
+0.0 5
+E808: Number or Float required
+0.0 5

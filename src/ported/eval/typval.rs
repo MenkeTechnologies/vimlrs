@@ -135,6 +135,24 @@ pub fn tv_get_float(tv: &typval_T) -> f64 {
     }
 }
 
+/// Port of `tv_get_float_chk()` from `Src/eval/typval.h` (static inline).
+///
+/// The checked read the float builtins use (`float_op_wrapper`, `float2nr()`,
+/// `pow()`, `fmod()`, `atan2()`): Float → itself, Number → promoted, and every
+/// other type is the ONE blanket `E808: Number or Float required` — unlike
+/// [`tv_get_float`], whose per-type table (E892, E893, …) is what arithmetic
+/// reports. `None` is the C `false` return.
+pub fn tv_get_float_chk(tv: &typval_T) -> Option<f64> {
+    match (tv.v_type, &tv.vval) {
+        (VAR_FLOAT, v_float(f)) => Some(*f), // c: *ret_f = tv->vval.v_float;
+        (VAR_NUMBER, v_number(n)) => Some(*n as f64), // c: *ret_f = (float_T)tv->vval.v_number;
+        _ => {
+            emsg("E808: Number or Float required"); // c: semsg("%s", _("E808: …"));
+            None
+        }
+    }
+}
+
 /// Port of `tv_get_string_buf_chk()` from `Src/eval/typval.c`.
 ///
 /// Number → decimal; Float → `%g`; String → itself; Bool → `v:false`/`v:true`;
