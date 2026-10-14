@@ -7769,7 +7769,13 @@ vim and Neovim agree. Parity case: `map_filter_nonstring_expr.vim`.
 - `list2str('a')`: vim `E1211`, Neovim `E474`, vimlrs no error.
 - `call map(a, 'v:val')` on a locked List or Dict (`let a = [1, 2] | lockvar a`)
   runs with no error; vim 9.2.1150 and Neovim 0.12.6 both report
-  `E741: Value is locked: map() argument` (the value is unchanged in all three).
-  `filter()` and `add()` already raise it. `filter_map_list`, `filter_map_dict` and
-  `filter_map_blob` (`src/ported/eval/list.rs`) run `value_check_lock` only when
-  `filtermap == FILTERMAP_FILTER`, so `map()` skips the check. Observed at 0.2.17.
+  `E741: Value is locked: map() argument`. With the identity `'v:val'` the value is
+  unchanged in all three; with `'v:val + 1'` vimlrs rewrites the locked list to
+  `[2, 3]` while vim and Neovim keep `[1, 2]`. `filter()` and `add()` already raise it.
+  The container check guarded by `filtermap == FILTERMAP_FILTER` in
+  `filter_map_list` / `filter_map_dict` (`src/ported/eval/list.rs`) is faithful -- the
+  vendored C has the same guard. What the port lacks is the per-item check the C runs
+  for `FILTERMAP_MAP` (`vendor/eval/list.c` `value_check_lock(TV_LIST_ITEM_TV(li)->v_lock, ...)`
+  in the list walk, `value_check_lock(di->di_tv.v_lock, ...)` + `var_check_ro` in the dict
+  walk): `lockvar a` locks the items too, so vim stops at the first item, while
+  `lockvar 1 a` (container only) lets `map()` through in vim as well. Observed at 0.2.17.
