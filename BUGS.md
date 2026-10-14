@@ -2891,7 +2891,7 @@ an equal-priority row that pins the sort's stability — input ids `3`(prio 10),
 
 ## Still open
 
-### R26-O1. A `{start}` inside a multi-byte sequence
+### R26-O1. A `{start}` inside a multi-byte sequence — ✅ CLOSED (re-measured at 0.2.17 against vim 9.2.1150: its repro is byte-identical)
 
 The residue of R26-2. The C chops the subject with `str += start` even when that
 lands mid-sequence, and the regex then matches the orphan continuation bytes one
@@ -2914,7 +2914,7 @@ and its own round. Rounding the other way (down to the character containing the
 offset) would be worse: it reports matches starting *before* the requested
 `{start}`, which `{start}` exists to forbid.
 
-### R26-O2. A builtin that reports an error but returns still aborts the command
+### R26-O2. A builtin that reports an error but returns still aborts the command — ✅ CLOSED (re-measured at 0.2.17 against vim 9.2.1150: its repro is byte-identical)
 
 `ex_echo` prints an argument whenever `eval1()` returned OK and consults
 `did_emsg` only to decide whether to add E15 (`vendor/eval.c:6146`, `:6150`). A
@@ -3234,7 +3234,7 @@ callback layer and belongs in its own round; a local Funcref check inside
 symptom disappear while leaving `'x' . F` and `strlen(F)` wrong and the shared
 primitive still lying.
 
-### R27-O2. `getregtype()` on an unset or cleared register is `'v'`, not `''`
+### R27-O2. `getregtype()` on an unset or cleared register is `'v'`, not `''` — ✅ CLOSED (re-measured at 0.2.17 against vim 9.2.1150: its repro is byte-identical)
 
 Found while fixing R27-1, pre-existing and untouched by it. The C's `kMTUnknown`
 has no representation in this port's register model, so a register that has
@@ -3342,7 +3342,7 @@ reaches nothing cannot read as a clean run.
 
 ## Still open
 
-### R28-O1. An error inside a called function abandons the caller's `|` line
+### R28-O1. An error inside a called function abandons the caller's `|` line — ✅ CLOSED (re-measured at 0.2.17 against vim 9.2.1150: its repro is byte-identical)
 
 Found by `fuzz-parity --dap` on its first 60-program run — a new manifestation
 of R26-O2's root cause (the abort keys on "an error was reported" rather than on
@@ -3552,7 +3552,7 @@ than compatible-mode, matching the Neovim engine this crate ports. Proven safe �
 all 34 expectations are unchanged by it — but it should land as its own reviewed
 commit touching only the script.
 
-### R29-O3. `exists(':cmd')` and `exists('##event')`
+### R29-O3. `exists(':cmd')` and `exists('##event')` — ✅ PARTLY CLOSED (re-measured at 0.2.17 against vim 9.2.1150: `echo exists(':echo') exists(':ec')` is `2 1` in both; the `##event` half was not re-measured)
 
 `exists(':echo')` is **2** in vim (`cmd_exists` returns 2 on an exact match, so the
 result is not a boolean), and 0 here. Neither `cmd_exists` (c:1388) nor
@@ -3814,7 +3814,7 @@ rather than closed, and the reason is given in each.
 
 ## Still open
 
-### R30-O1. `source_tolerant()` discards every parse error
+### R30-O1. `source_tolerant()` discards every parse error — ✅ CLOSED (re-measured at 0.2.17 against vim 9.2.1150: its repro is byte-identical)
 
 A script with a syntax error prints nothing about it and exits 0, where vim
 reports it and exits 1:
@@ -3851,7 +3851,7 @@ function's doc comment: each statement runs as its own chunk and `run_chunk`
 opens with `reset_run()`, which zeroes `did_emsg`, so even a reported error is
 erased by the next statement starting.
 
-### R30-O2. A byte slice that splits a character renders as U+FFFD, not `<c3>`
+### R30-O2. A byte slice that splits a character renders as U+FFFD, not `<c3>` — ✅ CLOSED (re-measured at 0.2.17 against vim 9.2.1150: its repro is byte-identical)
 
 ```
 $ printf "echo 'héllo'[1]\n" > b8.vim
@@ -3865,7 +3865,7 @@ four ASCII characters `<c3>`; this port substitutes U+FFFD. `message.rs`'s
 not use it. The old `#8` entry claimed the two "render identically"; corrected in
 place above.
 
-### R30-O3. `:bre` (`:brewind`) and the rest of the unmodelled ex-commands
+### R30-O3. `:bre` (`:brewind`) and the rest of the unmodelled ex-commands — ✅ CLOSED (re-measured at 0.2.17 against vim 9.2.1150: its repro is byte-identical)
 
 `try | bre | catch | echo v:exception | endtry` answers
 `Vim(try):E121: Undefined variable: bre` here and prints nothing in vim, which
@@ -3925,7 +3925,7 @@ The correctly-quoted form already exists at `ex_eval.rs:48`, `eval.rs:801/870`
 and elsewhere; the parser and lexer paths do not use it. Blocks R30-O1: reporting
 parse errors is only worth doing once the reported text is vim's.
 
-### R30-O6. `getbufvar('%', '&opt')` reads empty
+### R30-O6. `getbufvar('%', '&opt')` reads empty — ✅ CLOSED (re-measured at 0.2.17 against vim 9.2.1150: its repro is byte-identical)
 
 ```
 set tabstop=7
@@ -4162,7 +4162,7 @@ R30-O1 is unchanged: `source_tolerant()` discards every parse error, so
 the separate fix. `eval()` is the one path that reaches the parser at run time,
 which is why `tests/parity_cases/parse_error_text.vim` goes through it.
 
-### R31-O3. Five parse failures differ structurally, not in wording
+### R31-O3. Five parse failures differ structurally, not in wording — ✅ PARTLY CLOSED (re-measured at 0.2.17 against vim 9.2.1150: `echo string(1e3x)` now matches; the other four still differ)
 
 `{x y -> x}` (vim evaluates the dict KEY first and reports E121; this reports
 E720 at parse time), `&` and `$` alone (this port does not fail on them at all),
@@ -4373,7 +4373,7 @@ that function's `else` branch (which is `tv_get_string`, i.e. E731), so the path
 both engines actually take was not identified this round and the fix was not
 guessed at.
 
-### R32-O4. `exists(':cmd')` — unchanged, and now measured
+### R32-O4. `exists(':cmd')` — unchanged, and now measured — ✅ CLOSED (re-measured at 0.2.17 against vim 9.2.1150: its repro is byte-identical)
 
 R29-O3 stands. Measured: `exists(':echo')` is `2` and `exists(':ec')` is `1` in
 both engines, `0` here. `cmd_exists()` needs the generated `cmdnames[]` table,
@@ -5473,7 +5473,7 @@ status.
 
 ## Still open
 
-### R33-O1. `:if` / `:while` / `:for` do not skip on `did_emsg` (`CHECK_SKIP`)
+### R33-O1. `:if` / `:while` / `:for` do not skip on `did_emsg` (`CHECK_SKIP`) — ✅ PARTLY CLOSED (re-measured at 0.2.17 against vim 9.2.1150: every row matches vim except the `silent!` one, where vimlrs now prints `TRUE` then `FALSE` against vim's `FALSE`)
 
 Measured this round, both engines identical, and verified **pre-existing** — the
 same probes give byte-identical `viml` output on `origin/main` (d29c6cf) and after
@@ -5500,7 +5500,7 @@ Closing it needs a `cstack`-equivalent: this port compiles `:if`/`:while`/`:for`
 to bytecode jumps with no per-conditional state to consult, so the skip has to be
 reconstructed rather than transcribed. Not guessed at.
 
-### R33-O2. `:echo` evaluates every argument before writing any of them
+### R33-O2. `:echo` evaluates every argument before writing any of them — ✅ CLOSED (re-measured at 0.2.17 against vim 9.2.1150: its repro is byte-identical)
 
 Pre-existing, and made *visible* by R33-1 (before it, an erroring `:echo` printed
 nothing at all, so the ordering could not be observed).
@@ -5522,7 +5522,7 @@ emitted first. The content is now right; only the interleaving is not. Fixing it
 is a compiler change (emit one echo-write per argument plus the separator), not a
 bridge one.
 
-### R33-O3. A second, deferred diagnostic after an operand failure is not raised
+### R33-O3. A second, deferred diagnostic after an operand failure is not raised — ✅ CLOSED (re-measured at 0.2.17 against vim 9.2.1150: its repro is byte-identical)
 
 ```vim
 echo type([1] . '')
@@ -6966,7 +6966,7 @@ lines as ordinary commands (`E133: :return not inside a function`,
 `E193: :endfunction not inside a function`). This port reports the E932 and
 skips the whole definition.
 
-### R47-O3 (open). An error inside `execute()` prints ahead of the pending `:echo`
+### R47-O3 (CLOSED — re-measured at 0.2.17 against vim 9.2.1150). An error inside `execute()` prints ahead of the pending `:echo`
 
 `echo 1 | call execute('let zz += 1')` on separate lines: vim prints `1` and
 then the E121; this port prints the E121 first. Present before this round.
@@ -7071,7 +7071,8 @@ Errors were written raw; `emsg()` displays through `msg_outtrans()`, so TAB is
 - `echo foo(*)`: vim adds `E116: Invalid arguments for function foo(*)` after
   the E15 (same class as R33-O3, the deferred second diagnostic).
 - `echo 2 &&& 1`: vim `E112: Option name missing: & 1`, here `0 1`.
-- `>>`/`<<` bitwise shifts (vim 9.2 legacy, `E1282`/`E1283`): here a parse
+- ✅ CLOSED (re-measured at 0.2.17 against vim 9.2.1150: `echo 1 << 2` and `echo 8 >> 1` print `4` in both). Was:
+  `>>`/`<<` bitwise shifts (vim 9.2 legacy, `E1282`/`E1283`): here a parse
   failure dropped by `source_tolerant()`. Neovim has no shift operators (E15),
   so this is an engine split that needs a decision before it is ported.
 - `has('patch-…')` is always 0 here while `v:version` reports 801; both
@@ -7766,3 +7767,9 @@ vim and Neovim agree. Parity case: `map_filter_nonstring_expr.vim`.
 - `eval('0z01.')` is `E976` in both engines (the left operand is stringified for
   `.` before the missing right operand is noticed); vimlrs reports `E15`.
 - `list2str('a')`: vim `E1211`, Neovim `E474`, vimlrs no error.
+- `call map(a, 'v:val')` on a locked List or Dict (`let a = [1, 2] | lockvar a`)
+  runs with no error; vim 9.2.1150 and Neovim 0.12.6 both report
+  `E741: Value is locked: map() argument` (the value is unchanged in all three).
+  `filter()` and `add()` already raise it. `filter_map_list`, `filter_map_dict` and
+  `filter_map_blob` (`src/ported/eval/list.rs`) run `value_check_lock` only when
+  `filtermap == FILTERMAP_FILTER`, so `map()` skips the check. Observed at 0.2.17.
