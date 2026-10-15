@@ -2914,7 +2914,7 @@ and its own round. Rounding the other way (down to the character containing the
 offset) would be worse: it reports matches starting *before* the requested
 `{start}`, which `{start}` exists to forbid.
 
-### R26-O2. A builtin that reports an error but returns still aborts the command — ✅ CLOSED (re-measured at 0.2.17 against vim 9.2.1150: its repro is byte-identical)
+### R26-O2. A builtin that reports an error but returns still aborts the command — ✅ CLOSED for the abort (re-measured at 0.2.17 against vim 9.2.1150: every row now prints its value and rows A and B match vim's messages, though vim additionally prints its `Error detected while processing …` / `line N:` context lines; still divergent: row C prints `0` where vim prints `[]`, and row D omits vim's `E117: Unknown function: NoSuchCmpFn`)
 
 `ex_echo` prints an argument whenever `eval1()` returned OK and consults
 `did_emsg` only to decide whether to add E15 (`vendor/eval.c:6146`, `:6150`). A
@@ -3342,7 +3342,7 @@ reaches nothing cannot read as a clean run.
 
 ## Still open
 
-### R28-O1. An error inside a called function abandons the caller's `|` line — ✅ CLOSED (re-measured at 0.2.17 against vim 9.2.1150: its repro is byte-identical)
+### R28-O1. An error inside a called function abandons the caller's `|` line — ✅ CLOSED (re-measured at 0.2.17 against vim 9.2.1150: the repro's output and messages match vim line for line and both exit 1; vim additionally prints its `Error detected while processing …` / `line N:` context lines)
 
 Found by `fuzz-parity --dap` on its first 60-program run — a new manifestation
 of R26-O2's root cause (the abort keys on "an error was reported" rather than on
@@ -3814,7 +3814,7 @@ rather than closed, and the reason is given in each.
 
 ## Still open
 
-### R30-O1. `source_tolerant()` discards every parse error — ✅ CLOSED (re-measured at 0.2.17 against vim 9.2.1150: its repro is byte-identical)
+### R30-O1. `source_tolerant()` discards every parse error — ✅ CLOSED (re-measured at 0.2.17 against vim 9.2.1150: the repro's output and the `E110` message match vim line for line and both exit 1; vim additionally prints its `Error detected while processing …` / `line N:` context lines)
 
 A script with a syntax error prints nothing about it and exits 0, where vim
 reports it and exits 1:
