@@ -1138,28 +1138,43 @@ impl Parser {
     }
 
     /// `\{n,m}` / `\{n}` / `\{n,}` / `\{,m}` / `\{}` / `\{-…}` (non-greedy).
+    ///
+    /// c: `read_limits()` (`regexp.c`) plus the reversal rule of `nfa_regpiece()`:
+    /// a malformed limit is E554 (written `{...}` without the backslash under
+    /// `\v`), bounds given out of order are swapped, and a leading `-` makes the
+    /// piece non-greedy.
     fn brace_count(&mut self) -> (u32, u32, bool) {
-        let mut greedy = true;
-        if self.peek() == Some('-') {
-            greedy = false;
+        // `self.i` is already past the two-char opener.
+        let very_magic = self.vm.get(self.i.wrapping_sub(2)).copied().unwrap_or(false);
+        let reverse = self.peek() == Some('-');
+        if reverse {
             self.i += 1;
         }
+        let first_is_digit = self.peek().is_some_and(|c| c.is_ascii_digit());
         let lo = self.read_int();
-        let mut hi = lo;
-        if self.peek() == Some(',') {
+        let hi = if self.peek() == Some(',') {
             self.i += 1;
-            hi = self.read_int_or(INF);
-        }
-        // closing `}` (Vim allows a trailing `\}` or bare `}`).
-        if self.peek() == Some('\\') && self.peek2() == Some('}') {
-            self.i += 2;
-        } else if self.peek() == Some('}') {
-            self.i += 1;
-        }
+            self.read_int().unwrap_or(INF)
+        } else if first_is_digit {
+            lo.unwrap_or(0)
+        } else {
+            INF
+        };
         let lo = lo.unwrap_or(0);
-        let hi = hi.unwrap_or(if lo == 0 { INF } else { lo });
-        (lo, hi, greedy)
+        // c: "Allow either \{...} or \{...\}"
+        if self.peek() == Some('\\') {
+            self.i += 1;
+        }
+        if self.peek() == Some('}') {
+            self.i += 1;
+        } else {
+            let bs = if very_magic { "" } else { "\\" };
+            self.fail(&format!("E554: Syntax error in {bs}{{...}}"));
+            return (1, 1, true);
+        }
+        (lo.min(hi), lo.max(hi), !(reverse && lo != hi))
     }
+    /// `\{n,m}` / `\{n}` / `\{n,}` / `\{,m}` / `\{}` / `\{-…}` (non-greedy).
 
     fn read_int(&mut self) -> Option<u32> {
         let start = self.i;
@@ -1177,9 +1192,6 @@ impl Parser {
         } else {
             None
         }
-    }
-    fn read_int_or(&mut self, default: u32) -> Option<u32> {
-        Some(self.read_int().unwrap_or(default))
     }
 
     fn atom(&mut self, at_start: bool) -> Option<Node> {
@@ -1555,6 +1567,21 @@ impl Parser {
             'z' if self.peek() == Some('e') => {
                 self.i += 1;
                 Node::MatchEnd
+            }
+            // c: `nfa_regatom()`, `case Magic('z')` — outside a syntax item
+            // `reg_do_extmatch` is neither REX_SET nor REX_USE, so `\z(` is E66 and
+            // `\z1`..`\z9` is E67; any other follower falls to the `default:` arm,
+            // E867 naming it (`\z` at the end of the pattern names nothing, and the
+            // message is cut where the NUL ends the `%c`).
+            'z' => {
+                let next = self.bump();
+                self.fail(&match next {
+                    Some('(') => "E66: \\z( not allowed here".to_string(),
+                    Some('1'..='9') => "E67: \\z1 - \\z9 not allowed here".to_string(),
+                    Some(c) => format!("E867: (NFA regexp) Unknown operator '\\z{c}'"),
+                    None => "E867: (NFA regexp) Unknown operator '\\z".to_string(),
+                });
+                Node::Lit('z')
             }
             'd' => class_atom(false, ClassItem::Digit),
             'D' => class_atom(true, ClassItem::Digit),
