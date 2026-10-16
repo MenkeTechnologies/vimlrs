@@ -1,0 +1,15 @@
+1
+E54: Unmatched \(
+0
+E54: Unmatched \(
+1
+E54: Unmatched \(
+0
+0
+caught Vim(echo):E54: Unmatched \(
+caught Vim(let):E69: Missing ] after \%[
+1
+caught Vim(if):E54: Unmatched \(
+caught Vim(if):E730: Using a List as a String
+caught Vim(while):E54: Unmatched \(
+caught Vim(echo):E691: Can only compare List with List

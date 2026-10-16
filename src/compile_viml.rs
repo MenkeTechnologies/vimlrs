@@ -2200,6 +2200,7 @@ impl Compiler {
             // spells the same test out again for `ex_else`. The condition value is
             // on the stack, hence `drop = 1`.
             if self.calls > calls_before {
+                self.emit_call_unwind_check();
                 self.emit_block_abort_check(1);
             }
             let jf = self.emit(Op::JumpIfFalse(0));
@@ -2255,6 +2256,7 @@ impl Compiler {
         // backedge, which is the second half of why a failing body runs the loop
         // exactly once.
         if self.calls > calls_before {
+            self.emit_call_unwind_check();
             self.emit_block_abort_check(1);
         }
         self.emit(Op::JumpIfTrue(l_body));

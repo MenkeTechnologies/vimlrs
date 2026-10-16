@@ -1840,6 +1840,14 @@ pub fn note_error() {
 /// so a `VIML_ERR_MARK` inside the body does not leave the caller's statement
 /// comparing against the callee's snapshot.
 fn in_callee<T>(f: impl FnOnce() -> T) -> T {
+    in_callee_with(false, f)
+}
+
+/// [`in_callee`] with the choice of whether an error already converted into a
+/// pending exception still fails the caller (`false`, `eval_func`'s `aborting()`
+/// check) or is rolled back regardless (`true`, an evaluator step that has no
+/// such check, e.g. `typval_compare`).
+fn in_callee_with<T>(restore_when_pending: bool, f: impl FnOnce() -> T) -> T {
     let saved_fail = EVAL_FAIL.with(|c| c.get());
     let saved_mark = FAIL_MARK.with(|m| m.get());
     // The eval5 operand pre-check inside a CALLEE's body is that body's
@@ -1863,7 +1871,7 @@ fn in_callee<T>(f: impl FnOnce() -> T) -> T {
     // `PENDING_EXC` is this VM's stand-in for both halves of `aborting()`:
     // `errthrow()` fills it for a converted error (the `force_abort` case) and
     // `b_throw` for an explicit `:throw` (the `did_throw` case).
-    if PENDING_EXC.with(|p| p.borrow().is_none()) {
+    if restore_when_pending || PENDING_EXC.with(|p| p.borrow().is_none()) {
         EVAL_FAIL.with(|c| c.set(saved_fail));
         FAIL_MARK.with(|m| m.set(saved_mark));
         HARD_ERR.with(|h| h.set(saved_hard));
@@ -2932,7 +2940,22 @@ fn do_compare(vm: &mut VM, op: CmpOp, case: CaseFlag) -> Value {
     };
     let b = pop_tv(vm);
     let mut a = pop_tv(vm);
-    crate::ported::eval::typval_compare(&mut a, &b, cmp_to_exprtype(op), ic);
+    // c: `typval_compare` (`vendor/eval/typval.c`, the string arm) — a pattern
+    // that does not compile makes `vim_regcomp()` report (E54, E55, E65, …) and
+    // leave `regprog` NULL, so `n1` stays 0 and the function still returns OK:
+    // the `=~` yields 0 (`!~` yields 1) and the surrounding `:echo`/`:let`
+    // proceeds, with the error then raised against the command — even inside a
+    // `:try`, since there is no `aborting()` check on this path. Only the
+    // regex-compile report is exempt from failing the evaluator; a List/Dict
+    // operand (E692 …) still FAILs, so those are not rolled back.
+    let plain = |t: &typval_T| matches!(t.v_type, VAR_STRING | VAR_NUMBER);
+    if matches!(op, CmpOp::Match | CmpOp::NoMatch) && plain(&a) && plain(&b) {
+        in_callee_with(true, || {
+            crate::ported::eval::typval_compare(&mut a, &b, cmp_to_exprtype(op), ic);
+        });
+    } else {
+        crate::ported::eval::typval_compare(&mut a, &b, cmp_to_exprtype(op), ic);
+    }
     tv_to_value(a)
 }
 
