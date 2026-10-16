@@ -184,11 +184,11 @@ fn collect_free_vars(
             collect_free_vars(then, bound, out);
             collect_free_vars(otherwise, bound, out);
         }
-        Expr::Index { base, index } => {
+        Expr::Index { base, index, .. } => {
             collect_free_vars(base, bound, out);
             collect_free_vars(index, bound, out);
         }
-        Expr::Slice { base, from, to } => {
+        Expr::Slice { base, from, to, .. } => {
             collect_free_vars(base, bound, out);
             if let Some(f) = from {
                 collect_free_vars(f, bound, out);
@@ -899,11 +899,11 @@ fn slot_plan(stmts: &[(u32, Stmt)], in_function: bool) -> SlotPlan {
                 walk_expr(then, cx);
                 walk_expr(otherwise, cx);
             }
-            Expr::Index { base, index } => {
+            Expr::Index { base, index, .. } => {
                 walk_expr(base, cx);
                 walk_expr(index, cx);
             }
-            Expr::Slice { base, from, to } => {
+            Expr::Slice { base, from, to, .. } => {
                 walk_expr(base, cx);
                 if let Some(f) = from {
                     walk_expr(f, cx);
@@ -1208,11 +1208,11 @@ fn slot_plan(stmts: &[(u32, Stmt)], in_function: bool) -> SlotPlan {
                 scoped_e(then, in_function, out);
                 scoped_e(otherwise, in_function, out);
             }
-            Expr::Index { base, index } => {
+            Expr::Index { base, index, .. } => {
                 scoped_e(base, in_function, out);
                 scoped_e(index, in_function, out);
             }
-            Expr::Slice { base, from, to } => {
+            Expr::Slice { base, from, to, .. } => {
                 scoped_e(base, in_function, out);
                 if let Some(f) = from {
                     scoped_e(f, in_function, out);
@@ -3079,11 +3079,13 @@ impl Compiler {
                             base,
                             from: Some(Box::new(Expr::Number(i))),
                             to: None,
+                            mid_expr: false,
                         }
                     } else {
                         Expr::Index {
                             base,
                             index: Box::new(Expr::Number(i)),
+                            mid_expr: false,
                         }
                     };
                     let item = match op {
@@ -3774,16 +3776,31 @@ impl Compiler {
                 otherwise,
             } => self.ternary(cond, then, otherwise)?,
             Expr::Coalesce(a, b) => self.coalesce(a, b)?,
-            Expr::Index { base, index } => {
+            Expr::Index {
+                base,
+                index,
+                mid_expr,
+            } => {
                 self.expr(base)?;
                 self.expr(index)?;
                 self.emit(Op::CallBuiltin(h::VIML_INDEX, 2));
+                if *mid_expr {
+                    self.emit(Op::CallBuiltin(h::VIML_FAIL_MID, 0));
+                }
             }
-            Expr::Slice { base, from, to } => {
+            Expr::Slice {
+                base,
+                from,
+                to,
+                mid_expr,
+            } => {
                 self.expr(base)?;
                 self.opt_bound(from)?;
                 self.opt_bound(to)?;
                 self.emit(Op::CallBuiltin(h::VIML_SLICE, 3));
+                if *mid_expr {
+                    self.emit(Op::CallBuiltin(h::VIML_FAIL_MID, 0));
+                }
             }
             Expr::Member { base, key } => {
                 // A no-space `base.key` is syntactically ambiguous: it is a Dict
@@ -3800,6 +3817,9 @@ impl Compiler {
                                                         // Dict branch: subscript with the literal key.
                 self.load_str(key); // [base, "key"]
                 self.emit(Op::CallBuiltin(h::VIML_INDEX, 2)); // [value]
+                                                              // c: a Dict member read that FAILs (`d.missing`) is hard whatever
+                                                              // follows it — measured on vim 9.2, unlike `d['missing']`.
+                self.emit(Op::CallBuiltin(h::VIML_FAIL_MID, 0));
                 let jend = self.emit(Op::Jump(0));
                 // Concat branch: `base . <var named key>` — matches spaced `a . b`.
                 let lconcat = self.b.current_pos();
@@ -3905,6 +3925,12 @@ impl Compiler {
                     }
                     (None, Some(id)) => {
                         self.emit(Op::CallBuiltin(id, n));
+                        // c: `eval_func` FAILs once an exception is pending (`aborting()`),
+                        // even when the call itself ran: an argument that raised inside a
+                        // `:try` drops the call's value.
+                        if guarded && self.exc {
+                            self.emit(Op::CallBuiltin(h::VIML_CALL_ABORT, 0));
+                        }
                         if *mid_expr {
                             self.emit_call_mid();
                         }
@@ -3965,7 +3991,7 @@ impl Compiler {
             // same way `d.key(args)` does (c: `handle_subscript` sets `selfdict`
             // from the Dict it just indexed).
             Expr::CallExpr { callee, args } if matches!(**callee, Expr::Index { .. }) => {
-                let Expr::Index { base, index } = &**callee else {
+                let Expr::Index { base, index, .. } = &**callee else {
                     unreachable!("guarded by the match arm")
                 };
                 self.expr(base)?;

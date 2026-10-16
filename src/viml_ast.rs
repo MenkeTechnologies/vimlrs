@@ -133,6 +133,9 @@ pub enum Expr {
         base: Box<Expr>,
         /// Index expression.
         index: Box<Expr>,
+        /// More expression text follows the `]` (see [`Expr::Call::mid_expr`]): a
+        /// failed subscript then strands the rest of the command line.
+        mid_expr: bool,
     },
     /// Slice `base[from:to]`.
     Slice {
@@ -142,6 +145,8 @@ pub enum Expr {
         from: Option<Box<Expr>>,
         /// Upper bound, or None.
         to: Option<Box<Expr>>,
+        /// More expression text follows the `]` (see [`Expr::Index::mid_expr`]).
+        mid_expr: bool,
     },
     /// Dict member `base.key`.
     Member {

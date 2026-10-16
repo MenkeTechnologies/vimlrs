@@ -232,10 +232,38 @@ pub fn typval_compare(typ1: &mut typval_T, typ2: &typval_T, r#type: exprtype_T, 
     let mut n1: varnumber_T; // c: varnumber_T n1, n2;
     let n2: varnumber_T;
     let type_is = r#type == EXPR_IS || r#type == EXPR_ISNOT; // c:6797
+                                                             // Vim only: `v:null` facing a List, Dict, Blob or Float in `==` / `!=`.
+    let is_null = |t: &typval_T| {
+        t.v_type == VAR_SPECIAL
+            && matches!(
+                t.vval,
+                v_special(crate::ported::eval::typval_defs_h::SpecialVarValue::kSpecialVarNull)
+            )
+    };
+    let null_other = if r#type == EXPR_EQUAL || r#type == EXPR_NEQUAL {
+        match (is_null(typ1), is_null(typ2)) {
+            (true, false) => Some(&*typ2),
+            (false, true) => Some(&*typ1),
+            _ => None,
+        }
+        .filter(|o| matches!(o.v_type, VAR_LIST | VAR_DICT | VAR_BLOB | VAR_FLOAT))
+    } else {
+        None
+    };
 
     if type_is && typ1.v_type != typ2.v_type {
         // c: For "is" a different type always means false; "isnot" means true.
         n1 = (r#type == EXPR_ISNOT) as varnumber_T;
+    } else if let Some(other) = null_other {
+        // Vim (not Neovim) lets `v:null` meet a List, Dict, Blob or Float in `==` /
+        // `!=` without the type error: against a container it is simply unequal,
+        // against a Float it reads as 0.0 (`v:null == 0.0` is 1). Measured on
+        // vim 9.2; every other operator keeps the C's errors.
+        let equal = match other.v_type {
+            VAR_FLOAT => tv_get_float(other) == 0.0,
+            _ => false,
+        };
+        n1 = (equal == (r#type == EXPR_EQUAL)) as varnumber_T;
     } else if typ1.v_type == VAR_BLOB || typ2.v_type == VAR_BLOB {
         if type_is {
             // c: n1 = (typ1->v_type == typ2->v_type

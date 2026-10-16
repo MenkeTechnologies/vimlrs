@@ -3385,6 +3385,7 @@ pub(crate) fn let_target_expr(target: &LetTarget) -> Result<Expr, VimlError> {
         LetTarget::Index { base, index, .. } => Expr::Index {
             base: base.clone(),
             index: index.clone(),
+            mid_expr: false,
         },
         LetTarget::List { .. } | LetTarget::Range { .. } => {
             return Err(VimlError::msg("E734: Wrong variable type for +="))
@@ -4615,6 +4616,7 @@ impl Parser {
                 base: Box::new(base),
                 from: None,
                 to,
+                mid_expr: !self.call_tail_is_end(),
             });
         }
         let first = self.eval1()?;
@@ -4630,12 +4632,14 @@ impl Parser {
                 base: Box::new(base),
                 from: Some(Box::new(first)),
                 to,
+                mid_expr: !self.call_tail_is_end(),
             })
         } else {
             self.eat(&Tok::RBracket)?;
             Ok(Expr::Index {
                 base: Box::new(base),
                 index: Box::new(first),
+                mid_expr: !self.call_tail_is_end(),
             })
         }
     }

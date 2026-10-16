@@ -585,6 +585,12 @@ pub const VIML_LAMBDA_ARG: u16 = 3634;
 /// text unreachable when the call's error became an exception — see
 /// [`crate::viml_ast::Expr::Call::mid_expr`] and `b_call_mid`.
 pub const VIML_CALL_MID: u16 = 3635;
+/// Pass a value through, abandoning the rest of the command line first when its
+/// evaluation failed — see `b_fail_mid`.
+pub const VIML_FAIL_MID: u16 = 3636;
+/// Pass a builtin call's result through, failing the evaluation first when an
+/// exception is pending — see `b_call_abort`.
+pub const VIML_CALL_ABORT: u16 = 3637;
 /// `:echoerr`: pop an argument and the message so far, push the message with the
 /// argument appended — see `b_echoerr_arg`.
 pub const VIML_ECHOERR_ARG: u16 = 3622;
@@ -6641,12 +6647,58 @@ fn blob_concat(a: &typval_T, b: &typval_T) -> typval_T {
     }
 }
 
+/// A subscript or slice bound read as a Number.
+///
+/// c: `eval_index_inner` takes it with `tv_get_number_chk`, and a bad value does
+/// NOT fail the evaluation: a Float is `E805` and reads as 0, so `[1, 2][1.5]`
+/// still yields `1` and the `:echo` prints it before the error is raised. A List
+/// or Dict is stringified first (`E730`/`E731`, measured on vim 9.2) and that one
+/// does fail the expression.
+fn subscript_number(t: &typval_T) -> varnumber_T {
+    if matches!(t.v_type, VAR_LIST | VAR_DICT) {
+        let _ = tv_get_string(t);
+        set_hard_err();
+        return 0;
+    }
+    // c: `tv_get_number_chk(&var, &error)` answers 0 once it has reported (without the
+    // flag it would answer -1, which indexes the last element).
+    let mut error = false;
+    in_callee_with(true, || tv_get_number_chk(t, Some(&mut error)))
+}
+
+/// `VIML_FAIL_MID`: pass a value through, first abandoning the rest of the command
+/// line if evaluating it failed.
+///
+/// c: when `eval_index` / a Dict member read FAILs, the parse stops at that point;
+/// `nextcmd` is found only when the end of the argument or a `|` is what follows
+/// (`echo d['b']` reaches its `:catch`, `echo d['b'] . 'x'` does not).
+fn b_fail_mid(vm: &mut VM, _: u8) -> Value {
+    let v = pop_tv(vm);
+    if eval_failed_since_mark() {
+        set_hard_err();
+    }
+    tv_to_value(v)
+}
+
+/// [`VIML_CALL_ABORT`].
+///
+/// c: `eval_func` ends with `if (evaluate && aborting()) { clear_tv(rettv); ret = FAIL; }`,
+/// and `aborting()` holds from the moment an error became an exception. Counting the
+/// failure here makes the command around the call skip its output / assignment.
+fn b_call_abort(vm: &mut VM, _: u8) -> Value {
+    let v = pop_tv(vm);
+    if PENDING_EXC.with(|p| p.borrow().is_some()) {
+        note_error();
+    }
+    tv_to_value(v)
+}
+
 /// `eval_index` subscript (`eval.c`) — Phase-3 String/List/Dict subset.
 fn index_value(base: &typval_T, index: &typval_T) -> typval_T {
     match (base.v_type, &base.vval) {
         (VAR_LIST, v_list(Some(l))) => {
             // Faithful single-index via the ported value layer.
-            let i = tv_get_number_chk(index, None);
+            let i = subscript_number(index);
             let mut rettv = base.clone();
             if tv_list_slice_or_index(l, false, i, 0, false, &mut rettv, true) == 0 {
                 tv_special()
@@ -6673,7 +6725,7 @@ fn index_value(base: &typval_T, index: &typval_T) -> typval_T {
             let s = tv_get_string(base);
             let bytes = s.as_bytes();
             let len = bytes.len() as varnumber_T;
-            let i = tv_get_number_chk(index, None);
+            let i = subscript_number(index);
             // c:3298 — "If the index is too big or negative the result is
             // empty." A single index does NOT wrap around from the end (only a
             // *slice* bound does). c: `v = xmemdupz(s + n1, 1)` — Vim strings
@@ -6694,9 +6746,11 @@ fn index_value(base: &typval_T, index: &typval_T) -> typval_T {
             // Blob subscript → a single byte (Number), via the ported value
             // layer. A NULL blob (the empty result of a slice) has length 0,
             // so any index is E979 — it must not fall to the un-indexable arm.
-            let i = tv_get_number_chk(index, None);
+            let i = subscript_number(index);
             let mut rettv = base.clone();
-            let _ = match b {
+            // c: an out-of-range Blob index (E979) leaves the Blob as the value and the
+            // evaluation does not FAIL: vim echoes the Blob, then raises.
+            let _ = in_callee_with(true, || match b {
                 Some(b) => crate::ported::eval::typval::tv_blob_slice_or_index(
                     &b.borrow(),
                     false,
@@ -6713,7 +6767,7 @@ fn index_value(base: &typval_T, index: &typval_T) -> typval_T {
                     false,
                     &mut rettv,
                 ),
-            };
+            });
             rettv
         }
         // Everything else is un-indexable, and *which* error says so is part of
@@ -6737,7 +6791,7 @@ fn slice_value(base: &typval_T, from: &typval_T, to: &typval_T) -> typval_T {
         if t.v_type == VAR_SPECIAL {
             0
         } else {
-            let mut i = tv_get_number_chk(t, None);
+            let mut i = subscript_number(t);
             if i < 0 {
                 i += len;
             }
@@ -6748,7 +6802,7 @@ fn slice_value(base: &typval_T, from: &typval_T, to: &typval_T) -> typval_T {
         if t.v_type == VAR_SPECIAL {
             len - 1
         } else {
-            let mut i = tv_get_number_chk(t, None);
+            let mut i = subscript_number(t);
             if i < 0 {
                 i += len;
             }
@@ -6763,12 +6817,12 @@ fn slice_value(base: &typval_T, from: &typval_T, to: &typval_T) -> typval_T {
             let n1 = if from.v_type == VAR_SPECIAL {
                 0
             } else {
-                tv_get_number_chk(from, None)
+                subscript_number(from)
             };
             let n2 = if to.v_type == VAR_SPECIAL {
                 len - 1
             } else {
-                tv_get_number_chk(to, None)
+                subscript_number(to)
             };
             let mut rettv = base.clone();
             let _ = tv_list_slice_or_index(l, true, n1, n2, false, &mut rettv, true);
@@ -6813,12 +6867,12 @@ fn slice_value(base: &typval_T, from: &typval_T, to: &typval_T) -> typval_T {
             let n1 = if from.v_type == VAR_SPECIAL {
                 0
             } else {
-                tv_get_number_chk(from, None)
+                subscript_number(from)
             };
             let n2 = if to.v_type == VAR_SPECIAL {
                 len - 1
             } else {
-                tv_get_number_chk(to, None)
+                subscript_number(to)
             };
             let mut rettv = base.clone();
             let _ = crate::ported::eval::typval::tv_blob_slice_or_index(
@@ -6830,8 +6884,9 @@ fn slice_value(base: &typval_T, from: &typval_T, to: &typval_T) -> typval_T {
         // reports whichever error `check_can_index` says applies. Both are
         // evaluator-level failures — see the note in `index_value`.
         (VAR_DICT, _) => {
+            // Unlike the other failures here this one is NOT hard (measured on vim
+            // 9.2: `try | echo d['a':] | catch | … | endtry` reaches its `:catch`).
             message::emsg("E719: Cannot slice a Dictionary");
-            set_hard_err();
             tv_special()
         }
         _ => {
@@ -7593,6 +7648,8 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_ERRS_AFTER, b_errs_after);
     vm.register_builtin(VIML_RANGE_CHECK, b_range_check);
     vm.register_builtin(VIML_CALL_MID, b_call_mid);
+    vm.register_builtin(VIML_FAIL_MID, b_fail_mid);
+    vm.register_builtin(VIML_CALL_ABORT, b_call_abort);
     vm.register_builtin(VIML_MAKE_LAMBDA, b_make_lambda);
     vm.register_builtin(VIML_LAMBDA_ARG, b_lambda_arg);
     vm.register_builtin(VIML_ECHOERR_ARG, b_echoerr_arg);

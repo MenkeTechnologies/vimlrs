@@ -1,0 +1,87 @@
+0
+>> l[1.5]
+1
+caught Vim(echo):E805: Using a Float as a Number
+rest of file
+>> 'abc'[1.5]
+a
+caught Vim(echo):E805: Using a Float as a Number
+rest of file
+>> l[0:1.5]
+[1]
+caught Vim(echo):E805: Using a Float as a Number
+rest of file
+>> l[1.5:]
+[1, 2]
+caught Vim(echo):E805: Using a Float as a Number
+rest of file
+>> 0z0102[1.5]
+1
+caught Vim(echo):E805: Using a Float as a Number
+rest of file
+>> l[l[1.5]]
+2
+caught Vim(echo):E805: Using a Float as a Number
+rest of file
+>> abs(l[1.5])
+caught Vim(echo):E805: Using a Float as a Number
+rest of file
+>> 0z0102[2]
+0z0102
+caught Vim(echo):E979: Blob index out of range: 2
+rest of file
+>> 0z0102[-3]
+0z0102
+caught Vim(echo):E979: Blob index out of range: -1
+rest of file
+>> l[[1]]
+propagated Vim(echo):E730: Using a List as a String
+>> l[{}]
+propagated Vim(echo):E731: Using a Dictionary as a String
+>> 'abc'[{}]
+propagated Vim(echo):E731: Using a Dictionary as a String
+>> d['b']
+caught Vim(echo):E716: Key not present in Dictionary: "b"
+rest of file
+>> l[5]
+caught Vim(echo):E684: List index out of range: 5
+rest of file
+>> d['a':]
+caught Vim(echo):E719: Cannot slice a Dictionary
+rest of file
+>> d[:1]
+caught Vim(echo):E719: Cannot slice a Dictionary
+rest of file
+>> d['b'] . 'x'
+propagated Vim(echo):E716: Key not present in Dictionary: "b"
+>> l[5] . 'x'
+propagated Vim(echo):E684: List index out of range: 5
+>> [l[5]]
+propagated Vim(echo):E684: List index out of range: 5
+>> d.b
+propagated Vim(echo):E716: Key not present in Dictionary: "b"
+>> d.b . 'x'
+propagated Vim(echo):E716: Key not present in Dictionary: "b"
+>> [d.b]
+propagated Vim(echo):E716: Key not present in Dictionary: "b"
+>> v:null == []
+0
+rest of file
+>> [1] != v:null
+1
+rest of file
+>> v:null == {}
+0
+rest of file
+>> 0z == v:null
+0
+rest of file
+>> v:null == 0.0
+1
+rest of file
+>> v:null != 1.5
+1
+rest of file
+>> v:null < []
+caught Vim(echo):E691: Can only compare List with List
+rest of file
