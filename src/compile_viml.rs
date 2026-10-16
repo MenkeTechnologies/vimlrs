@@ -2596,6 +2596,15 @@ impl Compiler {
         self.b.patch_jump(cont, here);
     }
 
+    /// A call with more expression text after it: let the runtime abandon the rest
+    /// of the command line if the call's error became an exception (see
+    /// [`Expr::Call::mid_expr`]). Only a program that uses exceptions can observe it.
+    fn emit_call_mid(&mut self) {
+        if self.exc {
+            self.emit(Op::CallBuiltin(h::VIML_CALL_MID, 0));
+        }
+    }
+
     /// After a user-function call leaves its result on the stack, check whether
     /// the call raised an exception; if so, drop the (default) result and unwind
     /// to the enclosing boundary — so the throw aborts the surrounding command
@@ -3804,6 +3813,7 @@ impl Compiler {
                 name,
                 args,
                 emsg_name,
+                mid_expr,
             } => {
                 // JIT fast path: the bitwise builtins lower to fusevm-NATIVE ops
                 // when every argument is provably integer, so bit-manipulation
@@ -3895,11 +3905,17 @@ impl Compiler {
                     }
                     (None, Some(id)) => {
                         self.emit(Op::CallBuiltin(id, n));
+                        if *mid_expr {
+                            self.emit_call_mid();
+                        }
                     }
                     // Unknown name → user-defined function call (resolved by name
                     // at runtime). Stack: [name, arg0, …, argN].
                     (None, None) => {
                         self.emit(Op::CallBuiltin(h::VIML_CALL_USER, n));
+                        if *mid_expr {
+                            self.emit_call_mid();
+                        }
                         self.emit_call_unwind_check();
                     }
                 }
@@ -3938,6 +3954,7 @@ impl Compiler {
                     name: key.clone(),
                     args: args.clone(),
                     emsg_name: None,
+                    mid_expr: false,
                 })?; // [base, value]
                 self.emit(Op::CallBuiltin(h::VIML_CONCAT, 2)); // [result]
                 let lend = self.b.current_pos();

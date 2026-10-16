@@ -581,6 +581,10 @@ pub const VIML_RANGE_CHECK: u16 = 3633;
 pub const VIML_MAKE_LAMBDA: u16 = 3621;
 /// Bind one lambda argument as a bare local — see `b_lambda_arg`.
 pub const VIML_LAMBDA_ARG: u16 = 3634;
+/// Pass a call's result through, first making the command line's remaining
+/// text unreachable when the call's error became an exception — see
+/// [`crate::viml_ast::Expr::Call::mid_expr`] and `b_call_mid`.
+pub const VIML_CALL_MID: u16 = 3635;
 /// `:echoerr`: pop an argument and the message so far, push the message with the
 /// argument appended — see `b_echoerr_arg`.
 pub const VIML_ECHOERR_ARG: u16 = 3622;
@@ -1871,10 +1875,12 @@ fn in_callee_with<T>(restore_when_pending: bool, f: impl FnOnce() -> T) -> T {
     // `PENDING_EXC` is this VM's stand-in for both halves of `aborting()`:
     // `errthrow()` fills it for a converted error (the `force_abort` case) and
     // `b_throw` for an explicit `:throw` (the `did_throw` case).
+    // A mid-expression abort inside the callee's body belongs to that body's own
+    // parse and never strands the caller's line, exception or not.
+    HARD_ERR.with(|h| h.set(saved_hard));
     if restore_when_pending || PENDING_EXC.with(|p| p.borrow().is_none()) {
         EVAL_FAIL.with(|c| c.set(saved_fail));
         FAIL_MARK.with(|m| m.set(saved_mark));
-        HARD_ERR.with(|h| h.set(saved_hard));
         // Same condition, for the same reason: c:647's `!force_abort` guard means
         // an error the callee turned into an exception is NOT forgotten.
     }
@@ -2353,6 +2359,11 @@ fn b_throw(vm: &mut VM, _: u8) -> Value {
     PENDING_EXC.with(|p| *p.borrow_mut() = Some(v));
     // An explicit `:throw`, not an error — a one-line `:try` DOES catch this.
     EXC_FROM_ERR.with(|e| e.set(false));
+    // c: `aborting()` is true from here on (`did_throw`), so an `eval_func` that ran
+    // the throwing callee FAILs and its command prints and assigns nothing —
+    // `echo call('Thrower', [])` is the exception alone, not `0` and then the
+    // exception. `in_callee` keeps this count while an exception is pending.
+    note_error();
     Value::Undef
 }
 
@@ -4318,6 +4329,21 @@ pub fn range_len(start: i64, end: i64, stride: i64) -> Option<u64> {
         return None;
     }
     Some(count + 1)
+}
+
+/// [`VIML_CALL_MID`].
+///
+/// c: `eval_func` FAILs when the call's error was converted into an exception
+/// (`aborting()`), and the parse then stops right after the call. The command's
+/// `nextcmd` is the `|` after that point, so with more expression text behind the
+/// call the rest of the line — a one-line `:catch` included — is never reached.
+/// Marking the error hard abandons the line the same way (`b_line_abort`).
+fn b_call_mid(vm: &mut VM, _: u8) -> Value {
+    let v = pop_tv(vm);
+    if PENDING_EXC.with(|p| p.borrow().is_some()) {
+        set_hard_err();
+    }
+    tv_to_value(v)
 }
 
 /// `for VAR in range(…)` compiled to a counter loop: stack `start`, `end`,
@@ -7566,6 +7592,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_ERR_COUNT, b_err_count);
     vm.register_builtin(VIML_ERRS_AFTER, b_errs_after);
     vm.register_builtin(VIML_RANGE_CHECK, b_range_check);
+    vm.register_builtin(VIML_CALL_MID, b_call_mid);
     vm.register_builtin(VIML_MAKE_LAMBDA, b_make_lambda);
     vm.register_builtin(VIML_LAMBDA_ARG, b_lambda_arg);
     vm.register_builtin(VIML_ECHOERR_ARG, b_echoerr_arg);

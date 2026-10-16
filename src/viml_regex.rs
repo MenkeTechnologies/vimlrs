@@ -1145,7 +1145,11 @@ impl Parser {
     /// piece non-greedy.
     fn brace_count(&mut self) -> (u32, u32, bool) {
         // `self.i` is already past the two-char opener.
-        let very_magic = self.vm.get(self.i.wrapping_sub(2)).copied().unwrap_or(false);
+        let very_magic = self
+            .vm
+            .get(self.i.wrapping_sub(2))
+            .copied()
+            .unwrap_or(false);
         let reverse = self.peek() == Some('-');
         if reverse {
             self.i += 1;

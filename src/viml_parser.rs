@@ -3672,6 +3672,9 @@ struct Parser {
     /// operand (see `eval1`/`eval2`/`eval3`), and the expression roots wrap
     /// the tree in [`Expr::ScriptErrorGuard`] as a last resort.
     deferred_e15: Vec<String>,
+    /// Open `(` contexts around the token being parsed, innermost last: `true` for a
+    /// call's argument list, `false` for a grouping paren. See [`Self::call_tail_is_end`].
+    paren_ctx: Vec<bool>,
     /// The lex error that ended a `lex_prefix` scan, if any. Reported only when
     /// the parser runs out of tokens with an operand still expected — see
     /// `lex_prefix` and [`Self::invexpr`].
@@ -3707,6 +3710,7 @@ impl Parser {
             src: src.to_string(),
             depth: 0,
             deferred_e15: Vec::new(),
+            paren_ctx: Vec::new(),
             lex_err: None,
             clip: Vec::new(),
         }
@@ -4240,6 +4244,7 @@ impl Parser {
                     bytes.into_iter().map(|b| Expr::Number(b as i64)).collect(),
                 )],
                 emsg_name: None,
+                mid_expr: false,
             }),
             Tok::Str(s) => Ok(Expr::Str(s)),
             Tok::BStr(b) => Ok(Expr::Bytes(b)),
@@ -4253,7 +4258,10 @@ impl Parser {
                 if self.at_vim9_lambda() {
                     return self.vim9_lambda();
                 }
-                let e = self.nested_eval1()?;
+                self.paren_ctx.push(false);
+                let e = self.nested_eval1();
+                self.paren_ctx.pop();
+                let e = e?;
                 // c: `E110: Missing ')'`, with no argument.
                 self.eat_or(&Tok::RParen, "E110: Missing ')'")?;
                 Ok(e)
@@ -4302,6 +4310,39 @@ impl Parser {
 
     /// The operand that is a variable or function name: a call when `(` follows,
     /// otherwise a variable (or a vim9 keyword literal).
+    /// Whether nothing but the end of the argument follows the call just parsed, once
+    /// the `)` that close enclosing CALL argument lists are skipped.
+    ///
+    /// c: after an error inside a call became an exception, `get_func_arguments`
+    /// steps over the `)` of each enclosing call, and `check_nextcmd` then finds the
+    /// `|` (a `||` starts with one) only if that is all that is left. A grouping
+    /// paren, a bracket or an operator in between leaves the parse stranded
+    /// mid-expression. See [`Expr::Call::mid_expr`].
+    fn call_tail_is_end(&self) -> bool {
+        let mut ctx = self.paren_ctx.len();
+        let mut i = self.i;
+        loop {
+            // A lambda body is evaluated as an expression of its own, ending at
+            // its `}` (see `Self::clip`); a failure there strands nothing outside.
+            let at_clip = self
+                .clip
+                .last()
+                .zip(self.toks.get(i))
+                .is_some_and(|(&end, t)| t.span >= end);
+            if at_clip {
+                return true;
+            }
+            match self.toks.get(i).map(|t| &t.kind) {
+                None | Some(Tok::Eof) | Some(Tok::OrOr) => return true,
+                Some(Tok::RParen) if ctx > 0 && self.paren_ctx[ctx - 1] => {
+                    ctx -= 1;
+                    i += 1;
+                }
+                _ => return false,
+            }
+        }
+    }
+
     fn name_operand(&mut self, name: String, at: Option<usize>) -> Result<Expr, VimlError> {
         {
             if matches!(self.peek(), Tok::LParen) {
@@ -4315,6 +4356,7 @@ impl Parser {
                     name,
                     args,
                     emsg_name: at.map(|s| self.src_from(s)),
+                    mid_expr: !self.call_tail_is_end(),
                 })
             } else if vim9_active() {
                 // vim9 keyword literals (`vim9.txt`): in a `:vim9script` script
@@ -4345,6 +4387,7 @@ impl Parser {
                         name: "list2blob".to_string(),
                         args: vec![Expr::List(Vec::new())],
                         emsg_name: None,
+                        mid_expr: false,
                     }),
                     "null_function" | "null_partial" => Ok(Expr::NullFunc),
                     _ => Ok(Expr::Var(name)),
@@ -5057,6 +5100,23 @@ impl Parser {
     ///
     /// A `%s` in either receives the source still unread.
     fn arg_list(&mut self, close: &Tok, ran_out: &str, junk: &str) -> Result<Vec<Expr>, VimlError> {
+        let is_call = *close == Tok::RParen;
+        if is_call {
+            self.paren_ctx.push(true);
+        }
+        let r = self.arg_list_body(close, ran_out, junk);
+        if is_call {
+            self.paren_ctx.pop();
+        }
+        r
+    }
+
+    fn arg_list_body(
+        &mut self,
+        close: &Tok,
+        ran_out: &str,
+        junk: &str,
+    ) -> Result<Vec<Expr>, VimlError> {
         let mut args = Vec::new();
         if self.peek() == close {
             self.advance();

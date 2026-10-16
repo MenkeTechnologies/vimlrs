@@ -175,6 +175,15 @@ pub enum Expr {
         /// their own, and fall back to the bare name — which is also what the C
         /// prints for `:call`, whose name it copies out first.
         emsg_name: Option<String>,
+        /// Another token follows the call's closing `)` in the same expression.
+        ///
+        /// c: when an error inside the call becomes an exception, `eval_func`
+        /// FAILs (`aborting()`), and the parse stops right after the call. The
+        /// command's `nextcmd` is then found only if that point is the end of the
+        /// argument or a `|` — so `:try | echo f() | catch | … | endtry` reaches its
+        /// `:catch` but `echo f() + 1 | catch …` does not (the rest of the line is
+        /// abandoned). `false` for a synthesized call.
+        mid_expr: bool,
     },
     /// `base.name(args)` with no space around the dot — syntactically ambiguous
     /// in legacy Vimscript exactly as [`Expr::Member`] is, and resolved the same

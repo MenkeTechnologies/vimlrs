@@ -1,0 +1,64 @@
+0
+>> Thr()
+caught boom
+rest of file
+>> Bad()
+caught Vim(return):E730: Using a List as a String
+rest of file
+>> 1 + Thr()
+caught boom
+rest of file
+>> 'a' . Bad()
+caught Vim(return):E730: Using a List as a String
+rest of file
+>> abs(Thr())
+caught boom
+rest of file
+>> abs(abs(Bad()))
+caught Vim(return):E730: Using a List as a String
+rest of file
+>> abs(1 + abs(Bad()))
+caught Vim(return):E730: Using a List as a String
+rest of file
+>> Thr() || 1
+caught boom
+rest of file
+>> max([1, 2])[0] + abs(Bad())
+caught Vim(return):E730: Using a List as a String
+rest of file
+>> Thr() + 1
+propagated boom
+>> Bad() . 'x'
+propagated Vim(return):E730: Using a List as a String
+>> (Thr())
+propagated boom
+>> [Thr()]
+propagated boom
+>> {'k': Bad()}
+propagated Vim(return):E730: Using a List as a String
+>> Thr()[0]
+propagated boom
+>> printf('%s %s', Bad(), 1)
+propagated Vim(return):E730: Using a List as a String
+>> abs((Bad()))
+propagated Vim(return):E730: Using a List as a String
+>> abs(Bad() + 1)
+propagated Vim(return):E730: Using a List as a String
+>> map([1], {-> Thr() + 1})
+caught boom
+rest of file
+>> map([1], {x -> abs(Bad())})
+caught Vim(return):E730: Using a List as a String
+rest of file
+>> call('Thr', [])
+caught boom
+rest of file
+>> eval('Thr()')
+caught boom
+rest of file
+>> map([1], 'Thr()')
+caught boom
+rest of file
+>> substitute('a', 'a', '\=Thr()', '')
+caught boom
+rest of file
