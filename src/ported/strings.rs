@@ -204,6 +204,11 @@ pub fn f_strpart(argvars: &[typval_T], rettv: &mut typval_T) {
 pub fn f_stridx(argvars: &[typval_T], rettv: &mut typval_T) {
     let hay = tv_get_string(&argvars[0]);
     let needle = tv_get_string(&argvars[1]);
+    // c: `if (error || start_idx >= (varnumber_T)STRLEN(haystack)) return;` — a {start}
+    // AT the end of the haystack is already -1, even for an empty needle
+    // (`stridx('abc', '', 3)` and `stridx('', '', 0)` are both -1; without {start}
+    // the empty needle matches at 0). A negative {start} searches from 0.
+    let has_start = argvars.get(2).is_some_and(|t| t.v_type != VAR_UNKNOWN);
     let start = argvars
         .get(2)
         .map_or(0, |t| tv_get_number_chk(t, None).max(0) as usize);
@@ -213,7 +218,7 @@ pub fn f_stridx(argvars: &[typval_T], rettv: &mut typval_T) {
     // multibyte char (`stridx('日本語', 'x', 1)`), so walk the bytes as C does.
     // An empty needle matches immediately, as `strstr` does.
     let (hb, nb) = (hay.as_bytes(), needle.as_bytes());
-    let idx = if start > hb.len() {
+    let idx = if has_start && start >= hb.len() {
         None
     } else if nb.is_empty() {
         Some(start as varnumber_T)
