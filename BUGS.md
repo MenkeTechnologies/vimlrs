@@ -7779,3 +7779,96 @@ vim and Neovim agree. Parity case: `map_filter_nonstring_expr.vim`.
   in the list walk, `value_check_lock(di->di_tv.v_lock, ...)` + `var_check_ro` in the dict
   walk): `lockvar a` locks the items too, so vim stops at the first item, while
   `lockvar 1 a` (container only) lets `map()` through in vim as well. Observed at 0.2.17.
+
+## R56 — regex limits and `\z`, failing patterns in `=~`, errors inside a one-line `:try`, subscript errors, `stridx()`, `v:null` equality
+
+Measured against vim 9.2 (MacVim 9.2.0321). Every row below was probed one
+expression per sourced file, so that vim aborting the script on an uncaught error
+could not hide the rows after it.
+
+### R56-1. `\{}` limits and `\z` accepted everything — ✅ FIXED
+
+`a\{`, `a\{1`, `a\{x}` and `a\{1,x}` compiled as literal text; vim's
+`read_limits()` reports `E554: Syntax error in \{...}` (`{...}` with no
+backslash under `\v`) and the NFA front end follows with `E870`. Bounds given
+out of order (`a\{3,1}`) are swapped, not read as an empty range. `\z(` is
+`E66`, `\z1`..`\z9` is `E67` and any other `\z` is `E867: (NFA regexp) Unknown
+operator '\zx'` outside a syntax item; they were literal characters or, for
+`\z(`, a misleading `E55`. Parity case: `regex_brace_and_z_errors.vim`.
+
+### R56-2. A pattern that fails to compile aborted the whole expression — ✅ FIXED
+
+`vim_regcomp()` reports and leaves `regprog` NULL, so `typval_compare()` still
+returns OK: `'abc' =~ '\('` is `0`, `!~` is `1`, `let x = 'abc' =~ '\('` assigns,
+and the `:echo` prints before the error is raised — also inside a `:try`.
+vimlrs failed the evaluation, so nothing printed and nothing was assigned. A
+conditional (`:if`, `:while`, `:elseif`) whose test raised inside a `:try` also
+ran its `:else` branch; both branches are now skipped. Parity case:
+`regex_compile_error_in_expression.vim`.
+
+### R56-3. `stridx()` with a `{start}` at the end of the haystack — ✅ FIXED
+
+`if (error || start_idx >= STRLEN(haystack)) return;` — `stridx('abc', '', 3)`
+and `stridx('', '', 0)` are `-1`; vimlrs answered `3` and `0`. Without `{start}`
+an empty needle still matches at 0. Parity case: `stridx_start_at_end.vim`.
+
+### R56-4. An error inside a call strands the rest of a one-line `:try` — ✅ FIXED
+
+When an error inside a call becomes an exception, `eval_func` FAILs
+(`aborting()`) and the parse stops right after that call. The command's
+`nextcmd` is found only when what follows (stepping over the `)` of enclosing
+call argument lists) is the end of the argument or a `|` — `||` starts with
+one. `try | echo f() | catch | … | endtry` reaches its `:catch`;
+`echo f() + 1`, `echo (f())`, `echo [f()]` and `echo printf('%s %s', f(), 1)` do
+not, and the exception propagates out of the script. vimlrs caught all of them
+on the same line. The parser now records whether text follows each call
+(`Expr::Call::mid_expr`); the builtin results of a `:throw`ing callee also fail
+the caller's command (`echo call('Thrower', [])` printed `0` first). A hard
+failure inside a lambda body no longer strands the line that called the
+lambda. Parity case: `exception_in_call_ends_line.vim`.
+
+### R56-5. Subscript errors — ✅ FIXED
+
+* A Float subscript or slice bound is `E805` and reads as `0`; the expression
+  carries on, so `echo [1, 2][1.5]` prints `1` and then raises. A Blob index out
+  of range (`E979`) leaves the Blob as the value. vimlrs failed the expression
+  and printed nothing (and a Float bound read as `-1`).
+* A List or Dict used as a subscript is `E730`/`E731` (stringified) and hard.
+* `d.missing` abandons the line wherever it sits; `d['missing']` does so only
+  with expression text behind it (the R56-4 rule, applied to `]`). A slice of a
+  Dict (`E719`) is not hard.
+* A call whose argument raised inside a `:try` yields no value
+  (`echo abs([1, 2][1.5])` prints nothing).
+
+Parity case: `subscript_error_semantics.vim`.
+
+### R56-6. `v:null` in `==` / `!=` against a List, Dict, Blob or Float — ✅ FIXED
+
+vim answers instead of raising `E691`/`E735`/`E977`/`E907`: unequal against a
+container, `v:null == 0.0` is `1`. Neovim's C raises, and so did the port. Every
+other operator (`<`, `=~`, `is`) is unchanged. Parity case:
+`subscript_error_semantics.vim`.
+
+### R56-O. Measured this round, still open
+
+- `nr2char(-1)` is the single byte `0xff` in vim; the port keeps Neovim's
+  `E5070`/`E5071` range errors.
+- `printf('%zd', 1)`: vim does not accept the `z` length modifier
+  (`E767: Too many arguments for printf()`); the port follows Neovim's
+  `vim_vsnprintf`, which does.
+- `extend()` on a Blob works here; vim 9.2.0321 answers
+  `E712: Argument of extend() must be a List or Dictionary`, and for a Dict
+  target given a List its `E712` text differs from the port's `E896`.
+- `echo abs(d.missing)` inside a `:try`: vim also prints
+  `E116: Invalid arguments for function abs(d.missing) | catch | …`; vimlrs
+  prints only the `E716`.
+- `echo (1)(strlen([]))` inside a `:try`: vim prints `1` and does not reach the
+  `:catch`.
+- `try | return Thrower() | catch | … | endtry` at the top level: vim reports
+  `E133` uncaught.
+- Builtins vim has that vimlrs lacks: `base64_encode()`/`base64_decode()`,
+  `blob2str()`/`str2blob()`, `uri_encode()`/`uri_decode()`, `js_encode()`/
+  `js_decode()`, `ngettext()`, `bindtextdomain()`, `exists_compiled()`,
+  `readdirex()`, `echoraw()`, `instanceof()`, `list2tuple()`/`tuple2list()`,
+  `diff()`, `hlget()`/`hlset()`, `autocmd_*()`, `listener_*()`, plus the
+  job/channel/popup/prop/terminal/test families that need an editor.
