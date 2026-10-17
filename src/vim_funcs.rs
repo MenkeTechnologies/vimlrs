@@ -209,7 +209,13 @@ pub fn f_uridecode(argvars: &[typval_T], rettv: &mut typval_T) {
 fn normalize_encoding_name(enc: &str) -> String {
     let mut p: Vec<u8> = enc
         .bytes()
-        .map(|c| if c == b'_' { b'-' } else { c.to_ascii_lowercase() })
+        .map(|c| {
+            if c == b'_' {
+                b'-'
+            } else {
+                c.to_ascii_lowercase()
+            }
+        })
         .collect();
     let digit_after_prefix = (p.starts_with(b"ucs") || p.starts_with(b"utf"))
         && p.get(3).is_some_and(u8::is_ascii_digit)
