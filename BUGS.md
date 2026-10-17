@@ -7866,9 +7866,27 @@ other operator (`<`, `=~`, `is`) is unchanged. Parity case:
   `:catch`.
 - `try | return Thrower() | catch | … | endtry` at the top level: vim reports
   `E133` uncaught.
-- Builtins vim has that vimlrs lacks: `base64_encode()`/`base64_decode()`,
-  `blob2str()`/`str2blob()`, `uri_encode()`/`uri_decode()`, `js_encode()`/
-  `js_decode()`, `ngettext()`, `bindtextdomain()`, `exists_compiled()`,
+- Builtins vim has that vimlrs lacks: `js_encode()`/`js_decode()`, `ngettext()`, `bindtextdomain()`, `exists_compiled()`,
   `readdirex()`, `echoraw()`, `instanceof()`, `list2tuple()`/`tuple2list()`,
   `diff()`, `hlget()`/`hlset()`, `autocmd_*()`, `listener_*()`, plus the
   job/channel/popup/prop/terminal/test families that need an editor.
+
+---
+
+## R57 — `base64_*`, `blob2str()`/`str2blob()`, `uri_*`
+
+### R57-1. Vim-only blob/string codecs were missing — ✅ FIXED
+`base64_encode()`, `base64_decode()`, `blob2str()`, `str2blob()`, `uri_encode()`
+and `uri_decode()` are ported from Vim's `src/misc2.c` and `src/strings.c` into
+`src/vim_funcs.rs` (outside `src/ported/`, which holds only Neovim-derived
+code). Behaviour is byte-identical to vim 9.2 for the recorded parity case,
+including the decoder's quirks: padding is only trimmed from the end of the
+whole input, so an inner `=` decodes as zero bits (`base64_decode('YQ==YQ==')`
+is `0z61000061`).
+
+### R57-O. Still open
+- `blob2str()`/`str2blob()` with a wide `{options}.encoding` (UTF-16, UCS-2,
+  UTF-32, UCS-4) report `E1515`/`E1516`; vim converts the whole buffer,
+  NUL bytes included, which the port's `string_convert_ext` cannot do.
+- `typename()` of these builtins as Funcrefs has no entry in the generated
+  signature table.

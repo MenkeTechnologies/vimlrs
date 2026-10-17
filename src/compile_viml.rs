@@ -4154,6 +4154,13 @@ const EXTRA_BUILTIN_ARGC: &[(&str, u8, u8)] = &[
     // `typename({expr})` is Vim-only (vim9 type introspection). Vim raises E119
     // for `typename()` and E118 for a second argument.
     ("typename", 1, 1),
+    // Vim-only blob/string conversion builtins (src/vim_funcs.rs).
+    ("base64_decode", 1, 1),
+    ("base64_encode", 1, 1),
+    ("blob2str", 1, 2),
+    ("str2blob", 1, 2),
+    ("uri_decode", 1, 1),
+    ("uri_encode", 1, 1),
 ];
 
 pub(crate) fn builtin_argc_range(name: &str) -> Option<(u8, u8)> {
@@ -4190,6 +4197,12 @@ pub(crate) fn builtin_fn_id(name: &str) -> Option<u16> {
         "len" => h::VIML_FN_LEN,
         "type" => h::VIML_FN_TYPE,
         "typename" => h::VIML_FN_TYPENAME,
+        "base64_encode" => h::VIML_FN_BASE64_ENCODE,
+        "base64_decode" => h::VIML_FN_BASE64_DECODE,
+        "blob2str" => h::VIML_FN_BLOB2STR,
+        "str2blob" => h::VIML_FN_STR2BLOB,
+        "uri_encode" => h::VIML_FN_URI_ENCODE,
+        "uri_decode" => h::VIML_FN_URI_DECODE,
         "string" => h::VIML_FN_STRING,
         "empty" => h::VIML_FN_EMPTY,
         "abs" => h::VIML_FN_ABS,

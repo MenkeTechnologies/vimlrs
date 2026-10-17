@@ -60,6 +60,7 @@ pub mod viml_parser;
 pub mod viml_regex;
 // Outer docs here would merge with vimstr.rs's own `//!` block, resolving its
 // links against the crate root; the module documents itself.
+pub mod vim_funcs;
 pub mod vimstr;
 
 pub use fusevm_bridge::{eval_expr, eval_source};

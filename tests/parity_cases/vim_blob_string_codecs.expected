@@ -1,0 +1,67 @@
+0
+base64_encode(0z) = ''
+base64_encode(0z61) = 'YQ=='
+base64_encode(0z6162) = 'YWI='
+base64_encode(0z000102ff) = 'AAEC/w=='
+base64_encode('abc') =
+base64_encode('abc') ! Vim(echo):E1238: Blob required for argument 1
+base64_decode('YQ==') = 0z61
+base64_decode('YWJjZGU=') = 0z61626364.65
+base64_decode('YQ==YQ==') = 0z61000061
+base64_decode('YQ=a') = 0z6100
+base64_decode('YQ') =
+base64_decode('YQ') ! Vim(echo):E475: Invalid argument: YQ
+base64_decode('YR==') =
+base64_decode('YR==') ! Vim(echo):E475: Invalid argument: YR==
+base64_decode('!!!!') =
+base64_decode('!!!!') ! Vim(echo):E475: Invalid argument: !!!!
+base64_decode(0z61) =
+base64_decode(0z61) ! Vim(echo):E1174: String required for argument 1
+blob2str(0z) = []
+blob2str(0z610a62) = ['a', 'b']
+blob2str(0z610062) = ['a
+b']
+blob2str(0z610a) = ['a', '']
+blob2str(0z0a0a) = ['', '', '']
+blob2str(0zff) =
+blob2str(0zff) ! Vim(echo):E1515: Unable to convert from 'utf-8' encoding
+blob2str(0zc3a9) = ['é']
+blob2str(0ze9, {'encoding':'latin1'}) = ['é']
+blob2str(0zff, {'encoding':'none'}) = ['<ff>']
+blob2str(0z61, {'encoding':'bogus'}) =
+blob2str(0z61, {'encoding':'bogus'}) ! Vim(echo):E1515: Unable to convert from 'bogus' encoding
+blob2str(0z61, 1) =
+blob2str(0z61, 1) ! Vim(echo):E1206: Dictionary required for argument 2
+blob2str('a') =
+blob2str('a') ! Vim(echo):E1238: Blob required for argument 1
+str2blob([]) = 0z
+str2blob(['']) = 0z
+str2blob(['', '']) = 0z0A
+str2blob(['a', 'b']) = 0z610A62
+str2blob(['a', 1, 'b']) = 0z610A62
+str2blob([1, 'a']) = 0z0A61
+str2blob(["a\nb"]) = 0z610062
+str2blob(['é']) = 0zC3A9
+str2blob(['é'], {'encoding':'latin1'}) = 0zE9
+str2blob(['a'], {'encoding':'bogus'}) =
+str2blob(['a'], {'encoding':'bogus'}) ! Vim(echo):E1516: Unable to convert to 'bogus' encoding
+str2blob('a') =
+str2blob('a') ! Vim(echo):E1211: List required for argument 1
+uri_encode('abc-._~') = 'abc-._~'
+uri_encode('a b/c?d=e&f') = 'a%20b%2Fc%3Fd%3De%26f'
+uri_encode('é') = '%C3%A9'
+uri_encode(1) =
+uri_encode(1) ! Vim(echo):E1174: String required for argument 1
+uri_decode('%41%42') = 'AB'
+uri_decode('%c3%a9') = 'é'
+uri_decode('a+b') = 'a+b'
+uri_decode('%') = '%'
+uri_decode('%4') = '%4'
+uri_decode('%zz') = '%zz'
+uri_decode('a%2') = 'a%2'
+uri_decode(1) =
+uri_decode(1) ! Vim(echo):E1174: String required for argument 1
+base64_encode() =
+base64_encode() ! Vim(echo):E119: Not enough arguments for function: base64_encode
+uri_encode('a', 'b') =
+uri_encode('a', 'b') ! Vim(echo):E118: Too many arguments for function: uri_encode

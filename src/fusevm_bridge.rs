@@ -1283,6 +1283,18 @@ pub const VIML_FN_DIFF_HLID: u16 = 3573;
 /// `typename()` — the vim9 declared-type name of a value.
 pub const VIML_FN_TYPENAME: u16 = 3602;
 /// `intercept()` — AOP extension (vimlrs/zshrs-original; no Vim counterpart).
+/// `base64_encode()` (Vim-only; `src/vim_funcs.rs`)
+pub const VIML_FN_BASE64_ENCODE: u16 = 3640;
+/// `base64_decode()`
+pub const VIML_FN_BASE64_DECODE: u16 = 3641;
+/// `blob2str()`
+pub const VIML_FN_BLOB2STR: u16 = 3642;
+/// `str2blob()`
+pub const VIML_FN_STR2BLOB: u16 = 3643;
+/// `uri_encode()`
+pub const VIML_FN_URI_ENCODE: u16 = 3644;
+/// `uri_decode()`
+pub const VIML_FN_URI_DECODE: u16 = 3645;
 pub const VIML_FN_INTERCEPT: u16 = 3600;
 /// `intercept_proceed()` — AOP extension (vimlrs/zshrs-original).
 pub const VIML_FN_INTERCEPT_PROCEED: u16 = 3601;
@@ -7519,6 +7531,24 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FN_TOUPPER, |vm, n| call_func(vm, n, f_toupper));
     vm.register_builtin(VIML_FN_CHAR2NR, |vm, n| call_func(vm, n, f_char2nr));
     vm.register_builtin(VIML_FN_NR2CHAR, |vm, n| call_func(vm, n, f_nr2char));
+    vm.register_builtin(VIML_FN_BASE64_ENCODE, |vm, n| {
+        call_func(vm, n, crate::vim_funcs::f_base64_encode)
+    });
+    vm.register_builtin(VIML_FN_BASE64_DECODE, |vm, n| {
+        call_func(vm, n, crate::vim_funcs::f_base64_decode)
+    });
+    vm.register_builtin(VIML_FN_BLOB2STR, |vm, n| {
+        call_func(vm, n, crate::vim_funcs::f_blob2str)
+    });
+    vm.register_builtin(VIML_FN_STR2BLOB, |vm, n| {
+        call_func(vm, n, crate::vim_funcs::f_str2blob)
+    });
+    vm.register_builtin(VIML_FN_URI_ENCODE, |vm, n| {
+        call_func(vm, n, crate::vim_funcs::f_uriencode)
+    });
+    vm.register_builtin(VIML_FN_URI_DECODE, |vm, n| {
+        call_func(vm, n, crate::vim_funcs::f_uridecode)
+    });
     vm.register_builtin(VIML_FN_REPEAT, |vm, n| call_func(vm, n, f_repeat));
     vm.register_builtin(VIML_FN_SPLIT, |vm, n| call_func(vm, n, f_split));
     vm.register_builtin(VIML_FN_JOIN, |vm, n| call_func(vm, n, f_join));
