@@ -1179,7 +1179,6 @@ impl Parser {
         (lo.min(hi), lo.max(hi), !(reverse && lo != hi))
     }
     /// `\{n,m}` / `\{n}` / `\{n,}` / `\{,m}` / `\{}` / `\{-…}` (non-greedy).
-
     fn read_int(&mut self) -> Option<u32> {
         let start = self.i;
         let mut n = 0u32;
