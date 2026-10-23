@@ -49,6 +49,22 @@ pub enum Expr {
     Dict(Vec<(Expr, Expr)>),
     /// Variable reference (possibly scoped).
     Var(String),
+    /// A variable whose name holds `{expr}` curly braces, as written —
+    /// `a{n}b`, `g:x_{i}`, `{name}`. c: `get_name_len` → `make_expanded_name`
+    /// (`vendor/eval.c:5579`): each `{expr}` is evaluated to a String when the
+    /// expression RUNS and spliced into the name, recursively, so the name is
+    /// not known until then. Lowered through `VIML_EXPAND_NAME` and read by
+    /// name with the same `VIML_GETVAR` a plain [`Expr::Var`] uses.
+    CurlyVar(String),
+    /// `F{n}(args)` — a call whose function name holds `{expr}` curly braces.
+    /// The expanded name may be a user function or a builtin (`{n}('abc')`
+    /// with `n` = `'len'` is 3), so it is resolved by name at run time.
+    CurlyCall {
+        /// The name as written.
+        name: String,
+        /// Argument expressions.
+        args: Vec<Expr>,
+    },
     /// Option reference `&name`.
     Option(String),
     /// Environment variable `$NAME`.
@@ -259,6 +275,16 @@ pub enum ArithOp {
 pub enum LetTarget {
     /// `let x = …` / `let g:x = …`.
     Var(String),
+    /// `let a{n} = …` — a target whose name holds `{expr}` curly braces,
+    /// expanded when the `:let` runs (c: `get_lval` → `make_expanded_name`).
+    CurlyVar {
+        /// The name as written.
+        name: String,
+        /// The `:let` argument from the target to the end of the command — what
+        /// `E475: Invalid argument: %s` quotes when an `{expr}` fails (c:
+        /// `semsg(_(e_invarg2), name)` in `get_lval`, `vendor/eval.c:1230`).
+        src: String,
+    },
     /// `let &opt = …`.
     Option(String),
     /// `let $ENV = …`.
@@ -316,6 +342,14 @@ pub enum LetTarget {
 pub enum UnletArg {
     /// `unlet x` / `unlet g:x` / `unlet $ENV` — remove a variable by name.
     Name(String),
+    /// `unlet a{n}` — a name holding `{expr}` curly braces, expanded when the
+    /// `:unlet` runs (`get_lval`, as for [`LetTarget::CurlyVar`]).
+    CurlyName {
+        /// The name as written.
+        name: String,
+        /// The argument as written, for `E475`.
+        src: String,
+    },
     /// `unlet l[i]` / `unlet d.key` / `unlet d['key']` — remove one List item
     /// or Dict entry. `base` is the container expression, `index` the key/index.
     Item {
@@ -450,6 +484,11 @@ pub enum Stmt {
     Function {
         /// Function name (may be scoped / `s:` / autoload).
         name: String,
+        /// The `:function` argument as written, from the name to the end of
+        /// the line (`F{n}() abort`). c: `trans_function_name`'s `start`, the
+        /// text `E128`/`E475` quote; a name holding `{expr}` curly braces is
+        /// expanded from it when the definition runs (`make_expanded_name`).
+        src: String,
         /// Parameter names (without the `a:` prefix).
         args: Vec<String>,
         /// Default values for optional parameters: `(param index, default expr)`,

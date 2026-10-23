@@ -103,6 +103,14 @@ pub fn set_var(name: &str, name_len: usize, tv: typval_T, _copy: bool) {
             return;
         }
     };
+    // c:2882 `if (!valid_varname(varname)) return;` — for a NEW variable only
+    // (`a:0` exists and is E46 below, though its name starts with a digit). A
+    // name only a curly-braces expansion can produce (`let {n} = 1` with `n` =
+    // `'a b'`) is E461 here, not a variable; every script name was validated by
+    // the parser. The compiler's own `\x01…` temporaries are not script names.
+    if !name.starts_with('\u{1}') && find_var(name, true).is_none() && !valid_varname(&varname) {
+        return;
+    }
     match scope {
         VarScopeDict::Global => {
             globvardict.with(|d| tv_dict_add_tv(&mut d.borrow_mut(), &varname, tv));

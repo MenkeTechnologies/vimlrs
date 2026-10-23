@@ -1,0 +1,35 @@
+1
+5
+1
+5
+1
+gx
+6
+6
+0
+in Ffoo
+in Ffoo
+in s:Hi
+in s:Hi
+3
+9
+9
+{'k': 1}
+a
+1 2
+local q
+local q
+0
+global q
+E121: Undefined variable: nosuch
+E121: Undefined variable: nosuch2
+E475: Invalid argument: {nosuch2} = 1
+E121: Undefined variable: nosuch3
+E475: Invalid argument: {nosuch3}
+E121: Undefined variable: nosuch4
+E121: Undefined variable: nosuch5
+E116: Invalid arguments for function string({nosuch5})
+E121: Undefined variable: 1
+E461: Illegal variable name: a b
+E461: Illegal variable name: [1]
+E121: Undefined variable: [1]

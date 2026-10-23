@@ -1293,6 +1293,8 @@ pub const VIML_FN_STR2BLOB: u16 = 3643;
 pub const VIML_FN_URI_ENCODE: u16 = 3644;
 /// `uri_decode()`
 pub const VIML_FN_URI_DECODE: u16 = 3645;
+/// Expand a curly-braces name (`a{n}b`) at run time — see `b_expand_name`.
+pub const VIML_EXPAND_NAME: u16 = 3646;
 pub const VIML_FN_INTERCEPT: u16 = 3600;
 /// `intercept_proceed()` — AOP extension (vimlrs/zshrs-original).
 pub const VIML_FN_INTERCEPT_PROCEED: u16 = 3601;
@@ -4622,6 +4624,13 @@ fn b_call_user(vm: &mut VM, argc: u8) -> Value {
         message::semsg(&format!("E1085: Not a callable type: {name}"));
         return Value::Undef;
     }
+    // A name only known at run time — a curly-braces call, `{n}('abc')` with `n`
+    // = `'len'` — may resolve to a builtin. A statically known builtin name never
+    // arrives here (the compiler lowers it to the builtin's own op), so this is
+    // reached only for such names and for an unregistered `rust {}` export.
+    if crate::compile_viml::builtin_fn_id(&name).is_some() {
+        return call_builtin_by_name(&name, args).map_or(Value::Undef, tv_to_value);
+    }
     message::semsg(&format!("E117: Unknown function: {name}"));
     Value::Undef
 }
@@ -5918,38 +5927,110 @@ fn func_exists_hook(name: &str) -> bool {
         || crate::compile_viml::builtin_fn_id(name).is_some()
 }
 
-/// `VIML_DEFINE_FUNC` — register a deferred (block-level) `:function` when its
-/// line executes. The compiler emits this for a `:function` inside a script-level
-/// `:if`/`:while`/`:for`/`:try` block: the def was staged into `PENDING_FUNCS`
-/// at load, and this op moves it into the live `FUNCTIONS` registry only now,
-/// when control flow actually reached the definition. That is what makes the
-/// idempotent `if !exists('*F') | function F() … | endif` guard define `F` on
-/// the first source and skip it thereafter. Registration overwrites an existing
-/// entry, matching the top-level `:function` path (which also inserts
-/// unconditionally). Returns a dummy the compiler immediately pops.
+/// Port of the `{expr}` expansion in `get_name_len()` / `get_lval()`
+/// (`vendor/eval.c:5579`, `:1209`): the name `text` as the script wrote it, with
+/// each `{expr}` evaluated to a String and spliced in — recursively, so a value
+/// that itself holds `{…}` is expanded again (`make_expanded_name`). `None` when
+/// an `{expr}` failed; its own error is already reported.
+fn expand_curly_name(text: &str) -> Option<String> {
+    use crate::ported::eval::{find_name_end, make_expanded_name, FNE_CHECK_START};
+    match find_name_end(text, FNE_CHECK_START) {
+        (end, Some(es), Some(ee)) => make_expanded_name(&text[..end], es, ee),
+        (end, _, _) => Some(text[..end].to_string()),
+    }
+}
+
+/// `VIML_EXPAND_NAME` — stack `[text, src]` → the expanded name. `src` is the
+/// command argument an lval context quotes when the expansion fails (c:
+/// `get_lval`, `semsg(_(e_invarg2), name)` unless `aborting()`); an expression
+/// context passes `''` and reports nothing further (c: `get_name_len` returns -1
+/// and `eval7` FAILs). On failure the evaluator is marked failed and `Undef` is
+/// left for the compiler's guard to discard.
+fn b_expand_name(vm: &mut VM, _: u8) -> Value {
+    let src = tv_get_string(&pop_tv(vm));
+    let text = tv_get_string(&pop_tv(vm));
+    // c: `eval_to_string` returns NULL when `eval0` FAILs. The port's string
+    // evaluator hands back the recovered value instead, so an `{expr}` that
+    // raised (`{nosuch}` → E121) is told apart by the error count, as `f_eval`
+    // is.
+    let errs = message::err_count.with(|c| c.get());
+    let expanded =
+        expand_curly_name(&text).filter(|_| message::err_count.with(|c| c.get()) == errs);
+    match expanded {
+        Some(name) => Value::str(name),
+        None => {
+            if !src.is_empty() && !crate::ported::ex_eval::aborting() {
+                message::semsg(&format!("E475: Invalid argument: {src}"));
+            }
+            note_error();
+            Value::Undef
+        }
+    }
+}
+
+/// `VIML_DEFINE_FUNC` — register a deferred `:function` when its line executes.
+/// The def was staged into `PENDING_FUNCS` at load; this op moves it into the
+/// live `FUNCTIONS` registry only now, when control flow reached the
+/// definition — what makes the idempotent `if !exists('*F') | function F() …
+/// | endif` guard define `F` on the first source and skip it thereafter.
+///
+/// Stack `[key, src]`. `src` is the `:function` argument as written, from the
+/// name on (c: `trans_function_name`'s `start`). A name
+/// holding `{expr}` curly braces is expanded from it here, when the definition
+/// runs — a plain name is the staged def's own. Then the checks `ex_function`
+/// makes on the resolved name (`vendor/eval/userfunc.c`): a builtin-shaped name
+/// (lowercase, unscoped, no `#`) is `E128`, an existing function without `!`
+/// is `E122` and keeps its old body.
 fn b_define_func(vm: &mut VM, _argc: u8) -> Value {
+    let src = tv_get_string(&pop_tv(vm));
     let key = tv_get_string(&pop_tv(vm));
-    if let Some(mut def) = PENDING_FUNCS.with(|p| p.borrow().get(&key).cloned()) {
-        // c: `ex_function` — a `closure` function outside any function is
-        // E932 and is not defined; inside one, `register_closure` records the
-        // running activation as its `uf_scoped`.
-        if def.closure {
-            match current_scope() {
-                Some(scope) => def.scoped = Some(scope),
-                None => {
-                    message::semsg(&format!(
-                        "E932: Closure function should not be at top level: {}",
-                        def.name
-                    ));
-                    return Value::Int(0);
+    let Some(mut def) = PENDING_FUNCS.with(|p| p.borrow().get(&key).cloned()) else {
+        return Value::Int(0);
+    };
+    if crate::viml_parser::is_curly_name(&def.name) {
+        match expand_curly_name(&def.name) {
+            Some(name) => def.name = name,
+            None => {
+                if !crate::ported::ex_eval::aborting() {
+                    message::semsg(&format!("E475: Invalid argument: {src}"));
                 }
+                return Value::Int(0);
             }
         }
-        FUNCTIONS.with(|f| {
-            f.borrow_mut()
-                .insert(canon_func_name(&def.name).into_owned(), def)
-        });
     }
+    let canon = canon_func_name(&def.name).into_owned();
+    // c: `trans_function_name` → `builtin_function(lv.ll_name, len)`: a lowercase
+    // start with no `x:` scope and no autoload `#`. `s:Foo` has the scope, so it
+    // passes as is; the message quotes the argument as written.
+    if crate::ported::eval::userfunc::builtin_function(&canon, -1) {
+        message::semsg(&format!(
+            "E128: Function name must start with a capital or \"s:\": {src}"
+        ));
+        return Value::Int(0);
+    }
+    // c: `ex_function` — `if (fp != NULL && !eap->forceit) emsg_funcname(e_funcexts, name)`.
+    if !def.bang && FUNCTIONS.with(|f| f.borrow().contains_key(&canon)) {
+        message::semsg(&format!(
+            "E122: Function {canon} already exists, add ! to replace it"
+        ));
+        return Value::Int(0);
+    }
+    // c: `ex_function` — a `closure` function outside any function is
+    // E932 and is not defined; inside one, `register_closure` records the
+    // running activation as its `uf_scoped`.
+    if def.closure {
+        match current_scope() {
+            Some(scope) => def.scoped = Some(scope),
+            None => {
+                message::semsg(&format!(
+                    "E932: Closure function should not be at top level: {}",
+                    def.name
+                ));
+                return Value::Int(0);
+            }
+        }
+    }
+    FUNCTIONS.with(|f| f.borrow_mut().insert(canon, def));
     Value::Int(0)
 }
 
@@ -8314,6 +8395,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_CATCH_MATCH, b_catch_match);
     vm.register_builtin(VIML_REPORT_UNCAUGHT, b_report_uncaught);
     vm.register_builtin(VIML_DEFINE_FUNC, b_define_func);
+    vm.register_builtin(VIML_EXPAND_NAME, b_expand_name);
 }
 
 /// Register a compiled program's user functions, then run its `main` chunk.

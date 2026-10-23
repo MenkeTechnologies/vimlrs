@@ -14,6 +14,7 @@
 //! ```
 //! ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+use crate::ported::eval::{find_name_end, FNE_CHECK_START};
 use crate::viml_ast::{ArithOp, Block, Expr, ForVars, LetTarget, Stmt, UnaryOp, UnletArg};
 use crate::viml_lexer::{lex, CaseFlag, CmpOp, InterpPart, Tok, Token, VimlError};
 use std::cell::Cell;
@@ -2406,8 +2407,18 @@ fn parse_function(cur: &mut Lines, header: &str) -> Result<Stmt, VimlError> {
         Some(rest) => (true, rest.trim()),
         None => (false, header),
     };
-    let lparen = header
+    // c: `trans_function_name` → `get_lval` → `find_name_end`: a name holding
+    // `{expr}` curly braces (`F{n}()`) ends where its braces close, whatever
+    // the expression inside contains (`F{Get()}()`), so the parameter list's
+    // `(` is the first one AFTER the name. A plain name has no braces and the
+    // first `(` is that one.
+    let name_end = match find_name_end(header, FNE_CHECK_START) {
+        (end, Some(_), _) => end,
+        _ => 0,
+    };
+    let lparen = header[name_end..]
         .find('(')
+        .map(|p| name_end + p)
         .ok_or_else(|| VimlError::msg(format!("E124: Missing '(': {header}")))?;
     let name = header[..lparen].trim().to_string();
     // Find the `)` that matches the parameter-list `(` — not merely the first
@@ -2484,6 +2495,7 @@ fn parse_function(cur: &mut Lines, header: &str) -> Result<Stmt, VimlError> {
     }
     Ok(Stmt::Function {
         name,
+        src: header.to_string(),
         args,
         defaults,
         body,
@@ -2607,6 +2619,7 @@ fn parse_def(cur: &mut Lines, header: &str) -> Result<Stmt, VimlError> {
     body.extend(body_stmts);
     Ok(Stmt::Function {
         name,
+        src: header.to_string(),
         args,
         defaults,
         body,
@@ -3011,6 +3024,13 @@ pub(crate) fn let_target(lhs: &str, rest: &str) -> Result<LetTarget, VimlError> 
                 src: Some(text_to_eol(rest)),
             },
         }
+    } else if is_curly_name(lhs) {
+        // `a{n} = …` — c: `get_lval` finds the `{expr}` with `find_name_end` and
+        // expands it with `make_expanded_name` when the `:let` runs.
+        LetTarget::CurlyVar {
+            name: lhs.to_string(),
+            src: text_to_eol(rest),
+        }
     } else if !lhs.contains('[')
         && lhs.contains('.')
         && lhs.rsplit_once('.').is_some_and(|(_, k)| {
@@ -3294,6 +3314,12 @@ fn parse_unlet_arg(arg: &str) -> Result<UnletArg, VimlError> {
                 src: arg.to_string(),
             },
         });
+    } else if is_curly_name(arg) {
+        // `unlet a{n}` — expanded when the `:unlet` runs, as a `:let` target is.
+        return Ok(UnletArg::CurlyName {
+            name: arg.to_string(),
+            src: arg.to_string(),
+        });
     } else if !arg.contains('[')
         && arg.contains('.')
         && arg.rsplit_once('.').is_some_and(|(_, k)| {
@@ -3374,11 +3400,20 @@ fn split_top_colon(s: &str) -> Option<(&str, &str)> {
     None
 }
 
+/// Whether `name` is, in full, a variable name holding `{expr}` curly braces —
+/// `a{n}b`, `g:x_{i}`, `{name}` — as `find_name_end` measures it (c:
+/// `get_lval`, `vendor/eval.c:1209`). Text the name does not reach (`d.k{n}`,
+/// where the name is `d`) is not one.
+pub(crate) fn is_curly_name(name: &str) -> bool {
+    matches!(find_name_end(name, FNE_CHECK_START), (end, Some(_), _) if end == name.len())
+}
+
 /// The current value of a compound-assignment target, as an expression. List
 /// unpack targets cannot take a compound operator (`E734`).
 pub(crate) fn let_target_expr(target: &LetTarget) -> Result<Expr, VimlError> {
     Ok(match target {
         LetTarget::Var(n) => Expr::Var(n.clone()),
+        LetTarget::CurlyVar { name, .. } => Expr::CurlyVar(name.clone()),
         LetTarget::Option(n) => Expr::Option(n.clone()),
         LetTarget::Env(n) => Expr::Env(n.clone()),
         LetTarget::Register(c) => Expr::Register(*c),
@@ -4273,6 +4308,11 @@ impl Parser {
             Tok::LBrace => {
                 if self.at_lambda() {
                     self.lambda()
+                } else if !vim9_active() && self.at_curly_name() {
+                    // c: `eval_dict` (`vendor/eval.c`) first parses ONE expression
+                    // and, when `}` follows it, answers `NOTDONE` so `eval7`'s
+                    // default arm reads the whole `{expr}` as a curly-braces name.
+                    self.curly_name(at)
                 } else {
                     self.dict_literal()
                 }
@@ -4300,6 +4340,8 @@ impl Parser {
                 let name = self.src[start..end].to_string();
                 self.name_operand(name, at)
             }
+            // A `{` written right against a name continues it: `a{n}b`, `g:x_{i}`.
+            Tok::Ident(_) if self.lbrace_abuts_prev() => self.curly_name(at),
             Tok::Ident(name) => self.name_operand(name, at),
             // c (`eval9` → `eval_leader`/default): the token that cannot start an
             // operand is still unread when E15 quotes the rest, so it heads the
@@ -4309,6 +4351,58 @@ impl Parser {
                 Err(self.invexpr())
             }
         }
+    }
+
+    /// Lookahead for the `{` form of a curly-braces name: `{expr}` holding ONE
+    /// expression and nothing else. c: `eval_dict` parses `eval1` and tests for
+    /// a following `}` *before* reading the text as a Dict literal. Nothing the
+    /// trial parse recorded survives it.
+    fn at_curly_name(&mut self) -> bool {
+        let (i, depth, e15, parens) = (
+            self.i,
+            self.depth,
+            self.deferred_e15.len(),
+            self.paren_ctx.len(),
+        );
+        let hit = self.nested_eval1().is_ok() && matches!(self.peek(), Tok::RBrace);
+        self.i = i;
+        self.depth = depth;
+        self.deferred_e15.truncate(e15);
+        self.paren_ctx.truncate(parens);
+        hit
+    }
+
+    /// The operand at `at` is a name holding `{expr}` curly braces, whose first
+    /// token has just been consumed. c: `get_name_len` measures the whole name
+    /// with `find_name_end` (brace nesting, `[idx]`, quoted strings) and leaves
+    /// its expansion to run time. The tokens the name spans are consumed by
+    /// source offset, as the `Tok::Colon` arm does.
+    fn curly_name(&mut self, at: Option<usize>) -> Result<Expr, VimlError> {
+        let start = at.unwrap_or(0);
+        let (len, expr_start, _) =
+            find_name_end(self.src.get(start..).unwrap_or(""), FNE_CHECK_START);
+        if expr_start.is_none() {
+            return Err(self.invexpr());
+        }
+        let end = start + len;
+        while self
+            .toks
+            .get(self.i)
+            .is_some_and(|t| !matches!(t.kind, Tok::Eof) && t.span >= start && t.end <= end)
+        {
+            self.i += 1;
+        }
+        let name = self.src[start..end].to_string();
+        if !matches!(self.peek(), Tok::LParen) {
+            return Ok(Expr::CurlyVar(name));
+        }
+        self.advance();
+        let args = self.arg_list(
+            &Tok::RParen,
+            &format!("E116: Invalid arguments for function {name}"),
+            "E15: Invalid expression: \"%s\"",
+        )?;
+        Ok(Expr::CurlyCall { name, args })
     }
 
     /// The operand that is a variable or function name: a call when `(` follows,
@@ -4443,6 +4537,16 @@ impl Parser {
         let i = self.i;
         i > 0
             && self.toks.get(i).is_some_and(|t| t.kind == Tok::LBracket)
+            && self.toks[i].span == self.toks[i - 1].end
+    }
+
+    /// True when the token at the cursor is a `{` written directly against the
+    /// token before it — the `{expr}` continuation of a name (`a{n}b`), as
+    /// opposed to a Dict literal after a space (`echo x {}`).
+    fn lbrace_abuts_prev(&self) -> bool {
+        let i = self.i;
+        i > 0
+            && self.toks.get(i).is_some_and(|t| t.kind == Tok::LBrace)
             && self.toks[i].span == self.toks[i - 1].end
     }
 

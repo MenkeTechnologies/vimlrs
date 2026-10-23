@@ -7670,11 +7670,6 @@ script); vimlrs catches it.
 
 ### R54-O. Still open from this round (vim and Neovim agree, vimlrs differs)
 
-- **Curly-brace names are not supported.** `let {n} = 5`, `let a{n}b = 1`,
-  `echo {n}`, `function! F{n}()`: the parser fails and the tolerant reader drops
-  the line (or, for an expression, reports a different error). The ported
-  `make_expanded_name` exists; the parser/compiler have no node for a dynamic
-  name.
 - **Scope dictionaries are snapshots.** `let g:['a'] = 1`, `let s:['b'] = 1`,
   `let d = g: | let d['x'] = 1` and `unlet g:['x']` do not write through:
   reading a scope whole copies it. `g:`/`s:`/`b:`/`w:`/`t:`/`l:`/`a:` are `RefCell<dict_T>` thread-locals, not
@@ -7976,3 +7971,52 @@ String is reported once (`let d[[]] = 1`, `let l[[]] = 1` is `E730`, not
 - `let d[[]] .= 1` reports `E730` twice (once for the read, once for the store).
 - `if nosuch ) | endif`: vim swallows `| endif` into the trailing text and
   reports `E171`; vimlrs does not.
+
+---
+
+## R59 — curly-braces names, `:function` E122/E128, `set_var` E461
+
+### R59-1. Curly-braces names were not supported — ✅ FIXED
+`let {n} = 5`, `let a{n}b = 1`, `let g:x_{n} = …`, `let a{n} += 1`,
+`unlet a{n}`, `echo {n}`, `echo a{n}b`, `F{n}()`, `call F{n}()`,
+`function! F{n}()` / `function! s:{name}()` and `let [p{n}, q] = …` now work
+as in vim. The parser measures the name with the ported `find_name_end`
+(brace nesting, quoted strings; a `{expr}` followed by `}` is a name, anything
+else a Dict literal — `eval_dict`'s test) and keeps the text; the compiler
+expands it when the command runs through `VIML_EXPAND_NAME`, the ported
+`make_expanded_name` (each `{expr}` to a String, recursively, so `{r}` with
+`r = '{m}'` reads `m`'s name). The expanded name then goes through the same
+`VIML_GETVAR`/`VIML_SETVAR`/`VIML_UNLET`/`VIML_CALL_USER` a plain name uses;
+`b_call_user` also resolves a builtin (`{n}('abc')` with `n = 'len'` is 3), and
+`VIML_DEFINE_FUNC` takes the `:function` argument text to expand the name
+when the definition line runs. A failed `{expr}` fails the operand with only
+its own error (`echo {nosuch}` → E121; `F{nosuch}()` does not evaluate its
+arguments), while `:let`/`:unlet` add `E475: Invalid argument: {nosuch} = 1`
+quoting the argument (`get_lval`). Any curly name in a body disables slotting
+there, since it may alias any local. Recorded in
+`tests/parity_cases/curly_brace_names.vim`.
+
+### R59-2. `:function` accepted a builtin-shaped name and silently redefined — ✅ FIXED
+`function! foo()` is now `E128: Function name must start with a capital or
+"s:": foo()` (c: `trans_function_name` → `builtin_function`), and `function
+Twice()` on an existing `Twice` without `!` is `E122: Function Twice already
+exists, add ! to replace it` and keeps the old body (`ex_function`). Both checks
+run in `b_define_func` on the resolved name, so they cover an expanded one.
+Recorded in `tests/parity_cases/function_redefine_e122.vim`.
+
+### R59-3. `set_var` created a variable under any name — ✅ FIXED
+`let {n} = 1` with `n = 'a b'` or `n = [1]` made a variable named `a b` / `[1]`.
+`set_var` now runs the ported `valid_varname` on a NEW name (c:
+`set_var_const`, `vars.c:2882`): `E461: Illegal variable name: a b`. An
+existing name (`a:0`) is not re-checked, as in the C.
+
+### R59-O. Still open
+- After a failed `:function` definition (E128), vim runs the body lines as
+  commands and reports `E193: :endfunction not inside a function`; this
+  parser has already consumed the body, so only the E128 is printed.
+- `let d.k{n} = 1` is `E18: Unexpected characters in :let` in vim (the lval
+  ends at `d.k`); vimlrs reports `E461: Illegal variable name: d.k{n}`.
+- `let x = eval('nosuch')` assigns the recovered value (`exists('x')` is 1)
+  where vim's `eval()` fails the `:let`.
+- The compiler's `\x01unpack_N` temporaries for `let [a, b] = …` are visible
+  in `keys(g:)`.

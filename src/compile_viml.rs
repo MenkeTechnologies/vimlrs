@@ -217,6 +217,14 @@ fn collect_free_vars(
             args.iter().for_each(|a| collect_free_vars(a, bound, out));
         }
         Expr::ScriptErrorGuard { inner, .. } => collect_free_vars(inner, bound, out),
+        // c: while skipping, `get_name_len` measures a curly-braces name without
+        // expanding it, so `check_vars` sees only the unexpanded text (never a
+        // local) and the `{expr}` inside is not looked at. A call's arguments are
+        // still parsed (`get_func_arguments`), so they capture as usual.
+        Expr::CurlyVar(_) => {}
+        Expr::CurlyCall { args, .. } => {
+            args.iter().for_each(|a| collect_free_vars(a, bound, out));
+        }
         // Literals, sigil-scoped refs and deferred errors capture nothing.
         Expr::Number(_)
         | Expr::Float(_)
@@ -437,6 +445,7 @@ fn compile_program_inner(
     for (line, s) in stmts {
         if let Stmt::Function {
             name,
+            src: _,
             args,
             defaults,
             body,
@@ -452,8 +461,15 @@ fn compile_program_inner(
             // `function('1', {…})`, never `function('d.key')`. So the body is
             // registered under a generated numeric name (vim's `func_nr`
             // counter, which also starts at 1) and the definition line becomes
-            // the assignment it implies.
-            match dict_func_target(name) {
+            // the assignment it implies. A curly-braces name is never one: its
+            // `{expr}` may hold a `.` (`F{d.k}`), and it is expanded when the
+            // line runs, in `Compiler::stmt`.
+            let target = if crate::viml_parser::is_curly_name(name) {
+                None
+            } else {
+                dict_func_target(name)
+            };
+            match target {
                 Some((base, key)) => {
                     let anon = next_dict_func_name();
                     // c: `ex_function` sets `FC_DICT` for the `d.key()` form
@@ -898,6 +914,9 @@ fn slot_plan(stmts: &[(u32, Stmt)], in_function: bool) -> SlotPlan {
                 }
             }
             Expr::Var(name) if is_scope_dict(name) => *cx.bail = true,
+            // A curly-braces name is resolved at run time and may be ANY
+            // variable, a slotted one included — nothing here can be slotted.
+            Expr::CurlyVar(_) | Expr::CurlyCall { .. } => *cx.bail = true,
             Expr::Var(name) => {
                 if let Some(key) = slot_key(name, cx.in_function) {
                     if !cx.init.iter().any(|k| k == key) {
@@ -1746,6 +1765,21 @@ impl Compiler {
                             self.emit(Op::LoadInt(*bang as i64));
                             self.emit(Op::CallBuiltin(h::VIML_UNLET, 2));
                         }
+                        // `unlet a{n}` — the name is expanded first (`get_lval`);
+                        // `unlet!` hands it `GLV_QUIET`, which silences the E475
+                        // but not the `{expr}`'s own error.
+                        UnletArg::CurlyName { name, src } => {
+                            let src = if *bang { "" } else { src.as_str() };
+                            let failed = self.expand_name(name, src); // [name]
+                            self.emit(Op::LoadInt(*bang as i64));
+                            self.emit(Op::CallBuiltin(h::VIML_UNLET, 2));
+                            let done = self.emit(Op::Jump(0));
+                            let here = self.b.current_pos();
+                            self.b.patch_jump(failed, here);
+                            self.emit(Op::Pop); // the Undef name
+                            let end = self.b.current_pos();
+                            self.b.patch_jump(done, end);
+                        }
                         // `unlet base[index]` / `unlet base.key` — push the
                         // container then the index; the bridge removes the
                         // element in place (mirroring `do_unlet_var()`).
@@ -1872,6 +1906,7 @@ impl Compiler {
             }
             Stmt::Function {
                 name,
+                src,
                 args,
                 defaults,
                 body,
@@ -1904,7 +1939,14 @@ impl Compiler {
                 // `compile_program_inner`), defined when the line runs: a
                 // constructor function that builds `let c = {}` and then
                 // `function c.next() dict` must find its own local `c`.
-                let target = dict_func_target(name);
+                // A curly-braces name (`F{n}`, `s:{name}`) is staged under its
+                // text and expanded by `VIML_DEFINE_FUNC` when this line runs —
+                // the `{expr}` may hold a `.`, so it is never a `d.key()` target.
+                let target = if crate::viml_parser::is_curly_name(name) {
+                    None
+                } else {
+                    dict_func_target(name)
+                };
                 let flags = FuncFlags {
                     bang: *bang,
                     vim9: *vim9,
@@ -1925,7 +1967,8 @@ impl Compiler {
                 let key = deferred_key(&def);
                 DEFERRED_FUNCS.with(|f| f.borrow_mut().push(def));
                 self.load_str(&key);
-                self.emit(Op::CallBuiltin(h::VIML_DEFINE_FUNC, 1));
+                self.load_str(src);
+                self.emit(Op::CallBuiltin(h::VIML_DEFINE_FUNC, 2));
                 self.emit(Op::Pop);
                 if let (Some((base, key)), Some(anon)) = (target, anon) {
                     self.stmt(&Stmt::Let {
@@ -2633,6 +2676,35 @@ impl Compiler {
         self.emit(Op::CallBuiltin(h::VIML_GETVAR, 1));
     }
 
+    /// Emit the run-time expansion of a curly-braces name (`a{n}b`), leaving the
+    /// expanded name on the stack. Returns the jump taken when an `{expr}`
+    /// failed, with `Undef` in the name's place; the caller lands it after the
+    /// ops that use the name (see [`Self::expand_name_end`]). `src` is the
+    /// command argument `E475` quotes in an lval context, `""` in an expression.
+    fn expand_name(&mut self, name: &str, src: &str) -> usize {
+        self.emit(Op::CallBuiltin(h::VIML_ERR_MARK, 0));
+        self.emit(Op::Pop);
+        self.load_str(name);
+        self.load_str(src);
+        self.emit(Op::CallBuiltin(h::VIML_EXPAND_NAME, 2)); // [name]
+        self.emit(Op::CallBuiltin(h::VIML_ERR_SINCE, 0)); // [name, failed]
+        self.emit(Op::JumpIfTrue(0))
+    }
+
+    /// Close an expression-context [`Self::expand_name`]: the success path has
+    /// its value on the stack; the failure path drops the `Undef` name and
+    /// leaves 0 — the recovered operand every failed operand leaves, so the
+    /// enclosing expression's shape holds while the error propagates.
+    fn expand_name_end(&mut self, failed: usize) {
+        let done = self.emit(Op::Jump(0));
+        let here = self.b.current_pos();
+        self.b.patch_jump(failed, here);
+        self.emit(Op::Pop);
+        self.emit(Op::LoadInt(0));
+        let end = self.b.current_pos();
+        self.b.patch_jump(done, end);
+    }
+
     /// Emit a set of a variable from the value on top of the stack, leaving the
     /// stack balanced. A slotted local writes natively via `Op::SetSlot` (which
     /// consumes the value).
@@ -3116,6 +3188,30 @@ impl Compiler {
                 Ok(())
             }
             LetTarget::Var(name) => self.let_var(name, expr),
+            // c: `ex_let` evaluates the expression first (`eval0`), and only then
+            // `ex_let_one` → `get_lval` expands the target's `{expr}` braces —
+            // E475 quoting the argument as written when that fails. A failed
+            // expression assigns nothing, as for a plain name (`let_var`).
+            LetTarget::CurlyVar { name, src } => {
+                self.emit(Op::CallBuiltin(h::VIML_ERR_MARK, 0));
+                self.emit(Op::Pop);
+                self.expr(expr)?;
+                self.emit(Op::CallBuiltin(h::VIML_ERR_SINCE, 0));
+                let expr_failed = self.emit(Op::JumpIfTrue(0)); // [value]
+                let name_failed = self.expand_name(name, src); // [value, name]
+                self.emit(Op::CallBuiltin(h::VIML_SETVAR, 2));
+                self.emit(Op::Pop);
+                let done = self.emit(Op::Jump(0));
+                let here = self.b.current_pos();
+                self.b.patch_jump(name_failed, here);
+                self.emit(Op::Pop); // the Undef name
+                let here = self.b.current_pos();
+                self.b.patch_jump(expr_failed, here);
+                self.emit(Op::Pop); // the value
+                let end = self.b.current_pos();
+                self.b.patch_jump(done, end);
+                Ok(())
+            }
             LetTarget::Env(name) => {
                 // c: `ex_let_env` (`vendor/eval/vars.c:1316`) — an ARITHMETIC
                 // compound on an environment variable is `e_letwrong` before
@@ -3453,6 +3549,27 @@ impl Compiler {
             }
             Expr::Var(name) => {
                 self.get_var(name);
+            }
+            // c: `eval7` default arm — `get_name_len` expands the `{expr}`
+            // braces, then `eval_variable` reads the expanded name. A failed
+            // expansion FAILs the operand with no further message (`len <= 0`).
+            Expr::CurlyVar(name) => {
+                let failed = self.expand_name(name, ""); // [name]
+                self.emit(Op::CallBuiltin(h::VIML_GETVAR, 1)); // [value]
+                self.expand_name_end(failed);
+            }
+            // `F{n}(args)`: the name is expanded BEFORE the arguments are read, so
+            // a failed expansion skips them (c: `eval7` FAILs at `get_name_len`,
+            // `eval_func` is never reached). The expanded name is resolved at
+            // run time like any user call — `b_call_user` also finds a builtin.
+            Expr::CurlyCall { name, args } => {
+                let failed = self.expand_name(name, ""); // [name]
+                for a in args {
+                    self.expr(a)?;
+                }
+                self.emit(Op::CallBuiltin(h::VIML_CALL_USER, Self::argc(args.len())?));
+                self.emit_call_unwind_check();
+                self.expand_name_end(failed);
             }
             Expr::Option(name) => {
                 self.load_str(name);
