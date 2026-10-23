@@ -8419,12 +8419,15 @@ pub fn eval_source_debug(src: &str) -> Result<(), VimlError> {
 }
 
 /// Snapshot the `g:` scope for the debugger's variables view: `(name, rendered)`
-/// pairs read from `globvardict` (no VM run).
+/// pairs read from `globvardict` (no VM run). The compiler's own temporaries
+/// (`vars::is_compiler_temp`) are not variables and are left out, as `keys(g:)`
+/// leaves them out.
 pub fn dap_globals() -> Vec<(String, String)> {
     crate::ported::eval::vars::globvardict.with(|d| {
         d.borrow()
             .dv_hashtab
             .iter()
+            .filter(|(k, _)| !crate::ported::eval::vars::is_compiler_temp(k))
             .map(|(k, v)| (format!("g:{k}"), encode_tv2echo(v).to_string()))
             .collect()
     })

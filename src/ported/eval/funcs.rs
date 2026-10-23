@@ -3147,34 +3147,29 @@ pub fn f_insert(argvars: &[typval_T], rettv: &mut typval_T) {
 
 // `f_extend`/`f_extendnew` live in their real home file, `src/ported/eval/list.rs`.
 
-/// Port of `f_copy()` from `Src/eval/funcs.c` — a shallow copy of `{expr}`.
+/// Port of `f_copy()` from `vendor/eval/funcs.c:842` — a shallow copy of
+/// `{expr}`: `var_item_copy(NULL, &argvars[0], rettv, false, 0)`.
+///
+/// c: the shallow `tv_list_copy`/`tv_dict_copy` copy each item with `tv_copy`,
+/// which sets `to->v_lock = VAR_UNLOCKED` (`vendor/eval/typval.c:3727`) — so a
+/// `:lockvar`-ed item, or a `:const` variable in `copy(g:)`, is writable in the
+/// copy (`map(copy(g:), 'v:key')` after `const c = 1` is `{'c': 'c'}`).
 pub fn f_copy(argvars: &[typval_T], rettv: &mut typval_T) {
+    use crate::ported::eval::typval::{tv_dict_copy, tv_list_copy};
     match (argvars[0].v_type, &argvars[0].vval) {
         (VAR_LIST, v_list(Some(l))) => {
-            let items: Vec<_> = l
-                .borrow()
-                .lv_items
-                .iter()
-                .map(|it| it.li_tv.clone())
-                .collect();
-            let out = tv_list_alloc_ret(rettv, items.len() as isize);
-            let mut ob = out.borrow_mut();
-            for tv in items {
-                tv_list_append_tv(&mut ob, tv);
-            }
+            *rettv = typval_T {
+                v_type: VAR_LIST,
+                v_lock: crate::ported::eval::typval_defs_h::VarLockStatus::VAR_UNLOCKED,
+                vval: v_list(Some(tv_list_copy(l, false))),
+            };
         }
         (VAR_DICT, v_dict(Some(d))) => {
-            let pairs: Vec<_> = d
-                .borrow()
-                .dv_hashtab
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            let out = crate::ported::eval::typval::tv_dict_alloc_ret(rettv);
-            let mut ob = out.borrow_mut();
-            for (k, v) in pairs {
-                tv_dict_add_tv(&mut ob, &k, v);
-            }
+            *rettv = typval_T {
+                v_type: VAR_DICT,
+                v_lock: crate::ported::eval::typval_defs_h::VarLockStatus::VAR_UNLOCKED,
+                vval: v_dict(Some(tv_dict_copy(d, false))),
+            };
         }
         // c (`var_item_copy`, `case VAR_BLOB`): `tv_blob_copy` — a new buffer, never the
         // original's, so a write through the copy cannot show in the source.
@@ -3461,7 +3456,14 @@ pub(crate) fn var_item_copy(
             crate::ported::eval::typval::tv_blob_copy(b.as_ref(), &mut to);
             Some(to)
         }
-        _ => Some(from.clone()),
+        // c: every other type is `tv_copy(from, to)`, which unlocks the copy
+        // (`vendor/eval/typval.c:3727`): `deepcopy()` of a dict whose item was
+        // `:lockvar`-ed yields a writable item.
+        _ => {
+            let mut to = from.clone();
+            to.v_lock = crate::ported::eval::typval_defs_h::VarLockStatus::VAR_UNLOCKED;
+            Some(to)
+        }
     };
     *recurse -= 1;
     out

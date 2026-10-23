@@ -79,6 +79,18 @@ thread_local! {
     pub static tabpage_vars: RefCell<dict_T> = RefCell::new(dict_T::default());
 }
 
+/// Whether `name` is one of the compiler's own temporaries — the hidden
+/// `\x01unpack_N` / `\x01for_list_N` / `\x01for_idx_N` / `\x01const_N` names
+/// `compile_viml` stores a `:let [a, b] = …` value or a `:for` list and index
+/// under. They are stored in the running scope's dict (`g:`, or `l:` inside a
+/// function, so recursion keeps each activation's own), but they are not script
+/// variables: no script name can start with a control character, so nothing a
+/// script writes can collide with or read one, and a scope read whole
+/// ([`find_var`]'s snapshot) does not list them.
+pub fn is_compiler_temp(name: &str) -> bool {
+    name.starts_with('\u{1}')
+}
+
 /// Port of `set_var()` from `Src/eval/vars.c:2805` (folding `set_var_const`,
 /// `vars.c:2816`).
 ///
@@ -108,7 +120,7 @@ pub fn set_var(name: &str, name_len: usize, tv: typval_T, _copy: bool) {
     // name only a curly-braces expansion can produce (`let {n} = 1` with `n` =
     // `'a b'`) is E461 here, not a variable; every script name was validated by
     // the parser. The compiler's own `\x01…` temporaries are not script names.
-    if !name.starts_with('\u{1}') && find_var(name, true).is_none() && !valid_varname(&varname) {
+    if !is_compiler_temp(name) && find_var(name, true).is_none() && !valid_varname(&varname) {
         return;
     }
     match scope {
@@ -1598,7 +1610,17 @@ pub fn find_var(name: &str, _no_autoload: bool) -> Option<typval_T> {
         // The hashtab itself is copied, not re-filled: re-inserting in
         // iteration order resolves collisions differently, and `string(a:)`
         // would list the keys in an order the scope does not have.
-        nd.borrow_mut().dv_hashtab = d.dv_hashtab.clone();
+        let mut ht = d.dv_hashtab.clone();
+        // The compiler's temporaries share the scope dict but are not variables
+        // (`is_compiler_temp`): `keys(g:)` after `let [a, b] = …` is `['a', 'b']`
+        // as in vim, not `['\x01unpack_0', 'a', 'b']`. Removing from the copy
+        // tombstones the slot without moving the others, so the remaining keys
+        // keep the bucket order vim lists them in.
+        let temps: Vec<String> = ht.keys().filter(|k| is_compiler_temp(k)).cloned().collect();
+        for k in &temps {
+            ht.shift_remove(k);
+        }
+        nd.borrow_mut().dv_hashtab = ht;
         typval_T {
             v_type: VAR_DICT,
             v_lock: VarLockStatus::VAR_UNLOCKED,

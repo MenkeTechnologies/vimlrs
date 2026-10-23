@@ -8031,5 +8031,35 @@ existing name (`a:0`) is not re-checked, as in the C.
   ends at `d.k`); vimlrs reports `E461: Illegal variable name: d.k{n}`.
 - `let x = eval('nosuch')` assigns the recovered value (`exists('x')` is 1)
   where vim's `eval()` fails the `:let`.
-- The compiler's `\x01unpack_N` temporaries for `let [a, b] = …` are visible
-  in `keys(g:)`.
+
+## R60 — compiler temporaries in scope dicts, `copy()` keeping item locks
+
+### R60-1. The compiler's hidden temporaries were keys of `g:` / `l:` — ✅ FIXED
+`let [a, b] = …`, `const [c, d] = …` and `:for` store their value, list and
+index under `\x01unpack_N` / `\x01const_N` / `\x01for_list_N` /
+`\x01for_idx_N` in the running scope, and reading the scope whole listed them:
+`keys(g:)` after `let [a, b] = [1, 2]` was `['\x01unpack_0', 'a', 'b']`,
+`len(g:)` counted them, and a `for k in keys(g:)` saw its own list and index.
+The `find_var` scope snapshot (and the debugger's `g:` view) now leaves out
+every `vars::is_compiler_temp` name; removal from the copy tombstones the slot,
+so the remaining keys keep vim's bucket order.
+
+### R60-2. `copy()` / `deepcopy()` kept each item's lock — ✅ FIXED
+C `tv_copy` sets `to->v_lock = VAR_UNLOCKED` (`vendor/eval/typval.c:3727`), and
+both copies go through it per item. `f_copy` cloned the items with their lock,
+and `var_item_copy`'s scalar arm did the same, so after `lockvar d.x`,
+`let e = copy(d) | let e.x = 5` was E741, and `map(copy(g:), 'v:key')` after a
+`:const` was `E741: Value is locked: map() argument`. `f_copy` is now
+`tv_list_copy`/`tv_dict_copy` with `deep = false`, as `var_item_copy(…, false,
+0)` is in the C. Both recorded in `tests/parity_cases/scope_dict_hides_temps.vim`.
+
+### R60-O. Still open
+- After a failed `:function` definition (E128), vim runs the body lines as
+  commands and reports `E193: :endfunction not inside a function`; this
+  parser has already consumed the body, so only the E128 is printed.
+- `let d.k{n} = 1` is `E18: Unexpected characters in :let` in vim (the lval
+  ends at `d.k`); vimlrs reports `E461: Illegal variable name: d.k{n}`.
+- `let x = eval('nosuch')` assigns the recovered value (`exists('x')` is 1)
+  where vim's `eval()` fails the `:let`.
+- `for {n} in [1, 2]` / `for j{n} in …` is `E461: Illegal variable name: {n}`;
+  vim expands the curly name for each item.
