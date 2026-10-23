@@ -1,0 +1,49 @@
+1
+a
+  tabstop=8
+
+b
+
+  tabstop=8  shiftwidth=8
+
+c
+
+noignorecasenoignorecase
+d
+
+  tabstop=8  shiftwidth=8
+e
+
+
+  backspace=indent,eol,start  whichwrap=b,s  selection=inclusive
+
+
+
+  wildchar=<Tab>  report=2  maxfuncdepth=100
+
+
+
+  encoding=utf-8  fileformat=unix  fileformats=unix,dos
+
+  shiftwidth=8
+
+  tabstop=8
+
+f
+
+E488: Trailing characters: ts!
+g
+  tabstop=8noexpandtab
+
+
+E518: Unknown option: nosuch
+h
+
+  tabstop=8  lines=24  columns=80
+
+
+  iskeyword=@,48-57,_,192-255  matchpairs=(:),{:},[:]
+
+
+E518: Unknown option: nosuch
+last  undolevels=1000

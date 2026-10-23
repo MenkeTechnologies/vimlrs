@@ -52,6 +52,14 @@ thread_local! {
     /// never an expression. Off for the `eval_source` REPL, which evaluates bare
     /// expressions, so `3 + 4` there still yields 7. Set by [`with_ex_lines`].
     static EX_LINES: Cell<bool> = const { Cell::new(false) };
+    /// The `E171`/`E170`/`E600` a SOURCED file owes for a conditional it left
+    /// open, innermost first. c: `do_cmdline()` (`ex_docmd.c`) runs the lines
+    /// of an unclosed `:if`/`:while`/`:for`/`:try` like any other — a loop body
+    /// once, since nothing reaches the end that jumps back — and at the end of
+    /// the file reports the conditional on top of the stack. The parser closes
+    /// the block at end of input and [`parse_program`] appends the report.
+    static EOF_MISSING: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Byte offset of `part` (a subslice of `whole`) within `whole`.
@@ -1028,6 +1036,14 @@ fn is_final_block_terminator(cmd: &str) -> bool {
 /// `fusevm::Chunk::lines`, which is what `v:throwpoint` reports and what the
 /// debugger's statement markers read.
 pub fn parse_program(src: &str) -> Result<Block, VimlError> {
+    let saved_missing = EOF_MISSING.with(|m| m.borrow_mut().take());
+    let r = parse_program_body(src);
+    EOF_MISSING.with(|m| *m.borrow_mut() = saved_missing);
+    r
+}
+
+/// [`parse_program`] inside its save/restore of [`EOF_MISSING`].
+fn parse_program_body(src: &str) -> Result<Block, VimlError> {
     // Inline `rust { ... }` FFI blocks are rewritten to `call __rust_compile(...)`
     // (and their exported names recorded for builtin override) before lexing.
     let desugared = crate::rust_ffi::desugar(src);
@@ -1047,6 +1063,13 @@ pub fn parse_program(src: &str) -> Result<Block, VimlError> {
             out.push((lineno, s));
         }
     }
+    // c: do_cmdline() — the open conditional is reported once the file ran.
+    if let Some(msg) = EOF_MISSING.with(|m| m.borrow_mut().take()) {
+        // On a line of its own: grouped with the last command's line it would
+        // be skipped as the rest of a command line that failed.
+        let eof_line = src.lines().count() as u32 + 1;
+        out.push((eof_line, Stmt::Eval(Expr::ScriptError(msg))));
+    }
     Ok(group_by_line(out))
 }
 
@@ -1060,10 +1083,22 @@ pub fn parse_cmdline(src: &str) -> Result<Block, VimlError> {
     r
 }
 
-/// True when end of input legitimately closes an open conditional: a command
-/// line, not a sourced file (see [`CMDLINE_EOF`]).
-fn eof_closes_block() -> bool {
-    CMDLINE_EOF.with(|f| f.get())
+/// True when end of input closes an open conditional: on a command line
+/// silently (see [`CMDLINE_EOF`]), in a sourced file with `missing` owed at the
+/// end (see [`EOF_MISSING`]). Anywhere else the open block is an error.
+fn eof_closes_block(missing: &str) -> bool {
+    if CMDLINE_EOF.with(|f| f.get()) {
+        return true;
+    }
+    // A sourced file: the block ends here too, and the file owes `missing`
+    // (the innermost open conditional's, which is the first to get here).
+    if EX_LINES.with(|c| c.get()) {
+        EOF_MISSING.with(|m| {
+            m.borrow_mut().get_or_insert_with(|| missing.to_string());
+        });
+        return true;
+    }
+    false
 }
 
 /// The body of a `:while`/`:for` that a command line left open. It runs once,
@@ -1368,10 +1403,21 @@ impl Lines {
             let segs = split_commands(&text);
             if segs.len() > 1 {
                 for seg in segs {
-                    if !seg.trim().is_empty() {
-                        lines.push((lineno, seg.to_string()));
-                        tails.push(Some(text[slice_offset(&text, seg)..].to_string()));
+                    if seg.trim().is_empty() {
+                        continue;
                     }
+                    let tail = &text[slice_offset(&text, seg)..];
+                    // c: a command that evaluates an expression finds the next
+                    // command itself, after the expression; when the expression
+                    // fails to parse, nothing after it on the line is a command
+                    // (`if nosuch ) | endif` leaves the `:if` open).
+                    if expr_cmd_swallows_line(seg) {
+                        lines.push((lineno, tail.to_string()));
+                        tails.push(Some(tail.to_string()));
+                        break;
+                    }
+                    lines.push((lineno, seg.to_string()));
+                    tails.push(Some(tail.to_string()));
                 }
             } else {
                 lines.push((lineno, text));
@@ -1555,7 +1601,7 @@ fn parse_one(cur: &mut Lines) -> Result<Vec<Stmt>, VimlError> {
                 let unknown = matches!(&stmt, Stmt::UserCmd(l, _)
                     if l.starts_with(|c: char| c.is_ascii_lowercase()));
                 out.push(stmt);
-                if unknown {
+                if unknown || expr_cmd_swallows_line(seg) {
                     break;
                 }
             }
@@ -1604,6 +1650,43 @@ fn cmd_takes_bar_arg(cmd: &str) -> bool {
             // command (like a user command defined without `-bar`).
             | "Intercept"
     )
+}
+
+/// Whether the bar-split segment `seg` is a command that reads an expression
+/// whose text does not parse — after which vim takes no further command from the
+/// line. c: these commands are not `EX_TRLBAR`; each finds its next command
+/// itself once its expression is read (`eval0()`'s `ends_excmd` check, then
+/// `set_nextcmd`). On a failure the next command is taken only when the parse
+/// stopped at a `|` (`check_nextcmd`); otherwise the `|` and what follows stay
+/// part of the failed argument: `if 1 ) | endif`
+/// leaves the `:if` open, `if 1 | echo 1 ) | endif` too.
+fn expr_cmd_swallows_line(seg: &str) -> bool {
+    let (cmd, rest) = cmd_word(strip_command_modifiers(seg.trim()));
+    let rest = strip_legacy_trailing_comment(rest);
+    let trailing =
+        |e: &Expr| matches!(e, Expr::ScriptErrorGuard { msg, .. } if msg.starts_with("E488:"));
+    match cmd {
+        // c: eval0() — trailing text is the one failure certain to stop short of
+        // the `|`; an incomplete expression (`if 1 + | echo`) stops AT it.
+        "if" | "elsei" | "elseif" | "wh" | "whi" | "whil" | "while" | "cal" | "call" | "retu"
+        | "retur" | "return" | "th" | "thr" | "thro" | "throw" | "ev" | "eva" | "eval" => {
+            !rest.trim().is_empty() && parse_cmd_expr(rest).is_ok_and(|e| trailing(&e))
+        }
+        // c: ex_echo()/ex_execute() take `check_nextcmd()` of where the failed
+        // argument stopped, which an `E15` names: text left in the segment (it
+        // ends at the bar) means the parse stopped short of it.
+        "ec" | "ech" | "echo" | "echon" | "echom" | "echoms" | "echomsg" | "echoe" | "echoer"
+        | "echoerr" | "exe" | "exec" | "execu" | "execut" | "execute" => parse_expr_list(rest)
+            .is_ok_and(|es| {
+                es.iter().any(|e| {
+                    trailing(e)
+                        || matches!(e, Expr::ScriptError(msg)
+                            if msg.strip_prefix("E15: Invalid expression: \"")
+                                .is_some_and(|t| !t.starts_with('"')))
+                })
+            }),
+        _ => false,
+    }
 }
 
 /// When `b[i..]` opens an interpolated string (`$'…'` or `$"…"`), the index just
@@ -1925,13 +2008,13 @@ fn parse_if(cur: &mut Lines, cond_str: &str) -> Result<Stmt, VimlError> {
             Some((ref c, _)) if c == "else" => {
                 let (b, t) = parse_block(cur, &["endif"])?;
                 else_body = Some(b);
-                if t.is_none() && !eof_closes_block() {
+                if t.is_none() && !eof_closes_block("E171: Missing :endif") {
                     return Err(VimlError::msg("E171: Missing :endif"));
                 }
                 break;
             }
             Some((ref c, _)) if c == "endif" => break,
-            None if eof_closes_block() => break,
+            None if eof_closes_block("E171: Missing :endif") => break,
             None => return Err(VimlError::msg("E171: Missing :endif")),
             Some((ref c, ref rest)) => return Err(e_unmatched_block(c, &format!("{c} {rest}"))),
         }
@@ -1943,7 +2026,7 @@ fn parse_while(cur: &mut Lines, cond_str: &str) -> Result<Stmt, VimlError> {
     let cond = parse_cmd_expr(strip_legacy_trailing_comment(cond_str))?;
     let (body, term) = parse_block(cur, &["endwhile"])?;
     if term.is_none() {
-        if eof_closes_block() {
+        if eof_closes_block("E170: Missing :endwhile") {
             let body = run_once(body, cur.prev_line_no());
             return Ok(Stmt::While { cond, body });
         }
@@ -1978,7 +2061,7 @@ fn parse_for(cur: &mut Lines, header: &str) -> Result<Stmt, VimlError> {
     let iter = parse_cmd_expr(strip_legacy_trailing_comment(header[idx + 4..].trim()))?;
     let (body, term) = parse_block(cur, &["endfor"])?;
     if term.is_none() {
-        if eof_closes_block() {
+        if eof_closes_block("E170: Missing :endfor") {
             let body = run_once(body, cur.prev_line_no());
             return Ok(Stmt::For { vars, iter, body });
         }
@@ -2670,13 +2753,13 @@ fn parse_try(cur: &mut Lines) -> Result<Stmt, VimlError> {
             Some((ref c, _)) if c == "finally" => {
                 let (b, t) = parse_block(cur, &["endtry"])?;
                 finally = Some(b);
-                if t.is_none() && !eof_closes_block() {
+                if t.is_none() && !eof_closes_block("E600: Missing :endtry") {
                     return Err(VimlError::msg("E600: Missing :endtry"));
                 }
                 break;
             }
             Some((ref c, _)) if c == "endtry" => break,
-            None if eof_closes_block() => break,
+            None if eof_closes_block("E600: Missing :endtry") => break,
             None => return Err(VimlError::msg("E600: Missing :endtry")),
             Some((ref c, ref rest)) => return Err(e_unmatched_block(c, &format!("{c} {rest}"))),
         }

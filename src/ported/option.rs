@@ -638,6 +638,9 @@ pub fn do_set(args: &str, opt_flags: i32) {
         out
     };
     // c: `do_set_option()` — one argument, `arg` running to the end of the line.
+    // The `opt?` values the argument being processed showed (c: `did_show`).
+    let shown: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+    let mut did_show = false;
     let do_set_option = |arg: &str| -> Option<String> {
         const E474: &str = "E474: Invalid argument";
         const E488: &str = "E488: Trailing characters";
@@ -711,6 +714,11 @@ pub fn do_set(args: &str, opt_flags: i32) {
         // c: "print value" — `opt?`, or a bare number/string option.
         if nextchar == b'?' || (prefix == 0 && !b"=:&<".contains(&nextchar) && *kind != Kind::Bool)
         {
+            // c: showoneopt() — shown before the trailing-text check below, so
+            // `set ts!` displays `tabstop=8` and then reports E488.
+            shown
+                .borrow_mut()
+                .push(showoneopt(canon, *kind, opt_idx, varp, opt_flags));
             if nextchar != b'?' && nextchar != 0 && !white(afterchar) {
                 return Some(E488.to_string());
             }
@@ -888,6 +896,12 @@ pub fn do_set(args: &str, opt_flags: i32) {
     while i < b.len() {
         let start = i;
         let errmsg = do_set_option(&args[i..]);
+        // c: each value goes on the message line as it is shown — the first
+        // after `gotocmdline()`, each next one after `msg_putchar('\n')`.
+        for text in shown.borrow_mut().drain(..) {
+            crate::fusevm_bridge::set_show_option(&text, !did_show);
+            did_show = true;
+        }
         // c: "Advance to next argument: skip until a blank found, taking care of
         // backslashes; skip blanks."
         while i < b.len() && !white(b[i]) {
@@ -906,6 +920,60 @@ pub fn do_set(args: &str, opt_flags: i32) {
             return;
         }
     }
+    // c: do_set() `theend:` — "After displaying option values in silent mode."
+    if did_show {
+        crate::fusevm_bridge::set_show_end();
+    }
+}
+
+/// Port of `showoneopt()` (vim `option.c:6462`) — the text `:set opt?` shows for
+/// one option: `no`/`  ` and the name for a boolean, `  name=value` otherwise,
+/// with the value as `option_value2string()` renders it (`'wildchar'` as a key
+/// name, a `P_EXPAND` value with `$HOME` as `~`, unprintable characters `^X`).
+fn showoneopt(canon: &str, kind: Kind, opt_idx: usize, varp: OptVarp, opt_flags: i32) -> String {
+    use crate::ported::eval::typval::{tv_get_number_chk, tv_get_string};
+    let val = if opt_flags == 0 {
+        get_option_value(canon)
+    } else {
+        option_optval::optval_as_tv(optval_from_varp(opt_idx, varp), true)
+    };
+    if kind == Kind::Bool {
+        let on = tv_get_number_chk(&val, None) != 0;
+        return format!("{}{canon}", if on { "  " } else { "no" });
+    }
+    let mut value = tv_get_string(&val);
+    if matches!(canon, "wildchar" | "wildcharm") {
+        // c: wc_use_keyname() — a key with a `<Name>` is shown by it, any other
+        // character through transchar().
+        let n = tv_get_number_chk(&val, None);
+        let key =
+            crate::ported::keycodes::get_special_key_name(char::from_u32(n as u32).unwrap_or('\0'));
+        value = if key.starts_with('<') && !key.starts_with("<C-") {
+            key
+        } else {
+            String::from_utf8_lossy(&crate::ported::charset::transchar_buf(n as i32)).into_owned()
+        };
+    }
+    let flags = STRING_FLAGS
+        .iter()
+        .find(|(n, _)| *n == canon)
+        .map_or(0, |(_, f)| *f);
+    if flags & P_EXPAND != 0 {
+        // c: home_replace() — `$HOME` starting an item is shown as `~`.
+        if let Some(home) = std::env::var("HOME").ok().filter(|h| !h.is_empty()) {
+            value = value
+                .split(',')
+                .map(|item| match item.strip_prefix(home.as_str()) {
+                    Some(rest) if rest.is_empty() || rest.starts_with('/') => format!("~{rest}"),
+                    _ => item.to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+        }
+    }
+    let mut shown = crate::vimstr::VimStr::new();
+    crate::ported::message::msg_outtrans(value.as_bytes(), &mut shown);
+    format!("  {canon}={}", String::from_utf8_lossy(shown.as_bytes()))
 }
 
 #[cfg(test)]

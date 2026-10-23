@@ -1,0 +1,21 @@
+1
+E121: Undefined variable: nosuch
+{}
+E121: Undefined variable: nosuch
+{}
+E121: Undefined variable: nosuch
+{'k': 1}
+E730: Using a List as a String
+{'k': 1}
+E730: Using a List as a String
+[1, 2]
+E684: List index out of range: 5
+[1, 2]
+E684: List index out of range: 0
+[1, 2]
+E121: Undefined variable: nosuch
+[1, 2]
+Vim(let):E121: Undefined variable: nosuch
+{'k': 1}
+E684: List index out of range: 0
+{'f': 7, 'k': 1}

@@ -3807,6 +3807,52 @@ pub fn redir_silenced_emsg(s: &str) {
     echo_write(&line);
 }
 
+thread_local! {
+    /// The `:set opt?` text not yet written — see [`set_show_option`].
+    static SET_SHOW_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Show one `:set opt?` value (`showoneopt()`), `first` for the first value of
+/// the `:set` command.
+///
+/// c: in silent Ex mode the value is an informative message (`info_message`), so
+/// `mch_msg()` writes it to stdout through stdio — BUFFERED, until `do_set()`
+/// ends with an `out_flush()` (or the process exits) — while the line breaks
+/// around it are written to stderr at once: `gotocmdline()` breaks the message
+/// line before the first value when there is text on it, and `msg_putchar('\n')`
+/// precedes each further one. Merged, `echo 'a' | set ts? sw?` reads
+/// `a`, `\n`, `\n`, `  tabstop=8  shiftwidth=8`, `\n`. Only the plain display
+/// path shows it; a capture (`execute()`, an embedding host) sees nothing.
+pub fn set_show_option(text: &str, first: bool) {
+    if message::msg_silent.with(|m| m.get()) != 0
+        || ECHO_SINK.with(|s| s.borrow().is_some())
+        || EXECUTE_DEPTH.with(|d| d.get()) > 0
+    {
+        return;
+    }
+    if !first || MSG_COL.with(|c| c.get()) {
+        display_write(b"\n");
+    }
+    SET_SHOW_BUF.with(|b| b.borrow_mut().extend_from_slice(text.as_bytes()));
+    // The value is on the message line, buffered or not: an error after it
+    // (`set ts!` is E488 once shown) starts a new line.
+    MSG_COL.with(|c| c.set(true));
+}
+
+/// c: `do_set()` `theend:` after values were shown — `msg_putchar('\n')` as an
+/// informative message, then `out_flush()`: the buffered values and that newline
+/// are written. The message line still counts as written on, so the next `:echo`
+/// starts a new line.
+pub fn set_show_end() {
+    let mut pending = SET_SHOW_BUF.with(|b| std::mem::take(&mut *b.borrow_mut()));
+    if pending.is_empty() {
+        return;
+    }
+    pending.push(b'\n');
+    display_write(&pending);
+    MSG_COL.with(|c| c.set(true));
+}
+
 /// Close the message line if the run left text on it. Vim itself never writes
 /// that final newline — in `-es` mode its last line ends without one — but a
 /// command-line interpreter that leaves the shell prompt mid-line is not usable,
@@ -3814,6 +3860,12 @@ pub fn redir_silenced_emsg(s: &str) {
 /// spacing *between* messages. Called from the binary's exit path and after each
 /// REPL turn.
 pub fn msg_flush_line() {
+    // c: what `:set opt?` left in the stdio buffer goes out when the process
+    // exits (see [`set_show_option`]).
+    let pending = SET_SHOW_BUF.with(|b| std::mem::take(&mut *b.borrow_mut()));
+    if !pending.is_empty() {
+        display_write(&pending);
+    }
     if MSG_COL.with(|c| c.get()) {
         MSG_COL.with(|c| c.set(false));
         echo_write(b"\n");

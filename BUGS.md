@@ -7966,7 +7966,7 @@ the corrected value as vim does (`let &ts = -1` is `E487` and leaves 8, `let
 Neovim accepts it — vim is followed. Parity case: `option_value_bounds.vim`.
 
 ### R58-O. Measured this round, still open
-- `:set` shows nothing for `opt?`, a bare number/string option or `set ts!`
+- ✅ CLOSED in R62-4 (the display; "Last set from" under `verbose` stays open, R62-O). `:set` shows nothing for `opt?`, a bare number/string option or `set ts!`
   (which vim shows, then reports `E488`): the `-es` message stream it writes,
   whose newlines land on stderr and the text on stdout, is not modelled.
   `E518` for an unknown name is not reported because the option table is
@@ -7981,8 +7981,8 @@ Neovim accepts it — vim is followed. Parity case: `option_value_bounds.vim`.
   scope read is a copy.
 - A lambda whose body fails returns the partly evaluated value (`{-> 1 +
   nosuch}()` is `0`, `{-> [][0]}()` is `[]`); vimlrs returns `-1`.
-- `let d[[]] .= 1` reports `E730` twice (once for the read, once for the store).
-- `if nosuch ) | endif`: vim swallows `| endif` into the trailing text and
+- ✅ CLOSED in R62-1. `let d[[]] .= 1` reports `E730` twice (once for the read, once for the store).
+- ✅ CLOSED in R62-2 and R62-3. `if nosuch ) | endif`: vim swallows `| endif` into the trailing text and
   reports `E171`; vimlrs does not.
 
 ---
@@ -8148,3 +8148,74 @@ cb=exclude:a\\|b` is `exclude:a|b`. Recorded in
   the byte arrives as U+FFFD and is reported as `<ef>`.
 - Under `LANG=bogus` (no `LC_ALL`) vim's `v:ctype` is `UTF-8` on macOS; vimlrs
   answers `C`.
+
+## R62 — failed `:let` right-hand sides, conditionals open at end of file, `:set opt?`
+
+Oracle: `/opt/homebrew/Cellar/vim/9.2.1200/bin/vim` (9.2, patches 1-1200),
+`-es -u NONE -i NONE -N -c 'verbose source CASE'`.
+
+### R62-1. A subscripted `:let` stored a failed right-hand side — ✅ FIXED
+`let d['k'] = nosuch` stored `v:null` (`{'k': v:null}`), `let d.k .= nosuch`
+stored `0`, and `let d[[]] .= 1` / `let l[5] += 1` reported the read's error and
+then again for the store. `ex_let` skips the assignment when `eval0()` fails,
+so the `Index` and `Range` targets now evaluate the right-hand side under an
+error mark (`VIML_ERR_MARK` / `VIML_ERR_SINCE`, the plain `:let`'s guard) and
+branch past the store. An error inside a called function's body does not count
+(`let d.f = F()` still stores `F()`'s value, as `call_func()` returns OK).
+Recorded in `tests/parity_cases/let_subscript_rhs_fail.vim`.
+
+### R62-2. A conditional left open at the end of a sourced file was dropped — ✅ FIXED
+`if 1` with no `:endif` failed the strict parse and the tolerant fallback
+skipped the whole block silently, so neither its lines nor `E171` appeared.
+`do_cmdline()` runs the lines and then reports the innermost open conditional
+(`E171: Missing :endif`, `E170: Missing :endwhile`/`:endfor`, `E600: Missing
+:endtry`); an open loop's body runs once. In a sourced file (`EX_LINES`) end of
+input now closes the block as on a command line, and `parse_program` appends the
+report as a statement of its own after the file's last line. Recorded in
+`tests/parity_cases/if_open_at_eof.vim`, `try_open_at_eof.vim`,
+`for_open_at_eof.vim`, `if_failed_open_at_eof.vim`.
+
+### R62-3. An expression that did not parse let the `|` after it start a command — ✅ FIXED
+`if nosuch ) | endif` closed the `:if` with the `:endif` on its own line; in vim
+the `:if` finds its next command only after its expression parses (`eval0`'s
+`ends_excmd` check), so the `| endif` is part of the failed argument and the
+`:if` stays open (`check_nextcmd()` of where the parse stopped). The bar-split
+now keeps the rest of the line with an `:if`/`:elseif`/`:while`/`:call`/
+`:return`/`:throw`/`:eval` whose expression has trailing text (`E488`), and
+with an `:echo`-family/`:execute` argument that stops before the bar (`E488`, or
+an `E15` naming text left in the segment). An incomplete expression (`if 1 + |
+echo`) stops at the bar, and the next command still runs. Recorded in `tests/parity_cases/expr_cmd_swallows_bar.vim`.
+
+### R62-4. `:set opt?` showed nothing — ✅ FIXED
+Ported `showoneopt()`: `  name=value`, `no`/`  ` + name for a boolean,
+`'wildchar'` by key name, `$HOME` as `~` in a `P_EXPAND` value. The silent-Ex
+stream is modelled as vim writes it: the value is buffered (stdio stdout) until
+`:set` ends (`theend:`'s `out_flush()`), while the line break before each value
+is written at once; a `:set` that fails after showing a value (`set ts!` is
+E488, `set ts nosuch` E518) leaves it for the next display or for the exit.
+Recorded in `tests/parity_cases/set_show_values.vim`.
+
+### Existing test changed
+`examples/tolerant_block_jit_crash.vim` forced the tolerant fallback with an
+unmatched `if a`; vim reports `E171` there, which the example's contract (exit 0,
+no `E<num>:`) forbade. Its trigger is now an `enum` block (accepted by vim 9.2,
+not parsed by vimlrs), which keeps the declarations-then-tolerant shape the
+crash needed; vim prints nothing for the new form. Own commit.
+
+### R62-O. Measured this round, still open
+- Under `verbose` (the harness's `verbose source`), `:set opt?` of an option the
+  script set adds `\n\tLast set from {script} line {n}`; vimlrs tracks neither
+  where an option was set nor a `'verbose'` level.
+- `echo d[nosuch]` reports `E716: Key not present in Dictionary: "v:null"` after
+  the `E121`: the failed index still indexes (`v:null` and a failed value share
+  one VM representation). `let d[nosuch] .= 1` shows the same extra `E716`.
+- `let l[0:1] += [1]` is `E711` in vim after the first item is updated (`[2,
+  2]`); vimlrs leaves the list and reports nothing.
+- `if 1 | return 1 ) | endif` matches only because the parse fails; a command
+  that fails at run time before finding its next command (`:return` outside a
+  function with a valid expression) still lets the rest of the line run.
+- `echo [1, | echo 3` is `E15: Invalid expression: "| echo 3"` in vim;
+  vimlrs reports `E697: Missing end of List ']': ` (pre-existing).
+- Still open from R61-O: `set enc=foo` E474 (vim's `enc_canon_table`/alias
+  table differ from the vendored Neovim one this crate ports), `set t_zz` E846,
+  the lambda partial value, the verbose `not found in 'runtimepath'` messages.

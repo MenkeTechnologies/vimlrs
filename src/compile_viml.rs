@@ -2982,6 +2982,25 @@ impl Compiler {
         self.emit(Op::Pop);
     }
 
+    /// Evaluate a `:let` right-hand side under an error mark and branch out when
+    /// it failed, leaving the value on the stack for the store that follows.
+    /// Pair with [`Self::rhs_guard_end`], which the store's result reaches too.
+    fn rhs_guarded(&mut self, expr: &Expr) -> Result<usize, VimlError> {
+        self.emit(Op::CallBuiltin(h::VIML_ERR_MARK, 0));
+        self.emit(Op::Pop);
+        self.expr(expr)?;
+        self.emit(Op::CallBuiltin(h::VIML_ERR_SINCE, 0));
+        Ok(self.emit(Op::JumpIfTrue(0)))
+    }
+
+    /// The end of a [`Self::rhs_guarded`] store: either path leaves one value
+    /// (the store's result, or the failed right-hand side), which is dropped.
+    fn rhs_guard_end(&mut self, j_failed: usize) {
+        let here = self.b.current_pos();
+        self.b.patch_jump(j_failed, here);
+        self.emit(Op::Pop);
+    }
+
     /// `:let {name} = {expr}` for a plain variable target.
     fn let_var(&mut self, name: &str, expr: &Expr) -> Result<(), VimlError> {
         // Vim abandons a command whose expression raised an error, so a
@@ -3282,13 +3301,17 @@ impl Compiler {
                 // The error count before the lval is resolved rides along: an
                 // error there (`E121` for an undefined base) ends the `:let`
                 // in `get_lval`, before any write is attempted.
-                self.expr(expr)?;
+                // A failed right-hand side assigns nothing either (`ex_let`: the
+                // `eval0()` FAIL skips `ex_let_vars`): `let d[[]] = nosuch` is
+                // E121 alone, and `let d[[]] .= 1` reports the E730 of its read
+                // once instead of again for the store.
+                let j_failed = self.rhs_guarded(expr)?;
                 self.emit(Op::CallBuiltin(h::VIML_ERR_COUNT, 0));
                 self.expr(base)?;
                 self.expr(index)?;
                 self.load_str(src.as_deref().unwrap_or(""));
                 self.emit(Op::CallBuiltin(h::VIML_SETINDEX, 5));
-                self.emit(Op::Pop);
+                self.rhs_guard_end(j_failed);
                 Ok(())
             }
             LetTarget::Range {
@@ -3300,7 +3323,7 @@ impl Compiler {
                 // `let base[idx1:idx2] = list` — push the source list, base, idx1
                 // (default 0), idx2 (Undef → "to the end"); the bridge assigns
                 // the range in place via tv_list_assign_range.
-                self.expr(expr)?;
+                let j_failed = self.rhs_guarded(expr)?;
                 self.emit(Op::CallBuiltin(h::VIML_ERR_COUNT, 0));
                 self.expr(base)?;
                 match idx1 {
@@ -3317,7 +3340,7 @@ impl Compiler {
                 }
                 self.load_str(src.as_deref().unwrap_or(""));
                 self.emit(Op::CallBuiltin(h::VIML_SETRANGE, 6));
-                self.emit(Op::Pop);
+                self.rhs_guard_end(j_failed);
                 Ok(())
             }
             LetTarget::Register(c) => {
