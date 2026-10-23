@@ -14,6 +14,18 @@ use crate::fusevm_bridge as h;
 use crate::viml_ast::{ArithOp, Block, Expr, ForVars, LetTarget, Stmt, UnaryOp, UnletArg};
 use crate::viml_lexer::{CaseFlag, CmpOp, VimlError};
 
+/// Whether `name` is one of this compiler's own temporaries — the hidden
+/// `\x01unpack_N` / `\x01for_list_N` / `\x01for_idx_N` / `\x01const_N` names a
+/// `:let [a, b] = …` value or a `:for` list and index is stored under. They are
+/// stored in the running scope's dict (`g:`, or `l:` inside a function, so
+/// recursion keeps each activation's own), but they are not script variables:
+/// no script name can start with a control character, so nothing a script
+/// writes can collide with or read one, and a scope read whole
+/// (`vars::find_var`'s snapshot) does not list them.
+pub fn is_compiler_temp(name: &str) -> bool {
+    name.starts_with('\u{1}')
+}
+
 /// A compiled user function: its name, parameter names, and body chunk.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct UserFuncDef {
