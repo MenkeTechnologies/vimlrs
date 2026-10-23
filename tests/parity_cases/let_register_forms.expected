@@ -1,0 +1,18 @@
+1
+pat pat v
+xx
+E730: Using a List as a String
+[]
+E731: Using a Dictionary as a String
+V
+V 'xy
+'
+E354: Invalid register name: ':'
+E354: Invalid register name: '.'
+E354: Invalid register name: '%'
+E354: Invalid register name: '?'
+0
+1+1 2 1+1
+1+1+1 3
+E121: Undefined variable: nosuch
+ after

@@ -1,0 +1,11 @@
+1
+E741: Value is locked: map() argument
+[1, 2]
+[2, 3]
+E741: Value is locked: map() argument
+{'a': 1}
+E741: Value is locked: add() argument
+[1, 2]
+E741: Value is locked: extend() argument
+{'a': 1}
+[10, 20]

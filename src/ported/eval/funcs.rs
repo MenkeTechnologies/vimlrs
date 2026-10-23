@@ -4230,7 +4230,27 @@ pub fn f_getreg(argvars: &[typval_T], rettv: &mut typval_T) {
         None => return,
     };
     let return_list = argvars.len() > 2 && tv_get_number_chk(&argvars[2], None) != 0;
-    let lines = get_reg_contents(regname).unwrap_or_default();
+    let expr_src = argvars.len() > 1 && tv_get_number_chk(&argvars[1], None) != 0;
+    let mut lines = get_reg_contents(regname).unwrap_or_default();
+    // c: without `kGRegExprSrc` the `=` register is `get_expr_line()` — the
+    // source EVALUATED (`eval_to_string(expr_copy, true, false)`), returned
+    // as-is once ten evaluations are nested.
+    if regname == '=' && !expr_src {
+        thread_local! {
+            static nested: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+        }
+        if let Some(src) = lines.first().cloned() {
+            if nested.with(|n| n.get()) < 10 {
+                nested.with(|n| n.set(n.get() + 1));
+                let errs = crate::ported::message::err_count.with(|e| e.get());
+                let rv = crate::ported::eval::eval_to_string_eap(&src, true);
+                nested.with(|n| n.set(n.get() - 1));
+                // A failed evaluation is NULL: `getreg('=')` is then "".
+                let failed = crate::ported::message::err_count.with(|e| e.get()) != errs;
+                lines = rv.filter(|_| !failed).map(|s| vec![s]).unwrap_or_default();
+            }
+        }
+    }
     if return_list {
         let l = tv_list_alloc_ret(rettv, 0);
         for line in lines {
@@ -5462,7 +5482,7 @@ pub fn f_tabpagebuflist(_argvars: &[typval_T], rettv: &mut typval_T) {
 thread_local! {
     /// The last search pattern (`@/` / `spats[0].pat` in search.c), set by
     /// `search()`/`searchpos()` and read by `searchcount()`.
-    static LAST_SEARCH: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    pub(crate) static LAST_SEARCH: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
 }
 
 /// Find the first byte-column match of `pat` in `line` at or after byte offset
@@ -5734,14 +5754,21 @@ pub fn f_searchpairpos(argvars: &[typval_T], rettv: &mut typval_T) {
 pub fn f_searchdecl(_argvars: &[typval_T], rettv: &mut typval_T) {
     *rettv = typval_T::from(1 as varnumber_T);
 }
-/// Port of `f_getcharsearch()` — no prior `f`/`t` search → `{char:"",
-/// forward:1, until:0}` (the `last_csearch*()` defaults).
+/// Port of `f_getcharsearch()` (funcs.c:2073) — the `f`/`t` search state kept by
+/// `search.c` (`last_csearch*()`), which `setcharsearch()` writes.
 pub fn f_getcharsearch(_argvars: &[typval_T], rettv: &mut typval_T) {
+    use crate::ported::search::{last_csearch, last_csearch_forward, last_csearch_until};
     let d = tv_dict_alloc_ret(rettv);
     let mut db = d.borrow_mut();
-    tv_dict_add_str(&mut db, "char", "");
-    tv_dict_add_nr(&mut db, "forward", 1);
-    tv_dict_add_nr(&mut db, "until", 0);
+    // c:2079 tv_dict_add_str(dict, S_LEN("char"), last_csearch()); — bytes, not
+    // text: the buffer can hold a stale trailing byte of an earlier character.
+    tv_dict_add_tv(
+        &mut db,
+        "char",
+        typval_T::from(crate::vimstr::VimStr::from(last_csearch())),
+    );
+    tv_dict_add_nr(&mut db, "forward", last_csearch_forward() as varnumber_T);
+    tv_dict_add_nr(&mut db, "until", last_csearch_until() as varnumber_T);
 }
 
 // ── Interactive input builtins (stdin-backed standalone equivalent) ──
@@ -6428,10 +6455,47 @@ pub fn f_cursor(argvars: &[typval_T], rettv: &mut typval_T) {
 pub fn f_setcursorcharpos(argvars: &[typval_T], rettv: &mut typval_T) {
     f_cursor(argvars, rettv);
 }
-/// Port of `f_setcharsearch()` — sets the `f`/`t` search state we do not track
-/// standalone → no-op (rettv stays 0, as the C sets no return value).
-pub fn f_setcharsearch(_argvars: &[typval_T], rettv: &mut typval_T) {
+/// Port of `f_setcharsearch()` (funcs.c:6486) — set the `f`/`t` search state that
+/// `getcharsearch()` reads. The return value is the C's untouched rettv, 0.
+pub fn f_setcharsearch(argvars: &[typval_T], rettv: &mut typval_T) {
+    use crate::ported::search::{
+        set_csearch_direction, set_csearch_until, set_last_csearch, BACKWARD, FORWARD,
+    };
     *rettv = typval_T::from(0 as varnumber_T);
+    // c:6488 if (tv_check_for_dict_arg(argvars, 0) == FAIL) return;
+    if tv_check_for_dict_arg(argvars, 0) == FAIL {
+        return;
+    }
+    // c:6492 dict_T *d = argvars[0].vval.v_dict; if (d == NULL) return;
+    let v_dict(Some(d)) = &argvars[0].vval else {
+        return;
+    };
+    let d = d.borrow();
+    // c:6497 char *const csearch = tv_dict_get_string(d, "char", false);
+    if let Some(di) = tv_dict_find(&d, "char") {
+        let csearch = tv_get_string_buf_chk(di).unwrap_or_default();
+        let s = csearch.as_bytes();
+        // c:6499 int c = utf_ptr2char(csearch);
+        let c = if s.is_empty() {
+            0
+        } else {
+            crate::ported::mbyte::utf_ptr2char(s)
+        };
+        // c:6500 set_last_csearch(c, csearch, utfc_ptr2len(csearch));
+        set_last_csearch(c, s, crate::ported::mbyte::utfc_ptr2len(s));
+    }
+    // c:6503 di = tv_dict_find(d, S_LEN("forward"));
+    if let Some(di) = tv_dict_find(&d, "forward") {
+        set_csearch_direction(if tv_get_number(di) != 0 {
+            FORWARD
+        } else {
+            BACKWARD
+        });
+    }
+    // c:6508 di = tv_dict_find(d, S_LEN("until"));
+    if let Some(di) = tv_dict_find(&d, "until") {
+        set_csearch_until(i32::from(tv_get_number(di) != 0));
+    }
 }
 /// Port of `f_settagstack()` — no window tag stack to mutate → accepted no-op
 /// (0, the C success return).

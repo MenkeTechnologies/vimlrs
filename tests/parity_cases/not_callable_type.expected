@@ -1,0 +1,8 @@
+1
+E1085: Not a callable type: F
+E1085: Not a callable type: G
+E1085: Not a callable type: g:H
+E1085: Not a callable type: s:x
+E1085: Not a callable type: L
+0
+E117: Unknown function: NoSuchFunc

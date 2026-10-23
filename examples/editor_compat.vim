@@ -22,7 +22,7 @@ call assert_equal(-1, screenchar(1, 1))
 call assert_equal([], synstack(1, 1))
 call assert_equal(0, synID(1, 1, 1))
 call assert_equal(['', ''], spellbadword('teh'))
-call assert_equal({'char': '', 'forward': 1, 'until': 0}, getcharsearch())
+call assert_equal({'char': '', 'forward': 1, 'until': 1}, getcharsearch())
 
 " Cursor setters succeed (return 0) on the in-memory buffer.
 call assert_equal(0, setpos('.', [0, 1, 1, 0]))

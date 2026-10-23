@@ -106,6 +106,9 @@ thread_local! {
     /// `static yankreg_T *y_previous = NULL;` — ptr to last written yankreg,
     /// stored as an index into `y_regs` (`None` == NULL).
     static Y_PREVIOUS: Cell<Option<usize>> = const { Cell::new(None) };
+    /// c: `static char *expr_line = NULL;` (eval.c) — the source text of the
+    /// `=` register, which `:let @= = '1+1'` sets and `@=` reads back.
+    static expr_line: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 // ── register.h inline helpers ───────────────────────────────────────────────
@@ -337,10 +340,13 @@ fn get_reg_wrap_one_line(s: &str) -> Vec<String> {
 pub fn get_reg_contents(regname: char) -> Option<Vec<String>> {
     let mut regname = regname as i32;
 
-    // c: Don't allow using an expression register inside an expression; the
-    // expr register has no substrate here → NULL.
+    // c: `if (regname == '=') { … if (flags & kGRegExprSrc) return
+    // get_reg_wrap_one_line(get_expr_line_src(), flags); … }` — the source text.
+    // An unset register is NULL.
     if regname == '=' as i32 {
-        return None;
+        return expr_line
+            .with(|e| e.borrow().clone())
+            .map(|s| get_reg_wrap_one_line(&s));
     }
 
     if regname == '@' as i32 {
@@ -361,6 +367,12 @@ pub fn get_reg_contents(regname: char) -> Option<Vec<String>> {
         // c: case '_': *argp = ""; return true; → get_reg_wrap_one_line("").
         return Some(get_reg_wrap_one_line(""));
     }
+    // c: `case '/': *argp = last_search_pat(); return true;` — NULL (never
+    // searched) is a NULL result, which reads as "".
+    if regname == '/' as i32 {
+        let pat = crate::ported::eval::funcs::LAST_SEARCH.with(|p| p.borrow().clone());
+        return (!pat.is_empty()).then(|| get_reg_wrap_one_line(&pat));
+    }
 
     let i = get_yank_register(regname, YREG_PUT);
     Y_REGS.with(|r| r.borrow()[i].y_array.clone())
@@ -371,7 +383,14 @@ pub fn get_reg_contents(regname: char) -> Option<Vec<String>> {
 /// it. Returns `(reg index, old_y_previous)` or `None` on an invalid name.
 fn init_write_reg(name: i32, must_append: bool) -> Option<(usize, Option<usize>)> {
     if !valid_yank_reg(name, true) {
-        // c: emsg_invreg(name); — reported by the builtin bridge, not here.
+        // c: emsg_invreg(name) — `semsg(_("E354: Invalid register name: '%s'"),
+        // transchar_buf(NULL, name))`.
+        let mut t = crate::vimstr::VimStr::new();
+        crate::ported::message::msg_outtrans(&[name as u8], &mut t);
+        crate::ported::message::semsg(&format!(
+            "E354: Invalid register name: '{}'",
+            t.to_string_lossy()
+        ));
         return None;
     }
 
@@ -589,8 +608,22 @@ fn write_reg_contents_ex(
     yank_type: Option<MotionType>,
     block_len: colnr_T,
 ) {
-    // c: '/' set_last_search_pat, '#' altfile, '=' expr_line — no substrate here.
-    if name == '/' as i32 || name == '#' as i32 || name == '=' as i32 {
+    // c: `if (name == '/') { set_last_search_pat(str, RE_SEARCH, true, true);
+    // return; }`
+    if name == '/' as i32 {
+        crate::ported::eval::funcs::LAST_SEARCH
+            .with(|p| *p.borrow_mut() = String::from_utf8_lossy(str).into_owned());
+        return;
+    }
+    // c: `if (name == '=') { … set_expr_line(xstrnsave(str, len)); return; }` —
+    // appending (`:let @= .= …`) is handled by the caller, which reads the
+    // source back first.
+    if name == '=' as i32 {
+        expr_line.with(|e| *e.borrow_mut() = Some(String::from_utf8_lossy(str).into_owned()));
+        return;
+    }
+    // c: '#' sets the alternate file — no buffer list here.
+    if name == '#' as i32 {
         return;
     }
 
@@ -626,6 +659,8 @@ pub fn write_reg_contents(name: char, value: &str, mtype: MotionType, append: bo
     // width is passed as `block_len` so both widths agree.
     let (yt, block_len) = match mtype {
         MotionType::BlockWise(w) => (Some(MotionType::BlockWise(w)), w),
+        // c: `kMTUnknown` — `str_to_reg` detects the type from a trailing NL/CR.
+        MotionType::Unknown => (None, 0),
         other => (Some(other), 0),
     };
     write_reg_contents_ex(name as i32, value.as_bytes(), append, yt, block_len);

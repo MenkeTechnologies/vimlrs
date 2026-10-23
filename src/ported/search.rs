@@ -447,3 +447,69 @@ mod tests {
         assert_eq!((pos.lnum, pos.col), (3, 0));
     }
 }
+
+// ── the `f`/`t`/`;`/`,` character-search state (search.c:108-112) ──────────
+
+/// c: `grid_defs.h` — `MAX_SCHAR_SIZE`, the byte size of one screen cell's text.
+const MAX_SCHAR_SIZE: usize = 32;
+
+thread_local! {
+    /// c:108 `static uint8_t lastc[2] = { NUL, NUL };` — last character searched for.
+    static lastc: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+    /// c:109 `static Direction lastcdir = FORWARD;`
+    static lastcdir: std::cell::Cell<i32> = const { std::cell::Cell::new(FORWARD) };
+    /// c:110 `static bool last_t_cmd = true;`
+    static last_t_cmd: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    /// c:111 `static char lastc_bytes[MAX_SCHAR_SIZE + 1];` — a fixed buffer that is
+    /// only partly overwritten: `set_last_csearch` copies `len` bytes and leaves the
+    /// rest, so a one-byte character set after a two-byte one still reads the old
+    /// trailing byte (`'x<a4>'` after `'ä'`), as it does in vim.
+    static lastc_bytes: RefCell<[u8; MAX_SCHAR_SIZE + 1]> = const { RefCell::new([0; MAX_SCHAR_SIZE + 1]) };
+    /// c:112 `static int lastc_bytelen = 1;`
+    static lastc_bytelen: std::cell::Cell<i32> = const { std::cell::Cell::new(1) };
+}
+
+/// Port of `last_csearch()` (search.c:446) — `lastc_bytes` as a C string, i.e. up
+/// to its first NUL.
+pub fn last_csearch() -> Vec<u8> {
+    lastc_bytes.with(|b| {
+        let b = b.borrow();
+        let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
+        b[..end].to_vec()
+    })
+}
+
+/// Port of `last_csearch_forward()` (search.c:452).
+pub fn last_csearch_forward() -> i32 {
+    i32::from(lastcdir.with(|d| d.get()) == FORWARD)
+}
+
+/// Port of `last_csearch_until()` (search.c:457).
+pub fn last_csearch_until() -> i32 {
+    i32::from(last_t_cmd.with(|t| t.get()))
+}
+
+/// Port of `set_last_csearch()` (search.c:462).
+pub fn set_last_csearch(c: i32, s: &[u8], len: i32) {
+    lastc.with(|l| l.set(c as u8));
+    lastc_bytelen.with(|l| l.set(len));
+    lastc_bytes.with(|b| {
+        let mut b = b.borrow_mut();
+        if len != 0 {
+            let n = (len as usize).min(s.len()).min(MAX_SCHAR_SIZE);
+            b[..n].copy_from_slice(&s[..n]);
+        } else {
+            *b = [0; MAX_SCHAR_SIZE + 1];
+        }
+    });
+}
+
+/// Port of `set_csearch_direction()` (search.c:474).
+pub fn set_csearch_direction(cdir: i32) {
+    lastcdir.with(|d| d.set(cdir));
+}
+
+/// Port of `set_csearch_until()` (search.c:479).
+pub fn set_csearch_until(t_cmd: i32) {
+    last_t_cmd.with(|t| t.set(t_cmd != 0));
+}

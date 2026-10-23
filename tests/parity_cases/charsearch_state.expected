@@ -1,0 +1,9 @@
+1
+{'forward': 1, 'char': '', 'until': 1}
+{'forward': 0, 'char': 'a', 'until': 0}
+{'forward': 0, 'char': 'a', 'until': 0}
+{'forward': 0, 'char': 'x<a4>', 'until': 0} 2
+{'forward': 0, 'char': '', 'until': 0}
+{'forward': 1, 'char': '5', 'until': 1}
+E1206: Dictionary required for argument 1
+0

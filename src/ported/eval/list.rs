@@ -446,10 +446,27 @@ fn filter_map_list(
         .iter()
         .map(|it| it.li_tv.clone())
         .collect();
+    // c:294 the List is locked while the expression runs, so the callback
+    // cannot change it under the walk (`map(l, 'add(l, 3)')` is `E741: Value is
+    // locked: add() argument`).
+    let prev_lock = l.borrow().lv_lock;
+    if prev_lock == VarLockStatus::VAR_UNLOCKED {
+        l.borrow_mut().lv_lock = VarLockStatus::VAR_LOCKED;
+    }
     let mut out: Vec<listitem_T> = Vec::with_capacity(items.len());
     let mut i = 0;
     let mut failed = false;
     while i < items.len() {
+        // c:301 `if (filtermap == FILTERMAP_MAP && value_check_lock(
+        // TV_LIST_ITEM_TV(li)->v_lock, arg_errmsg, TV_TRANSLATE)) break;` —
+        // `lockvar l` locks the items as well as the List, so map() stops at
+        // the first one (`E741: Value is locked: map() argument`).
+        if filtermap == FILTERMAP_MAP
+            && value_check_lock(items[i].v_lock, Some(arg_errmsg), TV_TRANSLATE)
+        {
+            failed = true;
+            break;
+        }
         let key = nr_tv(i as varnumber_T);
         match filter_map_one(&items[i], &key, expr, filtermap) {
             None => {
@@ -480,6 +497,8 @@ fn filter_map_list(
         }
         i += 1;
     }
+    // c:332 tv_list_set_lock(l, prev_lock);
+    l.borrow_mut().lv_lock = prev_lock;
     // c: on failure the loop stops, leaving later items unprocessed/original.
     if failed && matches!(filtermap, FILTERMAP_MAP | FILTERMAP_FILTER) {
         for it in items.iter().skip(i) {
@@ -525,12 +544,24 @@ fn filter_map_dict(
     } else {
         None
     };
+    // c:103 the Dict is locked while the expression runs.
+    let prev_lock = d.borrow().dv_lock;
+    if prev_lock == VarLockStatus::VAR_UNLOCKED {
+        d.borrow_mut().dv_lock = VarLockStatus::VAR_LOCKED;
+    }
     let keys: Vec<String> = d.borrow().dv_hashtab.keys().cloned().collect();
     for k in keys {
         let val = match d.borrow().dv_hashtab.get(&k) {
             Some(v) => v.clone(),
             None => continue,
         };
+        // c:108 `if (filtermap == FILTERMAP_MAP && (value_check_lock(
+        // di->di_tv.v_lock, …) || var_check_ro(di->di_flags, …))) break;`
+        if filtermap == FILTERMAP_MAP
+            && value_check_lock(val.v_lock, Some(arg_errmsg), TV_TRANSLATE)
+        {
+            break;
+        }
         let key = str_tv(k.clone());
         match filter_map_one(&val, &key, expr, filtermap) {
             None => break,
@@ -554,6 +585,8 @@ fn filter_map_dict(
             },
         }
     }
+    // c:145 d->dv_lock = prev_lock;
+    d.borrow_mut().dv_lock = prev_lock;
 }
 
 /// Port of `filter_map_blob()` from `Src/eval/list.c:149`.

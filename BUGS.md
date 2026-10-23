@@ -7767,7 +7767,7 @@ vim and Neovim agree. Parity case: `map_filter_nonstring_expr.vim`.
 - `eval('0z01.')` is `E976` in both engines (the left operand is stringified for
   `.` before the missing right operand is noticed); vimlrs reports `E15`.
 - `list2str('a')`: vim `E1211`, Neovim `E474`, vimlrs no error.
-- `call map(a, 'v:val')` on a locked List or Dict (`let a = [1, 2] | lockvar a`)
+- ✅ CLOSED in R58-4. `call map(a, 'v:val')` on a locked List or Dict (`let a = [1, 2] | lockvar a`)
   runs with no error; vim 9.2.1150 and Neovim 0.12.6 both report
   `E741: Value is locked: map() argument`. With the identity `'v:val'` the value is
   unchanged in all three; with `'v:val + 1'` vimlrs rewrites the locked list to
@@ -7890,3 +7890,89 @@ is `0z61000061`).
   NUL bytes included, which the port's `string_convert_ext` cannot do.
 - `typename()` of these builtins as Funcrefs has no entry in the generated
   signature table.
+
+## R58 — f/t search state, json_encode() specials, E1085, map() locks, the a: scope, `:let @r`, eval-before-trailing
+
+Measured against vim 9.2.1200 (`/opt/homebrew/Cellar/vim/9.2.1200/bin/vim`,
+`-es -u NONE -i NONE -N`), with Neovim 0.12.4 consulted for the split rows.
+Every probe ran one script per case. All 184 existing records still reproduce
+byte-identically under 9.2.1200.
+
+### R58-1. `getcharsearch()`/`setcharsearch()` were constants — ✅ FIXED
+`setcharsearch()` was a no-op and `getcharsearch()` answered `until: 0`; vim and
+Neovim start at `until: 1`. The `search.c` state (`lastc_bytes`, `lastcdir`,
+`last_t_cmd`) is ported into `src/ported/search.rs`, including the fixed buffer
+that is only partly overwritten: `'ä'` then `'x'` reads back `'x<a4>'` in both
+engines. A non-Dict argument is `E1206`. Parity case: `charsearch_state.vim`.
+
+### R58-2. `json_encode()` of NaN/Infinity, a Funcref, a Blob — ✅ FIXED
+vim writes `NaN`/`Infinity`/`-Infinity`, reports `E1161: Cannot json encode a
+func` for a Funcref or Partial (the whole result is then `''`), and joins Blob
+bytes with a bare `,`. vimlrs wrote `null`, `null` and `[1, 2]`. Neovim reports
+`E474` for the first two and writes `[1, 2]`; the encoder already followed
+vim's text, so vim is followed. Parity case: `json_encode_specials.vim`.
+
+### R58-3. A call through a variable that is not a function — ✅ FIXED
+`let F = 0 | call F()` is `E1085: Not a callable type: F` in both engines
+(`user_func_error`'s `found_var`); vimlrs said `E117`. Inside a function a
+Number local was slotted where the by-name lookup could not see it; a name
+that is called is no longer slotted. Parity case: `not_callable_type.vim`.
+
+### R58-4. `map()` ignored item locks; the container was not locked during the walk — ✅ FIXED
+Closes the R55-O row. `filter_map_list`/`filter_map_dict` check each item's
+lock for `map()` (`E741: Value is locked: map() argument`) and lock the
+container while the expression runs, so `map(l, 'add(l, 3)')` is
+`E741: … add() argument` and leaves `l` alone. Parity case: `map_locked_items.vim`.
+
+### R58-5. The order of the a: scope; a lambda's arguments in a: — ✅ FIXED
+`call_user_func` adds `a:0`, `a:000`, `a:firstline`, `a:lastline`, the named
+arguments, then `a:1`.. — vimlrs added the named ones first, and a scope read
+(`a:`, `l:`, `g:`, …) re-inserted the keys in iteration order, which resolves
+hash collisions differently; the hashtab is now copied. A lambda's named
+arguments go to `l:` only (`{a -> a:a}` is `E121`), so the compiled prologue
+that copied them from `a:` is gone. Parity case: `a_scope_order.vim`.
+
+### R58-6. `:let @r`, `@/`, `@=` — ✅ FIXED
+`:let @a = [..]` stored lines where both engines raise `E730` (it went through
+`setreg()`); it now runs `ex_let_register` (`tv_get_string_chk`, type detected
+from a trailing NL). `init_write_reg` reports `E354` for `@:`, `@.`, `@%` and
+`setreg('?', …)`. `@/` is written and read back (`set_last_search_pat` /
+`last_search_pat`), and `@=` stores its source: `@=` and `getreg('=', 1)` read
+the source, `getreg('=')` evaluates it (nesting limit 10). Parity case:
+`let_register_forms.vim`.
+
+### R58-7. Trailing text was reported before the expression ran — ✅ FIXED
+`eval0()` evaluates what parsed, then reports `E488` only if that raised
+nothing: `let a = F() x` calls `F`, `let a = nosuch )` is `E121`. vimlrs
+reported `E488` without evaluating. Also: `:let op=` evaluates `{expr}` before
+it reads the target (`let n += nosuch` is one `E121`), a failed `{expr}` leaves
+`let [a, b] = …` without the following `E714`, and an index that cannot be a
+String is reported once (`let d[[]] = 1`, `let l[[]] = 1` is `E730`, not
+`E745` twice; `echo d[[]]` has no `E716`). Parity case: `eval_before_trailing.vim`.
+
+### R58-O. Measured this round, still open
+- `:set` follows a reduced grammar. Both engines agree on, and vimlrs lacks:
+  `E521: Number required after =` (`set ts=abc`, `set ts=`, `set ts+=abc`),
+  `E487: Argument must be positive` (`set ts=0`, `set tw=-1`), `E474: Invalid
+  argument` (`set ic=1`, `set ts=10000`), `E488` (`set ts!`), octal/hex values
+  (`set ts=010` is 8, `set ts=0x10` is 16), `P_NODUP` on comma lists (`set
+  isk+=@` adds nothing), and the `opt?`/bare-`opt` display. `E518` for an
+  unknown name is not reported because the option table is reduced (see
+  `option.rs`).
+- Option value validation is missing for `:let &opt` and `:set` alike: vim and
+  Neovim agree on `E487` for `&ts`, `&sw`, `&tw`, `&report`, `&wh`, `&wiw`,
+  `&nuw`, `&ut`, `&tm`, `&uc`, `&cwh`, `&hh` below range, `E474` for `&ts >
+  9999`, `&re`, `&cole`, `&nuw > 20`, `&imi`, `&ims`, `E591` for `&wmh > &wh`,
+  and `E474`/`E539` for invalid values of `&bs`, `&ambw`, `&sel`, `&ffs`, `&ve`,
+  `&wim`, `&cb`, `&km`, `&mps`, `&ff`, `&ww`, `&isk`, `&spl`. vim then stores a
+  corrected value (`let &ts = -1` leaves 8).
+- `v:lang`, `v:ctype`, `v:collate` are `''`; both engines answer the locale
+  (`C.UTF-8`). `v:key` outside a callback is `0`; both engines say `E121`.
+- A default argument read through a returned `a:` dict is `0` in both engines
+  (the value is cleared when the call ends); vimlrs keeps the value, because a
+  scope read is a copy.
+- A lambda whose body fails returns the partly evaluated value (`{-> 1 +
+  nosuch}()` is `0`, `{-> [][0]}()` is `[]`); vimlrs returns `-1`.
+- `let d[[]] .= 1` reports `E730` twice (once for the read, once for the store).
+- `if nosuch ) | endif`: vim swallows `| endif` into the trailing text and
+  reports `E171`; vimlrs does not.

@@ -710,8 +710,12 @@ pub fn encode_vim_to_echo(tv: &typval_T) -> VimStr {
 
 /// Port of `encode_tv2json()` from `Src/eval/encode.c:921` — the `json_encode()`
 /// rendering of a value.
+///
+/// A value JSON cannot hold (a Funcref) has already been reported by the
+/// encoder; the text is then empty — vim `json_encode_gap()`: on a FAIL from
+/// `json_encode_item()` it clears the buffer and answers `""`.
 pub fn encode_tv2json(tv: &typval_T) -> String {
-    encode_vim_to_json(tv, &mut Vec::new())
+    encode_vim_to_json(tv, &mut Vec::new()).unwrap_or_default()
 }
 
 /// Port of `convert_to_json_string()` from `Src/eval/encode.c:621` — a
@@ -736,39 +740,51 @@ fn convert_to_json_string(s: &str) -> String {
     out
 }
 
-/// Port of the `encode_vim_to_json` instantiation of the encode template — JSON
-/// render. Strings/keys are double-quoted+escaped, `v:true`/`v:false`/`v:null`
-/// become `true`/`false`/`null`.
+/// Port of vim's `json_encode_item()` (`json.c`), the `json_encode()` render.
+/// Strings/keys are double-quoted+escaped, `v:true`/`v:false`/`v:null` become
+/// `true`/`false`/`null`.
 ///
 /// `open` holds the containers being encoded,
 /// outermost first: one that contains itself is written as an EMPTY container
 /// of its kind, with no error — vim 9.2 `json_encode()` (`[1, l]` with `l`
 /// inside is `[1,[]]`). Neovim reports E724 and writes nothing there; this
 /// encoder follows vim's JSON text throughout (no blank after `,` or `:`).
-pub fn encode_vim_to_json(tv: &typval_T, open: &mut Vec<*const ()>) -> String {
-    match (tv.v_type, &tv.vval) {
+///
+/// `None` is `json_encode_item()` returning FAIL: a Funcref or Partial is
+/// `E1161: Cannot json encode a func` (`vartype_name()` calls both "func"), and
+/// every enclosing container gives up with it. Neovim instead reports `E474`.
+pub fn encode_vim_to_json(tv: &typval_T, open: &mut Vec<*const ()>) -> Option<String> {
+    Some(match (tv.v_type, &tv.vval) {
         (VAR_NUMBER, v_number(n)) => n.to_string(),
+        // c: `if (isnan(v)) "NaN" else if (isinf(v)) v < 0.0 ? "-Infinity" :
+        // "Infinity" else vim_snprintf("%g")` — vim writes the JavaScript names
+        // that its own `json_decode()` reads back. Neovim reports E474.
+        (VAR_FLOAT, v_float(f)) if f.is_nan() => "NaN".to_string(),
+        (VAR_FLOAT, v_float(f)) if f.is_infinite() => {
+            if *f < 0.0 { "-Infinity" } else { "Infinity" }.to_string()
+        }
         (VAR_FLOAT, v_float(f)) => {
-            if f.is_finite() {
-                let s = vim_float_g(*f, None);
-                if s.contains(['.', 'e', 'E']) {
-                    s
-                } else {
-                    format!("{s}.0")
-                }
+            let s = vim_float_g(*f, None);
+            if s.contains(['.', 'e', 'E']) {
+                s
             } else {
-                "null".to_string() // JSON has no NaN/Inf
+                format!("{s}.0")
             }
         }
         (VAR_STRING, v_string(s)) => convert_to_json_string(&s.to_string_lossy()),
         (VAR_BOOL, v_bool(b)) => if *b == kBoolVarTrue { "true" } else { "false" }.to_string(),
         (VAR_SPECIAL, _) => "null".to_string(),
+        (VAR_FUNC | VAR_PARTIAL, _) => {
+            // c: semsg(_(e_cannot_json_encode_str), vartype_name(val->v_type));
+            crate::ported::message::semsg("E1161: Cannot json encode a func");
+            return None;
+        }
         (VAR_LIST, v_list(l)) => match l {
             None => "[]".to_string(),
             Some(l) => {
                 let ptr = std::rc::Rc::as_ptr(l) as *const ();
                 if open.contains(&ptr) {
-                    return "[]".to_string();
+                    return Some("[]".to_string());
                 }
                 open.push(ptr);
                 let l = l.borrow();
@@ -777,7 +793,7 @@ pub fn encode_vim_to_json(tv: &typval_T, open: &mut Vec<*const ()>) -> String {
                     if i > 0 {
                         out.push(',');
                     }
-                    out.push_str(&encode_vim_to_json(&it.li_tv, open));
+                    out.push_str(&encode_vim_to_json(&it.li_tv, open)?);
                 }
                 out.push(']');
                 open.pop();
@@ -789,7 +805,7 @@ pub fn encode_vim_to_json(tv: &typval_T, open: &mut Vec<*const ()>) -> String {
             Some(d) => {
                 let ptr = std::rc::Rc::as_ptr(d) as *const ();
                 if open.contains(&ptr) {
-                    return "{}".to_string();
+                    return Some("{}".to_string());
                 }
                 open.push(ptr);
                 let d = d.borrow();
@@ -800,26 +816,26 @@ pub fn encode_vim_to_json(tv: &typval_T, open: &mut Vec<*const ()>) -> String {
                     }
                     out.push_str(&convert_to_json_string(k));
                     out.push(':');
-                    out.push_str(&encode_vim_to_json(v, open));
+                    out.push_str(&encode_vim_to_json(v, open)?);
                 }
                 out.push('}');
                 open.pop();
                 out
             }
         },
-        // c: TYPVAL_ENCODE_CONV_BLOB (encode.c:751) — a Blob is a JSON *array of
-        // byte values*, `[0, 17, 34]`, not `null`. (Note the ", " separator: the
-        // JSON encoder spaces list items, unlike `string()`.)
+        // c: `case VAR_BLOB:` — an array of the byte values, joined by a bare
+        // `,` like every other array here (`[0,17,34]`). Neovim's template
+        // writes `[0, 17, 34]`.
         (VAR_BLOB, v_blob(b)) => match b {
             None => "[]".to_string(),
             Some(b) => {
                 let b = b.borrow();
                 let items: Vec<String> = b.bv_ga.iter().map(|byte| byte.to_string()).collect();
-                format!("[{}]", items.join(", "))
+                format!("[{}]", items.join(","))
             }
         },
         _ => "null".to_string(),
-    }
+    })
 }
 
 /// Port of `encode_check_json_key()` from `vendor/eval/encode.c:781`.

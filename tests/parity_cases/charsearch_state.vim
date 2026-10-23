@@ -1,0 +1,16 @@
+" getcharsearch()/setcharsearch(): the f/t search state of search.c, including
+" the fixed byte buffer that keeps a stale trailing byte.
+echo getcharsearch()
+call setcharsearch({'char': 'abc', 'until': 0, 'forward': 0})
+echo getcharsearch()
+call setcharsearch({'forward': 'x'})
+echo getcharsearch()
+call setcharsearch({'char': 'ä'})
+call setcharsearch({'char': 'x'})
+echo getcharsearch() strlen(getcharsearch().char)
+call setcharsearch({'char': ''})
+echo getcharsearch()
+call setcharsearch({'char': 5, 'until': 1, 'forward': 1})
+echo getcharsearch()
+call setcharsearch([])
+echo setcharsearch({})

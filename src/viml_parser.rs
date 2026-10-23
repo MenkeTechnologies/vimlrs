@@ -2938,7 +2938,7 @@ fn parse_let(rest: &str) -> Result<Stmt, VimlError> {
             // c: `ex_let` evaluates `{expr}` BEFORE it reads the target, so an
             // expression that does not parse is the only error
             // (`let nosuch += * 2` is E15, not E121).
-            if let Expr::ScriptError(_) = rhs {
+            if let Expr::ScriptError(_) | Expr::ScriptErrorGuard { .. } = rhs {
                 return Ok(Stmt::Let { target, expr: rhs });
             }
             Expr::Arith {
@@ -3423,14 +3423,16 @@ fn parse_cmd_expr(src: &str) -> Result<Expr, VimlError> {
     if matches!(p.peek(), Tok::Eof) && p.lex_err.is_none() {
         return Ok(e);
     }
-    // c: `eval0`: `if (!ends_excmd(*p)) semsg(_(e_trailing_arg), p)` — the
-    // expression is not evaluated, so its own errors never show. Text the lexer
-    // could not read (`1 ~ 2`, `1 'abc`) is trailing text all the same.
+    // c: `eval0`: `ret = eval1(&p, rettv, evalarg); … if (ret != FAIL &&
+    // !ends_excmd(*p)) semsg(_(e_trailing_arg), p)` — the expression that DID
+    // parse is evaluated first (`let a = F() x` calls `F`), and the E488 is
+    // reported only when that raised nothing (`let a = nosuch )` is E121). Text
+    // the lexer could not read (`1 ~ 2`, `1 'abc`) is trailing text all the same.
     let at = p.toks.get(p.i).map_or(src.len(), |t| t.span);
-    Ok(Expr::ScriptError(format!(
-        "E488: Trailing characters: {}",
-        text_to_eol(&src[at..])
-    )))
+    Ok(Expr::ScriptErrorGuard {
+        inner: Box::new(e),
+        msg: format!("E488: Trailing characters: {}", text_to_eol(&src[at..])),
+    })
 }
 
 fn parse_expr_list(src: &str) -> Result<Vec<Expr>, VimlError> {

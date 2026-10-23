@@ -266,15 +266,7 @@ fn build_user_func_def(
         vim9: flags.vim9,
         dict: flags.dict,
         abort: flags.abort,
-        chunk: compile_function_body(
-            body,
-            exc,
-            def_line,
-            flags.abort,
-            flags.vim9,
-            flags.closure,
-            &[],
-        )?,
+        chunk: compile_function_body(body, exc, def_line, flags.abort, flags.vim9, flags.closure)?,
         closure: flags.closure,
         scoped: None,
     })
@@ -564,7 +556,6 @@ fn compile_function_body(
     abort: bool,
     vim9: bool,
     closure: bool,
-    lambda_args: &[String],
 ) -> Result<fusevm::Chunk, VimlError> {
     let mut c = Compiler::new(true, exc);
     // vim numbers a function body's lines from 1 at the first line AFTER the
@@ -587,18 +578,6 @@ fn compile_function_body(
     // reason: a bare name it never assigns may be its defining function's.
     if !exc && !vim9 && !closure {
         (c.slots, c.int_slots) = slot_plan(body, true);
-    }
-    // c: `call_user_func` (`vendor/eval/userfunc.c:1158-1162`) adds a lambda's
-    // named arguments straight to its `l:` dict (`tv_copy` + `hash_add`), so
-    // the body names them without `a:`. That is not an assignment: no
-    // `set_var_const`, hence no E704 for a lowercase Funcref argument
-    // (`map(fs, {i, v -> v()})`).
-    // `...` is not a named argument: the extras stay in `a:000` only.
-    for arg in lambda_args.iter().filter(|a| *a != "...") {
-        c.get_var(&format!("a:{arg}"));
-        c.load_str(arg);
-        c.emit(Op::CallBuiltin(h::VIML_LAMBDA_ARG, 2));
-        c.emit(Op::Pop);
     }
     // c: `ex_docmd.c:647-651` resets `did_emsg` after every command of a function
     // body — `&& !func_has_abort(real_cookie)`. Without the `abort` attribute the
@@ -870,6 +849,12 @@ fn slot_plan(stmts: &[(u32, Stmt)], in_function: bool) -> SlotPlan {
                 if !cx.in_function || introspects(name) {
                     *cx.bail = true;
                 } else {
+                    // `G()` with a local `G` is looked up BY NAME at run time
+                    // (`E1085: Not a callable type: G` when it is a Number), so
+                    // a slot for `G` would hide it from that lookup.
+                    if let Some(key) = slot_key(name, cx.in_function) {
+                        cx.disq.insert(key.to_string());
+                    }
                     args.iter().for_each(|a| walk_expr(a, cx));
                 }
             }
@@ -3151,8 +3136,14 @@ impl Compiler {
                 let n = self.hidden;
                 self.hidden += 1;
                 let tmp = format!("\u{1}unpack_{n}");
+                // c: `ex_let` — `eval0()` failing (an error, or trailing text)
+                // returns before `ex_let_vars`, so no E714 follows it.
+                self.emit(Op::CallBuiltin(h::VIML_ERR_MARK, 0));
+                self.emit(Op::Pop);
                 self.expr(expr)?;
                 self.set_var(&tmp);
+                self.emit(Op::CallBuiltin(h::VIML_ERR_SINCE, 0));
+                let j_eval_failed = self.emit(Op::JumpIfTrue(0));
                 // The C checks the target count against the list BEFORE it
                 // assigns anything (`ex_let_vars`, vars.c:1036-1051). Lowering
                 // straight to index/slice skipped that: too few items surfaced
@@ -3169,6 +3160,7 @@ impl Compiler {
                 let failed = self.unpack_stores(&tmp, names, rest, *op)?;
                 let after = self.b.current_pos();
                 self.b.patch_jump(jf, after);
+                self.b.patch_jump(j_eval_failed, after);
                 for j in failed {
                     self.b.patch_jump(j, after);
                 }
@@ -3471,8 +3463,11 @@ impl Compiler {
                 self.emit(Op::CallBuiltin(h::VIML_GETENV, 1));
             }
             Expr::Register(r) => {
+                // c: `get_reg_contents(**arg, kGRegExprSrc)` — `getreg(r, 1)`: the
+                // `=` register reads back its source, not its value.
                 self.load_str(&r.to_string());
-                self.emit(Op::CallBuiltin(h::VIML_GETREG, 1));
+                self.emit(Op::LoadInt(1));
+                self.emit(Op::CallBuiltin(h::VIML_GETREG, 2));
             }
             Expr::List(items) => {
                 // A single `VIML_MAKE_LIST` op carries the element count in a `u8`
@@ -3545,7 +3540,7 @@ impl Compiler {
                 // synthesized body reports line 1 — which is what vim reports
                 // for a throw inside `{x -> …}`.
                 let stmts: Block = vec![(1, Stmt::Return(Some((**body).clone())))];
-                let chunk = compile_function_body(&stmts, self.exc, 0, false, *vim9, true, params)?;
+                let chunk = compile_function_body(&stmts, self.exc, 0, false, *vim9, true)?;
                 LAMBDA_FUNCS.with(|f| {
                     f.borrow_mut().push(UserFuncDef {
                         name: name.clone(),
@@ -3664,20 +3659,36 @@ impl Compiler {
                     // c: `ex_let_one` reads the current value with `eval_variable`
                     // and RETURNS if that failed — `let g:nosuch += 1` is E121 alone,
                     // never also E734. Same for a right-hand side that failed.
+                    //
+                    // c: `ex_let` runs `eval0()` on `{expr}` BEFORE `ex_let_one`
+                    // reads the target, so a failing right-hand side is the only
+                    // error (`let nosuch += nosuch2` is E121 for `nosuch2`), and the
+                    // target is not even looked up.
+                    self.emit(Op::CallBuiltin(h::VIML_ARGS_BEGIN, 0));
+                    self.emit(Op::Pop);
+                    self.expr(rhs)?;
+                    self.emit(Op::CallBuiltin(h::VIML_ARGS_FAILED, 0));
+                    let rhs_ok = self.emit(Op::JumpIfFalse(0));
+                    self.emit(Op::Pop); // rhs
+                                        // The `:let` store is skipped by its own failure guard, so the
+                                        // value left here is never written anywhere.
+                    self.emit(Op::LoadInt(0));
+                    let rhs_fail_end = self.emit(Op::Jump(0));
+                    let here = self.b.current_pos();
+                    self.b.patch_jump(rhs_ok, here);
                     self.emit(Op::CallBuiltin(h::VIML_ARGS_BEGIN, 0));
                     self.emit(Op::Pop);
                     self.expr(lhs)?;
-                    self.expr(rhs)?;
                     self.emit(Op::CallBuiltin(h::VIML_ARGS_FAILED, 0));
                     let ok = self.emit(Op::JumpIfFalse(0));
-                    self.emit(Op::Pop); // rhs
                     self.emit(Op::Pop); // lhs
-                                        // The `:let` store is skipped by its own failure guard, so the
-                                        // value left here is never written anywhere.
+                    self.emit(Op::Pop); // rhs
                     self.emit(Op::LoadInt(0));
                     let to_end = self.emit(Op::Jump(0));
                     let here = self.b.current_pos();
                     self.b.patch_jump(ok, here);
+                    // [rhs, lhs] → [lhs, rhs], the order `VIML_MOD_OP` takes.
+                    self.emit(Op::Swap);
                     self.load_str(match op {
                         ArithOp::Add => "+",
                         ArithOp::Sub => "-",
@@ -3691,6 +3702,7 @@ impl Compiler {
                     self.emit(Op::CallBuiltin(h::VIML_MOD_OP, 3));
                     let end = self.b.current_pos();
                     self.b.patch_jump(to_end, end);
+                    self.b.patch_jump(rhs_fail_end, end);
                     return Ok(());
                 }
                 self.expr(lhs)?;

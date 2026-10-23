@@ -1,0 +1,21 @@
+1
+called
+E488: Trailing characters: x
+0
+called
+E488: Trailing characters: x
+E121: Undefined variable: nosuch
+E684: List index out of range: 0
+E488: Trailing characters: = 3
+0
+E121: Undefined variable: nosuch
+E488: Trailing characters: 2
+E121: Undefined variable: nosuch
+1
+E488: Trailing characters: 3
+E121: Undefined variable: nosuch
+0
+E730: Using a List as a String
+E731: Using a Dictionary as a String
+E730: Using a List as a String
+E730: Using a List as a String

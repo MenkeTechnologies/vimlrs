@@ -579,8 +579,6 @@ pub const VIML_ERRS_AFTER: u16 = 3620;
 pub const VIML_RANGE_CHECK: u16 = 3633;
 /// A lambda expression's value — see `b_make_lambda`.
 pub const VIML_MAKE_LAMBDA: u16 = 3621;
-/// Bind one lambda argument as a bare local — see `b_lambda_arg`.
-pub const VIML_LAMBDA_ARG: u16 = 3634;
 /// Pass a call's result through, first making the command line's remaining
 /// text unreachable when the call's error became an exception — see
 /// [`crate::viml_ast::Expr::Call::mid_expr`] and `b_call_mid`.
@@ -2681,20 +2679,6 @@ fn b_setvar(vm: &mut VM, _: u8) -> Value {
     Value::Undef
 }
 
-/// `VIML_LAMBDA_ARG` — bind a lambda's named argument as a bare local. Stack:
-/// the argument's value, then its name.
-///
-/// c: `call_user_func` (`vendor/eval/userfunc.c:1158-1162`) puts the argument
-/// straight into the lambda's `l:` dict, so none of `set_var_const`'s checks
-/// apply: `{i, v -> v()}` binds a Funcref under a lowercase name without E704,
-/// and a vim9 lambda's argument never falls back to a script variable.
-fn b_lambda_arg(vm: &mut VM, _: u8) -> Value {
-    let name = tv_get_string(&pop_tv(vm));
-    let val = pop_tv(vm);
-    set_var(&name, name.len(), val, false);
-    Value::Undef
-}
-
 fn b_setenv(vm: &mut VM, _: u8) -> Value {
     let name = tv_get_string(&pop_tv(vm));
     let val = tv_get_string(&pop_tv(vm));
@@ -3292,6 +3276,11 @@ fn b_setindex(vm: &mut VM, _: u8) -> Value {
     if message::err_count.with(|c| c.get()) > errs_before {
         return Value::Undef;
     }
+    // c:1081 `if (!tv_check_str(&var1)) goto done;` — whatever the container, an
+    // index that cannot be a String (`let l[[]] = 1`) is E730/E731/E976, once.
+    if !crate::ported::eval::typval::tv_check_str(&index) {
+        return Value::Undef;
+    }
     // c: `set_var_lval` checks the container's lock before writing into it and
     // names the lval in the message — `lp->ll_name`, which for a SUBSCRIPTED
     // target still points into the source. Verified against vim 9.2:
@@ -3352,6 +3341,23 @@ fn b_setindex(vm: &mut VM, _: u8) -> Value {
         }
         _ => message::emsg("E689: Can only index a List, Dictionary or Blob"),
     }
+    Value::Undef
+}
+
+/// `:let @r = expr` — c: `ex_let_register()`: the value is read with
+/// `tv_get_string_chk()` (a List is `E730`, not a list of lines), an invalid
+/// or read-only register is `E354`, and the type is detected from a trailing
+/// NL. Stack: the register name, then the value.
+fn b_let_register(vm: &mut VM, _: u8) -> Value {
+    let mut val = pop_tv(vm);
+    let name = tv_get_string(&pop_tv(vm));
+    let _ = crate::ported::eval::vars::ex_let_register(
+        &format!("@{name}"),
+        &mut val,
+        false,
+        None,
+        None,
+    );
     Value::Undef
 }
 
@@ -4610,6 +4616,11 @@ fn b_call_user(vm: &mut VM, argc: u8) -> Value {
                 }
             };
         }
+        // c: `user_func_error()` FCERR_UNKNOWN — "if (found_var)
+        // semsg(_(e_not_callable_type_str), name);": the name is a variable,
+        // just not one holding a function (`let F = 0 | call F()`).
+        message::semsg(&format!("E1085: Not a callable type: {name}"));
+        return Value::Undef;
     }
     message::semsg(&format!("E117: Unknown function: {name}"));
     Value::Undef
@@ -4780,43 +4791,17 @@ fn call_user_function_raw(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
             }
         });
     };
-    for (i, p) in func.params.iter().take(nfixed).enumerate() {
-        let default = func.defaults.iter().find(|(di, _)| *di == i);
-        // c: `call_user_func` takes the default when the argument is missing OR
-        // is `v:none` (`argvars[i].v_type == VAR_SPECIAL && v_number ==
-        // VVAL_NONE`), which is how a caller skips one optional argument to
-        // pass a later one: `F(1, v:none, 3)`.
-        let passed_none = args.get(i).is_some_and(|a| {
-            a.v_type == VAR_SPECIAL && matches!(a.vval, v_special(kSpecialVarNone))
-        });
-        let v = if i < args.len() && !(passed_none && default.is_some()) {
-            args[i].clone()
-        } else if let Some((_, chunk)) = default {
-            // c: an omitted optional argument is its default value (evaluated now,
-            // in the partially-bound a: scope); a missing non-optional one is the
-            // special "v:none"-like value, as before.
-            run_value_chunk(chunk.clone()).unwrap_or_else(tv_special)
-        } else {
-            tv_special()
-        };
-        bind_avar(p, v);
-    }
     let extra: Vec<typval_T> = if args.len() > nfixed {
         args[nfixed..].to_vec()
     } else {
         Vec::new()
     };
     bind_avar("0", tv_num(extra.len() as varnumber_T));
-    // Each extra argument is also reachable as a:1, a:2, ... a:N (Vim binds the
-    // varargs individually in addition to the a:000 list).
-    for (i, v) in extra.iter().enumerate() {
-        bind_avar(&(i + 1).to_string(), v.clone());
-    }
     // c: `tv_list_set_lock(&fc->fc_l_varlist, VAR_FIXED)`
     // (`vendor/eval/userfunc.c:1088`) — `a:000` is not merely read-only as a
     // NAME, its LIST is fixed, so `let a:000[0] = 9` and `add(a:000, 5)` are
     // `E742: Cannot change value of …` rather than silent mutations.
-    let a000 = new_list(extra);
+    let a000 = new_list(extra.clone());
     if let v_list(Some(l)) = &a000.vval {
         let mut lb = l.borrow_mut();
         lb.lv_lock = crate::ported::eval::typval_defs_h::VarLockStatus::VAR_FIXED;
@@ -4840,6 +4825,47 @@ fn call_user_function_raw(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
         .unwrap_or(1);
     bind_avar("firstline", tv_num(cursor_lnum as varnumber_T));
     bind_avar("lastline", tv_num(cursor_lnum as varnumber_T));
+    // c:1102 the named arguments come AFTER a:0, a:000, a:firstline and
+    // a:lastline, and the "..." ones after them: the a: hashtab's slot order — what
+    // `string(a:)` prints — follows insertion order where keys collide.
+    for (i, p) in func.params.iter().take(nfixed).enumerate() {
+        let default = func.defaults.iter().find(|(di, _)| *di == i);
+        // c: `call_user_func` takes the default when the argument is missing OR
+        // is `v:none` (`argvars[i].v_type == VAR_SPECIAL && v_number ==
+        // VVAL_NONE`), which is how a caller skips one optional argument to
+        // pass a later one: `F(1, v:none, 3)`.
+        let passed_none = args.get(i).is_some_and(|a| {
+            a.v_type == VAR_SPECIAL && matches!(a.vval, v_special(kSpecialVarNone))
+        });
+        let v = if i < args.len() && !(passed_none && default.is_some()) {
+            args[i].clone()
+        } else if let Some((_, chunk)) = default {
+            // c: an omitted optional argument is its default value (evaluated now,
+            // in the partially-bound a: scope); a missing non-optional one is the
+            // special "v:none"-like value, as before.
+            run_value_chunk(chunk.clone()).unwrap_or_else(tv_special)
+        } else {
+            tv_special()
+        };
+        // c:1158 `if (addlocal)` — a lambda's named arguments go to l:, not a:
+        // (`{a -> a:a}` is `E121: Undefined variable: a:a`).
+        if func.name.starts_with("<lambda>") {
+            let mut v = v;
+            v.v_lock = crate::ported::eval::typval_defs_h::VarLockStatus::VAR_FIXED;
+            crate::ported::eval::vars::funccal_stack.with(|s| {
+                if let Some(top) = s.borrow_mut().last_mut() {
+                    tv_dict_add_tv(&mut top.fc_l_vars.borrow_mut(), p, v);
+                }
+            });
+        } else {
+            bind_avar(p, v);
+        }
+    }
+    // Each extra argument is also reachable as a:1, a:2, ... a:N (Vim binds the
+    // varargs individually in addition to the a:000 list).
+    for (i, v) in extra.iter().enumerate() {
+        bind_avar(&(i + 1).to_string(), v.clone());
+    }
 
     // The caller's current line is this frame's call site, for `v:throwpoint`.
     CALL_SITE_LNUM.with(|c| c.borrow_mut().push(SOURCING_LNUM.with(|l| l.get())));
@@ -6719,6 +6745,11 @@ fn index_value(base: &typval_T, index: &typval_T) -> typval_T {
             }
         }
         (VAR_DICT, v_dict(Some(d))) => {
+            // c:3124 `else if (evaluate && !tv_check_str(&var1)) return FAIL;` —
+            // checked before the lookup, so a List key is E730 and no E716.
+            if !crate::ported::eval::typval::tv_check_str(index) {
+                return tv_special();
+            }
             let key = tv_get_string(index);
             match crate::ported::eval::typval::tv_dict_find(&d.borrow(), &key) {
                 Some(v) => v.clone(),
@@ -7514,7 +7545,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_STR_INTERP, b_str_interp);
     vm.register_builtin(VIML_GETOPT, b_getopt);
     vm.register_builtin(VIML_GETREG, |vm, n| call_func(vm, n, f_getreg));
-    vm.register_builtin(VIML_SETREG, |vm, n| call_func(vm, n, f_setreg));
+    vm.register_builtin(VIML_SETREG, b_let_register);
     vm.register_builtin(VIML_SETOPT, b_setopt);
     vm.register_builtin(VIML_FN_LEN, b_fn_len);
     vm.register_builtin(VIML_FN_TYPE, b_fn_type);
@@ -7681,7 +7712,6 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FAIL_MID, b_fail_mid);
     vm.register_builtin(VIML_CALL_ABORT, b_call_abort);
     vm.register_builtin(VIML_MAKE_LAMBDA, b_make_lambda);
-    vm.register_builtin(VIML_LAMBDA_ARG, b_lambda_arg);
     vm.register_builtin(VIML_ECHOERR_ARG, b_echoerr_arg);
     vm.register_builtin(VIML_ECHOERR_END, b_echoerr_end);
     vm.register_builtin(VIML_EXEC_STMT_FN, b_exec_stmt_fn);

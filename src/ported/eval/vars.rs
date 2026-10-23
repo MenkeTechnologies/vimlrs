@@ -1587,12 +1587,10 @@ pub fn find_var(name: &str, _no_autoload: bool) -> Option<typval_T> {
     // introspection (`keys(g:)`, `get(b:, …)`), not mutation-through-the-dict.
     let scope_snapshot = |d: &dict_T| -> typval_T {
         let nd = crate::ported::eval::typval::tv_dict_alloc();
-        {
-            let mut bm = nd.borrow_mut();
-            for (k, v) in d.dv_hashtab.iter() {
-                bm.dv_hashtab.insert(k.clone(), v.clone());
-            }
-        }
+        // The hashtab itself is copied, not re-filled: re-inserting in
+        // iteration order resolves collisions differently, and `string(a:)`
+        // would list the keys in an order the scope does not have.
+        nd.borrow_mut().dv_hashtab = d.dv_hashtab.clone();
         typval_T {
             v_type: VAR_DICT,
             v_lock: VarLockStatus::VAR_UNLOCKED,
@@ -2633,7 +2631,7 @@ fn ex_let_option(
 /// sentinel; charwise is used (the common `:let @r = "text"` case). The reduced
 /// `get_reg_contents` returns the register lines (C's `kGRegExprSrc` joined
 /// string), joined with `\n` for the `.=` concat.
-fn ex_let_register(
+pub(crate) fn ex_let_register(
     arg: &str,
     tv: &mut typval_T,
     is_const: bool,
@@ -2684,7 +2682,7 @@ fn ex_let_register(
         }
         if let Some(pv) = p {
             // c:1474 write_reg_contents(reg, p, strlen(p), false)
-            write_reg_contents(regname, &pv, MotionType::CharWise, false);
+            write_reg_contents(regname, &pv, MotionType::Unknown, false);
             arg_end = Some(2); // c:1475 arg_end = arg + 1 (sigil + register char)
         }
     }
