@@ -7886,7 +7886,7 @@ is `0z61000061`).
 - `typename()` of these builtins as Funcrefs has no entry in the generated
   signature table.
 
-## R58 — f/t search state, json_encode() specials, E1085, map() locks, the a: scope, `:let @r`, eval-before-trailing
+## R58 — f/t search state, json_encode() specials, E1085, map() locks, the a: scope, `:let @r`, eval-before-trailing, `:set` grammar, number option bounds
 
 Measured against vim 9.2.1200 (`/opt/homebrew/Cellar/vim/9.2.1200/bin/vim`,
 `-es -u NONE -i NONE -N`), with Neovim 0.12.4 consulted for the split rows.
@@ -7945,22 +7945,35 @@ it reads the target (`let n += nosuch` is one `E121`), a failed `{expr}` leaves
 String is reported once (`let d[[]] = 1`, `let l[[]] = 1` is `E730`, not
 `E745` twice; `echo d[[]]` has no `E716`). Parity case: `eval_before_trailing.vim`.
 
+### R58-8. `:set` argument grammar — ✅ FIXED
+`do_set` is now a port of vim's `do_set()`/`do_set_option()`: `E474` for a
+value on a boolean (`set ic=1`) or a `no`/`inv` prefix on a number, `E488` for
+trailing text (`set ic&x`, `set ts!`), `E521: Number required after =` for a
+value `vim_str2nr(STR2NR_ALL)` does not read whole (`set ts=010` is 8, `set
+ts=0x10` is 16), and the first error ends the command quoting the argument up
+to the next one (`E521: … tw=nope `, trailing blank included). String
+`+=`/`^=`/`-=` follow `stropt_get_newval()`: a comma only for a comma list, no
+item added twice on a `P_NODUP` option, doubled flags dropped on a
+`P_FLAGLIST` one, a trailing comma not doubled, a backslash escaping the next
+character. Parity cases: `set_argument_checks.vim`, `set_string_operators.vim`.
+
+### R58-9. Number option range checks — ✅ FIXED
+`set_option` runs vim's `did_set_*` checks and `check_num_option_bounds()` for
+the options of this crate's table, for `:set` and `:let &opt` alike, and stores
+the corrected value as vim does (`let &ts = -1` is `E487` and leaves 8, `let
+&nuw = 21` leaves 20, `let &wmh = 7` with `&wh` 5 is `E591` and leaves 5,
+`&fdl < 0` becomes 0 silently). `&ch = 0` is `E487` in vim (MIN_CMDHEIGHT 1);
+Neovim accepts it — vim is followed. Parity case: `option_value_bounds.vim`.
+
 ### R58-O. Measured this round, still open
-- `:set` follows a reduced grammar. Both engines agree on, and vimlrs lacks:
-  `E521: Number required after =` (`set ts=abc`, `set ts=`, `set ts+=abc`),
-  `E487: Argument must be positive` (`set ts=0`, `set tw=-1`), `E474: Invalid
-  argument` (`set ic=1`, `set ts=10000`), `E488` (`set ts!`), octal/hex values
-  (`set ts=010` is 8, `set ts=0x10` is 16), `P_NODUP` on comma lists (`set
-  isk+=@` adds nothing), and the `opt?`/bare-`opt` display. `E518` for an
-  unknown name is not reported because the option table is reduced (see
-  `option.rs`).
-- Option value validation is missing for `:let &opt` and `:set` alike: vim and
-  Neovim agree on `E487` for `&ts`, `&sw`, `&tw`, `&report`, `&wh`, `&wiw`,
-  `&nuw`, `&ut`, `&tm`, `&uc`, `&cwh`, `&hh` below range, `E474` for `&ts >
-  9999`, `&re`, `&cole`, `&nuw > 20`, `&imi`, `&ims`, `E591` for `&wmh > &wh`,
-  and `E474`/`E539` for invalid values of `&bs`, `&ambw`, `&sel`, `&ffs`, `&ve`,
-  `&wim`, `&cb`, `&km`, `&mps`, `&ff`, `&ww`, `&isk`, `&spl`. vim then stores a
-  corrected value (`let &ts = -1` leaves 8).
+- `:set` shows nothing for `opt?`, a bare number/string option or `set ts!`
+  (which vim shows, then reports `E488`): the `-es` message stream it writes,
+  whose newlines land on stderr and the text on stdout, is not modelled.
+  `E518` for an unknown name is not reported because the option table is
+  reduced (see `option.rs`).
+- String option values are not validated: vim and Neovim agree on `E474`/`E539`
+  for invalid values of `&bs`, `&ambw`, `&sel`, `&ffs`, `&ve`, `&wim`, `&cb`,
+  `&km`, `&mps`, `&ff`, `&ww`, `&isk`, `&spl`.
 - `v:lang`, `v:ctype`, `v:collate` are `''`; both engines answer the locale
   (`C.UTF-8`). `v:key` outside a callback is `0`; both engines say `E121`.
 - A default argument read through a returned `a:` dict is `0` in both engines

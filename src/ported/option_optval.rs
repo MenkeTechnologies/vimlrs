@@ -731,6 +731,60 @@ pub fn set_option_value(opt_idx: OptIndex, value: OptVal, opt_flags: i32) -> Opt
 ///   option here, vim only of the string ones.
 pub fn set_option(opt_idx: OptIndex, value: OptVal, opt_flags: i32) -> Option<String> {
     let scope = options[opt_idx].scope_flags;
+    // c (vim 9.2): `set_num_option()` stores the value, then the option's
+    // `did_set_*` callback and `check_num_option_bounds()` replace an
+    // out-of-range one and report it — so `let &ts = -1` is E487 and leaves 8,
+    // not the old value. Only the options of this crate's table that have a
+    // check are listed; `'scrolloff'` and `'sidescrolloff'` are checked only
+    // with a full screen, which `-es` is not.
+    const E487: &str = "E487: Argument must be positive";
+    const E474: &str = "E474: Invalid argument";
+    const E591: &str = "E591: 'winheight' cannot be smaller than 'winminheight'";
+    let mut errmsg: Option<&str> = None;
+    let value = match value.data {
+        OptValData::number(n) => {
+            let num = |name: &str| match get_option_value(find_option(name), 0).data {
+                OptValData::number(v) => v,
+                _ => 0,
+            };
+            let mut err = |e: &'static str, v: OptInt| {
+                errmsg = Some(e);
+                v
+            };
+            let v = match options[opt_idx].fullname {
+                "tabstop" if n <= 0 => err(E487, 8),
+                "tabstop" if n > 9999 => err(E474, 8), // TABSTOP_MAX
+                "shiftwidth" if n < 0 => err(E487, num("tabstop")),
+                "textwidth" if n < 0 => err(E487, 0),
+                "report" if n < 0 => err(E487, 1),
+                "cmdheight" if n < 1 => err(E487, 1), // MIN_CMDHEIGHT
+                "cmdwinheight" if n < 1 => err(E487, 1),
+                "winheight" if n < 1 => err(E487, 1),
+                "winheight" if num("winminheight") > n => err(E591, num("winminheight")),
+                "winminheight" if n < 0 => err(E487, 0),
+                "winminheight" if n > num("winheight") => err(E591, num("winheight")),
+                "winwidth" if n < 1 => err(E487, 1),
+                "helpheight" if n < 0 => err(E487, 0),
+                "numberwidth" if n < 1 => err(E487, 1),
+                "numberwidth" if n > 20 => err(E474, 20),
+                "conceallevel" if n < 0 => err(E487, 0),
+                "conceallevel" if n > 3 => err(E474, 3),
+                "iminsert" if !(0..=2).contains(&n) => err(E474, 0), // B_IMODE_LAST
+                "imsearch" if !(-1..=2).contains(&n) => err(E474, 0),
+                "updatecount" if n < 0 => err(E487, 100),
+                "updatetime" if n < 0 => err(E487, 2000),
+                "timeoutlen" if n < 0 => err(E487, 0),
+                "regexpengine" if !(0..=2).contains(&n) => err(E474, 0),
+                // did_set_foldlevel: "if (curwin->w_p_fdl < 0) curwin->w_p_fdl = 0;"
+                "foldlevel" if n < 0 => 0,
+                // did_set_wildchar: the value stays, the error is reported.
+                "wildchar" if matches!(n, 3 | 10 | 13) => err(E474, n),
+                _ => n,
+            };
+            NUMBER_OPTVAL(v)
+        }
+        _ => value,
+    };
     // c: "If NIL_OPTVAL, the option value is cleared" — the value goes back to
     // what it was before anything was stored (for the local value of a
     // global-local option, unset).
@@ -759,7 +813,7 @@ pub fn set_option(opt_idx: OptIndex, value: OptVal, opt_flags: i32) -> Option<St
     if both && has_local {
         store(OptVarp::Global, value);
     }
-    None
+    errmsg.map(str::to_string)
 }
 
 /// Port of `set_option_value_handle_tty()` from `vendor/option.c` (upstream

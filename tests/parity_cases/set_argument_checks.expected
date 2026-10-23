@@ -1,0 +1,21 @@
+1
+E521: Number required after =: ts=abc
+E521: Number required after =: ts=4x
+E521: Number required after =: ts=
+E521: Number required after =: ts+=abc
+E474: Invalid argument: ic=1
+E474: Invalid argument: noic=1
+E474: Invalid argument: nots
+E474: Invalid argument: invts
+E488: Trailing characters: ic&x
+E487: Argument must be positive: ts=0
+E487: Argument must be positive: tw=-1
+E474: Invalid argument: ts=10000
+E474: Invalid argument: wc=13
+E521: Number required after =: tw=nope 
+8 0 8
+8
+16
+5
+0
+1 4

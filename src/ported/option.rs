@@ -15,8 +15,8 @@ use crate::ported::eval::typval::tv_get_bool;
 use crate::ported::eval::typval_defs_h::{typval_T, varnumber_T};
 use crate::ported::option_optval::{
     self, find_option, get_varp_scope, kOptScopeBuf, kOptScopeGlobal, kOptScopeWin, options,
-    optval_from_varp, set_option, OptVal, OptValData, OptVarp, TriState, BOOLEAN_OPTVAL,
-    NIL_OPTVAL, NUMBER_OPTVAL, OPT_GLOBAL, OPT_LOCAL, STRING_OPTVAL, TRISTATE_FROM_INT,
+    optval_from_varp, set_option, OptValData, OptVarp, TriState, BOOLEAN_OPTVAL, NUMBER_OPTVAL,
+    OPT_LOCAL, STRING_OPTVAL, TRISTATE_FROM_INT,
 };
 #[cfg(test)]
 use std::collections::HashMap;
@@ -284,12 +284,48 @@ thread_local! {
     pub static SET_HOST_HOOK: std::cell::RefCell<Option<Box<dyn Fn(&str)>>> =
         const { std::cell::RefCell::new(None) };
 }
+/// The `P_COMMA`/`P_ONECOMMA`/`P_NODUP`/`P_FLAGLIST`/`P_EXPAND` bits of the
+/// string options in [`OPTIONS`], from vim's `optiondefs.h`. Only `:set`'s
+/// `+=`/`^=`/`-=` and its value copy read them.
+const P_COMMA: u32 = 0x1;
+const P_ONECOMMA: u32 = 0x2 | P_COMMA;
+const P_NODUP: u32 = 0x4;
+const P_FLAGLIST: u32 = 0x8;
+const P_EXPAND: u32 = 0x10;
+const STRING_FLAGS: &[(&str, u32)] = &[
+    ("runtimepath", P_EXPAND | P_ONECOMMA | P_NODUP),
+    ("iskeyword", P_COMMA | P_NODUP),
+    ("isprint", P_COMMA | P_NODUP),
+    ("isfname", P_COMMA | P_NODUP),
+    ("isident", P_COMMA | P_NODUP),
+    ("backspace", P_ONECOMMA | P_NODUP),
+    ("breakat", P_FLAGLIST),
+    ("fileformats", P_ONECOMMA | P_NODUP),
+    ("matchpairs", P_ONECOMMA | P_NODUP),
+    ("suffixes", P_ONECOMMA | P_NODUP),
+    ("whichwrap", P_ONECOMMA | P_FLAGLIST),
+    ("wildmode", P_ONECOMMA | P_NODUP),
+    ("clipboard", P_ONECOMMA | P_NODUP),
+    ("keymodel", P_ONECOMMA | P_NODUP),
+    ("langmap", P_ONECOMMA | P_NODUP),
+    ("spellfile", P_EXPAND | P_ONECOMMA),
+    ("spelllang", P_EXPAND | P_ONECOMMA),
+    ("virtualedit", P_ONECOMMA | P_NODUP),
+];
 
-/// Port of `do_set()` (`option.c`) — parse and apply a `:set` argument string:
-/// `set opt` / `set noopt` / `set opt!` / `set invopt` / `set opt=val` /
-/// `set opt:val` / `set opt&` / `set opt<` / `set opt?` (whitespace-separated,
-/// multiple per line). `opt_flags` is `ex_set()`'s: 0 for `:set`, `OPT_LOCAL`
-/// for `:setlocal`, `OPT_GLOBAL` for `:setglobal`.
+/// Port of `do_set()` (vim `option.c`) — parse and apply a `:set` argument
+/// string, one `do_set_option()` per argument: `opt`, `noopt`, `invopt`,
+/// `opt!`, `opt&`, `opt&vim`, `opt<`, `opt?`, `opt=val`/`opt:val` and the
+/// `+=`/`^=`/`-=` operators. `opt_flags` is `ex_set()`'s: 0 for `:set`,
+/// `OPT_LOCAL` for `:setlocal`, `OPT_GLOBAL` for `:setglobal`.
+///
+/// The first error is reported as `{msg}: {argument}` and ends the command.
+///
+/// RUST-PORT NOTE: an option name this crate's reduced table does not know is
+/// skipped silently instead of `E518` — most of vim's options are not in it,
+/// and a plugin's `set cpo&vim` must keep running. A query (`opt?`, a bare
+/// number/string option) shows nothing: the `-es` message stream it writes to
+/// is not modelled.
 pub fn do_set(args: &str, opt_flags: i32) {
     // Mirror the whole `:set` line to the host editor first (if a hook is
     // installed), then keep vimlrs' own option table in sync below so `&opt`
@@ -299,164 +335,319 @@ pub fn do_set(args: &str, opt_flags: i32) {
             f(args);
         }
     });
-    // The value `get_varp_scope(opt, opt_flags)` names, which every operator
-    // below starts from.
-    let current = |opt_idx| optval_from_varp(opt_idx, get_varp_scope(opt_idx, opt_flags));
-    let is_true = |v: OptVal| matches!(v.data, OptValData::boolean(TriState::kTrue));
-    for part in args.split_whitespace() {
-        // `opt=val` / `opt:val`, plus the compound-assign operators `opt+=val`
-        // (append), `opt^=val` (prepend), `opt-=val` (remove) — `do_set`'s
-        // OP_ADDING/OP_PREPENDING/OP_REMOVING. On a comma-list string option they
-        // edit the list (`set rtp+=DIR`); on a number option they add, multiply
-        // and subtract. A plain `=`/`:` sets.
-        if let Some((lhs, val)) = part.split_once(['=', ':']) {
-            let (name, op) = match lhs.strip_suffix(['+', '^', '-']) {
-                Some(base) => (base, lhs.as_bytes()[lhs.len() - 1]),
-                None => (lhs, b'='),
-            };
-            if let Some((canon, _, kind, _, _)) = findoption(name) {
-                let opt_idx = find_option(canon);
-                let value = match (kind, op) {
-                    (Kind::String, _) => {
-                        // c: a `:set` of a global-local string option works on
-                        // the global value (the local one is emptied by
-                        // `set_option`); `:setlocal` on its local value, or the
-                        // global one while the local one is unset.
-                        let scope = options[opt_idx].scope_flags;
-                        let global_local = scope & kOptScopeGlobal != 0
-                            && scope & (kOptScopeBuf | kOptScopeWin) != 0;
-                        let varp = match opt_flags {
-                            0 if global_local => OptVarp::Global,
-                            OPT_LOCAL if global_local => get_varp_scope(opt_idx, 0),
-                            _ => get_varp_scope(opt_idx, opt_flags),
-                        };
-                        let cur = match optval_from_varp(opt_idx, varp).data {
-                            OptValData::string(s) => s,
-                            _ => String::new(),
-                        };
-                        STRING_OPTVAL(match op {
-                            b'+' if cur.is_empty() => val.to_string(),
-                            b'+' => format!("{cur},{val}"),
-                            b'^' if cur.is_empty() => val.to_string(),
-                            b'^' => format!("{val},{cur}"),
-                            b'-' => cur
-                                .split(',')
-                                .filter(|s| *s != val)
-                                .collect::<Vec<_>>()
-                                .join(","),
-                            _ => val.to_string(),
-                        })
-                    }
-                    (Kind::Number, _) => {
-                        let n = val.trim().parse::<varnumber_T>().unwrap_or(0);
-                        // c: `do_set_option_numeric` — `+=` adds, `^=` MULTIPLIES,
-                        // `-=` subtracts (`set tw+=10`, `set sw^=2`).
-                        let cur = match current(opt_idx).data {
-                            OptValData::number(n) => n,
-                            _ => 0,
-                        };
-                        NUMBER_OPTVAL(match op {
-                            b'+' => cur.wrapping_add(n),
-                            b'^' => cur.wrapping_mul(n),
-                            b'-' => cur.wrapping_sub(n),
-                            _ => n,
-                        })
-                    }
-                    (Kind::Bool, b'=') => BOOLEAN_OPTVAL(TRISTATE_FROM_INT(
-                        val.trim().parse::<varnumber_T>().unwrap_or(0),
-                    )),
-                    // Compound op on a bool option: no-op.
-                    _ => continue,
-                };
-                set_option(opt_idx, value, opt_flags);
-            }
-            continue;
+    // c: the `+=`/`^=`/`-=` half of `stropt_get_newval()`: `find_dup_item()`,
+    // `stropt_concat_with_comma()`, `stropt_remove_val()` and
+    // `stropt_remove_dupflags()`.
+    let stropt_newval = |origval: &str, newval: String, op: u8, flags: u32| -> String {
+        if op == 0 {
+            return newval;
         }
-        // `opt!` (toggle a bool) / `opt?` (query — no-op here).
-        if let Some(name) = part.strip_suffix('!') {
-            if let Some((canon, _, Kind::Bool, _, _)) = findoption(name) {
-                let opt_idx = find_option(canon);
-                let on = is_true(current(opt_idx));
-                set_option(
-                    opt_idx,
-                    BOOLEAN_OPTVAL(TRISTATE_FROM_INT(i64::from(!on))),
-                    opt_flags,
-                );
-            }
-            continue;
-        }
-        // `opt&` / `opt&vim` / `opt&vi` — back to the default (`do_set_option`'s
-        // `nextchar == '&'` branch, `set_option_default`): the local value
-        // unless `:setglobal`, the global one unless `:setlocal`. Every row of
-        // this table has one default for both, so the three spellings agree.
-        if let Some((name, _)) = part
-            .split_once('&')
-            .filter(|(_, how)| matches!(*how, "" | "vim" | "vi"))
-        {
-            if let Some((canon, ..)) = findoption(name) {
-                let opt_idx = find_option(canon);
-                let def_val = options[opt_idx].def_val.clone();
-                if opt_flags & OPT_GLOBAL == 0 {
-                    set_option(opt_idx, def_val.clone(), OPT_LOCAL);
+        let comma_list = flags & P_COMMA != 0;
+        // c: find_dup_item() — an item that starts the value or follows an
+        // unescaped comma, and ends at a comma or the end.
+        let find_dup = || -> Option<usize> {
+            let o = origval.as_bytes();
+            let n = newval.as_bytes();
+            let mut bs = 0;
+            for s in 0..o.len() {
+                if (!comma_list || s == 0 || (o[s - 1] == b',' && bs & 1 == 0))
+                    && o[s..].starts_with(n)
+                    && (!comma_list || s + n.len() == o.len() || o[s + n.len()] == b',')
+                {
+                    return Some(s);
                 }
-                if opt_flags & OPT_LOCAL == 0 {
-                    set_option(opt_idx, def_val, OPT_GLOBAL);
-                }
-            }
-            continue;
-        }
-        // `opt<` — the local value from the global one (`nextchar == '<'`).
-        // `:setlocal` of a global-local option instead unsets the local value
-        // (`NO_LOCAL_UNDOLEVEL`, -1, ''), so `get_varp()` goes back to the
-        // global value.
-        if let Some(name) = part.strip_suffix('<') {
-            if let Some((canon, ..)) = findoption(name) {
-                let opt_idx = find_option(canon);
-                let scope = options[opt_idx].scope_flags;
-                let global_local =
-                    scope & kOptScopeGlobal != 0 && scope & (kOptScopeBuf | kOptScopeWin) != 0;
-                let value = if global_local && opt_flags == OPT_LOCAL {
-                    NIL_OPTVAL()
+                if (s > 1 && o[s - 1] == b'\\' && o[s - 2] != b',') || (s == 1 && o[0] == b'\\') {
+                    bs += 1;
                 } else {
-                    optval_from_varp(opt_idx, OptVarp::Global)
-                };
-                set_option(opt_idx, value, opt_flags);
+                    bs = 0;
+                }
             }
-            continue;
+            None
+        };
+        let dup = if op == b'-' || flags & P_NODUP != 0 {
+            find_dup()
+        } else {
+            None
+        };
+        let mut out = match op {
+            // c: "do not add if already there"
+            b'+' | b'^' if dup.is_some() => origval.to_string(),
+            b'+' | b'^' => {
+                let comma = comma_list && !origval.is_empty() && !newval.is_empty();
+                let mut orig = origval;
+                // c: "strip a trailing comma, would get 2"
+                if op == b'+'
+                    && comma
+                    && flags & P_ONECOMMA == P_ONECOMMA
+                    && orig.len() > 1
+                    && orig.ends_with(',')
+                    && orig.as_bytes()[orig.len() - 2] != b'\\'
+                {
+                    orig = &orig[..orig.len() - 1];
+                }
+                let sep = if comma { "," } else { "" };
+                if op == b'+' {
+                    format!("{orig}{sep}{newval}")
+                } else {
+                    format!("{newval}{sep}{orig}")
+                }
+            }
+            // c: stropt_remove_val()
+            _ => match dup {
+                Some(s) if !newval.is_empty() => {
+                    let (mut from, mut to) = (s, s + newval.len());
+                    if comma_list {
+                        if s == 0 {
+                            if origval.as_bytes().get(to) == Some(&b',') {
+                                to += 1;
+                            }
+                        } else {
+                            from -= 1;
+                        }
+                    }
+                    format!("{}{}", &origval[..from], &origval[to..])
+                }
+                _ => origval.to_string(),
+            },
+        };
+        // c: stropt_remove_dupflags()
+        if flags & P_FLAGLIST != 0 {
+            let mut v: Vec<u8> = out.into_bytes();
+            let mut s = 0;
+            while s < v.len() {
+                let dup_after = |v: &[u8], from: usize, c: u8| v[from..].contains(&c);
+                if flags & P_ONECOMMA == P_ONECOMMA {
+                    if v[s] != b',' && v.get(s + 1) == Some(&b',') && dup_after(&v, s + 2, v[s]) {
+                        v.drain(s..s + 2);
+                        continue;
+                    }
+                } else if (!comma_list || v[s] != b',') && dup_after(&v, s + 1, v[s]) {
+                    v.remove(s);
+                    continue;
+                }
+                s += 1;
+            }
+            out = String::from_utf8_lossy(&v).into_owned();
         }
-        if part.ends_with('?') {
-            continue; // query form: no terminal output in this subset
+        out
+    };
+    // c: `do_set_option()` — one argument, `arg` running to the end of the line.
+    let do_set_option = |arg: &str| -> Option<String> {
+        const E474: &str = "E474: Invalid argument";
+        const E488: &str = "E488: Trailing characters";
+        const E521: &str = "E521: Number required after =";
+        let white = |c: u8| c == b' ' || c == b'\t';
+        let at = |s: &[u8], k: usize| s.get(k).copied().unwrap_or(0);
+
+        // c: get_option_prefix()
+        let (prefix, arg) = if arg.starts_with("no") && !arg.starts_with("novice") {
+            (b'n', &arg[2..])
+        } else if let Some(rest) = arg.strip_prefix("inv") {
+            (b'i', rest)
+        } else {
+            (0, arg)
+        };
+        let s = arg.as_bytes();
+        // c: parse_option_name() — `t_xx` is four characters, any other name the run
+        // of alphanumerics and `_`.
+        let mut len = if s.starts_with(b"t_") && s.len() >= 4 {
+            4
+        } else {
+            s.iter()
+                .take_while(|c| c.is_ascii_alphanumeric() || **c == b'_')
+                .count()
+        };
+        let name_len = len;
+        let afterchar = at(s, len);
+        while white(at(s, len)) {
+            len += 1;
         }
-        // `noopt` / `invopt` (bool off / invert).
-        if let Some(name) = part.strip_prefix("no") {
-            if let Some((canon, _, Kind::Bool, _, _)) = findoption(name) {
-                set_option(
-                    find_option(canon),
-                    BOOLEAN_OPTVAL(TriState::kFalse),
-                    opt_flags,
-                );
-                continue;
+        // c: get_opt_op()
+        let op = match (at(s, len), at(s, len + 1)) {
+            (c @ (b'+' | b'^' | b'-'), b'=') => {
+                len += 1;
+                c
+            }
+            _ => 0,
+        };
+        let nextchar = at(s, len);
+        let Some((canon, _, kind, _, _)) = findoption(&arg[..name_len]) else {
+            return None;
+        };
+        let opt_idx = find_option(canon);
+        let varp = get_varp_scope(opt_idx, opt_flags);
+        let mut p = len; // c: `arg += len` — at nextchar
+        if b"?=:!&<".contains(&nextchar) && nextchar != 0 {
+            // c: "opt&vim" / "opt&vi"
+            if nextchar == b'&' && at(s, p + 1) == b'v' && at(s, p + 2) == b'i' {
+                p += if at(s, p + 3) == b'm' { 3 } else { 2 };
+            }
+            if b"?!&<".contains(&nextchar) && at(s, p + 1) != 0 && !white(at(s, p + 1)) {
+                return Some(E488.to_string());
             }
         }
-        if let Some(name) = part.strip_prefix("inv") {
-            if let Some((canon, _, Kind::Bool, _, _)) = findoption(name) {
-                let opt_idx = find_option(canon);
-                let on = is_true(current(opt_idx));
-                set_option(
-                    opt_idx,
-                    BOOLEAN_OPTVAL(TRISTATE_FROM_INT(i64::from(!on))),
-                    opt_flags,
-                );
-                continue;
+        // c: "print value" — `opt?`, or a bare number/string option.
+        if nextchar == b'?' || (prefix == 0 && !b"=:&<".contains(&nextchar) && *kind != Kind::Bool)
+        {
+            if nextchar != b'?' && nextchar != 0 && !white(afterchar) {
+                return Some(E488.to_string());
             }
+            return None;
         }
-        // Bare `opt` — turn a boolean on (number/string forms are queries).
-        if let Some((canon, _, Kind::Bool, _, _)) = findoption(part) {
-            set_option(
-                find_option(canon),
-                BOOLEAN_OPTVAL(TriState::kTrue),
-                opt_flags,
-            );
+        let cur = optval_from_varp(opt_idx, varp);
+        let def_val = options[opt_idx].def_val.clone();
+        // c: `opt<` copies the global value; `:setlocal` of a global-local option
+        // instead unsets the local value (`NO_LOCAL_UNDOLEVEL`, -1, ''), so
+        // `get_varp()` goes back to the global one.
+        let scope = options[opt_idx].scope_flags;
+        let global_local =
+            scope & kOptScopeGlobal != 0 && scope & (kOptScopeBuf | kOptScopeWin) != 0;
+        let global = || {
+            if global_local && opt_flags == OPT_LOCAL {
+                crate::ported::option_optval::NIL_OPTVAL()
+            } else {
+                optval_from_varp(opt_idx, OptVarp::Global)
+            }
+        };
+        let value = match kind {
+            // c: do_set_option_bool()
+            Kind::Bool => {
+                if nextchar == b'=' || nextchar == b':' {
+                    return Some(E474.to_string());
+                }
+                let on = matches!(cur.data, OptValData::boolean(TriState::kTrue));
+                match nextchar {
+                    b'!' => BOOLEAN_OPTVAL(TRISTATE_FROM_INT(i64::from(!on))),
+                    b'&' => def_val,
+                    b'<' => global(),
+                    _ => {
+                        if nextchar != 0 && !white(afterchar) {
+                            return Some(E488.to_string());
+                        }
+                        match prefix {
+                            b'i' => BOOLEAN_OPTVAL(TRISTATE_FROM_INT(i64::from(!on))),
+                            b'n' => BOOLEAN_OPTVAL(TriState::kFalse),
+                            _ => BOOLEAN_OPTVAL(TriState::kTrue),
+                        }
+                    }
+                }
+            }
+            _ if !b"=:&<".contains(&nextchar) || nextchar == 0 || prefix != 0 => {
+                return Some(E474.to_string());
+            }
+            // c: do_set_option_numeric()
+            Kind::Number => match nextchar {
+                b'&' => def_val,
+                b'<' => global(),
+                _ => {
+                    let v = &arg[p + 1..];
+                    let vb = v.as_bytes();
+                    if !(at(vb, 0) == b'-' || at(vb, 0).is_ascii_digit()) {
+                        return Some(E521.to_string());
+                    }
+                    // c: "Allow negative (for 'undolevels'), octal and hex numbers."
+                    let mut n_len = 0i32;
+                    let mut n: varnumber_T = 0;
+                    crate::ported::charset::vim_str2nr(
+                        v,
+                        None,
+                        Some(&mut n_len),
+                        crate::ported::charset::STR2NR_ALL,
+                        Some(&mut n),
+                        None,
+                        0,
+                        true,
+                        None,
+                    );
+                    let n_len = n_len as usize;
+                    if n_len == 0 || (n_len < vb.len() && !white(vb[n_len])) {
+                        return Some(E521.to_string());
+                    }
+                    let old = match cur.data {
+                        OptValData::number(c) => c,
+                        _ => 0,
+                    };
+                    NUMBER_OPTVAL(match op {
+                        b'+' => old.wrapping_add(n),
+                        b'^' => old.wrapping_mul(n),
+                        b'-' => old.wrapping_sub(n),
+                        _ => n,
+                    })
+                }
+            },
+            // c: do_set_option_string() / stropt_get_newval()
+            Kind::String => match nextchar {
+                b'&' => def_val,
+                b'<' => global(),
+                _ => {
+                    let flags = STRING_FLAGS
+                        .iter()
+                        .find(|(n, _)| *n == *canon)
+                        .map_or(0, |(_, f)| *f);
+                    // c: a `:set` of a global-local string option works on the
+                    // global value (the local one is emptied by `set_option`);
+                    // `:setlocal` on its local value, or the global one while the
+                    // local one is unset.
+                    let origvarp = match opt_flags {
+                        0 if global_local => OptVarp::Global,
+                        OPT_LOCAL if global_local => get_varp_scope(opt_idx, 0),
+                        _ => varp,
+                    };
+                    let origval = match optval_from_varp(opt_idx, origvarp).data {
+                        OptValData::string(s) => s,
+                        _ => String::new(),
+                    };
+                    // c: stropt_copy_value() — a backslash escapes the next
+                    // character, except before a file-name character of a P_EXPAND
+                    // option (`set rtp=c:\dir`).
+                    let raw = &arg.as_bytes()[p + 1..];
+                    let mut newval: Vec<u8> = Vec::new();
+                    let mut k = 0usize;
+                    while k < raw.len() && !white(raw[k]) {
+                        if raw[k] == b'\\' && k + 1 < raw.len() {
+                            let c = raw[k + 1];
+                            let keep = flags & P_EXPAND != 0
+                                && (c.is_ascii_alphanumeric() || b"/.-_+,#$%~=".contains(&c))
+                                && c != b'\\';
+                            if !keep {
+                                k += 1;
+                            }
+                        }
+                        newval.push(raw[k]);
+                        k += 1;
+                    }
+                    let newval = String::from_utf8_lossy(&newval).into_owned();
+                    STRING_OPTVAL(stropt_newval(&origval, newval, op, flags))
+                }
+            },
+        };
+        set_option(opt_idx, value, opt_flags)
+    };
+    let b = args.as_bytes();
+    let white = |c: u8| c == b' ' || c == b'\t';
+    let mut i = 0usize;
+    while i < b.len() && white(b[i]) {
+        i += 1;
+    }
+    while i < b.len() {
+        let start = i;
+        let errmsg = do_set_option(&args[i..]);
+        // c: "Advance to next argument: skip until a blank found, taking care of
+        // backslashes; skip blanks."
+        while i < b.len() && !white(b[i]) {
+            if b[i] == b'\\' && i + 1 < b.len() {
+                i += 1;
+            }
+            i += 1;
+        }
+        while i < b.len() && white(b[i]) {
+            i += 1;
+        }
+        // c: the message quotes `startarg` up to the NEXT argument, so the
+        // blanks after the failing one are part of it (`E521: … tw=x `).
+        if let Some(msg) = errmsg {
+            crate::ported::message::emsg(&format!("{msg}: {}", &args[start..i]));
+            return;
         }
     }
 }
