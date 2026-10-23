@@ -61,6 +61,8 @@ set_lang_var
 # ── option.c (not vendored) ──
 # did_set_string_option — vim optionstr.c:5543 (string option did_set_* validation).
 did_set_string_option
+# showoneopt — vim option.c:6462 (the `:set opt?` display of one option).
+showoneopt
 do_set
 findoption
 set_option_value
