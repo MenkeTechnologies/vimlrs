@@ -8059,10 +8059,11 @@ and `var_item_copy`'s scalar arm did the same, so after `lockvar d.x`,
   parser has already consumed the body, so only the E128 is printed.
 - `let d.k{n} = 1` is `E18: Unexpected characters in :let` in vim (the lval
   ends at `d.k`); vimlrs reports `E461: Illegal variable name: d.k{n}`.
-- `let x = eval('nosuch')` assigns the recovered value (`exists('x')` is 1)
-  where vim's `eval()` fails the `:let`.
-- `for {n} in [1, 2]` / `for j{n} in …` is `E461: Illegal variable name: {n}`;
-  vim expands the curly name for each item.
+- ✅ NOT A GAP (re-measured in R63). `let x = eval('nosuch')`: vim 9.2 also
+  assigns the recovered `0` (`exists('x')` is 1), at script level, in a function
+  and inside `:try`; vimlrs already matched.
+- ✅ CLOSED in R63-1. `for {n} in [1, 2]` / `for j{n} in …` is `E461: Illegal
+  variable name: {n}`; vim expands the curly name for each item.
 
 ## R61 — callback `v:` vars, locale `v:` vars, string option validation, `:set` grammar
 
@@ -8219,3 +8220,41 @@ crash needed; vim prints nothing for the new form. Own commit.
 - Still open from R61-O: `set enc=foo` E474 (vim's `enc_canon_table`/alias
   table differ from the vendored Neovim one this crate ports), `set t_zz` E846,
   the lambda partial value, the verbose `not found in 'runtimepath'` messages.
+
+## R63 — curly-braces `:for` variables, severe errors inside `:try`
+
+Oracle: `/opt/homebrew/Cellar/vim/9.2.1200/bin/vim` (9.2, patches 1-1200),
+`-es -u NONE -i NONE -N -c 'verbose source CASE'`.
+
+### R63-1. `:for {n} in …` rejected a curly-braces loop variable — ✅ FIXED
+`for {n} in [1, 2]`, `for j{n} in …` and `for g:{n}y in …` were `E461: Illegal
+variable name` and the body never ran. `next_for_item` stores each item through
+`ex_let_vars` → `get_lval`, which expands the braces per item, so the body can
+change what the next item's name expands to. The parser now keeps such a target
+as `ForVars::Curly` with the argument as written; the compiler expands it for
+each item and stores the item straight from the stack (a hidden temporary's
+lowercase name would refuse a Funcref item with `E704`). A failed `{expr}` is
+`E121` then `E475: Invalid argument: {nosuch} in [1, 2]   " cmt` (the argument
+to the end of the line) and ends the loop. A curly target disqualifies the slot
+plan, as `let {n} = …` does. Recorded in `tests/parity_cases/for_curly_var.vim`.
+
+### R63-2. Inside `:try`, a curly-braces target's E475 did not replace the E121 — ✅ FIXED
+`try | let {nosuch} = 1 | catch | echo v:exception` printed `Vim(let):E121:
+Undefined variable: nosuch`; vim prints `Vim(let):E475: Invalid argument:
+{nosuch} = 1`. `get_lval` sets `emsg_severe` before that `E475`, and
+`cause_errthrow` lets a severe message replace the earlier one of the same
+command (`if (plist == msg_list || severe)`). Ported the `emsg_severe` global
+(consumed by `emsg_multiline`, c:789-790) and the replacement in the bridge's
+`errthrow`; only an error exception is replaced, never a pending `:throw`.
+Recorded in `tests/parity_cases/curly_lval_severe_catch.vim`.
+
+### R63-O. Measured this round, still open
+- A curly name inside a list target quotes only that name in `E475`: `for
+  [a{nosuch}, b] in [[1, 2]]` and `let [a{nosuch}, b] = [1, 2]` print `E475:
+  Invalid argument: a{nosuch}`; vim quotes from the name to the end of the
+  command (`a{nosuch}, b] in [[1, 2]]`, `a{nosuch}, b] = [1, 2]`).
+- The other `emsg_severe` sites are not ported: `:call`'s trailing-characters
+  `E488` (`userfunc.c:3617`), `:let`'s listing `E488`/`E475`
+  (`vars.c:1222/1235`) and `:unlet`'s (`vars.c:1595`).
+- Still open from R60-O: `E193` after a failed `:function` definition, `E18`
+  for `let d.k{n} = 1`.

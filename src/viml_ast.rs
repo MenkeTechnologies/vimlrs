@@ -380,6 +380,18 @@ pub enum UnletArg {
 pub enum ForVars {
     /// `:for x in …`.
     One(String),
+    /// `:for {n} in …` / `:for j{n} in …` — a curly-braces name, expanded for
+    /// each item (c: `next_for_item` → `ex_let_vars` → `get_lval` →
+    /// `make_expanded_name`).
+    Curly {
+        /// The name as written.
+        name: String,
+        /// The `:for` argument from the target to the end of the line, comment
+        /// included — what `E475: Invalid argument: %s` quotes when an `{expr}`
+        /// fails (`for {nosuch} in [1]` is `E475: Invalid argument: {nosuch} in
+        /// [1]`).
+        src: String,
+    },
     /// `:for [a, b] in …` / `:for [a, b; rest] in …` — each item is unpacked
     /// into these names, with `rest` taking what is left, as `:let` does.
     List {

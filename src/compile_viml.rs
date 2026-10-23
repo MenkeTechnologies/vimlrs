@@ -1036,8 +1036,14 @@ fn slot_plan(stmts: &[(u32, Stmt)], in_function: bool) -> SlotPlan {
                         cx.disq
                             .insert(slot_key(n, cx.in_function).unwrap_or(n).to_string());
                     };
+                    // A curly-braces target may name ANY variable at run time
+                    // (a slotted one included), as for `let {n} = …`.
+                    if matches!(vars, ForVars::Curly { .. }) {
+                        *cx.bail = true;
+                    }
                     match vars {
                         ForVars::One(n) => disq_var(n),
+                        ForVars::Curly { .. } => {}
                         ForVars::List { names, rest } => {
                             names.iter().chain(rest).for_each(|n| disq_var(n))
                         }
@@ -2514,6 +2520,27 @@ impl Compiler {
                     self.emit(Op::CallBuiltin(h::VIML_ERRS_AFTER, 1));
                     unpack_failed.push(self.emit(Op::JumpIfTrue(0)));
                 }
+            }
+            // c: `next_for_item` → `ex_let_vars` → `ex_let_one` → `get_lval`
+            // expands the braces for each item; an `{expr}` that fails (E121,
+            // then E475 quoting the argument) is a failed store and ends the loop.
+            // The item stays on the stack rather than in a hidden variable, whose
+            // lowercase name would refuse a Funcref item (E704).
+            ForVars::Curly { name, src } => {
+                self.emit(Op::CallBuiltin(h::VIML_ERR_COUNT, 0)); // [item, count]
+                self.emit(Op::Swap); // [count, item]
+                let name_failed = self.expand_name(name, src); // [count, item, name]
+                self.emit(Op::CallBuiltin(h::VIML_SETVAR, 2));
+                self.emit(Op::Pop); // [count]
+                let stored = self.emit(Op::Jump(0));
+                let here = self.b.current_pos();
+                self.b.patch_jump(name_failed, here);
+                self.emit(Op::Pop); // the Undef name
+                self.emit(Op::Pop); // the item
+                let here = self.b.current_pos();
+                self.b.patch_jump(stored, here);
+                self.emit(Op::CallBuiltin(h::VIML_ERRS_AFTER, 1));
+                unpack_failed.push(self.emit(Op::JumpIfTrue(0)));
             }
             ForVars::List { names, rest } => {
                 // c: `next_for_item` is `ex_let_vars(...) == OK`, so an item

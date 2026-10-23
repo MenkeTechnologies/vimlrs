@@ -64,6 +64,15 @@ thread_local! {
     /// status answered 0.
     pub static ex_exitval: Cell<i32> = const { Cell::new(0) };
 
+    /// C global `bool emsg_severe` (`globals.h`) — set by a caller just before an
+    /// error that must win over the ones the same command already raised: when
+    /// the error becomes an exception it REPLACES the earlier message rather
+    /// than queueing behind it (`cause_errthrow`, `vendor/ex_eval.c:258`).
+    /// `get_lval` sets it for the `E475` of a failed `{expr}` in a curly-braces
+    /// target, so `try | let {nosuch} = 1 | catch` catches the E475, not the
+    /// E121 that preceded it. Consumed (reset) by the next [`emsg_multiline`].
+    pub static emsg_severe: Cell<bool> = const { Cell::new(false) };
+
     /// When `Some`, each `emsg` text is captured here instead of printed —
     /// modelling `emsg_silent` + the saved error list that `assert_fails()`
     /// inspects in `message.c`/`testing.c`. `None` is the normal (print) path.
@@ -99,6 +108,8 @@ pub fn emsg(s: &str) {
 /// through [`msg_outtrans`], which shows them as `^@`/`^I`/`^M` like any other
 /// control byte — `eval("1\t2")` reports `E488: Trailing characters: ^I2`.
 pub fn emsg_multiline(s: &str, multiline: bool) {
+    // c:789-790 `bool severe = emsg_severe; emsg_severe = false;`
+    let severe = emsg_severe.with(|e| e.replace(false));
     // Counted first: this one tracks *every* error, whatever happens to it next.
     err_count.with(|d| d.set(d.get() + 1));
     // The narrower counter: the same bump, but rolled back across a called
@@ -152,7 +163,7 @@ pub fn emsg_multiline(s: &str, multiline: bool) {
     // throw itself does: `errthrow` returns true when it took ownership of the
     // message, in which case nothing is printed here — the exception carries it.
     // Outside a `:try` it declines and the error prints as before.
-    if !crate::fusevm_bridge::errthrow(s) {
+    if !crate::fusevm_bridge::errthrow(s, severe) {
         // c:813, the displayed half of the same call — see the `emsg_silent`
         // branch above.
         set_vim_var_string(VV_ERRMSG, s);

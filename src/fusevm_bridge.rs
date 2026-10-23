@@ -2209,15 +2209,18 @@ fn observe_errors_clear() {
 ///
 /// The exception is tagged with the ex-command that raised it, as the C tags it
 /// (`Vim(echo):E730: …`) — see `VIML_SET_CMDNAME`.
-pub fn errthrow(msg: &str) -> bool {
+pub fn errthrow(msg: &str, severe: bool) -> bool {
     if crate::ported::ex_eval::trylevel.with(|t| t.get()) == 0 {
         return false;
     }
     // c: the C aborts the command the moment an error is thrown, so no *later*
     // error from the same statement can exist. This VM finishes evaluating the
     // statement, so a second error can still arrive — keep the first, which is the
-    // one Vim would have reported, and swallow the rest.
-    if PENDING_EXC.with(|p| p.borrow().is_some()) {
+    // one Vim would have reported, and swallow the rest — unless this one is
+    // severe (c: `emsg_severe`): `if (plist == msg_list || severe)` makes it the
+    // thrown message instead (`vendor/ex_eval.c:258`). A pending `:throw` value
+    // is not in `msg_list`, so only an error exception is replaced.
+    if PENDING_EXC.with(|p| p.borrow().is_some()) && !(severe && EXC_FROM_ERR.with(|e| e.get())) {
         return true;
     }
     // c: the exception carries the command that raised the error — `Vim(echo):E730`.
@@ -6009,6 +6012,9 @@ fn b_expand_name(vm: &mut VM, _: u8) -> Value {
         Some(name) => Value::str(name),
         None => {
             if !src.is_empty() && !crate::ported::ex_eval::aborting() {
+                // c: `get_lval` — `emsg_severe = true;` before the E475, so
+                // inside a `:try` it is the error thrown, not the E121 before it.
+                message::emsg_severe.with(|e| e.set(true));
                 message::semsg(&format!("E475: Invalid argument: {src}"));
             }
             note_error();

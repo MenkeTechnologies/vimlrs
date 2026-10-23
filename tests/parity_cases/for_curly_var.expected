@@ -1,0 +1,17 @@
+1
+1
+2
+3
+7
+b c
+0
+2
+a
+b
+3
+1
+2
+4
+E121: Undefined variable: nosuch
+E475: Invalid argument: {nosuch} in [1, 2]   " cmt
+after

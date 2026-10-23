@@ -2055,6 +2055,11 @@ fn parse_for(cur: &mut Lines, header: &str) -> Result<Stmt, VimlError> {
                 .collect(),
             rest,
         }
+    } else if is_curly_name(var) {
+        ForVars::Curly {
+            name: var.to_string(),
+            src: header.trim_start().to_string(),
+        }
     } else {
         ForVars::One(var.to_string())
     };

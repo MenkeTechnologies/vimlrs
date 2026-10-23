@@ -1,0 +1,5 @@
+0
+Vim(let):E475: Invalid argument: {nosuch} = 1
+Vim(for):E475: Invalid argument: {nosuch} in [1]
+Vim(echo):E121: Undefined variable: nosuch
+Vim(echo):E121: Undefined variable: nosuch1
