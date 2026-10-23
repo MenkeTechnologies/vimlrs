@@ -1625,10 +1625,6 @@ thread_local! {
     /// `eval_init()` call from startup (`eval.c:206`); `install()` runs per-VM,
     /// so the "once" has to be explicit here.
     static EVAL_INITED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// `v:val` — the current element during `map()`/`filter()`/`sort()`.
-    static V_VAL: RefCell<Option<typval_T>> = const { RefCell::new(None) };
-    /// `v:key` — the current key/index during `map()`/`filter()`.
-    static V_KEY: RefCell<Option<typval_T>> = const { RefCell::new(None) };
 }
 
 // ── Typval ↔ fusevm::Value bridge ──
@@ -2547,17 +2543,6 @@ fn b_report_uncaught(_vm: &mut VM, _: u8) -> Value {
     Value::Undef
 }
 
-/// `v:val` / `v:key` while a `map()`/`filter()`/`foreach()` callback runs. They
-/// live in the callback state rather than in `vimvars[]`, so every place that
-/// reads a variable BY NAME has to ask here first.
-fn callback_vvar(name: &str) -> Option<typval_T> {
-    match name {
-        "v:val" => V_VAL.with(|v| v.borrow().clone()),
-        "v:key" => V_KEY.with(|v| v.borrow().clone()),
-        _ => None,
-    }
-}
-
 fn b_getvar(vm: &mut VM, _: u8) -> Value {
     let name = tv_get_string(&pop_tv(vm));
     // `b:changedtick` is Vim's always-present buffer change counter (never
@@ -2579,9 +2564,6 @@ fn b_getvar(vm: &mut VM, _: u8) -> Value {
     }
     if name == "v:throwpoint" {
         return Value::str(V_THROWPOINT.with(|t| t.borrow().clone()));
-    }
-    if name == "v:val" || name == "v:key" {
-        return callback_vvar(&name).map_or(Value::Int(0), tv_to_value);
     }
     match eval_variable(&name) {
         Some(tv) => tv_to_value(tv),
@@ -4608,7 +4590,7 @@ fn b_call_user(vm: &mut VM, argc: u8) -> Value {
     // Fallback: `F(args)` where `F` is a variable holding a Funcref/Partial
     // (e.g. a lambda stored in a variable). Call through the funcref value.
     // `v:val` is the callback state's Funcref: `map(fs, 'v:val()')`.
-    if let Some(v) = callback_vvar(&name).or_else(|| eval_variable(&name)) {
+    if let Some(v) = eval_variable(&name) {
         if matches!(v.v_type, VAR_FUNC | VAR_PARTIAL) {
             return match call_funcref(&v, args) {
                 Some(rettv) => tv_to_value(rettv),
@@ -5664,6 +5646,25 @@ fn b_assert_nobeep(vm: &mut VM, argc: u8) -> Value {
     }
 }
 
+/// Run `f` with `v:key`/`v:val` bound to `key`/`val`, then put back what they
+/// were. c: `filter_map()` brackets its loop with `prepare_vimvar(VV_VAL)` /
+/// `prepare_vimvar(VV_KEY)` and `restore_vimvar()` (`Src/eval/list.c`): the two
+/// are `VAR_UNKNOWN` — absent from `v:`, `E121` to read — outside a callback,
+/// and an inner `map()` inside the expression hands the outer one its own
+/// values back (`map([[1, 2]], 'map(copy(v:val), "v:val") + [v:val]')` keeps
+/// the outer list as the last item).
+fn with_callback_vvars<R>(key: &typval_T, val: &typval_T, f: impl FnOnce() -> R) -> R {
+    use crate::ported::eval::vars::{prepare_vimvar, restore_vimvar, set_vim_var_tv, vv};
+    let save_val = prepare_vimvar(vv::VV_VAL);
+    let save_key = prepare_vimvar(vv::VV_KEY);
+    set_vim_var_tv(vv::VV_VAL, val.clone());
+    set_vim_var_tv(vv::VV_KEY, key.clone());
+    let out = f();
+    restore_vimvar(vv::VV_KEY, save_key);
+    restore_vimvar(vv::VV_VAL, save_val);
+    out
+}
+
 /// Evaluate a `map`/`filter` callback for one element: either a string
 /// expression (with `v:val`/`v:key` bound) or a funcref called as `f(key, val)`.
 fn eval_callback(
@@ -5672,9 +5673,7 @@ fn eval_callback(
     key: &typval_T,
     val: &typval_T,
 ) -> typval_T {
-    V_VAL.with(|v| *v.borrow_mut() = Some(val.clone()));
-    V_KEY.with(|v| *v.borrow_mut() = Some(key.clone()));
-    match callback.v_type {
+    with_callback_vvars(key, val, || match callback.v_type {
         VAR_FUNC | VAR_PARTIAL => {
             call_funcref(callback, vec![key.clone(), val.clone()]).unwrap_or_else(|| tv_num(0))
         }
@@ -5682,7 +5681,7 @@ fn eval_callback(
             .as_ref()
             .and_then(|c| run_chunk_capture(c.clone()))
             .unwrap_or_else(|| tv_num(0)),
-    }
+    })
 }
 
 // map()/filter()/mapnew()/foreach() are ported faithfully in
@@ -5874,9 +5873,7 @@ fn filter_map_eval(expr: &typval_T, key: &typval_T, val: &typval_T) -> Option<ty
 /// The foreach() command hook (`do_cmdline_cmd`): set v:key/v:val and run the
 /// string as a command line.
 fn filter_map_cmd(cmd: &str, key: &typval_T, val: &typval_T) -> bool {
-    V_VAL.with(|v| *v.borrow_mut() = Some(val.clone()));
-    V_KEY.with(|v| *v.borrow_mut() = Some(key.clone()));
-    run_cmdline_nested(cmd).is_ok()
+    with_callback_vvars(key, val, || run_cmdline_nested(cmd).is_ok())
 }
 
 /// Call a Funcref/Partial typval with `extra` args. A Partial prepends its bound
@@ -7579,6 +7576,9 @@ pub fn install(vm: &mut VM) {
             // here, in the once-per-thread startup block, is the C's placement.
             crate::ported::os::lang::init_locale();
             crate::ported::eval::eval_init();
+            // c: main.c runs `set_lang_var()` once the v: table exists
+            // (`evalvars_init()` would reset the four values it seeds).
+            crate::ported::os::lang::set_lang_var();
         }
     });
     vm.register_builtin(VIML_GETVAR, b_getvar);

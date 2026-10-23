@@ -783,6 +783,16 @@ pub fn set_option(opt_idx: OptIndex, value: OptVal, opt_flags: i32) -> Option<St
             };
             NUMBER_OPTVAL(v)
         }
+        // c (vim 9.2): `did_set_string_option()` runs the option's `did_set_*`
+        // callback (`optionstr.c`) on the new value and, when it returns an
+        // error, puts the old value back — here, by not storing it.
+        OptValData::string(ref s) => {
+            let name = options[opt_idx].fullname;
+            if let Some(e) = did_set_string_option(name, s, opt_flags) {
+                return Some(e);
+            }
+            value
+        }
         _ => value,
     };
     // c: "If NIL_OPTVAL, the option value is cleared" — the value goes back to
@@ -814,6 +824,320 @@ pub fn set_option(opt_idx: OptIndex, value: OptVal, opt_flags: i32) -> Option<St
         store(OptVarp::Global, value);
     }
     errmsg.map(str::to_string)
+}
+
+/// Port of `did_set_string_option()` (vim 9.2 `optionstr.c:5543`) reduced to
+/// its validation: the `did_set_*` callback of each string option in this
+/// crate's table that has one, run on the NEW value `val` of option `name`.
+/// Returns the error message, without the `: {argument}` `do_set()` appends.
+///
+/// The callbacks' side effects (redraws, `g_chartab[]` refills, the
+/// `clip_unnamed` flags, sourcing `spell/{lang}.vim`) are not modelled; only
+/// the answer to "is this value accepted" is. `'encoding'` (`mb_init()`) is not
+/// checked — see BUGS.md.
+pub fn did_set_string_option(name: &str, val: &str, opt_flags: i32) -> Option<String> {
+    const E474: &str = "E474: Invalid argument";
+    // c: transchar() — a character 0x80-0xff comes back as its raw byte, which
+    // the message display shows as `<xx>`; a `String` cannot hold that byte, so
+    // the displayed form is taken here.
+    let transchar = |c: i32| {
+        use crate::ported::charset::{transchar_buf, transchar_byte_buf};
+        String::from_utf8(transchar_buf(c))
+            .unwrap_or_else(|_| String::from_utf8_lossy(&transchar_byte_buf(c)).into_owned())
+    };
+    let b = val.as_bytes();
+    let at = |k: usize| b.get(k).copied().unwrap_or(0);
+    // c: opt_strings_flags() / check_opt_strings() — every item of `val` (one
+    // item, or a comma list when `list`) is one of `values`; empty is valid.
+    let check_opt_strings = |values: &[&str], list: bool| -> bool {
+        let mut v = b;
+        while !v.is_empty() {
+            let hit = values.iter().find(|s| {
+                v.starts_with(s.as_bytes())
+                    && ((list && v.get(s.len()) == Some(&b',')) || v.len() == s.len())
+            });
+            let Some(s) = hit else { return false };
+            v = &v[s.len() + usize::from(v.get(s.len()) == Some(&b','))..];
+        }
+        true
+    };
+    // c: valid_name() (`option.c:3531`) — alphanumerics and `allowed` only.
+    let valid_name = |allowed: &str| {
+        b.iter()
+            .all(|c| c.is_ascii_alphanumeric() || allowed.as_bytes().contains(c))
+    };
+    let invalid = |ok: bool| (!ok).then(|| E474.to_string());
+    match name {
+        "ambiwidth" => invalid(check_opt_strings(&["single", "double"], false)),
+        // c: did_set_backspace() — a single digit 0-3 is the Vim 5.x form.
+        "backspace" if at(0).is_ascii_digit() => invalid(at(0) <= b'3' && b.len() == 1),
+        "backspace" => invalid(check_opt_strings(
+            &["indent", "eol", "start", "nostop"],
+            true,
+        )),
+        "buftype" => invalid(check_opt_strings(
+            &[
+                "nofile", "nowrite", "quickfix", "help", "terminal", "acwrite", "prompt", "popup",
+            ],
+            false,
+        )),
+        // c: did_set_clipboard() (`clipboard.c:3202`) — FEAT_CLIPBOARD's items;
+        // `exclude:` takes the rest of the value as a pattern and ends the list.
+        "clipboard" => {
+            let mut p = 0usize;
+            while p < b.len() {
+                let item = |w: &str| {
+                    b[p..].starts_with(w.as_bytes())
+                        && matches!(b.get(p + w.len()), None | Some(b','))
+                };
+                let word = [
+                    "unnamed",
+                    "unnamedplus",
+                    "autoselect",
+                    "autoselectplus",
+                    "autoselectml",
+                    "html",
+                ]
+                .into_iter()
+                .find(|w| item(w));
+                if let Some(w) = word {
+                    p += w.len();
+                } else if b[p..].starts_with(b"exclude:") {
+                    let before = crate::ported::message::did_emsg.with(|d| d.get());
+                    crate::viml_regex::Regex::compile(&val[p + 8..]);
+                    let failed = crate::ported::message::did_emsg.with(|d| d.get()) > before;
+                    return invalid(!failed);
+                } else {
+                    return Some(E474.to_string());
+                }
+                if at(p) == b',' {
+                    p += 1;
+                }
+            }
+            None
+        }
+        "fileformat" => {
+            let ma = matches!(
+                get_option_value(find_option("modifiable"), 0).data,
+                OptValData::boolean(TriState::kTrue)
+            );
+            if !ma && opt_flags & OPT_GLOBAL == 0 {
+                Some("E21: Cannot make changes, 'modifiable' is off".to_string())
+            } else {
+                invalid(check_opt_strings(&["unix", "dos", "mac"], false))
+            }
+        }
+        "fileformats" => invalid(check_opt_strings(&["unix", "dos", "mac"], true)),
+        // c: did_set_filetype_or_syntax() → valid_filetype(); the P_NFNAME
+        // path check before it rejects a subset of the same characters.
+        "filetype" | "syntax" => invalid(valid_name(".-_")),
+        // c: did_set_iskeyword() / did_set_isopt() → check_isopt() /
+        // init_chartab(), which fail on the same malformed values.
+        "iskeyword" | "isprint" | "isfname" | "isident" => {
+            invalid(crate::ported::charset::check_isopt(val))
+        }
+        "keymodel" => invalid(check_opt_strings(&["startsel", "stopsel"], true)),
+        // c: did_set_langmap() (`map.c:3108`) — `aAbB` pairs or `ab;AB`
+        // halves, comma separated, `\` escaping. Only the checks are ported:
+        // the `langmap_mapchar[]` it fills is not read by anything here.
+        "langmap" => {
+            use crate::ported::mbyte::{utf_ptr2char, utfc_ptr2len};
+            let adv = |p: usize| {
+                if p < b.len() {
+                    p + utfc_ptr2len(&b[p..]).max(1) as usize
+                } else {
+                    p
+                }
+            };
+            let ch = |p: usize| {
+                if p < b.len() {
+                    utf_ptr2char(&b[p..])
+                } else {
+                    0
+                }
+            };
+            let mut p = 0usize;
+            while at(p) != 0 {
+                let mut p2 = p;
+                while at(p2) != 0 && at(p2) != b',' && at(p2) != b';' {
+                    if at(p2) == b'\\' && at(p2 + 1) != 0 {
+                        p2 += 1;
+                    }
+                    p2 = adv(p2);
+                }
+                // c: "abcd;ABCD form, p2 points to A" / "aAbBcCdD form"
+                let mut p2 = (at(p2) == b';').then_some(p2 + 1);
+                while at(p) != 0 {
+                    if at(p) == b',' {
+                        p += 1;
+                        break;
+                    }
+                    if at(p) == b'\\' && at(p + 1) != 0 {
+                        p += 1;
+                    }
+                    let from = ch(p);
+                    let mut to = 0;
+                    match p2.as_mut() {
+                        None => {
+                            p = adv(p);
+                            if at(p) != b',' {
+                                if at(p) == b'\\' {
+                                    p += 1;
+                                }
+                                to = ch(p);
+                            }
+                        }
+                        Some(q) => {
+                            if at(*q) != b',' {
+                                if at(*q) == b'\\' {
+                                    *q += 1;
+                                }
+                                to = ch(*q);
+                            }
+                        }
+                    }
+                    if to == 0 {
+                        return Some(format!(
+                            "E357: 'langmap': Matching character missing for {}",
+                            transchar(from)
+                        ));
+                    }
+                    // c: "Advance to next pair"
+                    p = adv(p);
+                    if let Some(q) = p2.as_mut() {
+                        *q = adv(*q);
+                        if at(p) == b';' {
+                            p = *q;
+                            if at(p) != 0 {
+                                if at(p) != b',' {
+                                    return Some(format!(
+                                        "E358: 'langmap': Extra characters after semicolon: {}",
+                                        &val[p..]
+                                    ));
+                                }
+                                p += 1;
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            None
+        }
+        // c: did_set_matchpairs(), the `has_mbyte` loop — `x:y` pairs of
+        // (possibly multibyte) characters, comma separated.
+        "matchpairs" => {
+            use crate::ported::mbyte::{utf_ptr2char, utfc_ptr2len};
+            let len = |p: usize| utfc_ptr2len(&b[p.min(b.len())..]) as usize;
+            let mut p = 0usize;
+            while p < b.len() {
+                let mut x2 = -1;
+                let mut x3 = -1;
+                p += len(p);
+                if at(p) != 0 {
+                    x2 = i32::from(at(p));
+                    p += 1;
+                }
+                if at(p) != 0 {
+                    x3 = utf_ptr2char(&b[p..]);
+                    p += len(p);
+                }
+                if x2 != i32::from(b':') || x3 == -1 || (at(p) != 0 && at(p) != b',') {
+                    return Some(E474.to_string());
+                }
+                if at(p) == 0 {
+                    break;
+                }
+                p += 1;
+            }
+            None
+        }
+        "selection" => {
+            invalid(!b.is_empty() && check_opt_strings(&["inclusive", "exclusive", "old"], false))
+        }
+        // c: valid_spelllang() (`spell.c:4444`)
+        "spelllang" => invalid(valid_name(".-_,@")),
+        // c: valid_spellfile() (`spell.c:4453`) — each `copy_option_part()` item
+        // ends in ".add" and holds only file-name characters.
+        "spellfile" => {
+            let mut p = 0usize;
+            while p < b.len() {
+                let mut part: Vec<u8> = Vec::new();
+                if at(p) == b'.' {
+                    part.push(b'.');
+                    p += 1;
+                }
+                while p < b.len() && at(p) != b',' {
+                    if at(p) == b'\\' && at(p + 1) == b',' {
+                        p += 1;
+                    }
+                    part.push(at(p));
+                    p += 1;
+                }
+                if p < b.len() {
+                    p += 1;
+                }
+                while at(p) == b' ' {
+                    p += 1;
+                }
+                if part.len() < 4
+                    || !part.ends_with(b".add")
+                    || !part
+                        .iter()
+                        .all(|&c| crate::ported::charset::vim_is_fname_char(i32::from(c)))
+                {
+                    return Some(E474.to_string());
+                }
+            }
+            None
+        }
+        "virtualedit" => invalid(check_opt_strings(
+            &["block", "insert", "all", "onemore", "none", "NONE"],
+            true,
+        )),
+        // c: did_set_whichwrap() → did_set_option_listflag(val, WW_ALL ",") →
+        // illegal_char(): `E539: Illegal character <%s>` with transchar(c).
+        "whichwrap" => b
+            .iter()
+            .find(|c| !b"bshl<>[]~,".contains(c))
+            .map(|&c| format!("E539: Illegal character <{}>", transchar(i32::from(c)))),
+        // c: did_set_wildmode() → check_opt_wim() (`ex_getln.c:2947`) — at most
+        // four comma items, each a `:`-joined run of the known words.
+        "wildmode" => {
+            let mut p = 0usize;
+            let mut idx = 0;
+            while p < b.len() {
+                let i = b[p..]
+                    .iter()
+                    .take_while(|c| c.is_ascii_alphabetic())
+                    .count();
+                if !matches!(at(p + i), 0 | b',' | b':') {
+                    return Some(E474.to_string());
+                }
+                let w = &val[p..p + i];
+                if ![
+                    "longest", "full", "list", "lastused", "noselect", "noinsert",
+                ]
+                .contains(&w)
+                {
+                    return Some(E474.to_string());
+                }
+                p += i;
+                if at(p) == 0 {
+                    break;
+                }
+                if at(p) == b',' {
+                    if idx == 3 {
+                        return Some(E474.to_string());
+                    }
+                    idx += 1;
+                }
+                p += 1;
+            }
+            None
+        }
+        _ => None,
+    }
 }
 
 /// Port of `set_option_value_handle_tty()` from `vendor/option.c` (upstream

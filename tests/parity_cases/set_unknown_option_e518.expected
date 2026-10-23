@@ -1,0 +1,33 @@
+1
+nosuch Vim(set):E518: Unknown option: nosuch
+invnosuch Vim(set):E518: Unknown option: invnosuch
+nonosuch Vim(set):E518: Unknown option: nonosuch
+nosuch& Vim(set):E518: Unknown option: nosuch&
+nosuch? Vim(set):E518: Unknown option: nosuch?
+nosuch=1 Vim(set):E518: Unknown option: nosuch=1
+nosuch! Vim(set):E518: Unknown option: nosuch!
+nosuch+=1 Vim(set):E518: Unknown option: nosuch+=1
+nosuch< Vim(set):E518: Unknown option: nosuch<
+& Vim(set):E518: Unknown option: &
+x; Vim(set):E518: Unknown option: x;
+1x Vim(set):E518: Unknown option: 1x
+allx Vim(set):E518: Unknown option: allx
+noall Vim(set):E518: Unknown option: noall
+w300 Vim(set):E519: Option not supported: w300
+w1200=4 ok
+w9600? Vim(set):E519: Option not supported: w9600?
+nonovice ok
+novice ok
+invnovice ok
+cpo&vim ok
+nocp ok
+guifont=x ok
+gfn=y ok
+stl=x ok
+t_AB=x ok
+Vim(set):E518: Unknown option: nosuch 
+1
+Vim(setlocal):E518: Unknown option: nosuch
+Vim(setglobal):E518: Unknown option: nosuch
+E518: Unknown option: nosuch
+after

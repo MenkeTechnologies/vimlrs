@@ -1,0 +1,7 @@
+0
+exclude:a|b
+exclude:a|b
+exclude:a\|b
+exclude:a\|b
+exclude:c|d
+second command

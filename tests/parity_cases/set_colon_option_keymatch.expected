@@ -1,0 +1,22 @@
+0
+wim=full -> full
+wim^=list, -> list,full
+wim+=longest:full -> list,full,longest:full
+wim+=longest:list -> list,full,longest:list
+wim^=list:full,full -> list:full,list,full,longest:list
+wim-=longest: -> list:full,list,full
+wim-=list:x,full -> list
+wim=list:full,full,list:longest,noselect -> list:full,full,list:longest,noselect
+wim+=list:full -> list:full,full,noselect
+wim-=noselect, -> list:full,full
+wim+=, -> list:full,full
+wim= -> 
+wim+=full,list -> full,list
+Vim(set):E474: Invalid argument: wim^=a:b
+wim^=a:b -> full,list
+Vim(set):E474: Invalid argument: wim=full,list:full,list:x
+wim=full,list:full,list:x -> full,list
+wim+=list:full -> full,list,list:full
+wim+=noinsert -> full,list,list:full,noinsert
+wim+=noinsert -> full,list,list:full,noinsert
+wim-=noinsert -> full,list,list:full

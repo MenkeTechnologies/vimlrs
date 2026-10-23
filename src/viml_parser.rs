@@ -339,9 +339,13 @@ fn parse_stmt_unplaced(line: &str) -> Result<Stmt, VimlError> {
         // aborts the enclosing function definition and leaks its body to global
         // scope (E461 on `l:` vars).
         "execute" => Ok(Stmt::Execute(parse_expr_list(rest)?)),
-        "set" => Ok(Stmt::Set(rest.to_string())),
-        "setlocal" => Ok(Stmt::Setlocal(rest.to_string())),
-        "setglobal" => Ok(Stmt::Setglobal(rest.to_string())),
+        // c: `separate_nextcmd()` drops the backslash of every `\|` in the
+        // argument of an `EX_TRLBAR` command such as `:set` (`split_commands`
+        // kept the bar in the command): `set cb=exclude:a\\|b` hands `:set`
+        // `a\|b`, and its own escape removal leaves `a|b`.
+        "set" => Ok(Stmt::Set(rest.replace("\\|", "|"))),
+        "setlocal" => Ok(Stmt::Setlocal(rest.replace("\\|", "|"))),
+        "setglobal" => Ok(Stmt::Setglobal(rest.replace("\\|", "|"))),
         "source" => Ok(Stmt::Source(rest.trim().to_string())),
         "unlet" => {
             // `:unlet[!] x y …` — the optional `!` suppresses the missing-var

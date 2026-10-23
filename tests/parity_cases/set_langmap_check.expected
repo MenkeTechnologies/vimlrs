@@ -1,0 +1,28 @@
+1
+abc Vim(let):E357: 'langmap': Matching character missing for c
+ab;cd ok ab;cd
+aAbB ok aAbB
+abc;ABC ok abc;ABC
+ab;A Vim(let):E357: 'langmap': Matching character missing for b
+ab;ABC Vim(let):E358: 'langmap': Extra characters after semicolon: C
+abc;AB Vim(let):E357: 'langmap': Matching character missing for c
+ab;AB,cd ok ab;AB,cd
+ab;ABx Vim(let):E358: 'langmap': Extra characters after semicolon: x
+a\,b Vim(let):E357: 'langmap': Matching character missing for b
+\;a ok \;a
+aA,bB, ok aA,bB,
+,aA ok ,aA
+éÉ ok éÉ
+é Vim(let):E357: 'langmap': Matching character missing for <e9>
+ab;CD, ok ab;CD,
+a\ Vim(let):E357: 'langmap': Matching character missing for a
+aA; Vim(let):E357: 'langmap': Matching character missing for a
+; Vim(let):E357: 'langmap': Matching character missing for ;
+;ab Vim(let):E357: 'langmap': Matching character missing for b
+a Vim(let):E357: 'langmap': Matching character missing for a
+a^A ok a^A
+ab;CD,xy;XY,zZ ok ab;CD,xy;XY,zZ
+ab;CD,xy ok ab;CD,xy
+ä; Vim(let):E357: 'langmap': Matching character missing for <e4>
+a;ä ok a;ä
+E357: 'langmap': Matching character missing for x: lmap=xy;

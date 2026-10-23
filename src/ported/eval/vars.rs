@@ -167,7 +167,13 @@ pub fn set_var(name: &str, name_len: usize, tv: typval_T, _copy: bool) {
         VarScopeDict::VimVar => {
             // c: existing v: var — decline read-only slots (var_check_ro, E46);
             //    an unknown v: name would be a "new v: variable" → E461 (c:2882).
-            if let Some(idx) = VIMVARS_DEF.iter().position(|&(n, _, _)| n == varname) {
+            // A `VAR_UNKNOWN` slot (`v:val` outside a callback) is not in
+            // `vimvarht`, so the C takes it for a new name: E461.
+            if let Some(idx) = VIMVARS_DEF
+                .iter()
+                .position(|&(n, _, _)| n == varname)
+                .filter(|&idx| get_vim_var_tv(idx).v_type != VAR_UNKNOWN)
+            {
                 // c: `var_check_ro()` (`vendor/eval/vars.c:2947`) — a `VV_RO`
                 // slot REPORTS `E46: Cannot change read-only variable "%.*s"`
                 // and only then declines. Declining in silence, which is what
@@ -1192,8 +1198,13 @@ pub fn get_globvar_ht() -> crate::ported::hashtab::hashtab_T<typval_T> {
 pub fn get_vimvar_dict() -> dict_T {
     let mut d = dict_T::default();
     for idx in 0..vv::VV_LEN {
-        d.dv_hashtab
-            .insert(get_vim_var_name(idx).to_string(), get_vim_var_tv(idx));
+        // c: "add to v: scope dict, unless the value is not always available"
+        // (`evalvars_init`) — `v:val`/`v:key` are `VAR_UNKNOWN` until
+        // `prepare_vimvar` gives them a value for a callback.
+        let tv = get_vim_var_tv(idx);
+        if tv.v_type != VAR_UNKNOWN {
+            d.dv_hashtab.insert(get_vim_var_name(idx).to_string(), tv);
+        }
     }
     d
 }

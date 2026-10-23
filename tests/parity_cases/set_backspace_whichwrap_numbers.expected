@@ -1,0 +1,18 @@
+0
+3
+Vim(set):E474: Invalid argument: bs=03
+indent,eol,nostop
+indent,eol,start
+[]
+nostop,indent,eol,start
+0 []
+1 [b]
+3 [b,s]
+4 [h,l]
+8 [<,>]
+16 [[,]]
+31 [b,s,h,l,<,>,[,]]
+32 []
+7 [b,s,h,l]
+b,s,h,l,<,>,[,] 3
+b,h,l,<,>

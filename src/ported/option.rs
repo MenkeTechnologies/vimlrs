@@ -217,6 +217,119 @@ const OPTIONS: &[(&str, &str, Kind, varnumber_T, &str)] = &[
     ("virtualedit", "ve", Kind::String, 0, ""),
 ];
 
+/// Every option name and abbreviation in vim 9.2's `options[]`
+/// (`optiondefs.h`), sorted bytewise for `binary_search`. Most are not in
+/// [`OPTIONS`]: a `:set` of one of them is accepted and does nothing here,
+/// while a name in neither table is `E518: Unknown option` (`do_set_option`'s
+/// `findoption()` miss). The `t_xx` terminal codes are not listed; `:set` skips
+/// them.
+#[rustfmt::skip]
+const VIM_OPTION_NAMES: &[&str] = &[
+    "ac", "acd", "acl", "act", "ai", "akm", "al", "aleph", "allowrevins", "altkeymap", "ambiwidth",
+    "ambw", "anti", "antialias", "ap", "ar", "arab", "arabic", "arabicshape", "ari", "arshape",
+    "asd", "autochdir", "autocomplete", "autocompletedelay", "autocompletetimeout", "autoindent",
+    "autoprint", "autoread", "autoshelldir", "autowrite", "autowriteall", "aw", "awa",
+    "background", "backspace", "backup", "backupcopy", "backupdir", "backupext", "backupskip",
+    "balloondelay", "ballooneval", "balloonevalterm", "balloonexpr", "bdir", "bdlay", "beautify",
+    "belloff", "beval", "bevalterm", "bex", "bexpr", "bf", "bg", "bh", "bin", "binary", "biosk",
+    "bioskey", "bk", "bkc", "bl", "bo", "bomb", "breakat", "breakindent", "breakindentopt", "bri",
+    "briopt", "brk", "browsedir", "bs", "bsdir", "bsk", "bt", "bufhidden", "buflisted", "buftype",
+    "casemap", "cb", "cc", "ccv", "cd", "cdh", "cdhome", "cdpath", "cedit", "cf", "cfc", "cfu",
+    "ch", "charconvert", "chi", "chistory", "ci", "cia", "cin", "cindent", "cink", "cinkeys",
+    "cino", "cinoptions", "cinscopedecls", "cinsd", "cinw", "cinwords", "clipboard", "clipmethod",
+    "cm", "cmdheight", "cmdwinheight", "cmp", "cms", "co", "cocu", "cole", "colorcolumn",
+    "columns", "com", "comments", "commentstring", "compatible", "complete", "completefunc",
+    "completefuzzycollect", "completeitemalign", "completeopt", "completepopup", "completeslash",
+    "completetimeout", "concealcursor", "conceallevel", "confirm", "consk", "conskey",
+    "copyindent", "cot", "cp", "cpm", "cpo", "cpoptions", "cpp", "cpt", "crb", "cryptmethod",
+    "cscopepathcomp", "cscopeprg", "cscopequickfix", "cscoperelative", "cscopetag",
+    "cscopetagorder", "cscopeverbose", "csl", "cspc", "csprg", "csqf", "csre", "cst", "csto",
+    "csverb", "cto", "cuc", "cul", "culopt", "cursorbind", "cursorcolumn", "cursorline",
+    "cursorlineopt", "cwh", "debug", "deco", "def", "define", "delcombine", "dex", "dg", "dia",
+    "dict", "dictionary", "diff", "diffanchors", "diffexpr", "diffopt", "digraph", "dip", "dir",
+    "directory", "display", "dy", "ea", "ead", "eadirection", "eb", "ed", "edcompatible", "ef",
+    "efm", "ei", "eiw", "ek", "emo", "emoji", "enc", "encoding", "endoffile", "endofline", "eof",
+    "eol", "ep", "equalalways", "equalprg", "errorbells", "errorfile", "errorformat", "esckeys",
+    "et", "eventignore", "eventignorewin", "ex", "expandtab", "exrc", "fcl", "fcs", "fdc", "fde",
+    "fdi", "fdl", "fdls", "fdm", "fdn", "fdo", "fdt", "fen", "fenc", "fencs", "fex", "ff", "ffs",
+    "ffu", "fic", "fileencoding", "fileencodings", "fileformat", "fileformats", "fileignorecase",
+    "filetype", "fillchars", "findfunc", "fixendofline", "fixeol", "fk", "fkmap", "fl", "flash",
+    "flp", "fml", "fmr", "fo", "foldclose", "foldcolumn", "foldenable", "foldexpr", "foldignore",
+    "foldlevel", "foldlevelstart", "foldmarker", "foldmethod", "foldminlines", "foldnestmax",
+    "foldopen", "foldtext", "formatexpr", "formatlistpat", "formatoptions", "formatprg", "fp",
+    "fs", "fsync", "ft", "gcr", "gd", "gdefault", "gfm", "gfn", "gfs", "gfw", "ghr", "gli", "go",
+    "gp", "gr", "graphic", "grepformat", "grepprg", "gtl", "gtt", "guicursor", "guifont",
+    "guifontset", "guifontwide", "guiheadroom", "guiligatures", "guioptions", "guipty",
+    "guitablabel", "guitabtooltip", "hardtabs", "helpfile", "helpheight", "helplang", "hf", "hh",
+    "hi", "hid", "hidden", "highlight", "history", "hk", "hkmap", "hkmapp", "hkp", "hl", "hlg",
+    "hls", "hlsearch", "ht", "ic", "icon", "iconstring", "ignorecase", "im", "imactivatefunc",
+    "imactivatekey", "imaf", "imageprotocol", "imak", "imc", "imcmdline", "imd", "imdisable",
+    "imi", "iminsert", "ims", "imsearch", "imsf", "imst", "imstatusfunc", "imstyle", "inc",
+    "include", "includeexpr", "incsearch", "inde", "indentexpr", "indentkeys", "indk", "inex",
+    "inf", "infercase", "insertmode", "ipc", "is", "isf", "isfname", "isi", "isident", "isk",
+    "iskeyword", "isp", "isprint", "joinspaces", "jop", "js", "jumpoptions", "key", "keymap",
+    "keymodel", "keyprotocol", "keywordprg", "km", "kmp", "kp", "kpc", "langmap", "langmenu",
+    "langnoremap", "langremap", "laststatus", "lazyredraw", "lbr", "lcs", "lhi", "lhistory",
+    "linebreak", "lines", "linespace", "lisp", "lispoptions", "lispwords", "list", "listchars",
+    "lm", "lmap", "lnr", "loadplugins", "lop", "lpl", "lrm", "ls", "lsp", "luadll", "lw", "lz",
+    "ma", "macatsui", "magic", "makeef", "makeencoding", "makeprg", "mat", "matchpairs",
+    "matchtime", "maxcombine", "maxfuncdepth", "maxmapdepth", "maxmem", "maxmempattern",
+    "maxmemtot", "maxsearchcount", "mco", "mef", "menc", "menuitems", "mesg", "messagesopt", "mfd",
+    "mh", "mis", "mkspellmem", "ml", "mle", "mls", "mlst", "mm", "mmd", "mmp", "mmt", "mod",
+    "modeline", "modelineexpr", "modelines", "modelinestrict", "modifiable", "modified", "mopt",
+    "more", "mouse", "mousef", "mousefocus", "mousehide", "mousem", "mousemev", "mousemodel",
+    "mousemoveevent", "mouses", "mouseshape", "mouset", "mousetime", "mp", "mps", "msc", "msm",
+    "mzq", "mzquantum", "mzschemedll", "mzschemegcdll", "nf", "novice", "nrformats", "nu",
+    "number", "numberwidth", "nuw", "odev", "oft", "ofu", "omnifunc", "open", "opendevice",
+    "operatorfunc", "opfunc", "opt", "optimize", "osctimeoutlen", "osfiletype", "ost", "pa",
+    "packpath", "para", "paragraphs", "paste", "pastetoggle", "patchexpr", "patchmode", "path",
+    "pb", "pdev", "penc", "perldll", "pex", "pexpr", "pfn", "ph", "pheader", "pi", "pm", "pmbcs",
+    "pmbfn", "pmw", "popt", "pp", "preserveindent", "previewheight", "previewpopup",
+    "previewwindow", "printdevice", "printencoding", "printexpr", "printfont", "printheader",
+    "printmbcharset", "printmbfont", "printoptions", "prompt", "pt", "pumborder", "pumheight",
+    "pummaxwidth", "pumopt", "pumwidth", "pvh", "pvp", "pvw", "pw", "pythondll", "pythonhome",
+    "pythonthreedll", "pythonthreehome", "pyx", "pyxversion", "qe", "qftf", "quickfixtextfunc",
+    "quoteescape", "rdt", "re", "readonly", "redraw", "redrawtime", "regexpengine",
+    "relativenumber", "remap", "renderoptions", "report", "restorescreen", "revins", "ri",
+    "rightleft", "rightleftcmd", "rl", "rlc", "rnu", "ro", "rop", "rs", "rtp", "ru", "rubydll",
+    "ruf", "ruler", "rulerformat", "runtimepath", "sb", "sbo", "sbr", "sc", "scb", "scf", "scl",
+    "scr", "scroll", "scrollbind", "scrollfocus", "scrolljump", "scrolloff", "scrolloffpad",
+    "scrollopt", "scs", "sect", "sections", "secure", "sel", "selection", "selectmode",
+    "sessionoptions", "sft", "sh", "shcf", "shell", "shellcmdflag", "shellpipe", "shellquote",
+    "shellredir", "shellslash", "shelltemp", "shelltype", "shellxescape", "shellxquote",
+    "shiftround", "shiftwidth", "shm", "shortmess", "shortname", "showbreak", "showcmd",
+    "showcmdloc", "showfulltag", "showmatch", "showmode", "showtabline", "showtabpanel", "shq",
+    "si", "sidescroll", "sidescrolloff", "signcolumn", "siso", "sj", "slm", "sloc", "slow",
+    "slowopen", "sm", "smartcase", "smartindent", "smarttab", "smc", "smd", "smoothscroll", "sms",
+    "sn", "so", "softtabstop", "sol", "sop", "sourceany", "sp", "spc", "spell", "spellcapcheck",
+    "spellfile", "spelllang", "spelloptions", "spellsuggest", "spf", "spk", "spl", "splitbelow",
+    "splitkeep", "splitright", "spo", "spr", "sps", "sr", "srr", "ss", "ssl", "ssop", "st", "sta",
+    "stal", "startofline", "statusline", "statuslineopt", "stl", "stlo", "stmp", "stpl", "sts",
+    "su", "sua", "suffixes", "suffixesadd", "sw", "swapfile", "swapsync", "swb", "swf",
+    "switchbuf", "sws", "sxe", "sxq", "syn", "synmaxcol", "syntax", "ta", "tabclose", "tabline",
+    "tabpagemax", "tabpanel", "tabpanelopt", "tabstop", "tag", "tagbsearch", "tagcase", "tagfunc",
+    "taglength", "tagrelative", "tags", "tagsecure", "tagstack", "tal", "tb", "tbi", "tbidi",
+    "tbis", "tbs", "tc", "tcl", "tcldll", "tenc", "term", "termbidi", "termencoding",
+    "termguicolors", "termresize", "termsync", "termwinkey", "termwinscroll", "termwinsize",
+    "termwintype", "terse", "textauto", "textmode", "textwidth", "tf", "tfu", "tgc", "tgst",
+    "thesaurus", "thesaurusfunc", "tildeop", "timeout", "timeoutlen", "title", "titlelen",
+    "titleold", "titlestring", "tl", "tm", "to", "toolbar", "toolbariconsize", "top", "tpl",
+    "tplo", "tpm", "tr", "trz", "ts", "tsc", "tsl", "tsr", "tsrfu", "tsy", "ttimeout",
+    "ttimeoutlen", "ttm", "tty", "ttybuiltin", "ttyfast", "ttym", "ttymouse", "ttyscroll",
+    "ttytype", "tw", "twk", "tws", "twsl", "twt", "tx", "uc", "udf", "udir", "ul", "undodir",
+    "undofile", "undolevels", "undoreload", "updatecount", "updatetime", "ur", "ut",
+    "varsofttabstop", "vartabstop", "vb", "vbs", "vdir", "ve", "verbose", "verbosefile", "vfile",
+    "vi", "viewdir", "viewoptions", "vif", "viminfo", "viminfofile", "virtualedit", "visualbell",
+    "vop", "vsts", "vts", "w1200", "w300", "w9600", "wa", "wak", "warn", "wb", "wc", "wcm", "wcr",
+    "wd", "weirdinvert", "wfb", "wfh", "wfw", "wh", "whichwrap", "whl", "wi", "wic", "wig",
+    "wildchar", "wildcharm", "wildignore", "wildignorecase", "wildmenu", "wildmode", "wildoptions",
+    "wim", "winaltkeys", "wincolor", "window", "winfixbuf", "winfixheight", "winfixwidth",
+    "winheight", "winhighlight", "winminheight", "winminwidth", "winptydll", "winwidth", "wiv",
+    "wiw", "wlseat", "wlsteal", "wltimeoutlen", "wm", "wmh", "wmnu", "wmw", "wop", "wrap",
+    "wrapmargin", "wrapscan", "write", "writeany", "writebackup", "writedelay", "ws", "wse", "wst",
+    "wtm", "ww", "xtermcodes",
+];
+
 /// Port of `findoption()` (`option.c`) — resolve an option name or abbreviation
 /// to its `OPTIONS` row.
 fn findoption(
@@ -284,7 +397,7 @@ thread_local! {
     pub static SET_HOST_HOOK: std::cell::RefCell<Option<Box<dyn Fn(&str)>>> =
         const { std::cell::RefCell::new(None) };
 }
-/// The `P_COMMA`/`P_ONECOMMA`/`P_NODUP`/`P_FLAGLIST`/`P_EXPAND` bits of the
+/// The `P_COMMA`/`P_ONECOMMA`/`P_NODUP`/`P_FLAGLIST`/`P_EXPAND`/`P_COLON` bits of the
 /// string options in [`OPTIONS`], from vim's `optiondefs.h`. Only `:set`'s
 /// `+=`/`^=`/`-=` and its value copy read them.
 const P_COMMA: u32 = 0x1;
@@ -292,6 +405,7 @@ const P_ONECOMMA: u32 = 0x2 | P_COMMA;
 const P_NODUP: u32 = 0x4;
 const P_FLAGLIST: u32 = 0x8;
 const P_EXPAND: u32 = 0x10;
+const P_COLON: u32 = 0x20;
 const STRING_FLAGS: &[(&str, u32)] = &[
     ("runtimepath", P_EXPAND | P_ONECOMMA | P_NODUP),
     ("iskeyword", P_COMMA | P_NODUP),
@@ -304,7 +418,7 @@ const STRING_FLAGS: &[(&str, u32)] = &[
     ("matchpairs", P_ONECOMMA | P_NODUP),
     ("suffixes", P_ONECOMMA | P_NODUP),
     ("whichwrap", P_ONECOMMA | P_FLAGLIST),
-    ("wildmode", P_ONECOMMA | P_NODUP),
+    ("wildmode", P_ONECOMMA | P_NODUP | P_COLON),
     ("clipboard", P_ONECOMMA | P_NODUP),
     ("keymodel", P_ONECOMMA | P_NODUP),
     ("langmap", P_ONECOMMA | P_NODUP),
@@ -321,9 +435,10 @@ const STRING_FLAGS: &[(&str, u32)] = &[
 ///
 /// The first error is reported as `{msg}: {argument}` and ends the command.
 ///
-/// RUST-PORT NOTE: an option name this crate's reduced table does not know is
-/// skipped silently instead of `E518` — most of vim's options are not in it,
-/// and a plugin's `set cpo&vim` must keep running. A query (`opt?`, a bare
+/// RUST-PORT NOTE: a vim option this crate's reduced table does not hold
+/// ([`VIM_OPTION_NAMES`]) is skipped silently — a plugin's `set cpo&vim` must
+/// keep running — and a `t_xx` terminal code likewise; any other name is
+/// `E518`. `set all`, `set all&` and `set termcap` do nothing. A query (`opt?`, a bare
 /// number/string option) shows nothing: the `-es` message stream it writes to
 /// is not modelled.
 pub fn do_set(args: &str, opt_flags: i32) {
@@ -345,7 +460,7 @@ pub fn do_set(args: &str, opt_flags: i32) {
         let comma_list = flags & P_COMMA != 0;
         // c: find_dup_item() — an item that starts the value or follows an
         // unescaped comma, and ends at a comma or the end.
-        let find_dup = || -> Option<usize> {
+        let find_dup = |origval: &str, newval: &str, comma_list: bool| -> Option<usize> {
             let o = origval.as_bytes();
             let n = newval.as_bytes();
             let mut bs = 0;
@@ -364,15 +479,106 @@ pub fn do_set(args: &str, opt_flags: i32) {
             }
             None
         };
-        let dup = if op == b'-' || flags & P_NODUP != 0 {
-            find_dup()
+        // c: stropt_handle_keymatch() (vim 9.2) — a P_COMMA|P_COLON option
+        // takes an operand that holds a `key:value` item or several items one
+        // item at a time: a `key:` item replaces (`+=`/`^=`) or removes (`-=`)
+        // every item with that key, any other item is added unless present, or
+        // removed. A single plain item takes the ordinary path below.
+        let keymatched = (comma_list
+            && flags & P_COLON != 0
+            && (newval.contains(':') || newval.contains(',')))
+        .then(|| {
+            // c: find_key_item() — the first item starting with `key` (which
+            // includes its ':'), as (offset, length up to the next comma).
+            let find_key_item = |src: &str, from: usize, key: &str| -> Option<(usize, usize)> {
+                let s = src.as_bytes();
+                (from..s.len())
+                    .find(|&p| {
+                        (p == from || s[p - 1] == b',') && s[p..].starts_with(key.as_bytes())
+                    })
+                    .map(|p| {
+                        (
+                            p,
+                            s[p..]
+                                .iter()
+                                .position(|&c| c == b',')
+                                .unwrap_or(s.len() - p),
+                        )
+                    })
+            };
+            // c: remove_comma_item() — with the comma after it, or the one
+            // before it when it is the last item.
+            let remove_comma_item = |out: &mut String, item: usize, len: usize| {
+                if out.as_bytes().get(item + len) == Some(&b',') {
+                    out.replace_range(item..item + len + 1, "");
+                } else if item > 0 && out.as_bytes()[item - 1] == b',' {
+                    out.replace_range(item - 1..item + len, "");
+                } else {
+                    out.truncate(item);
+                }
+            };
+            // c: remove_key_item() — every item with `key` except the one at
+            // `skip`.
+            let remove_key_item = |out: &mut String, key: &str, skip: Option<usize>| {
+                while let Some((mut found, mut len)) = find_key_item(out, 0, key) {
+                    if Some(found) == skip {
+                        let next = found
+                            + len
+                            + usize::from(out.as_bytes().get(found + len) == Some(&b','));
+                        match find_key_item(out, next, key) {
+                            Some((f, l)) => (found, len) = (f, l),
+                            None => break,
+                        }
+                    }
+                    remove_comma_item(out, found, len);
+                }
+            };
+            let mut out = origval.to_string();
+            for item in newval.split(',').filter(|i| !i.is_empty()) {
+                // c: append_item() / prepend_item()
+                let add = |out: &mut String| {
+                    *out = match (out.is_empty(), op) {
+                        (true, _) => item.to_string(),
+                        (false, b'^') => format!("{item},{out}"),
+                        (false, _) => format!("{out},{item}"),
+                    }
+                };
+                let Some(colon) = item.find(':') else {
+                    match (op, find_dup(&out, item, true)) {
+                        (b'-', Some(s)) => remove_comma_item(&mut out, s, item.len()),
+                        (b'+' | b'^', None) => add(&mut out),
+                        _ => {}
+                    }
+                    continue;
+                };
+                let key = &item[..=colon];
+                match (op, find_key_item(&out, 0, key)) {
+                    (b'-', _) => remove_key_item(&mut out, key, None),
+                    // c: "Exact duplicate: keep it in place, but remove other
+                    // items with the same key."
+                    (_, Some((s, len))) if &out[s..s + len] == item => {
+                        remove_key_item(&mut out, key, Some(s));
+                    }
+                    (_, found) => {
+                        if found.is_some() {
+                            remove_key_item(&mut out, key, None);
+                        }
+                        add(&mut out);
+                    }
+                }
+            }
+            out
+        });
+        let dup = if keymatched.is_none() && (op == b'-' || flags & P_NODUP != 0) {
+            find_dup(origval, &newval, comma_list)
         } else {
             None
         };
-        let mut out = match op {
+        let mut out = match (keymatched, op) {
+            (Some(k), _) => k,
             // c: "do not add if already there"
-            b'+' | b'^' if dup.is_some() => origval.to_string(),
-            b'+' | b'^' => {
+            (None, b'+' | b'^') if dup.is_some() => origval.to_string(),
+            (None, b'+' | b'^') => {
                 let comma = comma_list && !origval.is_empty() && !newval.is_empty();
                 let mut orig = origval;
                 // c: "strip a trailing comma, would get 2"
@@ -393,7 +599,7 @@ pub fn do_set(args: &str, opt_flags: i32) {
                 }
             }
             // c: stropt_remove_val()
-            _ => match dup {
+            (None, _) => match dup {
                 Some(s) if !newval.is_empty() => {
                     let (mut from, mut to) = (s, s + newval.len());
                     if comma_list {
@@ -439,6 +645,13 @@ pub fn do_set(args: &str, opt_flags: i32) {
         let white = |c: u8| c == b' ' || c == b'\t';
         let at = |s: &[u8], k: usize| s.get(k).copied().unwrap_or(0);
 
+        // c: `:set all` / `:set all&` / `:set termcap` list (or reset) every
+        // option before any name is looked up; neither is modelled.
+        if (arg.starts_with("all") && !at(arg.as_bytes(), 3).is_ascii_alphabetic())
+            || arg.starts_with("termcap")
+        {
+            return None;
+        }
         // c: get_option_prefix()
         let (prefix, arg) = if arg.starts_with("no") && !arg.starts_with("novice") {
             (b'n', &arg[2..])
@@ -472,6 +685,15 @@ pub fn do_set(args: &str, opt_flags: i32) {
         };
         let nextchar = at(s, len);
         let Some((canon, _, kind, _, _)) = findoption(&arg[..name_len]) else {
+            let name = &arg[..name_len];
+            if name.starts_with("t_") || VIM_OPTION_NAMES.binary_search(&name).is_err() {
+                return (!name.starts_with("t_")).then(|| "E518: Unknown option".to_string());
+            }
+            // c: "hidden option: skip" — 'w300', 'w1200' and 'w9600' have no
+            // value in any build; only asking for one is an error.
+            if matches!(name, "w300" | "w1200" | "w9600") && !b"=:!&<".contains(&nextchar) {
+                return Some("E519: Option not supported".to_string());
+            }
             return None;
         };
         let opt_idx = find_option(canon);
@@ -593,14 +815,48 @@ pub fn do_set(args: &str, opt_flags: i32) {
                         OPT_LOCAL if global_local => get_varp_scope(opt_idx, 0),
                         _ => varp,
                     };
-                    let origval = match optval_from_varp(opt_idx, origvarp).data {
+                    let mut origval = match optval_from_varp(opt_idx, origvarp).data {
                         OptValData::string(s) => s,
                         _ => String::new(),
                     };
+                    // c: opt_backspace_nr2str() — a Vim 5.x numeric 'backspace'
+                    // is replaced by its words before the new value is made, so
+                    // `set bs=3 | set bs=03` keeps "indent,eol,nostop".
+                    if *canon == "backspace" && origval.starts_with(|c: char| c.is_ascii_digit()) {
+                        let digits = origval.bytes().take_while(u8::is_ascii_digit).count();
+                        origval = match origval[..digits].parse::<u32>() {
+                            Ok(0) => "",
+                            Ok(1) => "indent,eol",
+                            Ok(2) => "indent,eol,start",
+                            Ok(3) => "indent,eol,nostop",
+                            _ => origval.as_str(),
+                        }
+                        .to_string();
+                        set_option(opt_idx, STRING_OPTVAL(origval.clone()), opt_flags);
+                    }
                     // c: stropt_copy_value() — a backslash escapes the next
                     // character, except before a file-name character of a P_EXPAND
                     // option (`set rtp=c:\dir`).
-                    let raw = &arg.as_bytes()[p + 1..];
+                    let mut raw = &arg.as_bytes()[p + 1..];
+                    // c: opt_whichwrap_nr2str() — a Vim 3.0 numeric 'whichwrap'
+                    // (`set ww=31`) is copied as its flag list; whatever follows
+                    // the digits is skipped with the argument.
+                    let ww_words;
+                    if *canon == "whichwrap" && raw.first().is_some_and(u8::is_ascii_digit) {
+                        let digits = raw.iter().take_while(|c| c.is_ascii_digit()).count();
+                        let i: u64 = std::str::from_utf8(&raw[..digits])
+                            .ok()
+                            .and_then(|d| d.parse().ok())
+                            .unwrap_or(u64::MAX);
+                        let flags = [(1, "b"), (2, "s"), (4, "h,l"), (8, "<,>"), (16, "[,]")];
+                        ww_words = flags
+                            .iter()
+                            .filter(|(bit, _)| i & bit != 0)
+                            .map(|(_, w)| *w)
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        raw = ww_words.as_bytes();
+                    }
                     let mut newval: Vec<u8> = Vec::new();
                     let mut k = 0usize;
                     while k < raw.len() && !white(raw[k]) {
@@ -690,6 +946,26 @@ mod tests {
                         panic!("option key {key:?} is claimed by both {prev:?} and {full:?}");
                     }
                 }
+            }
+        }
+    }
+
+    /// `VIM_OPTION_NAMES` is searched with `binary_search`, which answers
+    /// "absent" for a present name once the slice is out of order — and an
+    /// absent vim option is `E518` on every `:set` of it. Every name of this
+    /// port's own table must be in it too, since both are vim's.
+    #[test]
+    fn vim_option_names_sorted_and_cover_table() {
+        assert!(
+            VIM_OPTION_NAMES.windows(2).all(|w| w[0] < w[1]),
+            "VIM_OPTION_NAMES must be sorted bytewise without duplicates"
+        );
+        for (full, abbr, ..) in OPTIONS {
+            for key in [full, abbr] {
+                assert!(
+                    VIM_OPTION_NAMES.binary_search(key).is_ok(),
+                    "{key:?} is in OPTIONS but not in VIM_OPTION_NAMES"
+                );
             }
         }
     }

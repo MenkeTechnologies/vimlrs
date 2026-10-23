@@ -1,0 +1,15 @@
+0
+Vim(echo):E121: Undefined variable: v:key
+0 0 absent
+Vim(let):E461: Illegal variable name: v:key
+Vim(echo):E121: Undefined variable: v:val
+0 0 absent
+Vim(let):E461: Illegal variable name: v:val
+0
+[1]
+[7]
+{'a': 'a'}
+[[10, 20, [1, 2]]]
+{'k': [0, 'k']}
+Vim(echo):E121: Undefined variable: v:val
+Vim(echo):E121: Undefined variable: v:key

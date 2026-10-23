@@ -1,0 +1,104 @@
+0
+Vim(set):E474: Invalid argument: bs=foo
+Vim(set):E474: Invalid argument: bs=4
+Vim(set):E474: Invalid argument: bs=03
+Vim(set):E474: Invalid argument: bs=indent,foo
+Vim(set):E474: Invalid argument: bs+=foo
+Vim(set):E474: Invalid argument: ff=foo
+Vim(set):E474: Invalid argument: ffs=x
+ffs=mac, accepted: mac,
+  changed: mac,
+Vim(set):E474: Invalid argument: ve=foo
+Vim(set):E474: Invalid argument: ve=all,foo
+Vim(set):E474: Invalid argument: sel=foo
+Vim(set):E474: Invalid argument: sel=
+Vim(set):E474: Invalid argument: mps=ab
+Vim(set):E474: Invalid argument: mps=a:b:c
+Vim(set):E474: Invalid argument: mps=a:bc
+Vim(set):E474: Invalid argument: mps+=x
+Vim(set):E539: Illegal character <z>: ww=z
+Vim(set):E539: Illegal character <X>: ww=b,X
+Vim(set):E474: Invalid argument: ambw=x
+ambw= accepted: 
+  changed: 
+Vim(set):E474: Invalid argument: wim=x
+Vim(set):E474: Invalid argument: wim=lon
+Vim(set):E474: Invalid argument: wim=full,full,full,full,full
+Vim(set):E474: Invalid argument: wim=:full
+Vim(set):E474: Invalid argument: wim=full::list
+Vim(set):E474: Invalid argument: cb=x
+cb=unnamed, accepted: unnamed,
+  changed: unnamed,
+Vim(set):E474: Invalid argument: km=x
+Vim(set):E474: Invalid argument: km+=foo
+Vim(set):E474: Invalid argument: isk=300
+Vim(set):E474: Invalid argument: isk=a,
+Vim(set):E474: Invalid argument: isk=^a,b-a
+Vim(set):E474: Invalid argument: isk=0
+Vim(set):E474: Invalid argument: isk=a-b-c
+Vim(set):E474: Invalid argument: isk=@-@,^,,
+Vim(set):E474: Invalid argument: isk=a-
+Vim(set):E474: Invalid argument: isk=a\ ,b
+Vim(set):E474: Invalid argument: isk=255,256
+Vim(set):E474: Invalid argument: isp=1-300
+Vim(set):E474: Invalid argument: isf=x,,y
+Vim(set):E474: Invalid argument: spf=foo.txt
+spf=.add accepted: .add
+  changed: .add
+spf=a.add, accepted: a.add,
+  changed: a.add,
+Vim(set):E474: Invalid argument: spf=a:b.add
+Vim(set):E474: Invalid argument: ft=foo/bar
+Vim(set):E474: Invalid argument: ft=x\ y
+Vim(set):E474: Invalid argument: ft=x;y
+Vim(set):E474: Invalid argument: syn=x*y
+Vim(set):E474: Invalid argument: syn=a@b
+Vim(set):E474: Invalid argument: bt=foo
+Vim(set):E54: Unmatched \(
+bs=2 -> 2
+bs= -> 
+bs=eol,start,eol -> eol,start,eol
+ve=block,insert,all,onemore,none,NONE -> block,insert,all,onemore,none,NONE
+sel=old -> old
+km=startsel,stopsel -> startsel,stopsel
+km=startsel, -> startsel,
+wim=longest:full,list:lastused -> longest:full,list:lastused
+wim=full, -> full,
+cb=unnamed,unnamedplus,autoselect,html -> unnamed,unnamedplus,autoselect,html
+cb=exclude:x -> exclude:x
+cb=html,exclude:x,unnamed -> html,exclude:x,unnamed
+ff=mac -> mac
+ffs= -> 
+ffs=mac,dos,unix -> mac,dos,unix
+ambw=double -> double
+mps=<:>,a:b -> <:>,a:b
+mps=<:>, -> <:>,
+mps=é:ü -> é:ü
+ww=<,>,~,[,] -> <,>,~,[,]
+ww=,,, -> ,,,
+isk=^ -> ^
+isk=^a -> ^a
+isk=@,^@ -> @,^@
+isk=- -> -
+isk=é -> é
+isi=, -> ,
+ft=FOO.bar-1 -> FOO.bar-1
+ft= -> 
+spf=foo.add,bar.add -> foo.add,bar.add
+spf=x\ y.add -> x y.add
+bt=nofile -> nofile
+bt= -> 
+isfname follows the option: Vim(set):E474: Invalid argument: spf=a.add
+a.add
+Vim(let):E539: Illegal character <^A>
+Vim(let):E474: Invalid argument
+Vim(set):E21: Cannot make changes, 'modifiable' is off: ff=dos
+Vim(setlocal):E21: Cannot make changes, 'modifiable' is off: ff=mac
+Vim(let):E21: Cannot make changes, 'modifiable' is off
+setglobal ff=dos ok
+mac
+Vim(set):E474: Invalid argument: spl=a/b
+Vim(set):E474: Invalid argument: spl=en/x
+Vim(set):E474: Invalid argument: spl=en\ x
+Vim(set):E474: Invalid argument: spl=*
+en

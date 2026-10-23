@@ -207,9 +207,10 @@ const CT_FNAME_CHAR: u8 = 0x40;
 /// and the default `'isprint'` is `"@,161-255"` — 161-255 are already printable
 /// from the loop below, and the `@` (isalpha over 1-255) adds only ASCII letters
 /// and Latin-1 letters, all of which are printable already. The other three arms
-/// set `CT_ID_CHAR`/`CT_FNAME_CHAR` and `buf->b_chartab`, which nothing here
-/// reads. So the table is computed once, from the defaults; vimlrs has no
-/// `:set isprint` to invalidate it.
+/// set `CT_ID_CHAR`/`CT_FNAME_CHAR` and `buf->b_chartab`; [`vim_isfilec`] reads
+/// the `'isfname'` bit from the current option instead. So the table is
+/// computed once, from the defaults: a `:set isprint` is validated and stored
+/// but does not refill it.
 ///
 /// `dy_flags & kOptDyFlagUhex` is likewise the default (`'display'` has no
 /// `"uhex"`), so an unprintable byte is 2 cells (`^X`), not 4 (`<xx>`).
@@ -247,62 +248,140 @@ static G_CHARTAB: std::sync::LazyLock<[u8; 256]> = std::sync::LazyLock::new(buf_
 /// letters.
 const P_ISK_DEFAULT: &str = "@,48-57,_,192-255";
 
-/// Port of the `p_isk` arm of `parse_isopt()` (`vendor/charset.c:157`) —
-/// `b_chartab[]`, the per-byte "is this a keyword character" bitmap that
-/// `'iskeyword'` fills.
+/// Port of `parse_isopt()` (`vendor/charset.c:157`) — parse an `'iskeyword'`,
+/// `'isident'`, `'isfname'` or `'isprint'` value: single characters, character
+/// numbers and ranges (`192-255`, `#-178`), each optionally `^`-negated, comma
+/// separated, with `@` standing for "1 through 255, but only where
+/// `mb_islower()` or `mb_isupper()` says the byte is a letter" — the `@` is why
+/// `µ` (0xb5) is a keyword character while `ª` (0xaa) is not. Returns false
+/// (the C's `FAIL`) for a malformed value: a character outside 1-255, a
+/// descending range, trailing text after an item, or a trailing comma.
 ///
-/// The C parses `var` into single characters, ranges (`192-255`) and the
-/// `@` shorthand, which stands for "1 through 255, but only where
-/// `mb_islower()` or `mb_isupper()` says the byte is a letter" — the `@` is
-/// why `µ` (0xb5) is a keyword character while `ª` (0xaa) is not, even though
-/// neither is in the `192-255` range. The `^` negation prefix, the other three
-/// option arms (`p_isi`/`p_isp`/`p_isf`) and the error returns are not reached
-/// by the default value and are not ported here; vimlrs has no `:set
-/// iskeyword` to re-run this with.
-fn parse_isopt(var: &str) -> [bool; 256] {
-    let mut tab = [false; 256];
-    for part in var.split(',') {
-        let mut chars = part.chars();
-        let Some(c) = chars.next() else { continue };
-        // c: the `c == '@'` arm — a single '@' (not "@-@").
-        let (mut c, c2, do_isalpha) = if part == "@" {
-            (1u32, 255u32, true)
-        } else {
-            let first = c as u32;
-            match part.split_once('-') {
-                // c: `c2` is read the same way as `c`; both are decimal when
-                // they start with a digit.
-                Some((lo, hi)) if !lo.is_empty() && !hi.is_empty() => (
-                    lo.parse::<u32>().unwrap_or(first),
-                    hi.parse::<u32>()
-                        .unwrap_or_else(|_| hi.chars().next().map_or(first, |ch| ch as u32)),
-                    false,
-                ),
-                _ => {
-                    let n = part.parse::<u32>().unwrap_or(first);
-                    (n, n, false)
-                }
+/// RUST-PORT NOTE: the C's `buf`/`only_check` pair is `tab`: `None` only checks
+/// (`check_isopt`), `Some` sets (or, after `^`, clears) one membership flag per
+/// byte — the single bit the C's four `var == p_is*` arms each own.
+fn parse_isopt(var: &str, mut tab: Option<&mut [bool; 256]>) -> bool {
+    let b = var.as_bytes();
+    let at = |k: usize| b.get(k).copied().unwrap_or(0);
+    // c: `getdigits()` for a number, `mb_ptr2char_adv()` for a character.
+    let item = |p: &mut usize| -> i64 {
+        if at(*p).is_ascii_digit() {
+            let mut n: i64 = 0;
+            while at(*p).is_ascii_digit() {
+                n = n
+                    .saturating_mul(10)
+                    .saturating_add(i64::from(at(*p) - b'0'));
+                *p += 1;
             }
+            n
+        } else {
+            let c = utf_ptr2char(&b[*p..]);
+            *p += utfc_ptr2len(&b[*p..]).max(1) as usize;
+            i64::from(c)
+        }
+    };
+    let mut p = 0usize;
+    while p < b.len() {
+        let mut tilde = false;
+        if at(p) == b'^' && at(p + 1) != 0 {
+            tilde = true;
+            p += 1;
+        }
+        let mut c = item(&mut p);
+        let mut c2 = -1;
+        if at(p) == b'-' && at(p + 1) != 0 {
+            p += 1;
+            c2 = item(&mut p);
+        }
+        if c <= 0 || c >= 256 || (c2 < c && c2 != -1) || c2 >= 256 || !(at(p) == 0 || at(p) == b',')
+        {
+            return false;
+        }
+        let trail_comma = at(p) == b',';
+        // c: skip_to_option_part() — past the comma and any blanks.
+        if at(p) == b',' {
+            p += 1;
+        }
+        while at(p) == b' ' {
+            p += 1;
+        }
+        if trail_comma && p >= b.len() {
+            // c: "Trailing comma is not allowed."
+            return false;
+        }
+        let Some(tab) = tab.as_deref_mut() else {
+            continue;
         };
-
-        while c <= c2 && c < 256 {
+        let mut do_isalpha = false;
+        if c2 == -1 {
+            // c: a single '@' (not "@-@")
+            if c == i64::from(b'@') {
+                do_isalpha = true;
+                c = 1;
+                c2 = 255;
+            } else {
+                c2 = c;
+            }
+        }
+        while c <= c2 {
             // c: use the MB_ functions here, because isalpha() doesn't work
             // properly when 'encoding' is "latin1" and the locale is "C".
-            let ch = char::from_u32(c).unwrap_or('\0');
+            let ch = char::from_u32(c as u32).unwrap_or('\0');
             if !do_isalpha || mb_islower(ch) || mb_isupper(ch) {
-                // c: (var == p_isk) — SET_CHARTAB(buf, c).
-                tab[c as usize] = true;
+                tab[c as usize] = !tilde;
             }
             c += 1;
         }
     }
-    tab
+    true
+}
+
+/// Port of `check_isopt()` (`vendor/charset.c:151`) — whether `var` is a
+/// well-formed `'iskeyword'`/`'isident'`/`'isfname'`/`'isprint'` value.
+pub fn check_isopt(var: &str) -> bool {
+    parse_isopt(var, None)
 }
 
 /// `b_chartab[]` (`vendor/buffer_defs.h`) for the one buffer vimlrs has, filled
 /// from the default `'iskeyword'`.
-static B_CHARTAB: std::sync::LazyLock<[bool; 256]> =
-    std::sync::LazyLock::new(|| parse_isopt(P_ISK_DEFAULT));
+static B_CHARTAB: std::sync::LazyLock<[bool; 256]> = std::sync::LazyLock::new(|| {
+    let mut tab = [false; 256];
+    parse_isopt(P_ISK_DEFAULT, Some(&mut tab));
+    tab
+});
+
+/// Port of `vim_isfilec()` (`vendor/charset.c:859`) — is `c` a file-name
+/// character: at or above 0x100, or in `'isfname'` (on top of the bytes
+/// 0xa0-0xff `buf_init_chartab()` marks before walking that option).
+///
+/// RUST-PORT NOTE: `g_chartab[]`'s `CT_FNAME_CHAR` bit is computed here from the
+/// CURRENT `'isfname'` rather than kept in a table `init_chartab()` refills —
+/// a `:set isfname` is already validated by `check_isopt`, so the two agree.
+pub fn vim_isfilec(c: i32) -> bool {
+    if c >= 0x100 {
+        return true;
+    }
+    if c <= 0 {
+        return false;
+    }
+    let mut tab = [false; 256];
+    for (k, f) in tab.iter_mut().enumerate() {
+        *f = G_CHARTAB[k] & CT_FNAME_CHAR != 0;
+    }
+    let isf = crate::ported::option::get_option_value("isfname");
+    parse_isopt(
+        &crate::ported::eval::typval::tv_get_string(&isf),
+        Some(&mut tab),
+    );
+    tab[c as usize]
+}
+
+/// Port of `vim_is_fname_char()` (`vendor/charset.c:867`) — [`vim_isfilec`]
+/// plus the characters `'isfname'` leaves out so `gf` works. vim's build
+/// (`charset.c:1079`, the oracle) accepts `,`, ` ` and `@`; Neovim also `:`.
+pub fn vim_is_fname_char(c: i32) -> bool {
+    vim_isfilec(c) || c == i32::from(b',') || c == i32::from(b' ') || c == i32::from(b'@')
+}
 
 /// Port of `vim_iswordc_tab()` from `vendor/charset.c:804` — is `c` a keyword
 /// character?

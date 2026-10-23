@@ -7970,11 +7970,11 @@ Neovim accepts it — vim is followed. Parity case: `option_value_bounds.vim`.
   (which vim shows, then reports `E488`): the `-es` message stream it writes,
   whose newlines land on stderr and the text on stdout, is not modelled.
   `E518` for an unknown name is not reported because the option table is
-  reduced (see `option.rs`).
-- String option values are not validated: vim and Neovim agree on `E474`/`E539`
+  reduced (see `option.rs`). (✅ The `E518` half is CLOSED in R61-5.)
+- ✅ CLOSED in R61-3 (every option listed; `&enc` stays open, R61-O). String option values are not validated: vim and Neovim agree on `E474`/`E539`
   for invalid values of `&bs`, `&ambw`, `&sel`, `&ffs`, `&ve`, `&wim`, `&cb`,
   `&km`, `&mps`, `&ff`, `&ww`, `&isk`, `&spl`.
-- `v:lang`, `v:ctype`, `v:collate` are `''`; both engines answer the locale
+- ✅ CLOSED in R61-1 and R61-2. `v:lang`, `v:ctype`, `v:collate` are `''`; both engines answer the locale
   (`C.UTF-8`). `v:key` outside a callback is `0`; both engines say `E121`.
 - A default argument read through a returned `a:` dict is `0` in both engines
   (the value is cleared when the call ends); vimlrs keeps the value, because a
@@ -8063,3 +8063,88 @@ and `var_item_copy`'s scalar arm did the same, so after `lockvar d.x`,
   where vim's `eval()` fails the `:let`.
 - `for {n} in [1, 2]` / `for j{n} in …` is `E461: Illegal variable name: {n}`;
   vim expands the curly name for each item.
+
+## R61 — callback `v:` vars, locale `v:` vars, string option validation, `:set` grammar
+
+Oracle: `/opt/homebrew/Cellar/vim/9.2.1200/bin/vim` (9.2, patches 1-1200),
+`-es -u NONE -i NONE -N -c 'verbose source CASE'`.
+
+### R61-1. `v:val` / `v:key` existed outside a callback and leaked between nested ones — ✅ FIXED
+The bridge kept the two in thread-locals that a callback set and nothing
+cleared: `echo v:key` at script level printed `0`, `call map([9], '1') | echo
+v:val` printed `9`, `has_key(v:, 'key')` was 1 and `let v:key = 1` was E46. An
+inner `map()` overwrote the outer callback's value, so `map([[1, 2]],
+'map(copy(v:val), "v:val") + [v:val]')` ended in `2` instead of the list, and
+inside a callback `get(v:, 'val', -1)` / `v:['key']` read `v:null`. They now
+live in the `vimvars[]` slots, bracketed per item by `prepare_vimvar()` /
+`restore_vimvar()` as `filter_map()` does; `get_vimvar_dict()` leaves out a
+`VAR_UNKNOWN` slot (`evalvars_init`: "unless the value is not always
+available") and `set_var` treats one as a new name (`E461`). Recorded in
+`tests/parity_cases/callback_vvars_scope.vim`.
+
+### R61-2. `v:ctype`, `v:lang`, `v:lc_time`, `v:collate` were empty — ✅ FIXED
+Ported `set_lang_var()` / `get_locale_val()` (vim `locale.c`), run once after
+`eval_init()`: each reads `setlocale(category, NULL)` of the locale
+`init_locale()` adopted (`C.UTF-8` under the harness). Recorded in
+`tests/parity_cases/lang_vars_locale.vim`.
+
+### R61-3. String option values were not validated — ✅ FIXED
+`set_option()` now runs `did_set_string_option()`'s per-option callback
+(`optionstr.c`) on a new string value and keeps the old one on an error:
+`'ambiwidth'`, `'backspace'` (words or one digit 0-3), `'buftype'`,
+`'clipboard'` (with the `exclude:` pattern compiled — `E54` then `E474`),
+`'fileformat'` (`E21` in a `nomodifiable` buffer unless `:setglobal`),
+`'fileformats'`, `'filetype'`/`'syntax'` (`valid_filetype`), `'iskeyword'`/
+`'isprint'`/`'isfname'`/`'isident'` (`check_isopt`, now a full `parse_isopt`
+port with `^` negation and its FAIL returns), `'keymodel'`, `'langmap'`
+(`E357`/`E358`), `'matchpairs'` (the multibyte loop), `'selection'`,
+`'spelllang'`, `'spellfile'` (`.add` items of `vim_is_fname_char` characters,
+reading the current `'isfname'`), `'virtualedit'`, `'whichwrap'` (`E539:
+Illegal character <c>`) and `'wildmode'` (`check_opt_wim`). `:set` appends
+`: {argument}`; `:let &opt` reports the bare message. Recorded in
+`tests/parity_cases/set_string_option_values.vim` and
+`tests/parity_cases/set_langmap_check.vim`.
+
+### R61-4. Numeric `'backspace'` / `'whichwrap'` were stored as typed — ✅ FIXED
+`opt_backspace_nr2str()`: a numeric `'bs'` becomes its words before the next
+`:set` builds a value (`set bs=3 | set bs=03` restores `indent,eol,nostop`;
+`set bs=1 | set bs+=start` is `indent,eol,start`). `opt_whichwrap_nr2str()`: `set
+ww=31x` is `b,s,h,l,<,>,[,]`. Recorded in
+`tests/parity_cases/set_backspace_whichwrap_numbers.vim`.
+
+### R61-5. `:set nosuch` was silently accepted — ✅ FIXED
+A name that is neither in this port's table nor among vim 9.2's option
+names and abbreviations (`VIM_OPTION_NAMES`, from `optiondefs.h`) is `E518:
+Unknown option: {argument}`, with the `no`/`inv` prefix and any operator in the
+quoted text, and the earlier arguments of the line already applied. A vim
+option this port does not hold is still accepted silently, `t_xx` codes too;
+`'w300'`/`'w1200'`/`'w9600'` (hidden in every build) are `E519` when queried.
+Recorded in `tests/parity_cases/set_unknown_option_e518.vim`.
+
+### R61-6. `'wildmode'` `+=`/`^=`/`-=` ignored vim 9.2's key matching — ✅ FIXED
+`stropt_handle_keymatch()`: for a `P_COMMA|P_COLON` option an operand with a
+`key:value` item or several items is applied item by item (`set wim=full | set
+wim^=list,` is `list`, `set wim+=longest:full | set wim+=longest:list`
+replaces the item). Recorded in `tests/parity_cases/set_colon_option_keymatch.vim`.
+
+### R61-7. `\|` in a `:set` argument kept its backslash — ✅ FIXED
+`separate_nextcmd()` removes the backslash before each `|` of an `EX_TRLBAR`
+command's argument, then `:set` removes its own escapes: `set
+cb=exclude:a\\|b` is `exclude:a|b`. Recorded in
+`tests/parity_cases/set_bar_backslash.vim`.
+
+### R61-O. Measured this round, still open
+- `set enc=foo` is `E474` in vim (`mb_init()`); vimlrs stores it.
+- A successful `:set spelllang=…` sources `spell/{lang}.vim` from
+  'runtimepath', which under `verbose` prints `not found in 'runtimepath':
+  "spell/en.vim"`; `:runtime` under `verbose` likewise. Neither message is
+  produced (no `'verbose'` level is modelled).
+- `set t_zz=x` is `E846: Key code not set: t_zz`; vimlrs skips every `t_xx`.
+- A lambda whose body fails returns what `eval1()` left in `rettv` (`{->
+  [][0]}()` is `[]`, `{-> 1 + nosuch}()` is `0`, `{-> [1, nosuch]}()` is
+  `-1`, `{-> 'x' . nosuch}()` prints nothing); vimlrs returns `-1` for all of
+  them. The compiled body has no partially evaluated value to return.
+- `let &ww = "b,\x80"` reports `<80>`; a String option value here is UTF-8, so
+  the byte arrives as U+FFFD and is reported as `<ef>`.
+- Under `LANG=bogus` (no `LC_ALL`) vim's `v:ctype` is `UTF-8` on macOS; vimlrs
+  answers `C`.
