@@ -54,8 +54,13 @@ parse_fmt_types
 # ── os/lang.c (not vendored) ──
 # Locale adoption behind sort()'s 'l' flag (strcoll) — os/lang.c:121.
 init_locale
+# v:ctype / v:lang / v:lc_time / v:collate seeding — os/lang.c (vim locale.c:20, :181).
+get_locale_val
+set_lang_var
 
 # ── option.c (not vendored) ──
+# did_set_string_option — vim optionstr.c:5543 (string option did_set_* validation).
+did_set_string_option
 do_set
 findoption
 set_option_value
