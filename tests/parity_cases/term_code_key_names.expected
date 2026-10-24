@@ -1,0 +1,19 @@
+0
+t_ku <Up>        a
+t_#4 <S-Left>    b
+t_&9 <S-t_@1>    c
+t_kB <S-Tab>     d
+t_k; <F10>       e
+t_K1 <kHome>     f
+t_xx             g
+t_@1             h
+t_kb <BS>        i
+t_%i <S-Right>   j
+t_*7 <S-End>     k
+t_kI <Insert>    l
+t_kD <Del>       m
+t_ZZ             n
+
+t_PS <PasteStart> p
+
+t_ku <Up>        abc

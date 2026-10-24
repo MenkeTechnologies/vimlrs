@@ -1,0 +1,39 @@
+1
+latin1
+E474: Invalid argument: enc=foo
+latin1
+utf-8
+ucs-2le
+E474: Invalid argument: enc=cp1252
+ucs-2le
+8bit-cp1252
+2byte-foo
+euc-jp
+utf-8
+cp932
+big5
+latin1
+latin1
+utf-16be
+dec-mcs
+E474: Invalid argument: enc=zh-cn
+dec-mcs
+cp1250
+latin1
+euc-jp
+utf-8
+E474: Invalid argument
+utf-8
+E474: Invalid argument: enc=
+utf-8
+utf-8
+é
+é
+é
+é
+0
+0
+a
+a
+あ
+<82><a0>

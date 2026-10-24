@@ -1405,8 +1405,9 @@ pub const ENC_LATIN1: i32 = 0x200;
 pub const ENC_LATIN9: i32 = 0x400;
 pub const ENC_MACROMAN: i32 = 0x800;
 
-/// Port of `enc_canon_table[]` (`vendor/mbyte.c:151`): canonical name and
-/// properties. The codepage column is Windows-only and not carried.
+/// Port of `enc_canon_table[]` (vim 9.2 `mbyte.c:179`): canonical name and
+/// properties, in the C's `IDX_*` order. The codepage column is used only by
+/// the MS-Windows code and is not carried.
 const enc_canon_table: &[(&str, i32)] = &[
     ("latin1", ENC_8BIT + ENC_LATIN1),
     ("iso-8859-2", ENC_8BIT),
@@ -1428,6 +1429,7 @@ const enc_canon_table: &[(&str, i32)] = &[
     ("ucs-2", ENC_UNICODE + ENC_ENDIAN_B + ENC_2BYTE),
     ("ucs-2le", ENC_UNICODE + ENC_ENDIAN_L + ENC_2BYTE),
     ("utf-16", ENC_UNICODE + ENC_ENDIAN_B + ENC_2WORD),
+    ("utf-16be", ENC_UNICODE + ENC_ENDIAN_B + ENC_2WORD),
     ("utf-16le", ENC_UNICODE + ENC_ENDIAN_L + ENC_2WORD),
     ("ucs-4", ENC_UNICODE + ENC_ENDIAN_B + ENC_4BYTE),
     ("ucs-4le", ENC_UNICODE + ENC_ENDIAN_L + ENC_4BYTE),
@@ -1466,83 +1468,104 @@ const enc_canon_table: &[(&str, i32)] = &[
     ("cp1257", ENC_8BIT),
     ("cp1258", ENC_8BIT),
     ("macroman", ENC_8BIT + ENC_MACROMAN),
+    ("dec-mcs", ENC_8BIT),
     ("hp-roman8", ENC_8BIT),
 ];
 
-/// Port of `enc_alias_table[]` (`vendor/mbyte.c:274`): alias → index into
-/// [`enc_canon_table`].
-const enc_alias_table: &[(&str, usize)] = &[
-    ("ansi", 0),
-    ("iso-8859-1", 0),
-    ("latin2", 1),
-    ("latin3", 2),
-    ("latin4", 3),
-    ("cyrillic", 4),
-    ("arabic", 5),
-    ("greek", 6),
-    ("hebrew", 7),
-    ("latin5", 8),
-    ("turkish", 8),
-    ("latin6", 9),
-    ("nordic", 9),
-    ("thai", 10),
-    ("latin7", 11),
-    ("latin8", 12),
-    ("latin9", 13),
-    ("utf8", 16),
-    ("unicode", 17),
-    ("ucs2", 17),
-    ("ucs2be", 17),
-    ("ucs-2be", 17),
-    ("ucs2le", 18),
-    ("utf16", 19),
-    ("utf16be", 19),
-    ("utf-16be", 19),
-    ("utf16le", 20),
-    ("ucs4", 21),
-    ("ucs4be", 21),
-    ("ucs-4be", 21),
-    ("ucs4le", 22),
-    ("utf32", 21),
-    ("utf-32", 21),
-    ("utf32be", 21),
-    ("utf-32be", 21),
-    ("utf32le", 22),
-    ("utf-32le", 22),
-    ("932", 45),
-    ("949", 47),
-    ("936", 46),
-    ("gbk", 46),
-    ("950", 48),
-    ("eucjp", 24),
-    ("unix-jis", 24),
-    ("ujis", 24),
-    ("shift-jis", 25),
-    ("pck", 25),
-    ("euckr", 26),
-    ("5601", 26),
-    ("euccn", 27),
-    ("gb2312", 27),
-    ("euctw", 28),
-    ("japan", 24),
-    ("korea", 26),
-    ("prc", 27),
-    ("zh-cn", 27),
-    ("chinese", 27),
-    ("zh-tw", 28),
-    ("taiwan", 28),
-    ("cp950", 29),
-    ("950", 29),
-    ("mac", 57),
-    ("mac-roman", 57),
+/// Port of `enc_alias_table[]` (vim 9.2 `mbyte.c:319`): alias → canonical
+/// name. The C stores the `IDX_*` index of that name in [`enc_canon_table`];
+/// the name itself is carried here. The table is split where the C has its
+/// `#if`: [`enc_alias_search`] walks the three parts in the C's order (the
+/// first match wins, which matters for `"950"`, listed twice).
+const enc_alias_table: &[(&str, &str)] = &[
+    ("ansi", "latin1"),
+    ("iso-8859-1", "latin1"),
+    ("iso-8859", "latin1"),
+    ("latin2", "iso-8859-2"),
+    ("latin3", "iso-8859-3"),
+    ("latin4", "iso-8859-4"),
+    ("cyrillic", "iso-8859-5"),
+    ("arabic", "iso-8859-6"),
+    ("greek", "iso-8859-7"),
+    ("hebrew", "iso-8859-8"),
+    ("latin5", "iso-8859-9"),
+    ("turkish", "iso-8859-9"),
+    ("latin6", "iso-8859-10"),
+    ("nordic", "iso-8859-10"),
+    ("thai", "iso-8859-11"),
+    ("latin7", "iso-8859-13"),
+    ("latin8", "iso-8859-14"),
+    ("latin9", "iso-8859-15"),
+    ("utf8", "utf-8"),
+    ("unicode", "ucs-2"),
+    ("ucs2", "ucs-2"),
+    ("ucs2be", "ucs-2"),
+    ("ucs-2be", "ucs-2"),
+    ("ucs2le", "ucs-2le"),
+    ("utf16", "utf-16"),
+    ("utf16be", "utf-16be"),
+    ("utf-16be", "utf-16be"),
+    ("utf16le", "utf-16le"),
+    ("ucs4", "ucs-4"),
+    ("ucs4be", "ucs-4"),
+    ("ucs-4be", "ucs-4"),
+    ("ucs4le", "ucs-4le"),
+    ("utf32", "ucs-4"),
+    ("utf-32", "ucs-4"),
+    ("utf32be", "ucs-4"),
+    ("utf-32be", "ucs-4"),
+    ("utf32le", "ucs-4le"),
+    ("utf-32le", "ucs-4le"),
+    ("932", "cp932"),
+    ("949", "cp949"),
+    ("936", "cp936"),
+    ("gbk", "cp936"),
+    ("950", "cp950"),
+    ("eucjp", "euc-jp"),
+    ("unix-jis", "euc-jp"),
+    ("ujis", "euc-jp"),
+    ("shift-jis", "sjis"),
+    ("pck", "sjis"),
+    ("euckr", "euc-kr"),
+    ("5601", "euc-kr"),
+    ("euccn", "euc-cn"),
+    ("gb2312", "euc-cn"),
+    ("euctw", "euc-tw"),
 ];
 
-/// Port of `enc_canon_search()` (`vendor/mbyte.c:353`).
+/// The `#if defined(MSWIN) || defined(WIN32UNIX) || defined(MACOS_X)` part of
+/// `enc_alias_table[]` (vim 9.2 `mbyte.c:381`).
+#[cfg(target_os = "macos")]
+const enc_alias_table_os: &[(&str, &str)] = &[
+    ("japan", "cp932"),
+    ("korea", "cp949"),
+    ("prc", "cp936"),
+    ("chinese", "cp936"),
+    ("taiwan", "cp950"),
+    ("big5", "cp950"),
+];
+
+/// The `#else` part of `enc_alias_table[]` (vim 9.2 `mbyte.c:388`).
+#[cfg(not(target_os = "macos"))]
+const enc_alias_table_os: &[(&str, &str)] = &[
+    ("japan", "euc-jp"),
+    ("korea", "euc-kr"),
+    ("prc", "euc-cn"),
+    ("chinese", "euc-cn"),
+    ("taiwan", "euc-tw"),
+    ("cp950", "big5"),
+    ("950", "big5"),
+];
+
+/// The rows of `enc_alias_table[]` after its `#endif` (vim 9.2 `mbyte.c:397`).
+const enc_alias_table_tail: &[(&str, &str)] = &[("mac", "macroman"), ("mac-roman", "macroman")];
+
+/// Port of `enc_canon_search()` (vim 9.2 `mbyte.c:408`).
 fn enc_canon_search(name: &str) -> Option<usize> {
     enc_canon_table.iter().position(|&(n, _)| n == name)
 }
 
-/// Port of `enc_canon_props()` (`vendor/mbyte.c:366`): the properties of a
+/// Port of `enc_canon_props()` (vim 9.2 `mbyte.c:424`): the properties of a
 /// canonical encoding name, 0 when it is not known.
 pub fn enc_canon_props(name: &str) -> i32 {
     if let Some(i) = enc_canon_search(name) {
@@ -1556,7 +1579,20 @@ pub fn enc_canon_props(name: &str) -> i32 {
     }
 }
 
-/// Port of `enc_skip()` (`vendor/mbyte.c:2313`): skip vim's `2byte-`/`8bit-`
+/// Port of `mb_init()` (vim 9.2 `mbyte.c:469`) reduced to its answer to "is
+/// this 'encoding' value usable": the `e_invalid_argument` it returns for a
+/// canonical name `p_enc` it does not know. Any `8bit-`/`iso-8859-`/`2byte-`
+/// name is accepted (the Unix branch: "accept any "2byte-" name, assume current
+/// locale"). The flags and function pointers it sets are not modelled.
+pub fn mb_init(p_enc: &str) -> Option<&'static str> {
+    let known = p_enc.starts_with("8bit-")
+        || p_enc.starts_with("iso-8859-")
+        || p_enc.starts_with("2byte-")
+        || enc_canon_search(p_enc).is_some();
+    (!known).then_some("E474: Invalid argument")
+}
+
+/// Port of `enc_skip()` (vim 9.2 `mbyte.c:4720`): skip vim's `2byte-`/`8bit-`
 /// head of an encoding name.
 pub fn enc_skip(p: &str) -> &str {
     p.strip_prefix("2byte-")
@@ -1564,22 +1600,27 @@ pub fn enc_skip(p: &str) -> &str {
         .unwrap_or(p)
 }
 
-/// Port of `enc_alias_search()` (`vendor/mbyte.c:2389`).
-fn enc_alias_search(name: &str) -> Option<usize> {
+/// Port of `enc_alias_search()` (vim 9.2 `mbyte.c:4817`): the canonical name of
+/// alias `name`.
+fn enc_alias_search(name: &str) -> Option<&'static str> {
     enc_alias_table
         .iter()
+        .chain(enc_alias_table_os)
+        .chain(enc_alias_table_tail)
         .find(|&&(n, _)| n == name)
-        .map(|&(_, i)| i)
+        .map(|&(_, canon)| canon)
 }
 
-/// Port of `enc_canonize()` (`vendor/mbyte.c:2329`): the canonical name for
+/// Port of `enc_canonize()` (vim 9.2 `mbyte.c:4736`): the canonical name for
 /// `enc` — lower case, `_` → `-`, `2byte-`/`8bit-` and `microsoft-` dropped,
-/// `iso8859n` → `iso-8859-n`, `latin-N` → `latinN`, an alias resolved. A name
-/// that is not recognized comes back with only those edits.
+/// `iso8859` → `iso-8859`, `iso-8859n` → `iso-8859-n`, `latin-N` → `latinN`, an
+/// alias resolved. A name that is not recognized comes back with only the case
+/// and `_` edits and the edits after its `2byte-`/`8bit-` head.
 pub fn enc_canonize(enc: &str) -> String {
     if enc == "default" {
-        // c: `fenc_default`, set from `enc_locale()` by `set_init_1()`.
-        return enc_locale().unwrap_or_else(|| "latin1".to_string());
+        // c: get_encoding_default() — the default of 'encoding' as set_init_1()
+        // found it; this crate seeds it "utf-8" (see `option.rs`).
+        return "utf-8".to_string();
     }
     let r: String = enc
         .chars()
@@ -1600,7 +1641,7 @@ pub fn enc_canonize(enc: &str) -> String {
     if let Some(rest) = p.strip_prefix("iso8859") {
         p = format!("iso-8859{rest}");
     }
-    if p.starts_with("iso-8859") && p.as_bytes().get(8) != Some(&b'-') {
+    if p.starts_with("iso-8859") && p.as_bytes().get(8).is_some_and(u8::is_ascii_digit) {
         p = format!("iso-8859-{}", &p[8..]);
     }
     if let Some(rest) = p.strip_prefix("latin-") {
@@ -1608,8 +1649,8 @@ pub fn enc_canonize(enc: &str) -> String {
     }
     if enc_canon_search(&p).is_some() {
         p
-    } else if let Some(i) = enc_alias_search(&p) {
-        enc_canon_table[i].0.to_string()
+    } else if let Some(canon) = enc_alias_search(&p) {
+        canon.to_string()
     } else {
         format!("{head}{p}")
     }

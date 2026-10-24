@@ -792,10 +792,16 @@ pub fn set_option(opt_idx: OptIndex, value: OptVal, opt_flags: i32) -> Option<St
         // error, puts the old value back — here, by not storing it.
         OptValData::string(ref s) => {
             let name = options[opt_idx].fullname;
-            if let Some(e) = did_set_string_option(name, s, opt_flags) {
+            // c: did_set_encoding() — "canonize the value, so that STRCMP() can
+            // be used on it", before mb_init() checks it.
+            let s = match name {
+                "encoding" => crate::ported::mbyte::enc_canonize(s),
+                _ => s.clone(),
+            };
+            if let Some(e) = did_set_string_option(name, &s, opt_flags) {
                 return Some(e);
             }
-            value
+            STRING_OPTVAL(s)
         }
         _ => value,
     };
@@ -854,8 +860,8 @@ pub fn set_option(opt_idx: OptIndex, value: OptVal, opt_flags: i32) -> Option<St
 ///
 /// The callbacks' side effects (redraws, `g_chartab[]` refills, the
 /// `clip_unnamed` flags, sourcing `spell/{lang}.vim`) are not modelled; only
-/// the answer to "is this value accepted" is. `'encoding'` (`mb_init()`) is not
-/// checked — see BUGS.md.
+/// the answer to "is this value accepted" is. `'encoding'` arrives here already
+/// canonized (`did_set_encoding()` runs `enc_canonize()` before `mb_init()`).
 pub fn did_set_string_option(name: &str, val: &str, opt_flags: i32) -> Option<String> {
     const E474: &str = "E474: Invalid argument";
     // c: transchar() — a character 0x80-0xff comes back as its raw byte, which
@@ -890,6 +896,8 @@ pub fn did_set_string_option(name: &str, val: &str, opt_flags: i32) -> Option<St
     let invalid = |ok: bool| (!ok).then(|| E474.to_string());
     match name {
         "ambiwidth" => invalid(check_opt_strings(&["single", "double"], false)),
+        // c: did_set_encoding() → mb_init() (vim 9.2 `optionstr.c:2313`).
+        "encoding" => crate::ported::mbyte::mb_init(val).map(str::to_string),
         // c: did_set_backspace() — a single digit 0-3 is the Vim 5.x form.
         "backspace" if at(0).is_ascii_digit() => invalid(at(0) <= b'3' && b.len() == 1),
         "backspace" => invalid(check_opt_strings(

@@ -205,3 +205,173 @@ pub fn get_special_key_name(c: char) -> String {
         c => c.to_string(),
     }
 }
+
+/// `KS_EXTRA` (vim 9.2 `keymap.h:61`): the first termcap byte of a key that
+/// has no two-character termcap name.
+const KS_EXTRA: u8 = 253;
+/// `KE_TAB` (vim 9.2 `keymap.h:215`): the unshifted TAB key, `K_TAB`.
+const KE_TAB: u8 = 54;
+
+/// The rows of `key_names_table[]` (vim 9.2 `misc2.c:921`) whose key is a
+/// `TERMCAP2KEY(a, b)` code — the keys a `t_xx` option names — keyed by the
+/// two termcap bytes, in the table's order. Alternative names (`is_alt`) are
+/// left out: `find_special_key_in_table()` never returns one.
+const key_names_table: &[([u8; 2], &str)] = &[
+    (*b"kb", "BS"),
+    (*b"kD", "Del"),
+    (*b"kd", "Down"),
+    (*b"@7", "End"),
+    (*b"k1", "F1"),
+    (*b"k;", "F10"),
+    (*b"F1", "F11"),
+    (*b"F2", "F12"),
+    (*b"F3", "F13"),
+    (*b"F4", "F14"),
+    (*b"F5", "F15"),
+    (*b"F6", "F16"),
+    (*b"F7", "F17"),
+    (*b"F8", "F18"),
+    (*b"F9", "F19"),
+    (*b"k2", "F2"),
+    (*b"FA", "F20"),
+    (*b"FB", "F21"),
+    (*b"FC", "F22"),
+    (*b"FD", "F23"),
+    (*b"FE", "F24"),
+    (*b"FF", "F25"),
+    (*b"FG", "F26"),
+    (*b"FH", "F27"),
+    (*b"FI", "F28"),
+    (*b"FJ", "F29"),
+    (*b"k3", "F3"),
+    (*b"FK", "F30"),
+    (*b"FL", "F31"),
+    (*b"FM", "F32"),
+    (*b"FN", "F33"),
+    (*b"FO", "F34"),
+    (*b"FP", "F35"),
+    (*b"FQ", "F36"),
+    (*b"FR", "F37"),
+    (*b"k4", "F4"),
+    (*b"k5", "F5"),
+    (*b"k6", "F6"),
+    (*b"k7", "F7"),
+    (*b"k8", "F8"),
+    (*b"k9", "F9"),
+    (*b"%1", "Help"),
+    (*b"kh", "Home"),
+    (*b"kI", "Insert"),
+    (*b"KC", "k0"),
+    (*b"KD", "k1"),
+    (*b"KE", "k2"),
+    (*b"KF", "k3"),
+    (*b"KG", "k4"),
+    (*b"KH", "k5"),
+    (*b"KI", "k6"),
+    (*b"KJ", "k7"),
+    (*b"KK", "k8"),
+    (*b"KL", "k9"),
+    (*b"K8", "kDivide"),
+    (*b"K4", "kEnd"),
+    (*b"KA", "kEnter"),
+    (*b"K1", "kHome"),
+    (*b"K7", "kMinus"),
+    (*b"K9", "kMultiply"),
+    (*b"K5", "kPageDown"),
+    (*b"K3", "kPageUp"),
+    (*b"K6", "kPlus"),
+    (*b"KB", "kPoint"),
+    (*b"kl", "Left"),
+    (*b"kN", "PageDown"),
+    (*b"kP", "PageUp"),
+    (*b"PE", "PasteEnd"),
+    (*b"PS", "PasteStart"),
+    (*b"kr", "Right"),
+    ([KS_EXTRA, KE_TAB], "Tab"),
+    (*b"&8", "Undo"),
+    (*b"ku", "Up"),
+];
+
+/// The `MOD_MASK_SHIFT` rows of `modifier_keys_table[]` (vim 9.2
+/// `misc2.c:826`) whose shifted key is a two-character termcap code: the
+/// shifted key and the key without the modifier. The `MOD_MASK_CTRL` rows and
+/// the `KS_EXTRA` shifted keys cannot be named by a `t_xx` option.
+const modifier_keys_table: &[([u8; 2], [u8; 2])] = &[
+    (*b"&9", *b"@1"),
+    (*b"&0", *b"@2"),
+    (*b"*1", *b"@4"),
+    (*b"*2", *b"@5"),
+    (*b"*3", *b"@6"),
+    (*b"*4", *b"kD"),
+    (*b"*5", *b"kL"),
+    (*b"*7", *b"@7"),
+    (*b"*9", *b"@9"),
+    (*b"*0", *b"@0"),
+    (*b"#1", *b"%1"),
+    (*b"#2", *b"kh"),
+    (*b"#3", *b"kI"),
+    (*b"#4", *b"kl"),
+    (*b"%a", *b"%3"),
+    (*b"%b", *b"%4"),
+    (*b"%c", *b"%5"),
+    (*b"%d", *b"%7"),
+    (*b"%e", *b"%8"),
+    (*b"%f", *b"%9"),
+    (*b"%g", *b"%0"),
+    (*b"%h", *b"&3"),
+    (*b"%i", *b"kr"),
+    (*b"%j", *b"&5"),
+    (*b"!1", *b"&6"),
+    (*b"!2", *b"&7"),
+    (*b"!3", *b"&8"),
+    (*b"kB", [KS_EXTRA, KE_TAB]),
+];
+
+/// Port of `find_special_key_in_table()` (vim 9.2 `misc2.c:1682`) for a
+/// termcap key `TERMCAP2KEY(c[0], c[1])`: the key's name in
+/// [`key_names_table`].
+pub fn find_special_key_in_table(c: [u8; 2]) -> Option<&'static str> {
+    key_names_table
+        .iter()
+        .find(|(key, _)| *key == c)
+        .map(|&(_, name)| name)
+}
+
+/// Port of `show_one_termcode()` (vim 9.2 `term.c:7580`): the `t_xx` line of
+/// `:set t_xx?` for key code `name` — `t_xx`, the key's
+/// `get_special_key_name(TERMCAP2KEY(name[0], name[1]), 0)` when that is not a
+/// bare `<t_xx>`, padded to 17 columns (at least one blank), then `code` as
+/// `msg_outtrans()` shows it.
+///
+/// `get_special_key_name()` is reduced to what a two-character termcap key can
+/// reach: a shifted key is translated to its unshifted one through
+/// [`modifier_keys_table`] with `S-` in front, then named from
+/// [`key_names_table`], else spelled `t_xx`.
+pub fn show_one_termcode(name: [u8; 2], code: &str) -> String {
+    // c: `if (name[0] > '~')` — blanks for a code without a `t_xx` name.
+    let mut buf = if name[0] > b'~' {
+        "     ".to_string()
+    } else {
+        format!("t_{} ", String::from_utf8_lossy(&name))
+    };
+    let (modifiers, c) = modifier_keys_table
+        .iter()
+        .find(|(shifted, _)| *shifted == name)
+        .map_or(("", name), |&(_, unshifted)| ("S-", unshifted));
+    match find_special_key_in_table(c) {
+        Some(key) => buf.push_str(&format!("<{modifiers}{key}>")),
+        // c: `if (p[1] != 't')` — a bare `<t_xx>` is not shown.
+        None if !modifiers.is_empty() => {
+            buf.push_str(&format!("<{modifiers}t_{}>", String::from_utf8_lossy(&c)))
+        }
+        None => {}
+    }
+    // c: do IObuff[len++] = ' '; while (len < 17);
+    loop {
+        buf.push(' ');
+        if buf.len() >= 17 {
+            break;
+        }
+    }
+    buf + code
+}

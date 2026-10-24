@@ -8339,3 +8339,33 @@ accepts reproduces it; the example stays as a guard.
   modelled; only codes without one display right.
 - Still open from R61-O/R62-O: `set enc=` against vim's encoding table and the
   failing-lambda partial value.
+
+---
+
+## R65 — `set enc=` names, key-code `<Name>`s, stray block commands, skipped-branch messages
+
+Oracle: `/opt/homebrew/Cellar/vim/9.2.1200/bin/vim` (9.2, patches 1-1200),
+`-es -u NONE -i NONE -N -c 'verbose source CASE'`. C read at tag `v9.2.1200`.
+
+### R65-1. `set enc=` took any name — ✅ FIXED
+`did_set_encoding()` (`optionstr.c:2313`) runs `enc_canonize()` and then
+`mb_init()` (`mbyte.c:469`), which rejects a canonical name it does not know:
+`set enc=foo` and `set enc=cp1252` (cp1252 "is considered to be equal to
+latin1" and has no row) are `E474: Invalid argument: enc=…` with the value
+kept; `set enc=utf8` stores `utf-8`, `japan` `cp932` (the macOS rows of the
+alias table), `iso8859` `latin1`, `8bit-latin1` `latin1`, `default` the
+'encoding' default. The encoding tables were Neovim's; they are now vim's own
+`enc_canon_table[]` / `enc_alias_table[]` (with `utf-16be`, `dec-mcs`, the
+`iso-8859` alias and the `#if MACOS_X` split, without Neovim's `zh-cn` /
+`zh-tw`), and `enc_canonize()` inserts the `-` of `iso-8859n` only before a
+digit, as the C does. Recorded in `tests/parity_cases/set_encoding_names.vim`.
+
+### R65-2. A key code's `<Name>` was not shown — ✅ FIXED
+`show_one_termcode()` (`term.c:7580`) shows
+`get_special_key_name(TERMCAP2KEY(a, b), 0)` after `t_xx` unless it is a bare
+`<t_xx>`: `t_ku <Up>`, `t_k; <F10>`, `t_K1 <kHome>`, and a shifted code goes
+through `modifier_keys_table[]` (`t_#4 <S-Left>`, `t_kB <S-Tab>`,
+`t_&9 <S-t_@1>`); the padding to 17 columns always adds a blank
+(`t_PS <PasteStart> p`). The termcap rows of `key_names_table[]` and the
+shifted rows of `modifier_keys_table[]` (`misc2.c`) are ported. Recorded in
+`tests/parity_cases/term_code_key_names.vim`.

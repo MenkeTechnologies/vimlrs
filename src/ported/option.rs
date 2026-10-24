@@ -714,11 +714,10 @@ pub fn do_set(args: &str, opt_flags: i32) {
         let Some(code) = code else {
             return Some("E846: Key code not set".to_string());
         };
-        // c: show_one_termcode() — `t_xx`, the key's `<Name>` (not modelled:
-        // only names `get_special_key_name()` has none for are shown right),
-        // padded to 17 columns, then the code. Not an informative message, so
-        // it is written at once rather than buffered.
-        let text = format!("{:<17}{}", format!("t_{label} "), shown_code(&code));
+        // c: show_one_termcode(). Not an informative message, so it is written
+        // at once rather than buffered.
+        let text =
+            crate::ported::keycodes::show_one_termcode([name[0], name[1]], &shown_code(&code));
         shown.borrow_mut().push((text, false));
         None
     };
