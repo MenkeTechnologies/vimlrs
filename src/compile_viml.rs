@@ -1632,7 +1632,7 @@ impl Compiler {
                 // Only from the script's own top-level code to one of its
                 // top-level statements, which is a plain forward jump.
                 let reachable = !self.top_lines.is_empty()
-                    && resume.is_none_or(|l| self.top_lines.contains(&l));
+                    && resume.map_or(true, |l| self.top_lines.contains(&l));
                 if !reachable {
                     return self.stmt(&call);
                 }
