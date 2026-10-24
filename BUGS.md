@@ -8593,3 +8593,17 @@ nosuch}()` `0.0`); `eval1()` clears the condition, and on the false branch
 first stores the unevaluated true branch (`{-> 1 ? nosuch : 2}()` `0`, `{-> 0 ?
 2 : nosuch}()` -1); `??` clears a falsy left operand; a failed slice clears its
 base. Recorded in `tests/parity_cases/lambda_failed_residue_more.vim`.
+
+### R67-O. Measured this round, still open
+- A failed `:call` inside a `:function` without `abort` (`ex_docmd.c:1081`
+  resets `did_emsg` every line, so the dangling `:if` RUNS and a later `:else`
+  or `:endif` binds to it), inside a `:while`/`:for`/`:try` at script level,
+  or with a non-`:if` block open around it, keeps the old behaviour. The
+  function case needs the line-level executor of the R65-O design (a `cstack`
+  driven run of the rest of the body, locals dict-backed); not started this
+  round because the single-statement compile path `:execute` uses does not yet
+  share a function's locals and `a:` scope.
+- After a `:break`, the rest of a loop body is read in skip mode in vim (its
+  block-command errors report); vimlrs reports nothing there (R67-3 covers only
+  a loop's normal exit).
+- `{-> {}.a}()` is `{}` in vim (the member read cleared its Dict); vimlrs -1.
