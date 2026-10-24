@@ -589,6 +589,15 @@ pub const VIML_FAIL_MID: u16 = 3636;
 /// Pass a builtin call's result through, failing the evaluation first when an
 /// exception is pending — see `b_call_abort`.
 pub const VIML_CALL_ABORT: u16 = 3637;
+/// A lambda body's operand failed: record what `rettv` holds when `eval1()`
+/// returns FAIL there — see `b_lambda_residue`. Stack (bottom→top): the left
+/// operand, the residue kind ([`RESIDUE_CLEARED`] or [`RESIDUE_KEPT`]).
+pub const VIML_LAMBDA_RESIDUE: u16 = 3647;
+/// The left operand, cleared (`clear_tv()`): what `+ - . .. << >>` and the
+/// comparisons leave when the right operand or the operation fails.
+pub const RESIDUE_CLEARED: i64 = 0;
+/// The left operand unchanged: what `* / %` leave when the right operand fails.
+pub const RESIDUE_KEPT: i64 = 1;
 /// `:echoerr`: pop an argument and the message so far, push the message with the
 /// argument appended — see `b_echoerr_arg`.
 pub const VIML_ECHOERR_ARG: u16 = 3622;
@@ -1780,6 +1789,10 @@ thread_local! {
     /// whose body errored. Recorded inside [`in_callee`], before it rolls the
     /// caller's bookkeeping back.
     static LAST_CALL_FAILED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// One slot per lambda body being evaluated: the value `rettv` held when its
+    /// expression first failed, if an operand recorded one (see
+    /// [`VIML_LAMBDA_RESIDUE`]). `None` is `VAR_UNKNOWN`.
+    static LAMBDA_RESIDUE: RefCell<Vec<Option<typval_T>>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Mark the error in flight as a HARD failure — see [`VIML_EXC_IS_HARD`].
@@ -5023,12 +5036,21 @@ fn call_user_function_raw(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
     // is not forgotten either, and `PENDING_EXC` is this VM's stand-in for it.
     let saved_emsg = message::did_emsg.with(|d| d.get());
     let saved_block = BLOCK_MARK.with(|m| m.get());
+    let lambda_frame = func.name.starts_with("<lambda>");
+    if lambda_frame {
+        LAMBDA_RESIDUE.with(|r| r.borrow_mut().push(None));
+    }
     let fail_before = EVAL_FAIL.with(|f| f.get());
     in_callee(|| {
         run_chunk_nested(func.chunk.clone());
         // Read INSIDE, before `in_callee` restores the caller's counter.
         LAST_CALL_FAILED.with(|c| c.set(EVAL_FAIL.with(|f| f.get()) > fail_before));
     });
+    let residue = if lambda_frame {
+        LAMBDA_RESIDUE.with(|r| r.borrow_mut().pop().flatten())
+    } else {
+        None
+    };
     BLOCK_MARK.with(|m| m.set(saved_block));
     // A LAMBDA body is not a `do_cmdline` at all — `call_user_func` evaluates
     // `FC_LAMBDA`'s single expression directly (`userfunc.c`), so c:430/c:647-651
@@ -5082,8 +5104,11 @@ fn call_user_function_raw(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
     // shapes: a `:function` with no `:return`, a bare `:return`, a failing
     // `:return`, and the same three declared `abort`, all yield 0; only
     // `{x -> len([1] . '')}(1)` yields -1.
+    //
+    // A lambda's `rettv` is what `eval1()` left in it, which is `VAR_UNKNOWN`
+    // (so -1) unless an operand recorded a value ([`VIML_LAMBDA_RESIDUE`]).
     if is_lambda && LAST_CALL_FAILED.with(|c| c.get()) {
-        return Some(tv_num(-1));
+        return Some(residue.unwrap_or_else(|| tv_num(-1)));
     }
     // c: a function with no :return yields 0.
     Some(ret.unwrap_or_else(|| tv_num(0)))
@@ -6929,6 +6954,24 @@ fn b_fail_mid(vm: &mut VM, _: u8) -> Value {
 /// c: `eval_func` ends with `if (evaluate && aborting()) { clear_tv(rettv); ret = FAIL; }`,
 /// and `aborting()` holds from the moment an error became an exception. Counting the
 /// failure here makes the command around the call skip its output / assignment.
+/// `VIML_LAMBDA_RESIDUE`: record, for the innermost lambda being evaluated,
+/// what `rettv` holds when its expression fails at this operator — the left
+/// operand cleared or kept (see [`RESIDUE_CLEARED`]). Only the first failure
+/// counts: `eval1()` stops there, so nothing later touches `rettv`.
+fn b_lambda_residue(vm: &mut VM, _: u8) -> Value {
+    let kind = tv_get_number_chk(&pop_tv(vm), None);
+    let mut tv = pop_tv(vm);
+    if kind == RESIDUE_CLEARED {
+        crate::ported::eval::typval::clear_tv(&mut tv);
+    }
+    LAMBDA_RESIDUE.with(|r| {
+        if let Some(slot @ None) = r.borrow_mut().last_mut() {
+            *slot = Some(tv);
+        }
+    });
+    Value::Undef
+}
+
 fn b_call_abort(vm: &mut VM, _: u8) -> Value {
     let v = pop_tv(vm);
     if PENDING_EXC.with(|p| p.borrow().is_some()) {
@@ -7951,6 +7994,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_CALL_MID, b_call_mid);
     vm.register_builtin(VIML_FAIL_MID, b_fail_mid);
     vm.register_builtin(VIML_CALL_ABORT, b_call_abort);
+    vm.register_builtin(VIML_LAMBDA_RESIDUE, b_lambda_residue);
     vm.register_builtin(VIML_MAKE_LAMBDA, b_make_lambda);
     vm.register_builtin(VIML_ECHOERR_ARG, b_echoerr_arg);
     vm.register_builtin(VIML_ECHOERR_END, b_echoerr_end);

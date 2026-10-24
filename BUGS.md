@@ -8394,3 +8394,21 @@ then: `ex_return()` outside a function (`E133` comes before it looks at
 those messages on the path that skips the arm (the later arms after the one
 taken, nested blocks included, `:function` bodies not). Recorded in
 `tests/parity_cases/skipped_branch_messages.vim`.
+
+### R65-5. A failing lambda returned -1 instead of its partly computed value — ✅ FIXED
+`call_user_func()` evaluates a lambda's expression straight into `rettv` and
+returns -1 only when that is still `VAR_UNKNOWN` (`userfunc.c:3332`). Each
+`eval.c` level evaluates its left operand into `rettv` and stops at the first
+FAIL; when the right operand or the operation fails, `eval4()` (comparisons),
+`eval5()` (`<<` `>>`), `eval6()` (`+ - . ..`), `handle_subscript()` and
+`eval9_leader()` `clear_tv(rettv)` — vim's `clear_tv()` keeps the type, unlike
+Neovim's `tv_clear()` — while `eval7()` (`* / %`) leaves it untouched. So
+`{-> 1 + nosuch}()` is `0`, `{-> 1.5 * nosuch}()` `1.5`, `{-> [][0]}()` `[]`,
+`{-> 'x' . nosuch}()` `''`, `{-> [1, nosuch]}()` and `{-> nosuch + 1}()` `-1`.
+A lambda body's expression is now compiled along that left spine with the
+evaluator's failure mark around each operand and operation; the first failure
+records the cleared or kept left operand for the call to return, and an operand
+that failed leaves the rest unevaluated (`{-> nosuch + nosuch2}()` reports one
+`E121`). Measured on `map()`+`filter()` with `{_, v -> v * 2 + 1}` over 30000
+items: +0.3% instructions retired (control subtracted). Recorded in
+`tests/parity_cases/lambda_failed_residue.vim`.

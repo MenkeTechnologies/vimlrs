@@ -1932,6 +1932,33 @@ pub fn tv_clear(tv: &mut typval_T) {
     };
 }
 
+/// Port of vim's `clear_tv()` (vim 9.2 `typval.c:119`): free the value held by
+/// `varp` and leave its TYPE in place — a Number becomes 0, a Float 0.0, a
+/// String, List, Dict, Blob, Funcref or Partial its NULL — unlike Neovim's
+/// [`tv_clear`], which resets the type to `VAR_UNKNOWN` too. What a failed
+/// expression leaves in `rettv` is decided by this difference.
+///
+/// RUST-PORT NOTE: a cleared `VAR_SPECIAL` is `v_number = 0` with the type kept,
+/// which vim displays as `v:false`; this crate's `v_special` cannot hold that
+/// value, so it becomes the Bool `v:false`.
+pub fn clear_tv(varp: &mut typval_T) {
+    varp.vval = match varp.v_type {
+        VAR_NUMBER => v_number(0),
+        VAR_FLOAT => v_float(0.0),
+        VAR_STRING | VAR_FUNC => v_string(VimStr::new()),
+        VAR_LIST => v_list(None),
+        VAR_DICT => v_dict(None),
+        VAR_BLOB => v_blob(None),
+        VAR_PARTIAL => v_partial(None),
+        VAR_BOOL | VAR_SPECIAL => {
+            varp.v_type = VAR_BOOL;
+            v_bool(kBoolVarFalse)
+        }
+        _ => return,
+    };
+    varp.v_lock = VarLockStatus::VAR_UNLOCKED;
+}
+
 /// Port of `tv_free()` from `Src/eval/typval.c` (c:3677) — free `tv` and the
 /// value inside it. (`Rc`-managed: dropping the value releases it.)
 pub fn tv_free(tv: &mut typval_T) {

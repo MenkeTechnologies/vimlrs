@@ -286,7 +286,15 @@ fn build_user_func_def(
         vim9: flags.vim9,
         dict: flags.dict,
         abort: flags.abort,
-        chunk: compile_function_body(body, exc, def_line, flags.abort, flags.vim9, flags.closure)?,
+        chunk: compile_function_body(
+            body,
+            exc,
+            def_line,
+            flags.abort,
+            flags.vim9,
+            flags.closure,
+            false,
+        )?,
         closure: flags.closure,
         scoped: None,
     })
@@ -584,8 +592,10 @@ fn compile_function_body(
     abort: bool,
     vim9: bool,
     closure: bool,
+    lambda: bool,
 ) -> Result<fusevm::Chunk, VimlError> {
     let mut c = Compiler::new(true, exc);
+    c.lambda_body = lambda;
     // vim numbers a function body's lines from 1 at the first line AFTER the
     // `:function`, so `v:throwpoint` for a throw on the body's third line is
     // `…function F, line 3` and not the file line. The parser records absolute
@@ -720,6 +730,9 @@ struct Compiler {
     /// `:return` in it returns from that function (see
     /// [`compile_program_nested_in_function`]).
     func_cmdline: bool,
+    /// The body is a lambda's `return {expr}`: its expression is compiled to
+    /// record what `rettv` holds when it fails (see [`Self::expr_residue`]).
+    lambda_body: bool,
     /// Whether the program uses exceptions (`:try`/`:throw`). When set, a
     /// per-statement unwind check is emitted after every statement.
     exc: bool,
@@ -1322,6 +1335,7 @@ impl Compiler {
             returns: Vec::new(),
             finishes: Vec::new(),
             func_cmdline: false,
+            lambda_body: false,
             exc,
             unwind: Vec::new(),
             slots: std::collections::HashMap::new(),
@@ -1917,6 +1931,7 @@ impl Compiler {
                 self.emit(Op::CallBuiltin(h::VIML_ERR_MARK, 0));
                 self.emit(Op::Pop);
                 match expr {
+                    Some(e) if self.lambda_body => self.expr_residue(e)?,
                     Some(e) => self.expr(e)?,
                     None => {
                         self.emit(Op::LoadInt(0)); // `:return` with no expr → 0
@@ -2980,6 +2995,138 @@ impl Compiler {
         }
     }
 
+    /// A lambda body's expression, compiled so that when it fails the value
+    /// vim's `rettv` holds at that point is recorded for the lambda to return
+    /// (`call_user_func()` returns -1 only when `rettv` is still `VAR_UNKNOWN`,
+    /// vim 9.2 `userfunc.c:3332`).
+    ///
+    /// c (vim 9.2 `eval.c`): each level evaluates its left operand INTO `rettv`
+    /// and stops at the first FAIL. When the left operand fails, `rettv` is what
+    /// it left (this, recursively). When the right one or the operation fails,
+    /// `eval4()` (comparisons), `eval5()` (`<<` `>>`) and `eval6()` (`+ - . ..`)
+    /// `clear_tv(rettv)` — the left operand with its type kept — while `eval7()`
+    /// (`* / %`) returns with `rettv` untouched; `eval_multdiv_number()` failing
+    /// clears it. An operand that fails leaves the rest unevaluated, so its
+    /// errors are the only ones. Anything else is compiled as usual.
+    fn expr_residue(&mut self, e: &Expr) -> Result<(), VimlError> {
+        let (lhs, rhs, id, keep, chk) = match e {
+            Expr::Arith {
+                op,
+                lhs,
+                rhs,
+                mod_op: false,
+            } => {
+                let id = match op {
+                    ArithOp::Add => h::VIML_ADD,
+                    ArithOp::Sub => h::VIML_SUB,
+                    ArithOp::Mul => h::VIML_MUL,
+                    ArithOp::Div => h::VIML_DIV,
+                    ArithOp::Mod => h::VIML_MOD,
+                    ArithOp::Concat => h::VIML_CONCAT,
+                    ArithOp::ShiftL => h::VIML_SHIFT_L,
+                    ArithOp::ShiftR => h::VIML_SHIFT_R,
+                };
+                // The left-operand checks `Expr::Arith` makes before the right
+                // operand (c: eval5()/eval6()), under the same condition.
+                let chk = match op {
+                    ArithOp::Add if !self.expr_is_num(lhs) => Some(h::VIML_CHECK_LHS_ADD),
+                    ArithOp::Sub if !self.expr_is_num(lhs) => Some(h::VIML_CHECK_LHS_SUB),
+                    ArithOp::Concat if !self.expr_is_num(lhs) => Some(h::VIML_CHECK_LHS_CONCAT),
+                    ArithOp::ShiftL | ArithOp::ShiftR => Some(h::VIML_CHECK_LHS_SHIFT),
+                    _ => None,
+                };
+                let keep = matches!(op, ArithOp::Mul | ArithOp::Div | ArithOp::Mod);
+                (lhs, Some(rhs), id, keep, chk)
+            }
+            Expr::Compare { op, case, lhs, rhs } => {
+                (lhs, Some(rhs), h::cmp_id(*op, *case), false, None)
+            }
+            // c: handle_subscript() — `clear_tv(rettv)` when eval_index() FAILs.
+            Expr::Index {
+                base,
+                index,
+                mid_expr: false,
+            } => (base, Some(index), h::VIML_INDEX, false, None),
+            // c: eval9_leader() runs only on an operand that was evaluated, and
+            // clears it when it cannot be used as a Number.
+            Expr::Unary { op, expr } if !self.expr_is_num(expr) => {
+                let id = match op {
+                    UnaryOp::Neg => h::VIML_NEG,
+                    UnaryOp::Plus => h::VIML_UPLUS,
+                    UnaryOp::Not => h::VIML_NOT,
+                };
+                (expr, None, id, false, None)
+            }
+            _ => return self.expr(e),
+        };
+        // Operands that cannot fail can still make the operation fail
+        // (`1.0 % 2`), except Numbers.
+        let rhs_may_fail = rhs.is_some_and(|r| self.subscript_may_fail(r) || !self.expr_is_int(r));
+        if !self.subscript_may_fail(lhs) && self.expr_is_int(lhs) && !rhs_may_fail {
+            return self.expr(e);
+        }
+        let mut to_end = Vec::new();
+        // The left operand: when it failed, its own value stands.
+        self.emit(Op::CallBuiltin(h::VIML_ARGS_BEGIN, 0));
+        self.emit(Op::Pop);
+        self.expr_residue(lhs)?;
+        self.emit(Op::CallBuiltin(h::VIML_ARGS_FAILED, 0));
+        to_end.push(self.emit(Op::JumpIfTrue(0)));
+        // [L] → [L, L]: the copy is the operand, the original what is recorded.
+        self.emit(Op::Dup);
+        let record = |c: &mut Self, kind: i64, to_end: &mut Vec<usize>| {
+            c.emit(Op::Dup);
+            c.emit(Op::LoadInt(kind));
+            c.emit(Op::CallBuiltin(h::VIML_LAMBDA_RESIDUE, 2));
+            c.emit(Op::Pop);
+            to_end.push(c.emit(Op::Jump(0)));
+        };
+        if let Some(chk) = chk {
+            self.emit(Op::CallBuiltin(chk, 1));
+            self.emit(Op::CallBuiltin(h::VIML_LHS_CHECK_FAILED, 0));
+            let ok = self.emit(Op::JumpIfFalse(0));
+            self.emit(Op::Pop);
+            record(self, h::RESIDUE_CLEARED, &mut to_end);
+            let here = self.b.current_pos();
+            self.b.patch_jump(ok, here);
+        }
+        // The right operand: [L, L, R].
+        if let Some(rhs) = rhs {
+            self.emit(Op::CallBuiltin(h::VIML_ARGS_BEGIN, 0));
+            self.emit(Op::Pop);
+            self.expr(rhs)?;
+            self.emit(Op::CallBuiltin(h::VIML_ARGS_FAILED, 0));
+            let ok = self.emit(Op::JumpIfFalse(0));
+            self.emit(Op::Pop);
+            self.emit(Op::Pop);
+            let kind = if keep {
+                h::RESIDUE_KEPT
+            } else {
+                h::RESIDUE_CLEARED
+            };
+            record(self, kind, &mut to_end);
+            let here = self.b.current_pos();
+            self.b.patch_jump(ok, here);
+        }
+        // The operation: [L, V].
+        self.emit(Op::CallBuiltin(h::VIML_ARGS_BEGIN, 0));
+        self.emit(Op::Pop);
+        self.emit(Op::CallBuiltin(id, if rhs.is_some() { 2 } else { 1 }));
+        self.emit(Op::CallBuiltin(h::VIML_ARGS_FAILED, 0));
+        let ok = self.emit(Op::JumpIfFalse(0));
+        self.emit(Op::Pop);
+        record(self, h::RESIDUE_CLEARED, &mut to_end);
+        let here = self.b.current_pos();
+        self.b.patch_jump(ok, here);
+        self.emit(Op::Swap);
+        self.emit(Op::Pop);
+        let end = self.b.current_pos();
+        for j in to_end {
+            self.b.patch_jump(j, end);
+        }
+        Ok(())
+    }
+
     /// After `n` subscript operands evaluated under `VIML_ARGS_BEGIN`: when one
     /// of them failed, drop them and leave the failed value (`v:null`) in place
     /// of the subscript, jumping past it. Returns that jump to patch at the end.
@@ -3845,7 +3992,7 @@ impl Compiler {
                 // synthesized body reports line 1 — which is what vim reports
                 // for a throw inside `{x -> …}`.
                 let stmts: Block = vec![(1, Stmt::Return(Some((**body).clone())))];
-                let chunk = compile_function_body(&stmts, self.exc, 0, false, *vim9, true)?;
+                let chunk = compile_function_body(&stmts, self.exc, 0, false, *vim9, true, true)?;
                 LAMBDA_FUNCS.with(|f| {
                     f.borrow_mut().push(UserFuncDef {
                         name: name.clone(),
