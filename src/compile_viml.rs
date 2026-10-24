@@ -3102,6 +3102,15 @@ impl Compiler {
     /// errors are the only ones. Anything else is compiled as usual.
     fn expr_residue(&mut self, e: &Expr) -> Result<(), VimlError> {
         let (lhs, rhs, id, keep, chk) = match e {
+            Expr::And(a, b) => return self.logical_residue(a, b, true),
+            Expr::Or(a, b) => return self.logical_residue(a, b, false),
+            Expr::Ternary {
+                cond,
+                then,
+                otherwise,
+            } => return self.ternary_residue(cond, then, otherwise),
+            Expr::Coalesce(a, b) => return self.coalesce_residue(a, b),
+            Expr::Call { .. } | Expr::CallExpr { .. } => return self.call_residue(e),
             Expr::Arith {
                 op,
                 lhs,
@@ -3128,17 +3137,30 @@ impl Compiler {
                     _ => None,
                 };
                 let keep = matches!(op, ArithOp::Mul | ArithOp::Div | ArithOp::Mod);
-                (lhs, Some(rhs), id, keep, chk)
+                (lhs, vec![Some(&**rhs)], id, keep, chk)
             }
             Expr::Compare { op, case, lhs, rhs } => {
-                (lhs, Some(rhs), h::cmp_id(*op, *case), false, None)
+                (lhs, vec![Some(&**rhs)], h::cmp_id(*op, *case), false, None)
             }
             // c: handle_subscript() — `clear_tv(rettv)` when eval_index() FAILs.
             Expr::Index {
                 base,
                 index,
                 mid_expr: false,
-            } => (base, Some(index), h::VIML_INDEX, false, None),
+            } => (base, vec![Some(&**index)], h::VIML_INDEX, false, None),
+            // c: handle_subscript() clears it as well when a slice FAILs.
+            Expr::Slice {
+                base,
+                from,
+                to,
+                mid_expr: false,
+            } => (
+                base,
+                vec![from.as_deref(), to.as_deref()],
+                h::VIML_SLICE,
+                false,
+                None,
+            ),
             // c: eval9_leader() runs only on an operand that was evaluated, and
             // clears it when it cannot be used as a Number.
             Expr::Unary { op, expr } if !self.expr_is_num(expr) => {
@@ -3147,13 +3169,16 @@ impl Compiler {
                     UnaryOp::Plus => h::VIML_UPLUS,
                     UnaryOp::Not => h::VIML_NOT,
                 };
-                (expr, None, id, false, None)
+                (expr, Vec::new(), id, false, None)
             }
             _ => return self.expr(e),
         };
         // Operands that cannot fail can still make the operation fail
         // (`1.0 % 2`), except Numbers.
-        let rhs_may_fail = rhs.is_some_and(|r| self.subscript_may_fail(r) || !self.expr_is_int(r));
+        let rhs_may_fail = rhs
+            .iter()
+            .flatten()
+            .any(|r| self.subscript_may_fail(r) || !self.expr_is_int(r));
         if !self.subscript_may_fail(lhs) && self.expr_is_int(lhs) && !rhs_may_fail {
             return self.expr(e);
         }
@@ -3182,15 +3207,24 @@ impl Compiler {
             let here = self.b.current_pos();
             self.b.patch_jump(ok, here);
         }
-        // The right operand: [L, L, R].
-        if let Some(rhs) = rhs {
+        // The other operands (a slice's bounds, absent ones as `v:none`):
+        // [L, L, R…].
+        if !rhs.is_empty() {
             self.emit(Op::CallBuiltin(h::VIML_ARGS_BEGIN, 0));
             self.emit(Op::Pop);
-            self.expr(rhs)?;
+            for r in &rhs {
+                match r {
+                    Some(r) => self.expr(r)?,
+                    None => {
+                        self.emit(Op::LoadUndef);
+                    }
+                }
+            }
             self.emit(Op::CallBuiltin(h::VIML_ARGS_FAILED, 0));
             let ok = self.emit(Op::JumpIfFalse(0));
-            self.emit(Op::Pop);
-            self.emit(Op::Pop);
+            for _ in 0..=rhs.len() {
+                self.emit(Op::Pop);
+            }
             let kind = if keep {
                 h::RESIDUE_KEPT
             } else {
@@ -3203,7 +3237,7 @@ impl Compiler {
         // The operation: [L, V].
         self.emit(Op::CallBuiltin(h::VIML_ARGS_BEGIN, 0));
         self.emit(Op::Pop);
-        self.emit(Op::CallBuiltin(id, if rhs.is_some() { 2 } else { 1 }));
+        self.emit(Op::CallBuiltin(id, rhs.len() as u8 + 1));
         self.emit(Op::CallBuiltin(h::VIML_ARGS_FAILED, 0));
         let ok = self.emit(Op::JumpIfFalse(0));
         self.emit(Op::Pop);
@@ -3216,6 +3250,175 @@ impl Compiler {
         for j in to_end {
             self.b.patch_jump(j, end);
         }
+        Ok(())
+    }
+
+    /// [`Self::expr_residue`] helpers. Evaluate `e` under the failure mark,
+    /// as the residue spine (`spine`) or plainly, and push the jump taken when
+    /// it failed (its value left on the stack).
+    fn residue_guard(
+        &mut self,
+        e: &Expr,
+        spine: bool,
+        to_fail: &mut Vec<usize>,
+    ) -> Result<(), VimlError> {
+        self.emit(Op::CallBuiltin(h::VIML_ARGS_BEGIN, 0));
+        self.emit(Op::Pop);
+        if spine {
+            self.expr_residue(e)?;
+        } else {
+            self.expr(e)?;
+        }
+        self.emit(Op::CallBuiltin(h::VIML_ARGS_FAILED, 0));
+        to_fail.push(self.emit(Op::JumpIfTrue(0)));
+        Ok(())
+    }
+
+    /// Record the value on top of the stack (kept on the stack) as the
+    /// lambda's residue, cleared or as it is.
+    fn record_residue(&mut self, kind: i64) {
+        self.emit(Op::Dup);
+        self.emit(Op::LoadInt(kind));
+        self.emit(Op::CallBuiltin(h::VIML_LAMBDA_RESIDUE, 2));
+        self.emit(Op::Pop);
+    }
+
+    /// Patch `jumps` to the current position.
+    fn patch_here(&mut self, jumps: Vec<usize>) {
+        let here = self.b.current_pos();
+        for j in jumps {
+            self.b.patch_jump(j, here);
+        }
+    }
+
+    /// `a && b` / `a || b` in a lambda. c: `eval3()` / `eval2()` take the left
+    /// value as a Bool and `clear_tv(rettv)` before the loop, so an operand
+    /// that fails (or a value that is not a Number) leaves the left operand
+    /// cleared; after a first `&&`/`||` the loop has stored `rettv` as the
+    /// Number result, which a later failing operand leaves as it is.
+    fn logical_residue(&mut self, a: &Expr, b: &Expr, and: bool) -> Result<(), VimlError> {
+        let chained = matches!((a, and), (Expr::And(..), true) | (Expr::Or(..), false));
+        let mut to_end = Vec::new();
+        self.residue_guard(a, true, &mut to_end)?; // [A]
+        self.emit(Op::Dup);
+        let mut conv = Vec::new();
+        self.emit(Op::CallBuiltin(h::VIML_ARGS_BEGIN, 0));
+        self.emit(Op::Pop);
+        self.emit(Op::CallBuiltin(h::VIML_TRUTHY, 1));
+        self.emit(Op::CallBuiltin(h::VIML_ARGS_FAILED, 0));
+        conv.push(self.emit(Op::JumpIfTrue(0)));
+        let short = self.emit(if and {
+            Op::JumpIfFalse(0)
+        } else {
+            Op::JumpIfTrue(0)
+        });
+        // [A]: the right operand and its Bool.
+        let mut b_fail = Vec::new();
+        self.emit(Op::CallBuiltin(h::VIML_ARGS_BEGIN, 0));
+        self.emit(Op::Pop);
+        self.expr(b)?;
+        self.emit(Op::CallBuiltin(h::VIML_BOOLNUM, 1));
+        self.emit(Op::CallBuiltin(h::VIML_ARGS_FAILED, 0));
+        b_fail.push(self.emit(Op::JumpIfTrue(0)));
+        self.emit(Op::Swap);
+        self.emit(Op::Pop);
+        to_end.push(self.emit(Op::Jump(0)));
+        // Short-circuit: [A] → the constant result.
+        self.patch_here(vec![short]);
+        self.emit(Op::Pop);
+        self.emit(Op::LoadInt(i64::from(!and)));
+        to_end.push(self.emit(Op::Jump(0)));
+        // The Bool conversion failed: [A, t].
+        self.patch_here(conv);
+        self.emit(Op::Pop);
+        self.record_residue(h::RESIDUE_CLEARED);
+        to_end.push(self.emit(Op::Jump(0)));
+        // The right operand failed: [A, B].
+        self.patch_here(b_fail);
+        self.emit(Op::Pop);
+        self.record_residue(if chained {
+            h::RESIDUE_KEPT
+        } else {
+            h::RESIDUE_CLEARED
+        });
+        self.patch_here(to_end);
+        Ok(())
+    }
+
+    /// `c ? x : y` in a lambda. c: `eval1()` clears the condition once it has
+    /// it as a Number (`if (error || !op_falsy || !result) clear_tv(rettv)`),
+    /// so a failing `x` leaves the condition cleared; when `c` is false the
+    /// unevaluated `x` (`VAR_UNKNOWN`) is stored in `rettv` before `y` is
+    /// evaluated (`*rettv = var2`), so a failing `y` leaves nothing.
+    fn ternary_residue(&mut self, c: &Expr, x: &Expr, y: &Expr) -> Result<(), VimlError> {
+        let mut to_end = Vec::new();
+        self.residue_guard(c, true, &mut to_end)?; // [C]
+        self.emit(Op::Dup);
+        let mut fail = Vec::new();
+        self.emit(Op::CallBuiltin(h::VIML_ARGS_BEGIN, 0));
+        self.emit(Op::Pop);
+        self.emit(Op::CallBuiltin(h::VIML_TRUTHY, 1));
+        self.emit(Op::CallBuiltin(h::VIML_ARGS_FAILED, 0));
+        fail.push(self.emit(Op::JumpIfTrue(0))); // [C, t]
+        let to_else = self.emit(Op::JumpIfFalse(0));
+        // [C]: the branch taken; a failure of `x` records, of `y` does not.
+        for (branch, at) in [(x, None), (y, Some(to_else))] {
+            if let Some(j) = at {
+                self.patch_here(vec![j]);
+            }
+            if at.is_none() {
+                self.residue_guard(branch, false, &mut fail)?; // [C, V]
+            } else {
+                self.expr(branch)?;
+            }
+            self.emit(Op::Swap);
+            self.emit(Op::Pop);
+            to_end.push(self.emit(Op::Jump(0)));
+        }
+        // [C, t] or [C, V].
+        self.patch_here(fail);
+        self.emit(Op::Pop);
+        self.record_residue(h::RESIDUE_CLEARED);
+        self.patch_here(to_end);
+        Ok(())
+    }
+
+    /// `a ?? b` in a lambda. c: `eval1()` clears a falsy `a` before it
+    /// evaluates `b`, so a failing `b` leaves `a` cleared.
+    fn coalesce_residue(&mut self, a: &Expr, b: &Expr) -> Result<(), VimlError> {
+        let mut to_end = Vec::new();
+        self.residue_guard(a, true, &mut to_end)?; // [A]
+        self.emit(Op::Dup);
+        self.emit(Op::CallBuiltin(h::VIML_TV2BOOL, 1));
+        to_end.push(self.emit(Op::JumpIfTrue(0)));
+        let mut fail = Vec::new();
+        self.residue_guard(b, false, &mut fail)?; // [A, B]
+        self.emit(Op::Swap);
+        self.emit(Op::Pop);
+        to_end.push(self.emit(Op::Jump(0)));
+        self.patch_here(fail);
+        self.emit(Op::Pop);
+        self.record_residue(h::RESIDUE_CLEARED);
+        self.patch_here(to_end);
+        Ok(())
+    }
+
+    /// A call in a lambda. c: `get_func_tv()` returns FAIL with `rettv`
+    /// untouched when the arguments failed (`E116`); once they are evaluated
+    /// `call_func()` sets `rettv` to Number 0, which a failing call leaves.
+    fn call_residue(&mut self, e: &Expr) -> Result<(), VimlError> {
+        self.emit(Op::CallBuiltin(h::VIML_TAKE_ARGS_E116, 0));
+        self.emit(Op::Pop);
+        let mut fail = Vec::new();
+        self.residue_guard(e, false, &mut fail)?;
+        let end = self.emit(Op::Jump(0));
+        self.patch_here(fail);
+        self.emit(Op::CallBuiltin(h::VIML_TAKE_ARGS_E116, 0));
+        let args_failed = self.emit(Op::JumpIfTrue(0));
+        self.emit(Op::LoadInt(0));
+        self.record_residue(h::RESIDUE_KEPT);
+        self.emit(Op::Pop);
+        self.patch_here(vec![end, args_failed]);
         Ok(())
     }
 

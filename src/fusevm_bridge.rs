@@ -598,6 +598,9 @@ pub const VIML_VIM9SCRIPT: u16 = 3648;
 /// After a `:call`: whether the call failed outside any `:try`, so the rest of
 /// its line is dropped — see `b_call_drops_line`.
 pub const VIML_CALL_DROPS_LINE: u16 = 3649;
+/// Whether an `E116` (a call's arguments failed) was raised since the last
+/// time this was asked — see `b_take_args_e116`.
+pub const VIML_TAKE_ARGS_E116: u16 = 3650;
 /// The left operand, cleared (`clear_tv()`): what `+ - . .. << >>` and the
 /// comparisons leave when the right operand or the operation fails.
 pub const RESIDUE_CLEARED: i64 = 0;
@@ -1798,6 +1801,8 @@ thread_local! {
     /// expression first failed, if an operand recorded one (see
     /// [`VIML_LAMBDA_RESIDUE`]). `None` is `VAR_UNKNOWN`.
     static LAMBDA_RESIDUE: RefCell<Vec<Option<typval_T>>> = const { RefCell::new(Vec::new()) };
+    /// Set by [`b_args_e116`], read and cleared by [`b_take_args_e116`].
+    static ARGS_E116_SEEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Mark the error in flight as a HARD failure — see [`VIML_EXC_IS_HARD`].
@@ -2038,6 +2043,7 @@ fn b_args_failed(_vm: &mut VM, _: u8) -> Value {
 /// c:583. `aborting()` is `(did_emsg && force_abort) || got_int || did_throw`;
 /// the disjunct that can be live here is `did_throw`, i.e. a pending exception.
 fn b_args_e116(vm: &mut VM, _: u8) -> Value {
+    ARGS_E116_SEEN.with(|s| s.set(true));
     let bare = tv_get_string(&pop_tv(vm));
     let name = tv_get_string(&pop_tv(vm));
     // c: `emsg_funcname` prints the `name` POINTER, which for a call written in an
@@ -7037,6 +7043,13 @@ fn b_fail_mid(vm: &mut VM, _: u8) -> Value {
     tv_to_value(v)
 }
 
+/// `VIML_TAKE_ARGS_E116`: whether a call's arguments failed (`E116`) since
+/// the last read, which tells a lambda that its call failed before
+/// `call_func()` set `rettv` to Number 0.
+fn b_take_args_e116(_: &mut VM, _: u8) -> Value {
+    Value::Bool(ARGS_E116_SEEN.with(|s| s.replace(false)))
+}
+
 /// `VIML_CALL_DROPS_LINE`: c (vim 9.2 `userfunc.c:7000`) — `ex_call()` sets
 /// the next command only when `(!aborting() || did_throw) && (!failed ||
 /// cs_trylevel > 0)`; `failed` is the evaluator failing since the `:call`'s
@@ -8094,6 +8107,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_CALL_ABORT, b_call_abort);
     vm.register_builtin(VIML_LAMBDA_RESIDUE, b_lambda_residue);
     vm.register_builtin(VIML_CALL_DROPS_LINE, b_call_drops_line);
+    vm.register_builtin(VIML_TAKE_ARGS_E116, b_take_args_e116);
     vm.register_builtin(VIML_MAKE_LAMBDA, b_make_lambda);
     vm.register_builtin(VIML_ECHOERR_ARG, b_echoerr_arg);
     vm.register_builtin(VIML_ECHOERR_END, b_echoerr_end);

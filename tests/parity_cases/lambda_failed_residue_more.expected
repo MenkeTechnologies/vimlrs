@@ -1,0 +1,67 @@
+1
+E117: Unknown function: Nosuch
+0
+E117: Unknown function: Nosuch
+0
+E121: Undefined variable: nosuch
+E116: Invalid arguments for function Nosuch(nosuch)
+-1
+E118: Too many arguments for function: len
+0
+E119: Not enough arguments for function: len
+0
+E121: Undefined variable: nosuch
+E116: Invalid arguments for function len(nosuch)
+-1
+E121: Undefined variable: nosuch
+0
+E121: Undefined variable: nosuch
+0
+E121: Undefined variable: nosuch
+0
+E121: Undefined variable: nosuch
+1
+E805: Using a Float as a Number
+0.0
+E121: Undefined variable: nosuch
+-1
+0
+1
+E745: Using a List as a Number
+[]
+E745: Using a List as a Number
+0
+E121: Undefined variable: nosuch
+0
+E121: Undefined variable: nosuch
+-1
+E121: Undefined variable: nosuch
+-1
+E745: Using a List as a Number
+[]
+E121: Undefined variable: nosuch
+-1
+5
+E121: Undefined variable: nosuch
+0
+1
+E121: Undefined variable: nosuch
+''
+E121: Undefined variable: nosuch
+[]
+E121: Undefined variable: nosuch
+''
+E121: Undefined variable: nosuch
+[]
+[2, 3]
+E121: Undefined variable: nosuch
+''
+6
+[0, 1]
+E121: Undefined variable: nosuch
+E116: Invalid arguments for function F(nosuch)
+-1
+E117: Unknown function: F
+0
+E121: Undefined variable: nosuch
+-1

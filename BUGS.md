@@ -8582,3 +8582,14 @@ failure mark and skips the right operand and the operation when it did
 plus 100 calls of a 200-iteration function: no change in instructions retired
 beyond noise (5.764e9 → 5.759e9, control subtracted). Recorded in
 `tests/parity_cases/failed_left_operand_stops.vim`.
+
+### R67-5. A failing lambda's call, `&&`/`||`, `?:`, `??` or slice returned -1 — ✅ FIXED
+R65-5 extended to the rest of `eval1()`: a call whose arguments were evaluated
+leaves Number 0 (`call_func()` set it; `{-> Nosuch()}()`, `{-> len([], 2)}()`
+are `0`, `{-> Nosuch(nosuch)}()` with its `E116` stays -1); `eval3()`/`eval2()`
+clear the left operand before the loop and store the Number result after it
+(`{-> 1 && nosuch}()` `0`, `{-> 1 && 1 && nosuch}()` `1`, `{-> 1.5 &&
+nosuch}()` `0.0`); `eval1()` clears the condition, and on the false branch
+first stores the unevaluated true branch (`{-> 1 ? nosuch : 2}()` `0`, `{-> 0 ?
+2 : nosuch}()` -1); `??` clears a falsy left operand; a failed slice clears its
+base. Recorded in `tests/parity_cases/lambda_failed_residue_more.vim`.
