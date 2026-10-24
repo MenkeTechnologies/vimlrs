@@ -66,6 +66,9 @@ thread_local! {
     /// that closes nothing only reports (see [`stray_block_error`]).
     static BLOCK_KINDS: std::cell::RefCell<Vec<&'static str>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    /// How many `:function` bodies enclose the line being parsed: a body is not
+    /// the script's own `do_cmdline()` (see [`call_skip_region`]).
+    static FUNC_BODY: Cell<usize> = const { Cell::new(0) };
 }
 
 /// Byte offset of `part` (a subslice of `whole`) within `whole`.
@@ -1035,6 +1038,115 @@ fn stray_block_error(cmd: &str, seg: &str) -> Option<Stmt> {
     Some(Stmt::BlockError(kw.to_string(), format!("{msg}: {text}")))
 }
 
+/// What happens after a `:call` on source line `line` fails, when the commands
+/// after it on that line include a block command: `(resume, messages)` — the
+/// source line execution resumes at (`None`: the end of the file) and what is
+/// reported until then. `None` when the case is not handled here (see BUGS.md
+/// R67-1): only a script's own lines, with nothing but `:if`s open.
+///
+/// c (vim 9.2): `ex_call()` finds the next command only when the call did not
+/// fail (`userfunc.c:7000`), so the rest of the line is dropped, block commands
+/// and all. The failure sets `did_emsg`, which `do_cmdline()` clears only at
+/// the start of a line with no conditional open (`ex_docmd.c:823`); until then
+/// every command is skipped (`ea.skip`), and the conditional commands still
+/// run: `ex_if()`/`ex_while()`/`ex_for()`/`ex_try()` push, `ex_endif()` pops
+/// an `:if`, `ex_endwhile()`/`ex_endtry()` pop to their loop or `:try`
+/// (`cleanup_conditionals()`, `rewind_conditionals()`). Their errors are not
+/// shown while `did_emsg` is set (`do_one_cmd()`); `ex_return()` outside a
+/// function gives `E133` regardless and drops the rest of its line. A file that
+/// ends with a conditional open reports it (`ex_docmd.c:1262`).
+fn call_skip_region(cur: &Lines, line: u32) -> Option<(Option<u32>, Vec<String>)> {
+    if vim9_active() || CMDLINE_EOF.with(|f| f.get()) || FUNC_BODY.with(|f| f.get()) > 0 {
+        return None;
+    }
+    let mut stack = BLOCK_KINDS.with(|k| k.borrow().clone());
+    if stack.iter().any(|k| *k != "if") {
+        return None;
+    }
+    let kw = |text: &str| canon_block_kw(block_cmd_word(text.trim())).to_string();
+    let mut k = cur.i;
+    let mut has_block = false;
+    while let Some((n, text)) = cur.lines.get(k) {
+        if *n != line {
+            break;
+        }
+        has_block |= is_block_opener(&kw(text)) || is_block_terminator(&kw(text));
+        k += 1;
+    }
+    if !has_block {
+        return None;
+    }
+    let mut msgs = Vec::new();
+    let mut func_depth = 0usize;
+    loop {
+        if stack.is_empty() && func_depth == 0 {
+            // The next command line, past blank lines and comments.
+            let resume = cur.lines[k..]
+                .iter()
+                .find(|(_, t)| !t.trim().is_empty() && !t.trim().starts_with('"'))
+                .map(|(m, _)| *m);
+            return Some((resume, msgs));
+        }
+        let Some(&(n, _)) = cur.lines.get(k) else {
+            break;
+        };
+        while let Some((_, text)) = cur.lines.get(k).filter(|(m, _)| *m == n) {
+            k += 1;
+            let w = kw(text);
+            let rest = cmd_word(strip_command_modifiers(text.trim())).1;
+            if func_depth > 0 {
+                match w.as_str() {
+                    "function" if rest.contains('(') => func_depth += 1,
+                    "endfunction" => func_depth -= 1,
+                    _ => {}
+                }
+                continue;
+            }
+            match w.as_str() {
+                // c: ex_function() reads a body to its end even when skipping.
+                "function" if rest.contains('(') => func_depth = 1,
+                "if" => stack.push("if"),
+                "while" => stack.push("while"),
+                "for" => stack.push("for"),
+                "try" => stack.push("try"),
+                "endif" => {
+                    if stack.last() == Some(&"if") {
+                        stack.pop();
+                    }
+                }
+                "endwhile" | "endfor" | "endtry" => {
+                    let want: &[&str] = if w == "endtry" {
+                        &["try"]
+                    } else {
+                        &["while", "for"]
+                    };
+                    if let Some(at) = stack.iter().rposition(|b| want.contains(b)) {
+                        stack.truncate(at);
+                    }
+                }
+                "return" | "retur" | "retu" => {
+                    msgs.push("E133: :return not inside a function".to_string());
+                    // c: ex_return() returns before finding the next command.
+                    while cur.lines.get(k).is_some_and(|(m, _)| *m == n) {
+                        k += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    msgs.push(
+        match stack.last() {
+            Some(&"try") => "E600: Missing :endtry",
+            Some(&"while") => "E170: Missing :endwhile",
+            Some(&"for") => "E170: Missing :endfor",
+            _ => "E171: Missing :endif",
+        }
+        .to_string(),
+    );
+    Some((None, msgs))
+}
+
 fn is_block_terminator(cmd: &str) -> bool {
     matches!(
         canon_block_kw(cmd),
@@ -1725,7 +1837,16 @@ fn parse_one(cur: &mut Lines) -> Result<Vec<Stmt>, VimlError> {
                     continue;
                 }
                 let seg_tail = tail.get(slice_offset(&line, seg)..).unwrap_or(seg);
-                let stmt = with_cmd_tail(seg, seg_tail, || parse_stmt(seg))?;
+                let mut stmt = with_cmd_tail(seg, seg_tail, || parse_stmt(seg))?;
+                if let Stmt::Call(call) = &stmt {
+                    if let Some((resume, msgs)) = call_skip_region(cur, cur.prev_line_no()) {
+                        stmt = Stmt::CallDropsLine {
+                            call: call.clone(),
+                            resume,
+                            msgs,
+                        };
+                    }
+                }
                 // An unknown command word swallows the rest of the line: vim
                 // reports it before it looks for the next `|`.
                 let unknown = matches!(&stmt, Stmt::UserCmd(l, _)
@@ -2719,7 +2840,10 @@ fn parse_function(cur: &mut Lines, header: &str) -> Result<Stmt, VimlError> {
     let dict = attrs.split_whitespace().any(|w| w == "dict");
     let abort = attrs.split_whitespace().any(|w| w == "abort");
     let closure = attrs.split_whitespace().any(|w| w == "closure");
-    let (body, term) = with_own_blocks(|| parse_block(cur, &["endfunction"]))?;
+    FUNC_BODY.with(|f| f.set(f.get() + 1));
+    let r = with_own_blocks(|| parse_block(cur, &["endfunction"]));
+    FUNC_BODY.with(|f| f.set(f.get() - 1));
+    let (body, term) = r?;
     if term.is_none() {
         return Err(VimlError::msg("E126: Missing :endfunction"));
     }

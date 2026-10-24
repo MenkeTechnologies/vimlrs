@@ -445,6 +445,18 @@ pub enum Stmt {
     },
     /// `:call funcref(args)`.
     Call(Expr),
+    /// A `:call` whose failure drops the rest of its source line, block
+    /// commands included (see `viml_parser::call_skip_region`): on failure the
+    /// script reports `msgs` and resumes at the statement on source line
+    /// `resume` (`None`: the end of the file).
+    CallDropsLine {
+        /// The call.
+        call: Expr,
+        /// Where execution resumes.
+        resume: Option<u32>,
+        /// What is reported on the way.
+        msgs: Vec<String>,
+    },
     /// `:defer Func(args)` — call `Func` when the current function is done.
     ///
     /// The arguments are evaluated *now*, at the `:defer`, and the call happens on

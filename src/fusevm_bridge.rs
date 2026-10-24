@@ -595,6 +595,9 @@ pub const VIML_CALL_ABORT: u16 = 3637;
 pub const VIML_LAMBDA_RESIDUE: u16 = 3647;
 /// `:vim9script`: switch the running script to vim9 — see `b_vim9script`.
 pub const VIML_VIM9SCRIPT: u16 = 3648;
+/// After a `:call`: whether the call failed outside any `:try`, so the rest of
+/// its line is dropped — see `b_call_drops_line`.
+pub const VIML_CALL_DROPS_LINE: u16 = 3649;
 /// The left operand, cleared (`clear_tv()`): what `+ - . .. << >>` and the
 /// comparisons leave when the right operand or the operation fails.
 pub const RESIDUE_CLEARED: i64 = 0;
@@ -7016,11 +7019,15 @@ fn b_fail_mid(vm: &mut VM, _: u8) -> Value {
     tv_to_value(v)
 }
 
-/// [`VIML_CALL_ABORT`].
-///
-/// c: `eval_func` ends with `if (evaluate && aborting()) { clear_tv(rettv); ret = FAIL; }`,
-/// and `aborting()` holds from the moment an error became an exception. Counting the
-/// failure here makes the command around the call skip its output / assignment.
+/// `VIML_CALL_DROPS_LINE`: c (vim 9.2 `userfunc.c:7000`) — `ex_call()` sets
+/// the next command only when `(!aborting() || did_throw) && (!failed ||
+/// cs_trylevel > 0)`; `failed` is the evaluator failing since the `:call`'s
+/// mark (an error inside the called body does not count).
+fn b_call_drops_line(_: &mut VM, _: u8) -> Value {
+    let in_try = crate::ported::ex_eval::trylevel.with(|t| t.get()) > 0;
+    Value::Bool(eval_failed_since_mark() && !in_try)
+}
+
 /// `VIML_LAMBDA_RESIDUE`: record, for the innermost lambda being evaluated,
 /// what `rettv` holds when its expression fails at this operator — the left
 /// operand cleared or kept (see [`RESIDUE_CLEARED`]). Only the first failure
@@ -7039,6 +7046,11 @@ fn b_lambda_residue(vm: &mut VM, _: u8) -> Value {
     Value::Undef
 }
 
+/// [`VIML_CALL_ABORT`].
+///
+/// c: `eval_func` ends with `if (evaluate && aborting()) { clear_tv(rettv); ret = FAIL; }`,
+/// and `aborting()` holds from the moment an error became an exception. Counting the
+/// failure here makes the command around the call skip its output / assignment.
 fn b_call_abort(vm: &mut VM, _: u8) -> Value {
     let v = pop_tv(vm);
     if PENDING_EXC.with(|p| p.borrow().is_some()) {
@@ -8063,6 +8075,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FAIL_MID, b_fail_mid);
     vm.register_builtin(VIML_CALL_ABORT, b_call_abort);
     vm.register_builtin(VIML_LAMBDA_RESIDUE, b_lambda_residue);
+    vm.register_builtin(VIML_CALL_DROPS_LINE, b_call_drops_line);
     vm.register_builtin(VIML_MAKE_LAMBDA, b_make_lambda);
     vm.register_builtin(VIML_ECHOERR_ARG, b_echoerr_arg);
     vm.register_builtin(VIML_ECHOERR_END, b_echoerr_end);

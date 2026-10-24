@@ -553,10 +553,20 @@ fn compile_program_inner(
     if !exc && slot_top {
         (c.slots, c.int_slots) = slot_plan(&top, false);
     }
+    if !nested && !func_cmdline {
+        c.top_lines = top.iter().map(|(l, _)| *l).collect();
+        c.top_block = top.as_ptr() as usize;
+    }
     c.unwind.push(Vec::new());
     c.compile_stmts(&top)?;
     let frame = c.unwind.pop().expect("top unwind frame");
     let report = c.b.current_pos();
+    for (j, line) in std::mem::take(&mut c.line_jumps) {
+        let to = line
+            .and_then(|l| c.top_pos.iter().find(|(p, _)| *p == l))
+            .map_or(report, |&(_, pos)| pos);
+        c.b.patch_jump(j, to);
+    }
     for j in frame {
         c.b.patch_jump(j, report);
     }
@@ -733,6 +743,16 @@ struct Compiler {
     /// The body is a lambda's `return {expr}`: its expression is compiled to
     /// record what `rettv` holds when it fails (see [`Self::expr_residue`]).
     lambda_body: bool,
+    /// The source lines of the script's top-level statements, when this is a
+    /// script's own top level (empty otherwise): the targets a
+    /// [`Stmt::CallDropsLine`] may jump to.
+    top_lines: Vec<u32>,
+    /// The top-level block itself, to recognise it in `compile_stmts`.
+    top_block: usize,
+    /// Where each top-level statement's code starts, by source line.
+    top_pos: Vec<(u32, usize)>,
+    /// Jumps to a top-level statement by source line (`None`: the end).
+    line_jumps: Vec<(usize, Option<u32>)>,
     /// Whether the program uses exceptions (`:try`/`:throw`). When set, a
     /// per-statement unwind check is emitted after every statement.
     exc: bool,
@@ -1105,6 +1125,7 @@ fn slot_plan(stmts: &[(u32, Stmt)], in_function: bool) -> SlotPlan {
                 Stmt::Call(e) | Stmt::Expr(e) | Stmt::Eval(e) | Stmt::Throw(e) | Stmt::Defer(e) => {
                     walk_expr(e, cx)
                 }
+                Stmt::CallDropsLine { call, .. } => walk_expr(call, cx),
                 Stmt::Return(Some(e)) => walk_expr(e, cx),
                 Stmt::While { cond, body } => {
                     walk_expr(cond, cx);
@@ -1283,6 +1304,7 @@ fn slot_plan(stmts: &[(u32, Stmt)], in_function: bool) -> SlotPlan {
                 Stmt::Call(e) | Stmt::Expr(e) | Stmt::Eval(e) | Stmt::Throw(e) | Stmt::Defer(e) => {
                     scoped_e(e, in_function, out)
                 }
+                Stmt::CallDropsLine { call, .. } => scoped_e(call, in_function, out),
                 Stmt::Return(Some(e)) => scoped_e(e, in_function, out),
                 Stmt::While { cond, body } => {
                     scoped_e(cond, in_function, out);
@@ -1336,6 +1358,10 @@ impl Compiler {
             finishes: Vec::new(),
             func_cmdline: false,
             lambda_body: false,
+            top_lines: Vec::new(),
+            top_block: 0,
+            top_pos: Vec::new(),
+            line_jumps: Vec::new(),
             exc,
             unwind: Vec::new(),
             slots: std::collections::HashMap::new(),
@@ -1379,6 +1405,7 @@ impl Compiler {
             Stmt::Let { .. } => "let",
             Stmt::Const { .. } => "const",
             Stmt::Call(_) => "call",
+            Stmt::CallDropsLine { .. } => "call",
             Stmt::Eval(_) => "eval",
             Stmt::Defer(_) => "defer",
             Stmt::Return(_) => "return",
@@ -1442,7 +1469,7 @@ impl Compiler {
             // c: `ex_call` is the one that sets `eap->nextcmd` only when the
             // call SUCCEEDED, so a failed call drops the rest of the line even
             // though `get_func_arguments` had consumed the `(…)`.
-            Stmt::Call(_) => 2,
+            Stmt::Call(_) | Stmt::CallDropsLine { .. } => 2,
             Stmt::Silent { stmt, .. } => Self::nextcmd_rule(stmt),
             // Everything else — `:echo` included (`vendor/eval.c:6187` sets it
             // from wherever the argument loop stopped) — drops the line only
@@ -1452,7 +1479,11 @@ impl Compiler {
     }
 
     fn compile_stmts(&mut self, stmts: &[(u32, Stmt)]) -> Result<(), VimlError> {
+        let at_top = stmts.as_ptr() as usize == self.top_block;
         for (line, s) in stmts {
+            if at_top && !self.top_pos.iter().any(|(l, _)| l == line) {
+                self.top_pos.push((*line, self.b.current_pos()));
+            }
             // The line every op emitted for this statement is tagged with. It
             // costs no bytecode: `fusevm::ChunkBuilder::emit` already takes a
             // line and the chunk already keeps the vector.
@@ -1594,6 +1625,29 @@ impl Compiler {
                 self.emit(Op::Pop);
                 self.expr(e)?;
                 self.emit(Op::Pop);
+                Ok(())
+            }
+            Stmt::CallDropsLine { call, resume, msgs } => {
+                let call = Stmt::Call(call.clone());
+                // Only from the script's own top-level code to one of its
+                // top-level statements, which is a plain forward jump.
+                let reachable = !self.top_lines.is_empty()
+                    && resume.is_none_or(|l| self.top_lines.contains(&l));
+                if !reachable {
+                    return self.stmt(&call);
+                }
+                self.stmt(&call)?;
+                // c: ex_call() — no next command when the call failed outside
+                // a `:try`; the lines up to `resume` run in skip mode.
+                self.emit(Op::CallBuiltin(h::VIML_CALL_DROPS_LINE, 0));
+                let ok = self.emit(Op::JumpIfFalse(0));
+                for m in msgs {
+                    self.raise_cmd(m);
+                }
+                let j = self.emit(Op::Jump(0));
+                self.line_jumps.push((j, *resume));
+                let here = self.b.current_pos();
+                self.b.patch_jump(ok, here);
                 Ok(())
             }
             // `:defer Func(args)` — evaluate the arguments *here* and stash the

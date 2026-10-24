@@ -8528,3 +8528,29 @@ variable: true`. Recorded in `tests/parity_cases/vim9_special_names.vim` and
   `:call`, the failing-lambda partial value of `&&`/`||`/`?:`, `E193` after a
   failed `:function` definition, `E18` for `let d.k{n} = 1`, the list-target
   `E475` span, and the unported `emsg_severe` sites.
+
+---
+
+## R67 — a failed `:call` drops the rest of its line
+
+Oracle: `/opt/homebrew/Cellar/vim/9.2.1200/bin/vim` (9.2, patches 1-1200),
+`-es -u NONE -i NONE -N -c 'verbose source CASE'`. C read at tag `v9.2.1200`.
+
+### R67-1. `if 1 | call Nosuch() | endif` closed its `:if` — ✅ FIXED (script level)
+`ex_call()` sets the next command only when the call did not fail or a `:try`
+is active (`userfunc.c:7000`), so the `| endif` is never read and the `:if`
+stays open. The failure sets `did_emsg`, cleared only at the start of a line
+with no conditional open (`ex_docmd.c:823`), so the script runs in skip mode
+until the dangling `:if` is closed by a later block command, and reports a
+conditional still open at the end of the file. The parser now marks a `:call`
+followed by block commands on its line and replays the following lines' block
+commands the way the `ex_eval.c` handlers act in skip mode (`:endif` pops an
+`:if`, `:endwhile`/`:endtry` pop to their loop or `:try`, `:function` bodies
+are read through, `:return` gives `E133` and ends its line), recording where
+execution resumes and what is reported. The compiler emits, after such a call,
+a test of "failed outside a `:try`" that reports those messages and jumps to
+the resume line's top-level statement. Limited to a script's own top level
+with only `:if`s open around the call; elsewhere the old behaviour stands (see
+R67-O). 300 marked calls of a 50-iteration function: +0.36% instructions
+retired (control subtracted). Recorded in
+`tests/parity_cases/call_failure_drops_line.vim`.

@@ -1,0 +1,15 @@
+1
+E117: Unknown function: Nosuch
+a
+E117: Unknown function: Nosuch
+b
+E117: Unknown function: Nosuch
+E133: :return not inside a function
+c
+E117: Unknown function: Nosuch
+d
+e
+caught
+f
+E117: Unknown function: Nosuch
+E171: Missing :endif
