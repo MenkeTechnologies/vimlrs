@@ -8429,3 +8429,61 @@ The `v:` table was Neovim's, which has only `v:t_number` … `v:t_bool` and
 (8), `v:t_channel` (9), `v:t_class` (12), `v:t_object` (13), `v:t_typealias`
 (14), `v:t_enum` (15), `v:t_enumvalue` (16), `v:t_tuple` (17), read-only.
 Recorded in `tests/parity_cases/v_t_type_numbers.vim`.
+
+### R65-O. Measured this round, still open
+- **Run-time line structure (`if 1 | call Nosuch() | endif`).** vim decides
+  where a command ends when it runs it: a command that handles `|` itself sets
+  `eap->nextcmd` only on its success path, so a failed one drops the rest of its
+  line. `ex_call()` (`userfunc.c:7000`) sets it only when
+  `(!aborting() || did_throw) && (!failed || cs_trylevel > 0)`; `:echo`,
+  `:let`, `:execute`, `:eval`, `:throw`, `:unlet`, `:const`, `:echomsg` still
+  find their `|` after a failed expression (measured: `if 1 | echo nosuch |
+  endif` closes the `:if`, and a later `endif` is `E580`). The dropped tail
+  takes its block commands with it, so the `:if` stays open and is closed by
+  whatever closer comes next, at run time. Design for a faithful port:
+  1. Keep the structured compile for the success path (no cost when nothing
+     fails).
+  2. The parser marks each `:call` (the only command measured to drop its
+     tail) that has block commands after it on its source line, and records the
+     open-block stack at that point: the enclosing blocks plus the openers
+     earlier on the same line.
+  3. At script level (one `do_cmdline()` unit, outside any `:function`), the
+     failure makes `did_emsg` stick until the conditional stack is empty at the
+     start of a line (`ex_docmd.c:823-836`), so everything up to there runs in
+     skip mode, where only block commands act and only messages that bypass
+     `!did_emsg` print (`E133`, the end-of-file `E171`/`E170`/`E600`). The
+     region is therefore static: from the recorded stack, replay the block
+     commands of the following lines through ports of `ex_endif()`/
+     `ex_else()`/`ex_endwhile()`/`ex_endtry()` (a mismatched `:endwhile`
+     rewinds through `:if`s), skipping `:function` bodies, until the stack
+     empties; the next line is where execution resumes. The compiler emits,
+     after the marked `:call`, a test of "this call failed and `trylevel == 0`"
+     that jumps to a label before that line (or to an end-of-unit block that
+     reports the open conditional), emitting the static messages on the way.
+     The jump only leaves `:if` bodies (nothing on the VM stack); a failing
+     line inside a `:while`/`:for`/`:try` keeps today's behaviour until the
+     loop state can be unwound the same way.
+  4. Inside a `:function` without `abort`, `did_emsg` is reset at every line
+     (`ex_docmd.c:1081`), so the dangling `:if` stays open while the next lines
+     RUN and a later `:else`/`:endif` binds to it. The parse tree is then wrong
+     for the rest of the body; the faithful route is a deopt: on the failure,
+     hand the remaining lines of the body to a line-level executor that keeps
+     vim's `cstack` (the `ex_eval.c` handlers are ported in
+     `src/ported/ex_eval.rs`) and dispatches each non-block command through the
+     single-statement compiler `:execute` uses, with the function's locals
+     dict-backed (a body containing such a line is compiled without slots).
+- Block commands in an inactive LOOP body still report nothing: `while 0 |
+  endif | endwhile` is `E580` in vim (skip mode reads the body), and a loop
+  that ends reads its body once more in skip mode. Only `:if` branches emit
+  their skip-mode messages (R65-4).
+- `{-> Nosuch()}()`, `{-> len([], 2)}()` are `0` in vim (the call failed after
+  its arguments, `call_func()` had set `rettv` to Number 0); `&&`/`||`/`?:`/
+  `??`, slices and `{}.a` also leave a value (`{-> 1 && nosuch}()` `0`,
+  `{-> 1 && 1 && nosuch}()` `1`, `{-> [1, 2][1:nosuch]}()` `[]`). vimlrs still
+  returns -1 for those (R65-5 covers the arithmetic, comparison, subscript and
+  leader levels).
+- `echo nosuch + nosuch2` outside a lambda reports both `E121`s; vim stops at
+  the first. The lambda spine of R65-5 does not apply to other commands.
+- `fileencoding`, `termencoding`, `makeencoding` are names only; vim
+  canonizes them through the same `did_set_encoding()` (`set fenc=UTF8` is
+  `utf-8`).
