@@ -186,6 +186,9 @@ f_iconv
 f_setcellwidths
 f_getcellwidths
 cw_value
+# mb_init — vim 9.2 mbyte.c:469 (the 'encoding' check did_set_encoding() runs); Neovim
+# removed it, so it is absent from the vendored mbyte.c.
+mb_init
 
 # ── eval/funcs.c (full table, not in the vendored funcs.c subset) ──
 # Real Neovim builtins whose definitions sit in the parts of eval/funcs.c that
