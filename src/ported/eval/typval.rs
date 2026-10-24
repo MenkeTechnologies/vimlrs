@@ -182,14 +182,11 @@ pub fn tv_get_string_buf_chk(tv: &typval_T) -> Option<crate::vimstr::VimStr> {
         // c: return tv->vval.v_string == NULL ? "" : v_string;
         (VAR_STRING, v_string(s)) => Some(s.clone()),
         // c: STRCPY(buf, encode_bool_var_names[tv->vval.v_bool]);
-        (VAR_BOOL, v_bool(b)) => Some(
-            if *b == kBoolVarTrue {
-                "v:true"
-            } else {
-                "v:false"
-            }
-            .into(),
-        ),
+        //
+        // vim 9.2 writes `get_var_special_name()` here instead (`typval.c`
+        // `tv_get_string_buf_chk_strict`), so `true .. ''` is `'true'` in vim9
+        // code and `'v:true'` in legacy code.
+        (VAR_BOOL, _) => Some(crate::fusevm_bridge::get_var_special_name(tv).into()),
         // c: STRCPY(buf, encode_special_var_names[tv->vval.v_special]);
         //
         // The table is indexed by the value, so `v:none` is `'v:none'` here and
@@ -198,11 +195,9 @@ pub fn tv_get_string_buf_chk(tv: &typval_T) -> Option<crate::vimstr::VimStr> {
         // `typval_compare` falls through to its string branch and compares these
         // two names — vim answers 0 for `==` and 1 for `!=` because the names
         // differ, and did so here only once this stopped printing one name for
-        // both.
-        (VAR_SPECIAL, v_special(v)) => {
-            Some(crate::ported::eval::encode::encode_special_var_names[*v as usize].into())
-        }
-        (VAR_SPECIAL, _) => Some("v:null".into()),
+        // both. vim names it through `get_var_special_name()` as for a Bool, so
+        // `v:null` is `'null'` in vim9 code; `v:none` keeps its prefix.
+        (VAR_SPECIAL, _) => Some(crate::fusevm_bridge::get_var_special_name(tv).into()),
         // c: emsg(_(str_errors[tv->v_type])); return NULL;
         //
         // `str_errors[]` (c:4135) is a per-type table, and the type is part of

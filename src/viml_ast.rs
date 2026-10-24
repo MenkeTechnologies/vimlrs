@@ -490,6 +490,9 @@ pub enum Stmt {
     Continue(String),
     /// `:finish` — stop sourcing the rest of the current script/file.
     Finish,
+    /// `:vim9script` as the first command of a script: from here on the script
+    /// runs as vim9 (`current_sctx.sc_version`, see `in_vim9script()`).
+    Vim9Script,
     /// `:return [expr]`.
     Return(Option<Expr>),
     /// A block command with no block to act on (`:endif` with no `:if` open,

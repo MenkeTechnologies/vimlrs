@@ -616,14 +616,10 @@ fn TYPVAL_ENCODE_CONVERT_ONE_VALUE(tv: &typval_T, st: &mut EncodeState) -> VimSt
             out.push_char(')');
             out
         }
-        (VAR_BOOL, v_bool(b)) => if *b == kBoolVarTrue {
-            "v:true"
-        } else {
-            "v:false"
-        }
-        .into(),
-        (VAR_SPECIAL, v_special(v)) => encode_special_var_names[*v as usize].into(),
-        (VAR_SPECIAL, _) => "v:null".into(),
+        // vim's `echo_string_core()` names these through `get_var_special_name()`
+        // (`evalvars.c:2676`): `true`/`false`/`null` in vim9 code, `v:true`/
+        // `v:false`/`v:null` in legacy code, `v:none` in both.
+        (VAR_BOOL, _) | (VAR_SPECIAL, _) => crate::fusevm_bridge::get_var_special_name(tv).into(),
         // TYPVAL_ENCODE_CONV_LIST_START / _BETWEEN_ITEMS / _END
         (VAR_LIST, v_list(l)) => match l {
             None => "[]".into(),

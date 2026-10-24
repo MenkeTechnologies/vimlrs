@@ -1,0 +1,12 @@
+0
+true false null v:none
+[true, null] {'a': false}
+true [null, false, v:none]
+true|null
+false [true]
+[true,false,null]
+
+[true, null]
+[v:true, v:false, v:null]
+[true][v:true, v:false, v:null]false
+[false]

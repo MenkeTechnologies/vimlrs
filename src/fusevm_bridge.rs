@@ -593,6 +593,8 @@ pub const VIML_CALL_ABORT: u16 = 3637;
 /// returns FAIL there — see `b_lambda_residue`. Stack (bottom→top): the left
 /// operand, the residue kind ([`RESIDUE_CLEARED`] or [`RESIDUE_KEPT`]).
 pub const VIML_LAMBDA_RESIDUE: u16 = 3647;
+/// `:vim9script`: switch the running script to vim9 — see `b_vim9script`.
+pub const VIML_VIM9SCRIPT: u16 = 3648;
 /// The left operand, cleared (`clear_tv()`): what `+ - . .. << >>` and the
 /// comparisons leave when the right operand or the operation fails.
 pub const RESIDUE_CLEARED: i64 = 0;
@@ -2609,6 +2611,54 @@ fn is_vim9_def_frame() -> bool {
     VIM9_DEF_STACK.with(|s| *s.borrow().last().unwrap_or(&false))
 }
 
+/// Port of `in_vim9script()` from vim `src/vim9script.c:22`.
+///
+/// c: `return (current_sctx.sc_version == SCRIPT_VERSION_VIM9 ||
+/// (cmdmod.cmod_flags & CMOD_VIM9CMD)) && !(cmdmod.cmod_flags & CMOD_LEGACY);`
+/// The `:vim9cmd` / `:legacy` modifiers are not modelled, so only the script
+/// version decides. It is what makes `echo true` print `true` in a vim9 script
+/// or `:def` and `v:true` in legacy code (`get_var_special_name()`).
+pub fn in_vim9script() -> bool {
+    crate::ported::eval::userfunc::current_sctx
+        .with(|c| c.borrow().sc_version == crate::ported::eval::userfunc::SCRIPT_VERSION_VIM9)
+}
+
+/// Port of `get_var_special_name()` from vim `src/evalvars.c:2676` — the text a
+/// Bool or special value shows as in `:echo`, `string()` and string context.
+///
+/// c: `case VVAL_FALSE: return in_vim9script() ? "false" : "v:false";` — and the
+/// same for `true` and `null`; `v:none` keeps its prefix in both dialects.
+/// Neovim has only the prefixed names (`encode_bool_var_names[]`,
+/// `encode_special_var_names[]`), which is what legacy code still gets.
+///
+/// `tv` must be a `VAR_BOOL` or `VAR_SPECIAL`; a special without a payload is
+/// `v:null`, as the callers treated it before.
+pub fn get_var_special_name(tv: &typval_T) -> &'static str {
+    use crate::ported::eval::typval_defs_h::BoolVarValue::kBoolVarTrue;
+    let vim9 = in_vim9script();
+    match &tv.vval {
+        v_bool(b) if *b == kBoolVarTrue => if vim9 { "true" } else { "v:true" },
+        v_bool(_) => if vim9 { "false" } else { "v:false" },
+        v_special(kSpecialVarNone) => "v:none",
+        _ => if vim9 { "null" } else { "v:null" },
+    }
+}
+
+/// Set `current_sctx.sc_version`, returning the previous value. vim saves and
+/// restores the whole `current_sctx` around a sourced file (`do_source()`) and
+/// a function call (`call_user_func()`); only the version is modelled here.
+fn set_script_version(version: i32) -> i32 {
+    crate::ported::eval::userfunc::current_sctx
+        .with(|c| std::mem::replace(&mut c.borrow_mut().sc_version, version))
+}
+
+/// `:vim9script` — c: `ex_vim9script()` (`vim9script.c:131`) sets
+/// `current_sctx.sc_version = SCRIPT_VERSION_VIM9` for the rest of the file.
+fn b_vim9script(_: &mut VM, _: u8) -> Value {
+    set_script_version(crate::ported::eval::userfunc::SCRIPT_VERSION_VIM9);
+    Value::Undef
+}
+
 fn b_setvar(vm: &mut VM, _: u8) -> Value {
     let name = tv_get_string(&pop_tv(vm));
     let val = pop_tv(vm);
@@ -4071,9 +4121,16 @@ fn source_file(path: &str) {
             // lives HERE (not in `run_source_nested`) so `assert_fails()` and
             // `execute()`, which need parse/compile errors to propagate, are
             // unaffected.
+            //
+            // c: `do_source()` saves `current_sctx` and starts the file as a
+            // legacy script; its own `:vim9script` switches it, and the
+            // sourcing script's version is back once the file is done.
+            let saved_version =
+                set_script_version(crate::ported::eval::userfunc::SCRIPT_VERSION_LEGACY);
             if run_source_nested(&src).is_err() {
                 source_tolerant(&src);
             }
+            set_script_version(saved_version);
             // Restore the sourcing script's scope and persist the nested file's
             // own scope under its path for any later re-source.
             let child_scope = crate::ported::eval::vars::script_vars
@@ -4907,6 +4964,15 @@ fn call_user_function_raw(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
     // Track vim9-def-ness parallel to the frame so `b_getvar` can fall back to
     // script scope for a bare name inside a vim9 def (but not a legacy function).
     VIM9_DEF_STACK.with(|s| s.borrow_mut().push(func.vim9));
+    // c: `call_user_func()` runs the body under the function's script context:
+    // a `:def` always as vim9 (`call_def_function`, `vim9execute.c:6903`), a
+    // legacy `:function` always as legacy, even in a vim9 file
+    // (`define_function`, `userfunc.c:5757-5759`). Restored on the way out.
+    let saved_version = set_script_version(if func.vim9 {
+        crate::ported::eval::userfunc::SCRIPT_VERSION_VIM9
+    } else {
+        crate::ported::eval::userfunc::SCRIPT_VERSION_LEGACY
+    });
     // c: `call_user_func` stamps every a: value FIXED — `v->di_tv.v_lock =
     // VAR_FIXED` (`vendor/eval/userfunc.c:1151`), and the a:000 list items too
     // (c:1171). That is what makes `let a:000[0] = 99` `E742: Cannot change
@@ -5090,6 +5156,7 @@ fn call_user_function_raw(name: &str, args: Vec<typval_T>) -> Option<typval_T> {
     VIM9_DEF_STACK.with(|s| {
         s.borrow_mut().pop();
     });
+    set_script_version(saved_version);
     CALL_SITE_LNUM.with(|c| {
         c.borrow_mut().pop();
     });
@@ -7984,6 +8051,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(VIML_FN_LOG10, |vm, n| call_float_op(vm, n, f64::log10));
     vm.register_builtin(VIML_EXEC_STMT, b_exec_stmt);
     vm.register_builtin(VIML_SOURCE, b_source);
+    vm.register_builtin(VIML_VIM9SCRIPT, b_vim9script);
     vm.register_builtin(VIML_LOCKVAR, b_lockvar);
     vm.register_builtin(VIML_UNLET, b_unlet);
     vm.register_builtin(VIML_UNLET_INDEX, b_unlet_index);
@@ -8775,7 +8843,10 @@ pub fn eval_file(path: &std::path::Path) -> Result<(), VimlError> {
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| path.display().to_string());
     crate::ported::eval::fs::push_sourcing_name(sname);
+    // c: `do_source()` — the file starts as a legacy script (see `source_file`).
+    let saved_version = set_script_version(crate::ported::eval::userfunc::SCRIPT_VERSION_LEGACY);
     let r = eval_file_inner(path);
+    set_script_version(saved_version);
     crate::ported::eval::fs::pop_sourcing_name();
     r
 }

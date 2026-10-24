@@ -8487,3 +8487,44 @@ Recorded in `tests/parity_cases/v_t_type_numbers.vim`.
 - `fileencoding`, `termencoding`, `makeencoding` are names only; vim
   canonizes them through the same `did_set_encoding()` (`set fenc=UTF8` is
   `utf-8`).
+
+## R66 — vim9 names for Bool and null values
+
+Oracle: `/opt/homebrew/Cellar/vim/9.2.1200/bin/vim` (9.2, patches 1-1200),
+`-es -u NONE -i NONE -N -c 'verbose source CASE'`. C read at tag `v9.2.0900`.
+
+### R66-1. vim9 code printed `v:true` / `v:false` / `v:null` — ✅ FIXED
+vim names a Bool or special value through `get_var_special_name()`
+(`evalvars.c:2676`): `true`/`false`/`null` when `in_vim9script()`
+(`vim9script.c:22`, `current_sctx.sc_version == SCRIPT_VERSION_VIM9`),
+`v:true`/`v:false`/`v:null` otherwise, `v:none` in both. That covers `:echo`,
+`string()`, `printf('%s')` and string context (`true .. ''`); `json_encode()`
+has its own names. vimlrs had only Neovim's prefixed tables, so every vim9
+script printed `v:true` for `echo true`. The script version is now modelled on
+`current_sctx.sc_version`: `:vim9script` as a script's first command sets it
+(`ex_vim9script()`, `vim9script.c:131`), `:source` saves it and starts the file
+as legacy (`do_source()`), a `:def` call runs as vim9 even from a legacy script
+(`call_def_function()`, `vim9execute.c:6903`) and a legacy `:function` as
+legacy even in a vim9 file (`define_function()`, `userfunc.c:5757-5759`).
+`execute()` / `:execute` text parses in the caller's dialect, so
+`execute('echo true')` in a vim9 script is no longer `E121: Undefined
+variable: true`. Recorded in `tests/parity_cases/vim9_special_names.vim` and
+`tests/parity_cases/def_special_names_legacy.vim`.
+
+### R66-O. Measured this round, still open
+- The `:legacy` and `:vim9cmd` modifiers (`CMOD_LEGACY` / `CMOD_VIM9CMD` in
+  `in_vim9script()`) are not parsed: `legacy echo v:true` in a vim9 script
+  prints nothing in vimlrs, `v:true` in vim.
+- vim9's white-space rules are not enforced: `echo [1,2,3][-1]` in a vim9
+  script is `E1069: White space required after ',': ,2,3][-1]` in vim and
+  prints `3` in vimlrs.
+- `throw [1, 2]` inside `:try` reports `E730: Using a List as a String` and vim
+  then runs nothing more of the script (exit 1); vimlrs turns it into a caught
+  `Vim(throw):E730` exception and carries on.
+- `map(range(3), function('Add', [1]))` where the call fails with `E118`
+  leaves `[]` as the `:echo`ed result in vim; vimlrs echoes the unchanged
+  `[0, 1, 2]`.
+- Still open from R65-O and R63-O: run-time line structure after a failed
+  `:call`, the failing-lambda partial value of `&&`/`||`/`?:`, `E193` after a
+  failed `:function` definition, `E18` for `let d.k{n} = 1`, the list-target
+  `E475` span, and the unported `emsg_severe` sites.

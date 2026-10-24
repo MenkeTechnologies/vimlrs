@@ -400,14 +400,29 @@ pub struct sctx_T {
     pub sc_lnum: i64,
     /// `uint64_t sc_chan` — channel (only when `sc_sid == SID_API_CLIENT`).
     pub sc_chan: u64,
+    /// vim's `int sc_version` (`structs.h`) — the script version. A legacy
+    /// script is `0`/`1` here (`:scriptversion` is not modelled);
+    /// [`SCRIPT_VERSION_VIM9`] once `:vim9script` has run, and inside a `:def`.
+    pub sc_version: i32,
 }
+
+/// vim `structs.h:94` `#define SCRIPT_VERSION_VIM9 999999`.
+pub const SCRIPT_VERSION_VIM9: i32 = 999999;
+
+/// The version a legacy `:function` body runs under. vim gives it its defining
+/// script's version, mapping a vim9 one to `SCRIPT_VERSION_MAX` (`userfunc.c:
+/// 5757-5759`: "`:func` does not use Vim9 script syntax, even in a Vim9 script
+/// file"); without `:scriptversion` every legacy version is `1`.
+pub const SCRIPT_VERSION_LEGACY: i32 = 1;
 
 thread_local! {
     /// C `sctx_T current_sctx` (a global set by the sourcing/exec machinery) —
     /// the script context of the code currently executing. RUST-PORT NOTE: the
     /// standalone interpreter has a single, unnumbered script context, so this
     /// stays at its `Default` (`sc_sid == 0`); it is copied into a function's
-    /// `uf_script_ctx` at definition time (see [`register_luafunc`]).
+    /// `uf_script_ctx` at definition time (see [`register_luafunc`]). Only
+    /// `sc_version` moves: `:vim9script`, `:source` and each user-function call
+    /// set and restore it.
     pub static current_sctx: std::cell::RefCell<sctx_T> =
         std::cell::RefCell::new(sctx_T::default());
 }

@@ -215,6 +215,15 @@ fn script_is_vim9(src: &str) -> bool {
         .is_some_and(|l| l.split(char::is_whitespace).next() == Some("vim9script"))
 }
 
+/// True when `src` parses as vim9: it is a `:vim9script` itself, or it is a
+/// command line (`:execute`, `execute()`) run from vim9 code. vim runs such a
+/// line under the caller's `current_sctx`, so `execute('echo true')` in a vim9
+/// script sees the vim9 `true`. A `:source`d file is parsed after `do_source()`
+/// reset the version to legacy, so only its own first line decides for it.
+fn source_is_vim9(src: &str) -> bool {
+    script_is_vim9(src) || crate::fusevm_bridge::in_vim9script()
+}
+
 /// The small set of names Phase 3 recognizes as builtin function calls. The
 /// full `funcs.c` table is ported in Phase 5.
 pub const PHASE3_BUILTINS: &[&str] = &[
@@ -322,15 +331,18 @@ fn parse_stmt_unplaced(line: &str) -> Result<Stmt, VimlError> {
             stmt: Box::new(inner),
         });
     }
-    // `:vim9script [noclear]` — switches the script to vim9 mode (a no-op leaf;
-    // the mode's parse effects are applied in `Lines::new`). Matched here because
-    // its command word ends at the `9`, which `cmd_word` treats as a boundary.
+    // `:vim9script [noclear]` — switches the script to vim9 mode. The mode's
+    // parse effects are applied in `Lines::new`; at run time it sets the script
+    // version (`Stmt::Vim9Script`), but only where the parse took it as the
+    // script's first command — anywhere else vim refuses it (E1038) and the
+    // script stays legacy. Matched here because its command word ends at the
+    // `9`, which `cmd_word` treats as a boundary.
     if line
         .split(|c: char| c.is_whitespace())
         .next()
         .is_some_and(|w| w == "vim9script")
     {
-        return Ok(Stmt::Expr(Expr::Number(0)));
+        return Ok(if vim9_active() { Stmt::Vim9Script } else { Stmt::Expr(Expr::Number(0)) });
     }
     let cmd_end = line
         .find(|c: char| !c.is_ascii_alphabetic())
@@ -1138,7 +1150,7 @@ fn parse_program_body(src: &str) -> Result<Block, VimlError> {
     // (and their exported names recorded for builtin override) before lexing.
     let desugared = crate::rust_ffi::desugar(src);
     let src = desugared.as_str();
-    let _vim9 = Vim9Guard::enter(script_is_vim9(src));
+    let _vim9 = Vim9Guard::enter(source_is_vim9(src));
     let mut cur = Lines::new(src);
     let mut out = Vec::new();
     loop {
@@ -1244,7 +1256,7 @@ pub fn parse_program_lines_tolerant(src: &str) -> TolerantParse {
     // `parse_program`).
     let desugared = crate::rust_ffi::desugar(src);
     let src = desugared.as_str();
-    let _vim9 = Vim9Guard::enter(script_is_vim9(src));
+    let _vim9 = Vim9Guard::enter(source_is_vim9(src));
     let mut cur = Lines::new(src);
     let mut out = Vec::new();
     let mut errs = Vec::new();

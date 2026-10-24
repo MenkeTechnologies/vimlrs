@@ -1412,6 +1412,7 @@ impl Compiler {
             Stmt::Function { .. } => "function",
             Stmt::DelFunction(_) => "delfunction",
             Stmt::Finish => "finish",
+            Stmt::Vim9Script => "vim9script",
             Stmt::CommandDef(_) => "command",
             Stmt::CommandDel(_) => "delcommand",
             Stmt::Autocmd(_) => "autocmd",
@@ -1892,6 +1893,11 @@ impl Compiler {
                     return Ok(());
                 }
                 self.exit_jump(EXIT_BREAK);
+                Ok(())
+            }
+            Stmt::Vim9Script => {
+                self.emit(Op::CallBuiltin(h::VIML_VIM9SCRIPT, 0));
+                self.emit(Op::Pop);
                 Ok(())
             }
             Stmt::Finish => {
