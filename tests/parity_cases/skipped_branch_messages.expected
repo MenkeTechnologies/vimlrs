@@ -1,0 +1,13 @@
+1
+E133: :return not inside a function
+a
+b
+E133: :return not inside a function
+E580: :endif without :if: endif
+c
+E602: :endtry without :try:     endtry
+d
+E133: :return not inside a function
+e
+E133: :return not inside a function
+E171: Missing :endif

@@ -60,6 +60,12 @@ thread_local! {
     /// the block at end of input and [`parse_program`] appends the report.
     static EOF_MISSING: std::cell::RefCell<Option<String>> =
         const { std::cell::RefCell::new(None) };
+    /// The blocks open around the line being parsed, innermost last, within one
+    /// `do_cmdline()` unit (a file, a command line, a `:function` body): the
+    /// parse-time image of vim's `cstack`, which decides whether a block command
+    /// that closes nothing only reports (see [`stray_block_error`]).
+    static BLOCK_KINDS: std::cell::RefCell<Vec<&'static str>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Byte offset of `part` (a subslice of `whole`) within `whole`.
@@ -933,6 +939,87 @@ fn e_unmatched_block(cmd: &str, line: &str) -> VimlError {
     VimlError::msg(format!("{code}: :{kw} without {opener}: {}", line.trim()))
 }
 
+/// Keeps `kind` on [`BLOCK_KINDS`] while its block is parsed.
+struct BlockKind;
+
+impl BlockKind {
+    fn enter(kind: &'static str) -> Self {
+        BLOCK_KINDS.with(|k| k.borrow_mut().push(kind));
+        BlockKind
+    }
+}
+
+impl Drop for BlockKind {
+    fn drop(&mut self) {
+        BLOCK_KINDS.with(|k| k.borrow_mut().pop());
+    }
+}
+
+/// Run `f` with an empty [`BLOCK_KINDS`]: a `:function` body, a file or a
+/// command line is its own `do_cmdline()`, with its own `cstack`.
+fn with_own_blocks<T>(f: impl FnOnce() -> T) -> T {
+    let saved = BLOCK_KINDS.with(|k| std::mem::take(&mut *k.borrow_mut()));
+    let r = f();
+    BLOCK_KINDS.with(|k| *k.borrow_mut() = saved);
+    r
+}
+
+/// The error of a block command `cmd` (the segment `seg` of its source line)
+/// that closes or continues no block open around it, when its handler only
+/// reports it and leaves every conditional as it was; `None` when the handler
+/// would close or rewind conditionals (a `:endwhile` inside an `:if` inside a
+/// `:while`), which stays a parse error.
+///
+/// c (vim 9.2 `ex_eval.c`): `ex_endif()` sets `e_endif_without_if` whenever the
+/// innermost conditional is not an `:if`; `ex_else()` sets `e_else_without_if`
+/// / `e_elseif_without_if` the same way, and `e_multiple_else` /
+/// `e_elseif_after_else` when it is an `:if` already past its `:else`;
+/// `ex_endwhile()` sets `e_endwhile_without_while` / `e_endfor_without_for`
+/// with no loop open (`cs_looplevel <= 0`); `ex_catch()`, `ex_finally()` and
+/// `ex_endtry()` set theirs with no `:try` open (`cs_trylevel <= 0`). In none of
+/// those cases does anything else happen. `do_one_cmd()` reports `eap->errmsg`
+/// with `append_command()`: the command as written, from the end of the
+/// previous command (blanks included) to its `|` or comment.
+fn stray_block_error(cmd: &str, seg: &str) -> Option<Stmt> {
+    if vim9_active() {
+        return None;
+    }
+    let kw = canon_block_kw(cmd);
+    let (top, in_loop, in_try) = BLOCK_KINDS.with(|k| {
+        let k = k.borrow();
+        (
+            k.last().copied(),
+            k.iter().any(|b| matches!(*b, "while" | "for")),
+            k.contains(&"try"),
+        )
+    });
+    let text = split_commands(seg).first().copied().unwrap_or(seg);
+    // c: these take no argument, so a `"` starts a comment (`EX_TRLBAR`).
+    let text = match kw {
+        "elseif" | "catch" => text,
+        _ => text.split('"').next().unwrap_or(text),
+    };
+    let msg = match kw {
+        "endif" => "E580: :endif without :if",
+        "else" if top == Some("if") => "E583: Multiple :else",
+        "else" => "E581: :else without :if",
+        "elseif" if top == Some("if") => "E584: :elseif after :else",
+        "elseif" => "E582: :elseif without :if",
+        "endwhile" if !in_loop => "E588: :endwhile without :while",
+        "endfor" if !in_loop => "E588: :endfor without :for",
+        "catch" if !in_try => "E603: :catch without :try",
+        "finally" if !in_try => "E606: :finally without :try",
+        "endtry" if !in_try => "E602: :endtry without :try",
+        // c: `ex_endfunction()` — `E193: %s not inside a function`, which
+        // names the command and is reported without the command text.
+        "endfunction" | "enddef" => {
+            return Some(Stmt::BlockError(kw.to_string(), format!("E193: :{kw} not inside a function")));
+        }
+        _ => return None,
+    };
+    Some(Stmt::BlockError(kw.to_string(), format!("{msg}: {text}")))
+}
+
 fn is_block_terminator(cmd: &str) -> bool {
     matches!(
         canon_block_kw(cmd),
@@ -1037,7 +1124,7 @@ fn is_final_block_terminator(cmd: &str) -> bool {
 /// debugger's statement markers read.
 pub fn parse_program(src: &str) -> Result<Block, VimlError> {
     let saved_missing = EOF_MISSING.with(|m| m.borrow_mut().take());
-    let r = parse_program_body(src);
+    let r = with_own_blocks(|| parse_program_body(src));
     EOF_MISSING.with(|m| *m.borrow_mut() = saved_missing);
     r
 }
@@ -1056,6 +1143,11 @@ fn parse_program_body(src: &str) -> Result<Block, VimlError> {
         let Some(line) = cur.peek() else { break };
         let (cmd, _) = cmd_word(&line);
         if is_block_terminator(cmd) {
+            if let Some(s) = stray_block_error(cmd, &line) {
+                out.push((cur.line_no(), s));
+                cur.bump();
+                continue;
+            }
             return Err(e_unmatched_block(cmd, &line));
         }
         let lineno = cur.line_no();
@@ -1932,6 +2024,11 @@ fn parse_block(cur: &mut Lines, terms: &[&str]) -> ParseBlockResult {
             ));
         }
         if is_block_terminator(cmd) {
+            if let Some(s) = stray_block_error(cmd, &line) {
+                stmts.push((cur.line_no(), s));
+                cur.bump();
+                continue;
+            }
             return Err(e_unmatched_block(cmd, &line));
         }
         let lineno = cur.line_no();
@@ -2013,6 +2110,7 @@ fn strip_legacy_trailing_comment(s: &str) -> &str {
 }
 
 fn parse_if(cur: &mut Lines, cond_str: &str) -> Result<Stmt, VimlError> {
+    let _kind = BlockKind::enter("if");
     let mut arms = Vec::new();
     let mut else_body = None;
     let (body, mut term) = parse_block(cur, IF_TERMS)?;
@@ -2046,6 +2144,7 @@ fn parse_if(cur: &mut Lines, cond_str: &str) -> Result<Stmt, VimlError> {
 }
 
 fn parse_while(cur: &mut Lines, cond_str: &str) -> Result<Stmt, VimlError> {
+    let _kind = BlockKind::enter("while");
     let cond = parse_cmd_expr(strip_legacy_trailing_comment(cond_str))?;
     let (body, term) = parse_block(cur, &["endwhile"])?;
     if term.is_none() {
@@ -2059,6 +2158,7 @@ fn parse_while(cur: &mut Lines, cond_str: &str) -> Result<Stmt, VimlError> {
 }
 
 fn parse_for(cur: &mut Lines, header: &str) -> Result<Stmt, VimlError> {
+    let _kind = BlockKind::enter("for");
     // `{var} in {expr}` — split on the first whitespace-delimited `in`.
     let idx = header
         .find(" in ")
@@ -2604,7 +2704,7 @@ fn parse_function(cur: &mut Lines, header: &str) -> Result<Stmt, VimlError> {
     let dict = attrs.split_whitespace().any(|w| w == "dict");
     let abort = attrs.split_whitespace().any(|w| w == "abort");
     let closure = attrs.split_whitespace().any(|w| w == "closure");
-    let (body, term) = parse_block(cur, &["endfunction"])?;
+    let (body, term) = with_own_blocks(|| parse_block(cur, &["endfunction"]))?;
     if term.is_none() {
         return Err(VimlError::msg("E126: Missing :endfunction"));
     }
@@ -2755,6 +2855,7 @@ fn parse_def(cur: &mut Lines, header: &str) -> Result<Stmt, VimlError> {
 }
 
 fn parse_try(cur: &mut Lines) -> Result<Stmt, VimlError> {
+    let _kind = BlockKind::enter("try");
     const TRY_TERMS: &[&str] = &["catch", "finally", "endtry"];
     // The `:try` keyword's own source line — if `:endtry` is on the same one, the
     // whole construct was a `|`-separated one-liner, which Vim handles differently

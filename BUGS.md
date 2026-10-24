@@ -8369,3 +8369,28 @@ through `modifier_keys_table[]` (`t_#4 <S-Left>`, `t_kB <S-Tab>`,
 (`t_PS <PasteStart> p`). The termcap rows of `key_names_table[]` and the
 shifted rows of `modifier_keys_table[]` (`misc2.c`) are ported. Recorded in
 `tests/parity_cases/term_code_key_names.vim`.
+
+### R65-3. A block command with nothing to close was dropped silently — ✅ FIXED
+`endif`, `else`, `endwhile`, `catch`, `endtry`, `endfunction`, … with no block
+for them made `parse_program` fail, and the tolerant fallback dropped the line
+without a word. vim's handlers only report in those cases (`ex_endif()` when
+the innermost conditional is not an `:if`, `ex_else()` likewise and `E583` /
+`E584` after an `:else`, `ex_endwhile()` with no loop open, `ex_catch()` /
+`ex_finally()` / `ex_endtry()` with no `:try`, `ex_endfunction()` `E193`), and
+`do_one_cmd()` appends the command as written — blanks included, up to its `|`
+or comment (`E580: :endif without :if:   endif  `). The parser now keeps the
+blocks open around each line (a `:function` body is its own unit) and turns
+such a command into a statement that reports at run time; one whose handler
+would close or rewind conditionals (a `:endwhile` inside an `:if` inside a
+`:while`) is still a parse error. Recorded in
+`tests/parity_cases/stray_block_commands.vim`.
+
+### R65-4. A branch not taken reported nothing — ✅ FIXED
+vim reads a branch it does not take in skip mode, and two commands report even
+then: `ex_return()` outside a function (`E133` comes before it looks at
+`eap->skip`), and a block command with nothing to close (R65-3). `if 0 | return
+| endif` is `E133` and then `E171`; an `E133` in a skipped `:if` arm sets
+`did_emsg`, so the `:else` after it does not run either. The compiler emits
+those messages on the path that skips the arm (the later arms after the one
+taken, nested blocks included, `:function` bodies not). Recorded in
+`tests/parity_cases/skipped_branch_messages.vim`.

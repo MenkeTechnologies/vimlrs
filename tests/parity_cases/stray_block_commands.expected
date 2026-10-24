@@ -1,0 +1,25 @@
+1
+E580: :endif without :if: endif
+E581: :else without :if: else
+E582: :elseif without :if: elseif 1
+E588: :endwhile without :while: endwhile
+E588: :endfor without :for: endfor
+E603: :catch without :try: catch /x/
+E606: :finally without :try: finally
+E602: :endtry without :try: endtry
+E193: :endfunction not inside a function
+E580: :endif without :if: en
+E580: :endif without :if:   endif  
+E580: :endif without :if: endif 
+E580: :endif without :if: endif 
+E580: :endif without :if:   endif  
+a
+E583: Multiple :else:   else
+E584: :elseif after :else:   elseif 1
+E580: :endif without :if:   endif
+E602: :endtry without :try:   endtry
+E588: :endwhile without :while:   endwhile
+Vim(endif):E580: :endif without :if:   endif
+E580: :endif without :if:   endif
+in F
+end

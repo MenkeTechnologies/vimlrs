@@ -492,6 +492,13 @@ pub enum Stmt {
     Finish,
     /// `:return [expr]`.
     Return(Option<Expr>),
+    /// A block command with no block to act on (`:endif` with no `:if` open,
+    /// a second `:else`, `:endtry` outside any `:try`, …) whose `ex_*` handler
+    /// only reports and changes no conditional (`ex_endif()`, `ex_else()`,
+    /// `ex_endwhile()`, `ex_catch()`, `ex_endtry()` in `ex_eval.c`). Carries the
+    /// command's full name and the full message, the command text appended as
+    /// `do_one_cmd()` appends it.
+    BlockError(String, String),
     /// `:function {name}(args) … :endfunction`.
     Function {
         /// Function name (may be scoped / `s:` / autoload).

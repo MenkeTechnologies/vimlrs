@@ -1369,6 +1369,18 @@ impl Compiler {
             Stmt::Defer(_) => "defer",
             Stmt::Return(_) => "return",
             Stmt::Break(_) => "break",
+            Stmt::BlockError(kw, _) => match kw.as_str() {
+                "endif" => "endif",
+                "else" => "else",
+                "elseif" => "elseif",
+                "endwhile" => "endwhile",
+                "endfor" => "endfor",
+                "catch" => "catch",
+                "finally" => "finally",
+                "endtry" => "endtry",
+                "endfunction" => "endfunction",
+                _ => "enddef",
+            },
             Stmt::Continue(_) => "continue",
             Stmt::Throw(_) => "throw",
             Stmt::Execute(_) => "execute",
@@ -1884,6 +1896,10 @@ impl Compiler {
                 self.exit_jump(EXIT_CONTINUE);
                 Ok(())
             }
+            Stmt::BlockError(_, msg) => {
+                self.raise_cmd(msg);
+                Ok(())
+            }
             Stmt::Return(expr) => {
                 // c: `ex_return` outside a function is `emsg(e_return_not_inside_function)`
                 // at run time, before the argument is evaluated, and without
@@ -2251,9 +2267,19 @@ impl Compiler {
             }
             let jf = self.emit(Op::JumpIfFalse(0));
             self.compile_stmts(body)?;
+            // c: the arms after the one taken are read in skip mode.
+            let later = arms
+                .iter()
+                .skip(end_jumps.len() + 1)
+                .map(|(_, b)| b)
+                .chain(else_body);
+            for b in later {
+                self.skip_messages(b);
+            }
             end_jumps.push(self.emit(Op::Jump(0)));
             let next = self.b.current_pos();
             self.b.patch_jump(jf, next);
+            self.skip_messages(body);
         }
         if let Some(body) = else_body {
             self.compile_stmts(body)?;
@@ -2263,6 +2289,73 @@ impl Compiler {
             self.b.patch_jump(j, end);
         }
         Ok(())
+    }
+
+    /// Report what the commands of `body` report when a branch not taken is
+    /// read in skip mode (`ea.skip`, `do_one_cmd()`): the conditional commands
+    /// and the ones that handle `|` themselves still run then (vim 9.2
+    /// `ex_docmd.c:2466`). Of those, two report regardless of the skip: a
+    /// block command with no block to act on ([`Stmt::BlockError`]) and
+    /// `ex_return()` outside a function, which gives `E133` before it looks at
+    /// `eap->skip`. Nested blocks are skipped too; a `:function` body is not
+    /// read as commands.
+    fn skip_messages(&mut self, body: &[(u32, Stmt)]) {
+        fn collect(s: &Stmt, top_return: bool, out: &mut Vec<String>) {
+            let all = |b: &[(u32, Stmt)], out: &mut Vec<String>| {
+                for (_, s) in b {
+                    collect(s, top_return, out);
+                }
+            };
+            match s {
+                Stmt::BlockError(_, msg) => out.push(msg.clone()),
+                Stmt::Return(_) if top_return => {
+                    out.push("E133: :return not inside a function".to_string())
+                }
+                Stmt::LineGroup(g) => {
+                    for s in g {
+                        collect(s, top_return, out);
+                    }
+                }
+                Stmt::If { arms, else_body } => {
+                    for (_, b) in arms {
+                        all(b, out);
+                    }
+                    if let Some(b) = else_body {
+                        all(b, out);
+                    }
+                }
+                Stmt::While { body, .. } | Stmt::For { body, .. } => all(body, out),
+                Stmt::Try {
+                    body,
+                    catches,
+                    finally,
+                    ..
+                } => {
+                    all(body, out);
+                    for (_, b) in catches {
+                        all(b, out);
+                    }
+                    if let Some(b) = finally {
+                        all(b, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut msgs = Vec::new();
+        let top_return = !self.in_function && !self.func_cmdline;
+        for (_, s) in body {
+            collect(s, top_return, &mut msgs);
+        }
+        let any = !msgs.is_empty();
+        for m in msgs {
+            self.raise_cmd(&m);
+        }
+        // c: the error sets `did_emsg`, so the rest of the conditional is
+        // skipped as after any other error in it.
+        if any {
+            self.emit_block_abort_check(0);
+        }
     }
 
     /// A block header whose text did not parse ([`Expr::ScriptError`], see
