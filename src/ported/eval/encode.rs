@@ -463,65 +463,57 @@ pub fn encode_vim_to_string(tv: &typval_T) -> VimStr {
     TYPVAL_ENCODE_CONVERT_ONE_VALUE(tv, &mut EncodeState::new(Recurse::String))
 }
 
-/// Which `TYPVAL_ENCODE_CONV_RECURSE` the instantiation defines — what a
-/// container that is already being converted (a self-reference) turns into.
+/// Which caller the walk renders for — what a container already met on the
+/// walk turns into.
 #[derive(Clone, Copy, PartialEq)]
 enum Recurse {
-    /// `encode_vim_to_string` (`vendor/eval/encode.c:459`): `E724` once, and
-    /// `{E724@N}` in the text.
+    /// `string()`: vim's `tv2string()` passes `restore_copyID` TRUE to
+    /// `echo_string_core()`, so `list_tv2string()` / `dict_tv2string()` give
+    /// back each container's `copyID` when done and only a container that
+    /// contains itself is `[...]` / `{...}` (vim 9.2 `eval.c:6616`, `:6705`).
     String,
-    /// `encode_vim_to_echo` (`vendor/eval/encode.c:501`): `[...@N]` / `{...@N}`,
-    /// no error.
+    /// `:echo`: `echo_string()` passes `restore_copyID` FALSE, so a container
+    /// keeps the walk's `copyID` and any later meeting of it — a sibling
+    /// (`[l, l]`) as well as a self-reference — is `[...]` / `{...}`.
     Echo,
 }
 
-/// The walk's `mpstack`, reduced to what `TYPVAL_ENCODE_CONV_RECURSE` reads:
-/// the containers currently being converted, outermost first, each with
-/// whether it is a Dict (`kMPConvDict`) or a List (`kMPConvList`).
-///
-/// c: `TYPVAL_ENCODE_CHECK_SELF_REFERENCE` marks a container with the walk's
-/// `copyID` on entry and restores the saved one when it is done, so only a
-/// container that CONTAINS ITSELF is a reference back — the same List twice
-/// side by side (`[l, l]`) is converted twice. Membership in this stack is that
-/// test.
+/// The containers met on the walk, each with whether it is a Dict: `stack`
+/// those still being converted, `seen` every one marked so far — the two
+/// readings of `lv_copyID == copyID` that [`Recurse`] tells apart.
 struct EncodeState {
     stack: Vec<(bool, *const ())>,
+    seen: Vec<(bool, *const ())>,
     recurse: Recurse,
-    /// c: `did_echo_string_emsg` — "Only give this message once for a recursive
-    /// call to avoid flooding the user with errors."
-    did_emsg: bool,
 }
 
 impl EncodeState {
     fn new(recurse: Recurse) -> Self {
         EncodeState {
             stack: Vec::new(),
+            seen: Vec::new(),
             recurse,
-            did_emsg: false,
         }
     }
 
-    /// `TYPVAL_ENCODE_CONV_RECURSE(val, conv_type)` when `ptr` is already on the
-    /// stack, else `None` (the C's NOTDONE: convert it).
+    /// c: `list_tv2string()` / `dict_tv2string()` — `"[...]"` / `"{...}"` for
+    /// a non-empty container whose `copyID` is the walk's (`lv_len > 0`,
+    /// `ht_used != 0`), else `None`: convert it, marking it on the way in.
     fn TYPVAL_ENCODE_CHECK_SELF_REFERENCE(
         &mut self,
         is_dict: bool,
         ptr: *const (),
+        nonempty: bool,
     ) -> Option<VimStr> {
-        let backref = self.stack.iter().position(|&e| e == (is_dict, ptr))?;
-        Some(match self.recurse {
-            Recurse::String => {
-                if !self.did_emsg {
-                    self.did_emsg = true;
-                    crate::ported::message::emsg(
-                        "E724: unable to correctly dump variable with self-referencing container",
-                    );
-                }
-                format!("{{E724@{backref}}}").into()
-            }
-            Recurse::Echo if is_dict => format!("{{...@{backref}}}").into(),
-            Recurse::Echo => format!("[...@{backref}]").into(),
-        })
+        let marked = match self.recurse {
+            Recurse::String => &self.stack,
+            Recurse::Echo => &self.seen,
+        };
+        if nonempty && marked.contains(&(is_dict, ptr)) {
+            return Some(if is_dict { "{...}" } else { "[...]" }.into());
+        }
+        self.seen.push((is_dict, ptr));
+        None
     }
 }
 
@@ -531,19 +523,15 @@ fn TYPVAL_ENCODE_CONVERT_ONE_VALUE(tv: &typval_T, st: &mut EncodeState) -> VimSt
     match (tv.v_type, &tv.vval) {
         // TYPVAL_ENCODE_CONV_NUMBER
         (VAR_NUMBER, v_number(n)) => n.to_string().into(),
-        // TYPVAL_ENCODE_CONV_FLOAT (encode.c:351) — FP_NAN → "str2float('nan')",
-        // FP_INFINITE → "[-]str2float('inf')", else "%g" then append ".0" if no
-        // '.'/'e' (so string(3.0) is "3.0", not "3").
+        // TYPVAL_ENCODE_CONV_FLOAT (encode.c:351) — "%g", then ".0" appended if
+        // there is no '.'/'e' (so string(3.0) is "3.0", not "3").
         (VAR_FLOAT, v_float(f)) => {
+            // c (vim 9.2): echo_string_core() formats a Float with "%g", whose
+            // vim_vsnprintf() writes "nan" and "[-]inf" (strings.c:4455).
             if f.is_nan() {
-                "str2float('nan')".into()
+                "nan".into()
             } else if f.is_infinite() {
-                if *f < 0.0 {
-                    "-str2float('inf')"
-                } else {
-                    "str2float('inf')"
-                }
-                .into()
+                if *f < 0.0 { "-inf" } else { "inf" }.into()
             } else {
                 let s = vim_float_g(*f, None);
                 if s.contains(['.', 'e', 'E']) {
@@ -641,7 +629,11 @@ fn TYPVAL_ENCODE_CONVERT_ONE_VALUE(tv: &typval_T, st: &mut EncodeState) -> VimSt
             None => "[]".into(),
             Some(l) => {
                 let ptr = std::rc::Rc::as_ptr(l) as *const ();
-                if let Some(text) = st.TYPVAL_ENCODE_CHECK_SELF_REFERENCE(false, ptr) {
+                if let Some(text) = st.TYPVAL_ENCODE_CHECK_SELF_REFERENCE(
+                    false,
+                    ptr,
+                    !l.borrow().lv_items.is_empty(),
+                ) {
                     return text;
                 }
                 st.stack.push((false, ptr));
@@ -663,7 +655,11 @@ fn TYPVAL_ENCODE_CONVERT_ONE_VALUE(tv: &typval_T, st: &mut EncodeState) -> VimSt
             None => "{}".into(),
             Some(d) => {
                 let ptr = std::rc::Rc::as_ptr(d) as *const ();
-                if let Some(text) = st.TYPVAL_ENCODE_CHECK_SELF_REFERENCE(true, ptr) {
+                if let Some(text) = st.TYPVAL_ENCODE_CHECK_SELF_REFERENCE(
+                    true,
+                    ptr,
+                    !d.borrow().dv_hashtab.is_empty(),
+                ) {
                     return text;
                 }
                 st.stack.push((true, ptr));

@@ -120,6 +120,22 @@ pub const VAR_TYPE_BOOL: varnumber_T = 6;
 pub const VAR_TYPE_SPECIAL: varnumber_T = 7;
 /// `VAR_TYPE_BLOB`. (c:130)
 pub const VAR_TYPE_BLOB: varnumber_T = 10;
+/// vim 9.2 `vim.h:2297`: `VAR_TYPE_JOB` — the value of `v:t_job` (no jobs here).
+pub const VAR_TYPE_JOB: varnumber_T = 8;
+/// vim 9.2 `vim.h:2298`: `VAR_TYPE_CHANNEL` — the value of `v:t_channel`.
+pub const VAR_TYPE_CHANNEL: varnumber_T = 9;
+/// vim 9.2 `vim.h:2301`: `VAR_TYPE_CLASS` — the value of `v:t_class`.
+pub const VAR_TYPE_CLASS: varnumber_T = 12;
+/// vim 9.2 `vim.h:2302`: `VAR_TYPE_OBJECT` — the value of `v:t_object`.
+pub const VAR_TYPE_OBJECT: varnumber_T = 13;
+/// vim 9.2 `vim.h:2303`: `VAR_TYPE_TYPEALIAS` — the value of `v:t_typealias`.
+pub const VAR_TYPE_TYPEALIAS: varnumber_T = 14;
+/// vim 9.2 `vim.h:2304`: `VAR_TYPE_ENUM` — the value of `v:t_enum`.
+pub const VAR_TYPE_ENUM: varnumber_T = 15;
+/// vim 9.2 `vim.h:2305`: `VAR_TYPE_ENUMVALUE` — the value of `v:t_enumvalue`.
+pub const VAR_TYPE_ENUMVALUE: varnumber_T = 16;
+/// vim 9.2 `vim.h:2306`: `VAR_TYPE_TUPLE` — the value of `v:t_tuple`.
+pub const VAR_TYPE_TUPLE: varnumber_T = 17;
 
 /// `union typval_vval_union` — the active value member selected by
 /// `typval_T.v_type`. (c:137) Member names match the C union fields; a NULL C

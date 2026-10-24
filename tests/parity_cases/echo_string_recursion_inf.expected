@@ -1,0 +1,16 @@
+0
+nan nan
+inf -inf nan
+[inf, -inf, nan] {'a': nan}
+[inf, nan]
+inf
+inf -inf nan inf 1
+1
+1.5
+inf -inf nan inf
+[1, [...]]
+[1, [...]]
+{'a': 1, 'b': {...}}
+{'a': 1, 'b': {...}}
+[[1], [...]] [[1], [1]]
+[[1, [...]]]

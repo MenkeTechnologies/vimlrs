@@ -17,8 +17,10 @@ use crate::ported::eval::typval::{
 use crate::ported::eval::typval_defs_h::{
     dict_T, list_T, partial_T, typval_T, typval_vval_union::*, varnumber_T, BoolVarValue,
     BoolVarValue::*, SpecialVarValue, SpecialVarValue::*, VarLockStatus, VarType, VarType::*,
-    VARNUMBER_MAX, VARNUMBER_MIN, VAR_TYPE_BLOB, VAR_TYPE_BOOL, VAR_TYPE_DICT, VAR_TYPE_FLOAT,
-    VAR_TYPE_FUNC, VAR_TYPE_LIST, VAR_TYPE_NUMBER, VAR_TYPE_STRING,
+    VARNUMBER_MAX, VARNUMBER_MIN, VAR_TYPE_BLOB, VAR_TYPE_BOOL, VAR_TYPE_CHANNEL, VAR_TYPE_CLASS,
+    VAR_TYPE_DICT, VAR_TYPE_ENUM, VAR_TYPE_ENUMVALUE, VAR_TYPE_FLOAT, VAR_TYPE_FUNC, VAR_TYPE_JOB,
+    VAR_TYPE_LIST, VAR_TYPE_NUMBER, VAR_TYPE_OBJECT, VAR_TYPE_SPECIAL, VAR_TYPE_STRING,
+    VAR_TYPE_TUPLE, VAR_TYPE_TYPEALIAS,
 };
 
 /// Reduced `funccall_T` (`typval_defs.h:299`) — one function-call activation's
@@ -345,6 +347,15 @@ pub mod vv {
         VV_TYPE_FLOAT,
         VV_TYPE_BOOL,
         VV_TYPE_BLOB,
+        VV_TYPE_NONE,
+        VV_TYPE_JOB,
+        VV_TYPE_CHANNEL,
+        VV_TYPE_CLASS,
+        VV_TYPE_OBJECT,
+        VV_TYPE_TYPEALIAS,
+        VV_TYPE_ENUM,
+        VV_TYPE_ENUMVALUE,
+        VV_TYPE_TUPLE,
         VV_EVENT,
         VV_VERSIONLONG,
         VV_ECHOSPACE,
@@ -476,6 +487,17 @@ const VIMVARS_DEF: [(&str, VarType, u8); VV_LEN] = [
     ("t_float", VAR_NUMBER, VV_RO),
     ("t_bool", VAR_NUMBER, VV_RO),
     ("t_blob", VAR_NUMBER, VV_RO),
+    // vim 9.2 `evalvars.c:138-165`: the type numbers vim has and Neovim does
+    // not, so `v:t_none` and the rest are defined.
+    ("t_none", VAR_NUMBER, VV_RO),
+    ("t_job", VAR_NUMBER, VV_RO),
+    ("t_channel", VAR_NUMBER, VV_RO),
+    ("t_class", VAR_NUMBER, VV_RO),
+    ("t_object", VAR_NUMBER, VV_RO),
+    ("t_typealias", VAR_NUMBER, VV_RO),
+    ("t_enum", VAR_NUMBER, VV_RO),
+    ("t_enumvalue", VAR_NUMBER, VV_RO),
+    ("t_tuple", VAR_NUMBER, VV_RO),
     ("event", VAR_DICT, VV_RO),
     ("versionlong", VAR_NUMBER, VV_RO),
     ("echospace", VAR_NUMBER, VV_RO),
@@ -649,6 +671,15 @@ pub fn evalvars_init() {
         v[VV_TYPE_FLOAT].vv_tv = num(VAR_TYPE_FLOAT);
         v[VV_TYPE_BOOL].vv_tv = num(VAR_TYPE_BOOL);
         v[VV_TYPE_BLOB].vv_tv = num(VAR_TYPE_BLOB);
+        v[VV_TYPE_NONE].vv_tv = num(VAR_TYPE_SPECIAL);
+        v[VV_TYPE_JOB].vv_tv = num(VAR_TYPE_JOB);
+        v[VV_TYPE_CHANNEL].vv_tv = num(VAR_TYPE_CHANNEL);
+        v[VV_TYPE_CLASS].vv_tv = num(VAR_TYPE_CLASS);
+        v[VV_TYPE_OBJECT].vv_tv = num(VAR_TYPE_OBJECT);
+        v[VV_TYPE_TYPEALIAS].vv_tv = num(VAR_TYPE_TYPEALIAS);
+        v[VV_TYPE_ENUM].vv_tv = num(VAR_TYPE_ENUM);
+        v[VV_TYPE_ENUMVALUE].vv_tv = num(VAR_TYPE_ENUMVALUE);
+        v[VV_TYPE_TUPLE].vv_tv = num(VAR_TYPE_TUPLE);
 
         v[VV_FALSE].vv_tv = typval_T {
             v_type: VAR_BOOL,

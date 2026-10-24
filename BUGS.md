@@ -8412,3 +8412,20 @@ that failed leaves the rest unevaluated (`{-> nosuch + nosuch2}()` reports one
 `E121`). Measured on `map()`+`filter()` with `{_, v -> v * 2 + 1}` over 30000
 items: +0.3% instructions retired (control subtracted). Recorded in
 `tests/parity_cases/lambda_failed_residue.vim`.
+
+### R65-6. `:echo`/`string()` rendered recursion and inf/nan the Neovim way — ✅ FIXED
+`echo l` for a List holding itself was `[1, [...@0]]` and `string(l)` reported
+`E724`; vim's `echo_string_core()` gives `[1, [...]]` for both, `string()`
+quietly. `:echo` passes `restore_copyID` FALSE, so a container met twice side
+by side is `[...]` too (`echo [x, x]` is `[[1], [...]]`, `string([x, x])`
+`[[1], [1]]`), and an empty one is never replaced (`lv_len > 0`). A Float is
+`%g`, so `inf`, `-inf`, `nan`, not `str2float('inf')`. `examples/dict_deepcopy.vim`
+asserted the Neovim forms; changed in its own commit (it passes under vim).
+Recorded in `tests/parity_cases/echo_string_recursion_inf.vim`.
+
+### R65-7. `v:t_none`, `v:t_job`, `v:t_channel`, `v:t_class`, … were undefined — ✅ FIXED
+The `v:` table was Neovim's, which has only `v:t_number` … `v:t_bool` and
+`v:t_blob`. vim's `evalvars.c:131-165` also defines `v:t_none` (7), `v:t_job`
+(8), `v:t_channel` (9), `v:t_class` (12), `v:t_object` (13), `v:t_typealias`
+(14), `v:t_enum` (15), `v:t_enumvalue` (16), `v:t_tuple` (17), read-only.
+Recorded in `tests/parity_cases/v_t_type_numbers.vim`.

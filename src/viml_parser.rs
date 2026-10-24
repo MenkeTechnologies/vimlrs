@@ -1013,7 +1013,10 @@ fn stray_block_error(cmd: &str, seg: &str) -> Option<Stmt> {
         // c: `ex_endfunction()` — `E193: %s not inside a function`, which
         // names the command and is reported without the command text.
         "endfunction" | "enddef" => {
-            return Some(Stmt::BlockError(kw.to_string(), format!("E193: :{kw} not inside a function")));
+            return Some(Stmt::BlockError(
+                kw.to_string(),
+                format!("E193: :{kw} not inside a function"),
+            ));
         }
         _ => return None,
     };
