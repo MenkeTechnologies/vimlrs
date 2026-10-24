@@ -3062,6 +3062,31 @@ impl Compiler {
         }
     }
 
+    /// The left operand of a binary operator. c: each `eval.c` level returns
+    /// FAIL as soon as its left operand failed, so the right operand is never
+    /// evaluated (`echo nosuch + nosuch2` is one `E121`). When `lhs` can fail
+    /// it is evaluated under the failure mark, and the jump returned leaves its
+    /// value as the operator's; pair with [`Self::patch_lhs_failed`].
+    fn lhs_guarded(&mut self, lhs: &Expr) -> Result<Option<usize>, VimlError> {
+        if !self.subscript_may_fail(lhs) {
+            self.expr(lhs)?;
+            return Ok(None);
+        }
+        self.emit(Op::CallBuiltin(h::VIML_ARGS_BEGIN, 0));
+        self.emit(Op::Pop);
+        self.expr(lhs)?;
+        self.emit(Op::CallBuiltin(h::VIML_ARGS_FAILED, 0));
+        Ok(Some(self.emit(Op::JumpIfTrue(0))))
+    }
+
+    /// Land a [`Self::lhs_guarded`] jump here, after the operator.
+    fn patch_lhs_failed(&mut self, jump: Option<usize>) {
+        if let Some(j) = jump {
+            let here = self.b.current_pos();
+            self.b.patch_jump(j, here);
+        }
+    }
+
     /// A lambda body's expression, compiled so that when it fails the value
     /// vim's `rettv` holds at that point is recorded for the lambda to return
     /// (`call_user_func()` returns -1 only when `rettv` is still `VAR_UNKNOWN`,
@@ -4224,7 +4249,7 @@ impl Compiler {
                     self.b.patch_jump(rhs_fail_end, end);
                     return Ok(());
                 }
-                self.expr(lhs)?;
+                let lhs_failed = self.lhs_guarded(lhs)?;
                 // c: eval5 (c:2405) type-checks the LEFT operand of `+`, `-` and `.`
                 // *before it even parses the right one*, "to avoid side effects after
                 // an error" — so `0z - remove(d, k)` reports the Blob (E974) and never
@@ -4275,6 +4300,7 @@ impl Compiler {
                     ArithOp::ShiftR => h::VIML_SHIFT_R,
                 };
                 self.emit(Op::CallBuiltin(id, 2));
+                self.patch_lhs_failed(lhs_failed);
             }
             Expr::Compare { op, case, lhs, rhs } => {
                 // Value-position compare of numeric operands → native compare
@@ -4295,9 +4321,10 @@ impl Compiler {
                     self.b.patch_jump(jend, lend);
                     return Ok(());
                 }
-                self.expr(lhs)?;
+                let lhs_failed = self.lhs_guarded(lhs)?;
                 self.expr(rhs)?;
                 self.emit(Op::CallBuiltin(h::cmp_id(*op, *case), 2));
+                self.patch_lhs_failed(lhs_failed);
             }
             Expr::And(a, b) => self.logical_and(a, b)?,
             Expr::Or(a, b) => self.logical_or(a, b)?,

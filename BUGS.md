@@ -8572,3 +8572,13 @@ reads its body once in skip mode, where the commands of R65-4 still report:
 a `:return` there at script level `E133`. The compiler emits those messages on
 the loop's exit (not on a `:break`). Recorded in
 `tests/parity_cases/loop_skip_messages.vim`.
+
+### R67-4. A failed left operand still evaluated the right one — ✅ FIXED
+`echo nosuch + nosuch2` reported both `E121`s; every `eval.c` level returns FAIL
+as soon as its left operand fails. An arithmetic, concatenation, shift or
+comparison operator whose left operand can fail now evaluates it under the
+failure mark and skips the right operand and the operation when it did
+(R65-5 did this only inside lambdas). Measured on a 30000-iteration `g:` loop
+plus 100 calls of a 200-iteration function: no change in instructions retired
+beyond noise (5.764e9 → 5.759e9, control subtracted). Recorded in
+`tests/parity_cases/failed_left_operand_stops.vim`.

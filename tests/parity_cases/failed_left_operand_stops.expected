@@ -1,0 +1,13 @@
+1
+E121: Undefined variable: nosuch
+a
+E121: Undefined variable: nosuch
+E121: Undefined variable: nosuch
+E121: Undefined variable: nosuch
+E121: Undefined variable: nosuch
+E121: Undefined variable: nosuch
+E121: Undefined variable: nosuch
+0 0
+E121: Undefined variable: nosuch
+E116: Invalid arguments for function len(nosuch . nosuch2)
+end
