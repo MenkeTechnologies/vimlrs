@@ -8564,3 +8564,11 @@ comma in `'fileencoding'` (`E474`), and for `'termencoding'` needs a conversion
 to and from `'encoding'` (`set tenc=bogus` is `E950: Cannot convert between
 bogus and utf-8` and then `E474`). Recorded in
 `tests/parity_cases/set_fenc_tenc_menc.vim`.
+
+### R67-3. A loop body not run reported nothing — ✅ FIXED
+A `:while` whose condition is false, a `:for` over an empty or finished list,
+reads its body once in skip mode, where the commands of R65-4 still report:
+`while 0 | endif | endwhile` is `E580`, `for i in [] | endtry | endfor` `E602`,
+a `:return` there at script level `E133`. The compiler emits those messages on
+the loop's exit (not on a `:break`). Recorded in
+`tests/parity_cases/loop_skip_messages.vim`.

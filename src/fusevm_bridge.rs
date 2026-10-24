@@ -2640,10 +2640,28 @@ pub fn get_var_special_name(tv: &typval_T) -> &'static str {
     use crate::ported::eval::typval_defs_h::BoolVarValue::kBoolVarTrue;
     let vim9 = in_vim9script();
     match &tv.vval {
-        v_bool(b) if *b == kBoolVarTrue => if vim9 { "true" } else { "v:true" },
-        v_bool(_) => if vim9 { "false" } else { "v:false" },
+        v_bool(b) if *b == kBoolVarTrue => {
+            if vim9 {
+                "true"
+            } else {
+                "v:true"
+            }
+        }
+        v_bool(_) => {
+            if vim9 {
+                "false"
+            } else {
+                "v:false"
+            }
+        }
         v_special(kSpecialVarNone) => "v:none",
-        _ => if vim9 { "null" } else { "v:null" },
+        _ => {
+            if vim9 {
+                "null"
+            } else {
+                "v:null"
+            }
+        }
     }
 }
 

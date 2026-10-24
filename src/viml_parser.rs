@@ -345,7 +345,11 @@ fn parse_stmt_unplaced(line: &str) -> Result<Stmt, VimlError> {
         .next()
         .is_some_and(|w| w == "vim9script")
     {
-        return Ok(if vim9_active() { Stmt::Vim9Script } else { Stmt::Expr(Expr::Number(0)) });
+        return Ok(if vim9_active() {
+            Stmt::Vim9Script
+        } else {
+            Stmt::Expr(Expr::Number(0))
+        });
     }
     let cmd_end = line
         .find(|c: char| !c.is_ascii_alphabetic())

@@ -2474,6 +2474,8 @@ impl Compiler {
             self.emit_block_abort_check(1);
         }
         self.emit(Op::JumpIfTrue(l_body));
+        // c: a loop whose condition is false reads its body once in skip mode.
+        self.skip_messages(body);
         let l_end = self.b.current_pos();
         for j in ctx.breaks {
             self.b.patch_jump(j, l_end);
@@ -2572,6 +2574,8 @@ impl Compiler {
         self.emit(Op::GetSlot(bound_slot));
         self.emit(cmp);
         self.emit(Op::JumpIfTrue(l_body)); // backedge = the loop test
+                                           // c: a finished `:for` reads its body once in skip mode.
+        self.skip_messages(body);
         let l_end = self.b.current_pos();
         self.b.patch_jump(range_failed, l_end);
         for j in ctx.breaks {
@@ -2738,8 +2742,11 @@ impl Compiler {
         self.set_var(&idx_var);
         self.emit(Op::Jump(l_cond));
 
+        // c: a finished `:for` reads its body once in skip mode.
+        let l_done = self.b.current_pos();
+        self.b.patch_jump(jf, l_done);
+        self.skip_messages(body);
         let l_end = self.b.current_pos();
-        self.b.patch_jump(jf, l_end);
         for j in unpack_failed {
             self.b.patch_jump(j, l_end);
         }

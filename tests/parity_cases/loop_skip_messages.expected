@@ -1,0 +1,15 @@
+1
+E580: :endif without :if:  endif 
+a
+E602: :endtry without :try:  endtry 
+b
+E580: :endif without :if:  endif 
+c
+d
+E133: :return not inside a function
+e
+f
+k 1
+k 2
+E581: :else without :if:     else
+g
