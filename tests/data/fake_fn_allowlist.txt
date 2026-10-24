@@ -469,3 +469,7 @@ f_typename
 # and `member_of` folds a container's element types to their common name.
 type_name_of
 member_of
+
+# ── term.c (not vendored) ──
+# show_one_termcode — vim 9.2 term.c:7580 (the `:set t_xx?` line of one key code).
+show_one_termcode
