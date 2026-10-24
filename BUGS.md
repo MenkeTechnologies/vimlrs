@@ -8554,3 +8554,13 @@ with only `:if`s open around the call; elsewhere the old behaviour stands (see
 R67-O). 300 marked calls of a 50-iteration function: +0.36% instructions
 retired (control subtracted). Recorded in
 `tests/parity_cases/call_failure_drops_line.vim`.
+
+### R67-2. `'fileencoding'`, `'termencoding'`, `'makeencoding'` were names only — ✅ FIXED
+`echo &fenc` printed nothing at all and `set fenc=UTF8` was accepted as typed.
+They are options (`fenc` buffer-local, `menc` global-local, `tenc` global, all
+empty by default), and `did_set_encoding()` canonizes each value
+(`set fenc=UTF8` is `utf-8`, `setglobal fenc=ISO8859_2` `iso-8859-2`), refuses a
+comma in `'fileencoding'` (`E474`), and for `'termencoding'` needs a conversion
+to and from `'encoding'` (`set tenc=bogus` is `E950: Cannot convert between
+bogus and utf-8` and then `E474`). Recorded in
+`tests/parity_cases/set_fenc_tenc_menc.vim`.

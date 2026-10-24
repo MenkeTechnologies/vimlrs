@@ -100,6 +100,11 @@ const OPTIONS: &[(&str, &str, Kind, varnumber_T, &str)] = &[
     //     the value is locale-independent by construction; that makes the
     //     LC_ALL=C reading a vim/nvim split, not a gap here.
     ("encoding", "enc", Kind::String, 0, "utf-8"),
+    // c: 'fileencoding', 'termencoding' and 'makeencoding' default to empty in
+    // both engines; vim canonizes a value set in them (`did_set_encoding()`).
+    ("fileencoding", "fenc", Kind::String, 0, ""),
+    ("termencoding", "tenc", Kind::String, 0, ""),
+    ("makeencoding", "menc", Kind::String, 0, ""),
     ("buftype", "bt", Kind::String, 0, ""),
     ("fileformat", "ff", Kind::String, 0, "unix"),
     ("iskeyword", "isk", Kind::String, 0, "@,48-57,_,192-255"),

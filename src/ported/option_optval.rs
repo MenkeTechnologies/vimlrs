@@ -243,6 +243,8 @@ const LOCAL_SCOPES: &[(&str, u8)] = &[
     ("syntax", kOptScopeBuf),
     ("buftype", kOptScopeBuf),
     ("fileformat", kOptScopeBuf),
+    ("fileencoding", kOptScopeBuf),
+    ("makeencoding", kOptScopeGlobal | kOptScopeBuf),
     ("iskeyword", kOptScopeBuf),
     ("binary", kOptScopeBuf),
     ("bomb", kOptScopeBuf),
@@ -360,6 +362,9 @@ pub(crate) static options: LazyLock<Vec<vimoption_T>> = LazyLock::new(|| {
         // other makes the two answers contradict. `option_tables_agree` in
         // `option.rs` fails the build's test run if they drift.
         s("encoding", "enc", "utf-8"),
+        s("fileencoding", "fenc", ""),
+        s("termencoding", "tenc", ""),
+        s("makeencoding", "menc", ""),
         s("buftype", "bt", ""),
         s("fileformat", "ff", "unix"),
         s("iskeyword", "isk", "@,48-57,_,192-255"),
@@ -795,7 +800,9 @@ pub fn set_option(opt_idx: OptIndex, value: OptVal, opt_flags: i32) -> Option<St
             // c: did_set_encoding() — "canonize the value, so that STRCMP() can
             // be used on it", before mb_init() checks it.
             let s = match name {
-                "encoding" => crate::ported::mbyte::enc_canonize(s),
+                "encoding" | "fileencoding" | "termencoding" | "makeencoding" => {
+                    crate::ported::mbyte::enc_canonize(s)
+                }
                 _ => s.clone(),
             };
             if let Some(e) = did_set_string_option(name, &s, opt_flags) {
@@ -898,6 +905,25 @@ pub fn did_set_string_option(name: &str, val: &str, opt_flags: i32) -> Option<St
         "ambiwidth" => invalid(check_opt_strings(&["single", "double"], false)),
         // c: did_set_encoding() → mb_init() (vim 9.2 `optionstr.c:2313`).
         "encoding" => crate::ported::mbyte::mb_init(val).map(str::to_string),
+        // c: did_set_encoding() — "No comma allowed in 'fileencoding'; catches
+        // confusing it with 'fileencodings'."
+        "fileencoding" => invalid(!val.contains(',')),
+        // c: did_set_encoding() — a 'termencoding' needs input and output
+        // conversion set up with 'encoding' (`convert_setup()`).
+        "termencoding" => {
+            let enc = match get_option_value(find_option("encoding"), 0).data {
+                OptValData::string(e) => e,
+                _ => String::new(),
+            };
+            let ok = crate::ported::mbyte::convert_setup_ext(val, &enc).is_some()
+                && crate::ported::mbyte::convert_setup_ext(&enc, val).is_some();
+            if !ok {
+                crate::ported::message::semsg(&format!(
+                    "E950: Cannot convert between {val} and {enc}"
+                ));
+            }
+            invalid(ok)
+        }
         // c: did_set_backspace() — a single digit 0-3 is the Vim 5.x form.
         "backspace" if at(0).is_ascii_digit() => invalid(at(0) <= b'3' && b.len() == 1),
         "backspace" => invalid(check_opt_strings(

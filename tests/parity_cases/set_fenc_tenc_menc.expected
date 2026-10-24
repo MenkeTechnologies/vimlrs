@@ -1,0 +1,17 @@
+1
+[][][]
+utf-8 utf-8 utf-8
+E474: Invalid argument: fenc=a,b
+utf-8
+latin1
+iso-8859-2 latin1
+iso-8859-2
+E950: Cannot convert between bogus and utf-8
+E474: Invalid argument: tenc=bogus
+iso-8859-2
+latin1 latin1 
+utf-8 latin1 utf-8
+2byte-foo
+default
+[]
+1 1 1
