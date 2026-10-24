@@ -473,3 +473,8 @@ member_of
 # ── term.c (not vendored) ──
 # show_one_termcode — vim 9.2 term.c:7580 (the `:set t_xx?` line of one key code).
 show_one_termcode
+
+# ── typval.c (vim, not Neovim) ──
+# clear_tv — vim 9.2 typval.c:119; Neovim renamed it tv_clear() and changed it to
+# reset the type, so the vendored C has no clear_tv. Ported under vim's name.
+clear_tv
