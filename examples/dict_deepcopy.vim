@@ -55,8 +55,9 @@ call assert_equal({'b': 2}, r)
 " --- a container that holds itself (copyID): deepcopy() copies it once and
 "     points the copy back at the copy; a container listed twice stays one
 "     container; with {noref} nothing is shared and the recursion ends in E698.
-"     Rendering it prints the back-reference (`[...@0]`) instead of recursing.
-"     Measured from nvim 0.12.
+"     Rendering it prints `[...]` / `{...}` instead of recursing, and string()
+"     reports no error (vim 9.2 list_tv2string()/dict_tv2string()).
+"     Measured from vim 9.2.
 let s:self = [1]
 call add(s:self, s:self)
 let s:copy = deepcopy(s:self)
@@ -67,13 +68,13 @@ let s:two = deepcopy([s:shared, s:shared])
 call assert_true(s:two[0] is s:two[1])
 call assert_false(deepcopy([s:shared, s:shared], 1)[0] is deepcopy([s:shared, s:shared], 1)[1])
 call assert_fails('call deepcopy(s:self, 1)', 'E698: Variable nested too deep for making a copy')
-call assert_equal('[1, [...@0]]', execute('echo s:self')[1:])
-call assert_fails('call string(s:self)', 'E724: unable to correctly dump variable with self-referencing container')
+call assert_equal('[1, [...]]', execute('echo s:self')[1:])
+call assert_equal('[1, [...]]', string(s:self))
 let s:selfd = {'a': 1}
 let s:selfd.me = s:selfd
 let s:cd = deepcopy(s:selfd)
 call assert_true(s:cd.me is s:cd)
-call assert_equal("{'a': 1, 'me': {...@0}}", execute('echo s:selfd')[1:])
+call assert_equal("{'a': 1, 'me': {...}}", execute('echo s:selfd')[1:])
 
 if len(v:errors) > 0
   for err in v:errors

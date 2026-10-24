@@ -1,6 +1,6 @@
 " A List or Dict that holds itself: copying and encoding it must terminate.
-" (How :echo/string() RENDER the back-reference is an engine split — vim
-" `[...]`, Neovim and this port `[...@0]` — see examples/dict_deepcopy.vim.)
+" (How :echo/string() render the back-reference is recorded in
+" echo_string_recursion_inf.vim.)
 let l = [1]
 call add(l, l)
 let d = {'a': 1}
