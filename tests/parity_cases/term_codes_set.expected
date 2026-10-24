@@ -1,0 +1,27 @@
+0
+set t_zz Vim(set):E846: Key code not set: t_zz
+set t_zz? Vim(set):E846: Key code not set: t_zz?
+set t_k1 Vim(set):E846: Key code not set: t_k1
+set t_ Vim(set):E518: Unknown option: t_
+set t_z Vim(set):E518: Unknown option: t_z
+set t_#4? Vim(set):E846: Key code not set: t_#4?
+set t_@7? Vim(set):E846: Key code not set: t_@7?
+  t_AB=
+
+set t_AB? ok
+  t_Co=
+
+set t_Co ok
+set t_zz=x ok
+t_zz             x
+
+set t_zz? ok
+set t_xy= ok
+set t_xy? Vim(set):E846: Key code not set: t_xy?
+set not_zz Vim(set):E474: Invalid argument: not_zz
+set t_aé? Vim(set):E846: Key code not set: t_aé?
+set t_aé=1 Vim(set):E846: Key code not set: t_aé=1
+
+t_zz             x  t_Co=
+
+end

@@ -321,6 +321,8 @@ pub fn run() -> ExitCode {
             .map(|p| p.to_string_lossy().into_owned())
             .collect();
         crate::ported::eval::funcs::set_arglist(&arglist);
+        // The files run as `vim -es -c 'verbose source FILE'` sources them.
+        crate::fusevm_bridge::set_silent_ex(true);
         // Source each file in order through the bytecode cache.
         for path in &cli.files {
             if let Err(e) = eval_file(path) {

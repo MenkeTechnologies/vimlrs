@@ -1,0 +1,13 @@
+1
+E711: List value does not have enough items
+[2, 2]
+E710: List value has more items than targets
+[7, 8, 3]
+E711: List value does not have enough items
+[7, 2, 3]
+[1, 1, 2]
+[1, 7, 6, 7]
+['ax', 'by']
+[3, 2]
+E734: Wrong variable type for +=
+[2, [2]]

@@ -1,0 +1,26 @@
+0
+1 1
+  verbose=1
+
+not found in 'runtimepath': "nosuch.vim"
+not found in 'runtimepath': "a.vim b.vim"
+not found in 'packpath': "nosuch.vim"
+not found in 'runtimepath': "nosuch.vim"
+not found in 'packpath': "nosuch.vim"
+not found in 'packpath': "nosuch.vim"
+not found in 'runtimepath': "nosuch.vim"
+not found in 'packpath': "nosuch.vim"
+not found in 'packpath': "nosuch.vim"
+not found in 'packpath': "x.vim"
+not found in 'packpath': "x.vim"
+not found in 'packpath': "x.vim"
+not found in 'packpath': "x.vim"
+not found in 'runtimepath': "syntax/nosuch*.vim"
+not found in 'runtimepath': ""
+not found in 'packpath': ""
+not found in 'packpath': ""
+not found in 'runtimepath': "spell/de.vim"
+not found in 'runtimepath': "spell/fr.vim"
+not found in 'runtimepath': "spell/en.vim"
+not found in 'runtimepath': "spell/-x.vim"
+not found in 'runtimepath': "x.vim"

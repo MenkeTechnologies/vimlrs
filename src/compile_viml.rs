@@ -2878,6 +2878,31 @@ impl Compiler {
     /// Whether evaluating `expr` could raise a Vim error. A literal cannot; an
     /// expression the compiler has already proved numeric cannot either (that is the
     /// same judgement the native-arithmetic fast path relies on).
+    /// Whether evaluating `e` as a subscript's base or index can FAIL: anything
+    /// [`Self::expr_can_error`] allows but a slotted local, which always exists.
+    fn subscript_may_fail(&self, e: &Expr) -> bool {
+        match e {
+            Expr::Var(name) => !self.slots.contains_key(self.slot_key(name)),
+            _ => Self::expr_can_error(e),
+        }
+    }
+
+    /// After `n` subscript operands evaluated under `VIML_ARGS_BEGIN`: when one
+    /// of them failed, drop them and leave the failed value (`v:null`) in place
+    /// of the subscript, jumping past it. Returns that jump to patch at the end.
+    fn subscript_fail_branch(&mut self, n: usize) -> usize {
+        self.emit(Op::CallBuiltin(h::VIML_ARGS_FAILED, 0));
+        let ok = self.emit(Op::JumpIfFalse(0));
+        for _ in 0..n {
+            self.emit(Op::Pop);
+        }
+        self.emit(Op::LoadUndef);
+        let skip = self.emit(Op::Jump(0));
+        let here = self.b.current_pos();
+        self.b.patch_jump(ok, here);
+        skip
+    }
+
     fn expr_can_error(expr: &Expr) -> bool {
         !matches!(
             expr,
@@ -3350,7 +3375,14 @@ impl Compiler {
                 // `let base[idx1:idx2] = list` — push the source list, base, idx1
                 // (default 0), idx2 (Undef → "to the end"); the bridge assigns
                 // the range in place via tv_list_assign_range.
-                let j_failed = self.rhs_guarded(expr)?;
+                // c: a compound operator is applied item by item
+                // (`list_assign_range(…, op, …)`), not to `l[i:j]` read whole: the
+                // right-hand side alone is evaluated and handed over with the op.
+                let (value, op) = match (expr, Self::let_compound_op(expr)) {
+                    (Expr::Arith { rhs, .. }, Some(op)) => (rhs.as_ref(), op),
+                    _ => (expr, '='),
+                };
+                let j_failed = self.rhs_guarded(value)?;
                 self.emit(Op::CallBuiltin(h::VIML_ERR_COUNT, 0));
                 self.expr(base)?;
                 match idx1 {
@@ -3366,7 +3398,8 @@ impl Compiler {
                     }
                 }
                 self.load_str(src.as_deref().unwrap_or(""));
-                self.emit(Op::CallBuiltin(h::VIML_SETRANGE, 6));
+                self.load_str(&op.to_string());
+                self.emit(Op::CallBuiltin(h::VIML_SETRANGE, 7));
                 self.rhs_guard_end(j_failed);
                 Ok(())
             }
@@ -3972,11 +4005,25 @@ impl Compiler {
                 index,
                 mid_expr,
             } => {
+                // c: `eval_index()` is not reached when evaluating the base or
+                // the index FAILed: `echo d[nosuch]` is the E121 alone, not also
+                // `E716: Key not present in Dictionary: "v:null"` for the value
+                // the failed read recovered.
+                let guard = self.subscript_may_fail(base) || self.subscript_may_fail(index);
+                if guard {
+                    self.emit(Op::CallBuiltin(h::VIML_ARGS_BEGIN, 0));
+                    self.emit(Op::Pop);
+                }
                 self.expr(base)?;
                 self.expr(index)?;
+                let skip = guard.then(|| self.subscript_fail_branch(2));
                 self.emit(Op::CallBuiltin(h::VIML_INDEX, 2));
                 if *mid_expr {
                     self.emit(Op::CallBuiltin(h::VIML_FAIL_MID, 0));
+                }
+                if let Some(j) = skip {
+                    let end = self.b.current_pos();
+                    self.b.patch_jump(j, end);
                 }
             }
             Expr::Slice {
@@ -4001,7 +4048,18 @@ impl Compiler {
                 // type test that dispatches at execution time. `base` is
                 // evaluated exactly ONCE (Dup the value), so a side-effecting base
                 // fires once and chains like `a.b.c` do not blow up.
+                // c: a base that FAILed is the whole expression's failure: neither
+                // the subscript nor the concatenation's variable is read.
+                let guard = self.subscript_may_fail(base);
+                if guard {
+                    self.emit(Op::CallBuiltin(h::VIML_ARGS_BEGIN, 0));
+                    self.emit(Op::Pop);
+                }
                 self.expr(base)?; // [base]
+                let jfail = guard.then(|| {
+                    self.emit(Op::CallBuiltin(h::VIML_ARGS_FAILED, 0));
+                    self.emit(Op::JumpIfTrue(0)) // [base], the failed value
+                });
                 self.emit(Op::Dup); // [base, base]
                 self.emit(Op::CallBuiltin(h::VIML_IS_DICT, 1)); // [base, bool]
                 let jf = self.emit(Op::JumpIfFalse(0)); // pops bool → [base]
@@ -4019,6 +4077,9 @@ impl Compiler {
                 self.emit(Op::CallBuiltin(h::VIML_CONCAT, 2)); // [result]
                 let lend = self.b.current_pos();
                 self.b.patch_jump(jend, lend);
+                if let Some(j) = jfail {
+                    self.b.patch_jump(j, lend);
+                }
             }
             Expr::Call {
                 name,

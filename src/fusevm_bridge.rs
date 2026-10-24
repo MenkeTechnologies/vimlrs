@@ -3423,6 +3423,7 @@ fn b_setrange(vm: &mut VM, _: u8) -> Value {
         tv_list_assign_range, tv_list_check_range_index_one, tv_list_check_range_index_two,
         tv_list_copy,
     };
+    let op = tv_get_string(&pop_tv(vm));
     let lval = tv_get_string(&pop_tv(vm));
     let idx2_tv = pop_tv(vm);
     let idx1_tv = pop_tv(vm);
@@ -3488,7 +3489,7 @@ fn b_setrange(vm: &mut VM, _: u8) -> Value {
     {
         return Value::Undef;
     }
-    tv_list_assign_range(&dest, &src.borrow(), n1, n2, empty_idx2, "=", "");
+    tv_list_assign_range(&dest, &src.borrow(), n1, n2, empty_idx2, &op, "");
     Value::Undef
 }
 
@@ -3789,9 +3790,11 @@ pub fn msg_emsg(s: &str, multiline: bool) {
     }
     use std::io::Write;
     let _ = std::io::stdout().lock().flush();
-    let mut err = std::io::stderr().lock();
-    let _ = err.write_all(shown);
-    let _ = err.flush();
+    if !silent_ex_quiet() {
+        let mut err = std::io::stderr().lock();
+        let _ = err.write_all(shown);
+        let _ = err.flush();
+    }
     MSG_COL.with(|c| c.set(true));
 }
 
@@ -3813,6 +3816,8 @@ pub fn redir_silenced_emsg(s: &str) {
 thread_local! {
     /// The `:set opt?` text not yet written — see [`set_show_option`].
     static SET_SHOW_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    /// Whether a value was shown since the last [`set_show_end`].
+    static SET_SHOWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Show one `:set opt?` value (`showoneopt()`), `first` for the first value of
@@ -3826,7 +3831,7 @@ thread_local! {
 /// precedes each further one. Merged, `echo 'a' | set ts? sw?` reads
 /// `a`, `\n`, `\n`, `  tabstop=8  shiftwidth=8`, `\n`. Only the plain display
 /// path shows it; a capture (`execute()`, an embedding host) sees nothing.
-pub fn set_show_option(text: &str, first: bool) {
+pub fn set_show_option(text: &str, first: bool, buffered: bool) {
     if message::msg_silent.with(|m| m.get()) != 0
         || ECHO_SINK.with(|s| s.borrow().is_some())
         || EXECUTE_DEPTH.with(|d| d.get()) > 0
@@ -3836,7 +3841,13 @@ pub fn set_show_option(text: &str, first: bool) {
     if !first || MSG_COL.with(|c| c.get()) {
         display_write(b"\n");
     }
-    SET_SHOW_BUF.with(|b| b.borrow_mut().extend_from_slice(text.as_bytes()));
+    if buffered {
+        SET_SHOW_BUF.with(|b| b.borrow_mut().extend_from_slice(text.as_bytes()));
+    } else {
+        // c: show_one_termcode() is not an informative message: stderr, at once.
+        display_write(text.as_bytes());
+    }
+    SET_SHOWN.with(|s| s.set(true));
     // The value is on the message line, buffered or not: an error after it
     // (`set ts!` is E488 once shown) starts a new line.
     MSG_COL.with(|c| c.set(true));
@@ -3847,12 +3858,13 @@ pub fn set_show_option(text: &str, first: bool) {
 /// are written. The message line still counts as written on, so the next `:echo`
 /// starts a new line.
 pub fn set_show_end() {
-    let mut pending = SET_SHOW_BUF.with(|b| std::mem::take(&mut *b.borrow_mut()));
-    if pending.is_empty() {
+    if !SET_SHOWN.with(|s| s.replace(false)) {
         return;
     }
+    let mut pending = SET_SHOW_BUF.with(|b| std::mem::take(&mut *b.borrow_mut()));
     pending.push(b'\n');
-    display_write(&pending);
+    // c: written with `silent_mode` off, so even at 'verbose' 0.
+    display_write_raw(&pending);
     MSG_COL.with(|c| c.set(true));
 }
 
@@ -3867,7 +3879,7 @@ pub fn msg_flush_line() {
     // exits (see [`set_show_option`]).
     let pending = SET_SHOW_BUF.with(|b| std::mem::take(&mut *b.borrow_mut()));
     if !pending.is_empty() {
-        display_write(&pending);
+        display_write_raw(&pending);
     }
     if MSG_COL.with(|c| c.get()) {
         MSG_COL.with(|c| c.set(false));
@@ -4143,21 +4155,79 @@ fn runtime_glob(root: &std::path::Path, name: &str) -> Vec<std::path::PathBuf> {
 /// `:runtime!` sources every match. Names not found anywhere are silently
 /// skipped, exactly like Vim.
 pub fn do_runtime(bang: bool, args: &str) {
-    let roots = runtime_dirs();
-    for name in args.split_whitespace() {
-        let mut done = false;
-        for root in &roots {
-            for m in runtime_glob(root, name) {
-                source_file(&m.display().to_string());
-                if !bang {
-                    done = true;
-                    break;
-                }
-            }
-            if done {
-                break;
+    // c: ex_runtime() → get_runtime_cmd_flags(): a first word that is a prefix
+    // of START/OPT/PACK/ALL picks the pack directories (and, but for ALL, drops
+    // 'runtimepath').
+    let args = args.trim_start();
+    let word = args.split_whitespace().next().unwrap_or("");
+    let (rtp, start, opt, names) = match ["START", "OPT", "PACK", "ALL"]
+        .iter()
+        .position(|w| !word.is_empty() && w.starts_with(word))
+    {
+        Some(i) => {
+            let rest = args[word.len()..].trim_start();
+            match i {
+                0 => (false, true, false, rest),
+                1 => (false, false, true, rest),
+                2 => (false, true, true, rest),
+                _ => (true, true, true, rest),
             }
         }
+        None => (true, false, false, args),
+    };
+    let roots = runtime_dirs();
+    // c: do_in_path() over one path for every name; the not-found message
+    // names the whole argument.
+    let in_path = |basepath: &str, roots: &[std::path::PathBuf]| -> bool {
+        let mut did_one = false;
+        for name in names.split_whitespace() {
+            'name: for root in roots {
+                for m in runtime_glob(root, name) {
+                    source_file(&m.display().to_string());
+                    did_one = true;
+                    if !bang {
+                        break 'name;
+                    }
+                }
+            }
+        }
+        if !did_one && crate::ported::option_optval::p_verbose.with(|v| v.get()) > 0 {
+            msg(&format!(
+                "not found in '{basepath}': \"{}\"",
+                names.trim_end()
+            ));
+        }
+        did_one
+    };
+    // c: the `pack/*/start/*/` (or `opt`) directories under each packpath root.
+    let pack_dirs = |kind: &str| -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        for root in &roots {
+            let Ok(packs) = std::fs::read_dir(root.join("pack")) else {
+                continue;
+            };
+            let mut packs: Vec<_> = packs.flatten().map(|e| e.path()).collect();
+            packs.sort();
+            for pack in packs {
+                if let Ok(plugins) = std::fs::read_dir(pack.join(kind)) {
+                    let mut plugins: Vec<_> = plugins.flatten().map(|e| e.path()).collect();
+                    plugins.sort();
+                    out.extend(plugins.into_iter().filter(|p| p.is_dir()));
+                }
+            }
+        }
+        out
+    };
+    // c: do_in_path_and_pp()
+    let mut done = false;
+    if rtp {
+        done = in_path("runtimepath", &roots);
+    }
+    if (!done || bang) && start {
+        done = in_path("packpath", &pack_dirs("start"));
+    }
+    if (!done || bang) && opt {
+        in_path("packpath", &pack_dirs("opt"));
     }
 }
 
@@ -7097,11 +7167,42 @@ fn echo_write(s: &[u8]) {
 /// `msg_silent` is back to 0 (see [`exec_display`]).
 fn display_write(s: &[u8]) {
     // c: `msg_silent` — nothing is shown while `:silent` is in effect.
+    if message::msg_silent.with(|m| m.get()) != 0 || silent_ex_quiet() {
+        return;
+    }
+    display_write_raw(s);
+}
+
+/// [`display_write`] without the `:silent` / 'verbose' gates.
+fn display_write_raw(s: &[u8]) {
     if message::msg_silent.with(|m| m.get()) != 0 {
         return;
     }
     use std::io::Write;
     let _ = std::io::stdout().lock().write_all(s);
+}
+
+thread_local! {
+    /// Whether the run is the CLI's silent-Ex emulation of `vim -es -c 'verbose
+    /// source FILE'` — see [`set_silent_ex`].
+    static SILENT_EX: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run as `vim -es` sources a file under `:verbose`: 'verbose' is 1 while the
+/// file runs, and should the script set it to 0, messages stop being written —
+/// c: `msg_puts_printf()` writes nothing when `silent_mode && p_verbose == 0`,
+/// which takes `:echo` and errors alike; only a `:set opt?` value, which
+/// `showoneopt()` writes with `silent_mode` off, still shows.
+pub fn set_silent_ex(on: bool) {
+    SILENT_EX.with(|s| s.set(on));
+    if on {
+        crate::ported::option::do_set("verbose=1", 0);
+    }
+}
+
+/// c: `silent_mode && p_verbose == 0` (`msg_puts_printf`).
+fn silent_ex_quiet() -> bool {
+    SILENT_EX.with(|s| s.get()) && crate::ported::option_optval::p_verbose.with(|v| v.get()) == 0
 }
 
 /// The screen half of an `:echo` written while `execute()` captures.

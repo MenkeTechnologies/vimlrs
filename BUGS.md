@@ -8062,7 +8062,7 @@ and `var_item_copy`'s scalar arm did the same, so after `lockvar d.x`,
 - ✅ NOT A GAP (re-measured in R63). `let x = eval('nosuch')`: vim 9.2 also
   assigns the recovered `0` (`exists('x')` is 1), at script level, in a function
   and inside `:try`; vimlrs already matched.
-- ✅ CLOSED in R63-1. `for {n} in [1, 2]` / `for j{n} in …` is `E461: Illegal
+- ✅ CLOSED in R64-1. `for {n} in [1, 2]` / `for j{n} in …` is `E461: Illegal
   variable name: {n}`; vim expands the curly name for each item.
 
 ## R61 — callback `v:` vars, locale `v:` vars, string option validation, `:set` grammar
@@ -8207,15 +8207,15 @@ crash needed; vim prints nothing for the new form. Own commit.
 - Under `verbose` (the harness's `verbose source`), `:set opt?` of an option the
   script set adds `\n\tLast set from {script} line {n}`; vimlrs tracks neither
   where an option was set nor a `'verbose'` level.
-- `echo d[nosuch]` reports `E716: Key not present in Dictionary: "v:null"` after
+- ✅ CLOSED in R64-1. `echo d[nosuch]` reports `E716: Key not present in Dictionary: "v:null"` after
   the `E121`: the failed index still indexes (`v:null` and a failed value share
   one VM representation). `let d[nosuch] .= 1` shows the same extra `E716`.
-- `let l[0:1] += [1]` is `E711` in vim after the first item is updated (`[2,
+- ✅ CLOSED in R64-2. `let l[0:1] += [1]` is `E711` in vim after the first item is updated (`[2,
   2]`); vimlrs leaves the list and reports nothing.
-- `if 1 | return 1 ) | endif` matches only because the parse fails; a command
+- ✅ CLOSED in R64-4 (for `:return`; a failed `:call` stays open, R64-O). `if 1 | return 1 ) | endif` matches only because the parse fails; a command
   that fails at run time before finding its next command (`:return` outside a
   function with a valid expression) still lets the rest of the line run.
-- `echo [1, | echo 3` is `E15: Invalid expression: "| echo 3"` in vim;
+- ✅ CLOSED in R64-3. `echo [1, | echo 3` is `E15: Invalid expression: "| echo 3"` in vim;
   vimlrs reports `E697: Missing end of List ']': ` (pre-existing).
 - Still open from R61-O: `set enc=foo` E474 (vim's `enc_canon_table`/alias
   table differ from the vendored Neovim one this crate ports), `set t_zz` E846,
@@ -8258,3 +8258,84 @@ Recorded in `tests/parity_cases/curly_lval_severe_catch.vim`.
   (`vars.c:1222/1235`) and `:unlet`'s (`vars.c:1595`).
 - Still open from R60-O: `E193` after a failed `:function` definition, `E18`
   for `let d.k{n} = 1`.
+
+## R64 — failed subscript operands, compound ranges, the line past a `|`, `'verbose'`, `t_xx`
+
+Oracle: `/opt/homebrew/Cellar/vim/9.2.1200/bin/vim` (9.2, patches 1-1200),
+`-es -u NONE -i NONE -N -c 'verbose source CASE'`.
+
+### R64-1. A subscript was taken of a failed base or index — ✅ FIXED
+`echo d[nosuch]` added `E716: Key not present in Dictionary: "v:null"`,
+`echo nosuch[0]` `E909`, `echo nosuch.x` `E121: … x`: the value a failed read
+recovers and `v:null` are the same VM value, so the subscript could not tell
+them apart. An `Index` or `Member` whose operands can fail now evaluates them
+under the `VIML_ARGS_BEGIN`/`VIML_ARGS_FAILED` mark (the call-argument one, so
+an error inside a called function's body does not count) and leaves the failed
+value without indexing (c: `eval_index()` is not reached). Slotted locals, which
+cannot fail, skip the guard. Recorded in
+`tests/parity_cases/subscript_failed_operand.vim`.
+
+### R64-2. `let l[i:j] op= list` was rejected — ✅ FIXED
+The parser refused a compound operator on a range (`E734` at parse time, the
+line dropped). `list_assign_range()` applies the operator item by item, so
+`let l = [1, 2] | let l[0:1] += [1]` is `E711` with `l` at `[2, 2]`. The
+compiler now hands `VIML_SETRANGE` the right-hand side and the operator. The
+E710/E711 texts are vim's (`… than targets`, `… does not have enough items`).
+Recorded in `tests/parity_cases/let_range_compound.vim`.
+
+### R64-3. A List or Dict cut short by a `|` reported the end of the text — ✅ FIXED
+vim parses the expression over the whole line, so `echo [1, | echo 3` reads
+its next item from the bar: `E15: Invalid expression: "| echo 3"`, and `echo [1
+| echo 4` is `E696: Missing comma in List: | echo 4` (the same for E722). The
+List/Dict parser now quotes the text to the end of the source line. Recorded in
+`tests/parity_cases/list_dict_parse_past_bar.vim`.
+
+### R64-4. `:return` outside a function let the rest of the line run — ✅ FIXED
+`ex_return()` reports `E133` before reading its argument, so no next command is
+found: `if 1 | return | endif` leaves the `:if` open (`E171` at the end). The
+bar-split keeps the rest of the line with a `:return` that is not inside a
+`:function`/`:def` body. Recorded in
+`tests/parity_cases/return_outside_function_line.vim`.
+
+### R64-5. No `'verbose'` level — ✅ FIXED
+`'verbose'` (`vbs`) is an option; the CLI runs its files at 1, as the harness's
+`verbose source` does. At 'verbose' > 0 `:runtime` reports what it did not find
+(`not found in 'runtimepath': "{arg}"`, and `'packpath'` for
+`START`/`OPT`/`PACK`/`ALL`, whose prefixes are ported from
+`get_runtime_cmd_flags()`), and setting `'spelllang'` sources
+`spell/{lang}.vim` (`do_spelllang_source()`). At 'verbose' 0 silent Ex mode
+writes no message (`msg_puts_printf`): `:echo` and errors vanish, a `:set opt?`
+value still shows. Recorded in `tests/parity_cases/verbose_runtime_messages.vim`
+and `verbose_zero_silences.vim`.
+
+### R64-6. `t_xx` names were all skipped — ✅ FIXED
+`set t_zz` / `set t_zz?` of a key code that is not set is `E846: Key code not
+set`; `set t_` / `set t_z` is `E518`; `t_xx=value` sets a key code, which a
+later query shows (`show_one_termcode()`); a termcap option (`t_AB`, the
+`p_term()` rows) shows `  t_AB=`. A `t_xx` name ending inside a multibyte
+character (`set t_aé?`) panicked the interpreter (a byte slice off a char
+boundary); it is now the `E846` vim reports. Recorded in
+`tests/parity_cases/term_codes_set.vim`.
+
+### `examples/tolerant_block_jit_crash.vim` re-checked
+With the crash fix reverted (`suppress_jit()` made a no-op), neither the
+original `if a` shape (run through the fallback with the R62 end-of-file close
+also disabled) nor the `enum` shape crashes, nor 200 declarations: every
+`var` chunk now carries `CallBuiltin`, which fusevm's block tier refuses
+(`--tiers`: "block-JIT eligible false, block-ineligible ops CallBuiltin"), so
+the collision that crashed can no longer reach native code. No shape vim
+accepts reproduces it; the example stays as a guard.
+
+### R64-O. Measured this round, still open
+- `if 0 | return | endif` is `E133` in vim even though the `:return` is
+  skipped; vimlrs leaves the `:if` open but prints no `E133`.
+- `if 1 | call Nosuch() | endif` leaves the `:if` open in vim (`ex_call()` sets
+  no next command after a failed call outside `:try`); that is decided at run
+  time, which the parse-time bar-split cannot see.
+- `:set opt?` under `verbose` adds `Last set from {script} line {n}` for an
+  option the script set; not modelled (no per-option script context), and the
+  message carries the script's absolute path, so no committed case can hold it.
+- A known key code's `<Name>` in `show_one_termcode()` (`t_ku <Up>`) is not
+  modelled; only codes without one display right.
+- Still open from R61-O/R62-O: `set enc=` against vim's encoding table and the
+  failing-lambda partial value.

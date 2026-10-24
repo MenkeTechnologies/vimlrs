@@ -518,7 +518,8 @@ pub fn tv_list_assign_range(
         idx += 1;
     }
     if si < src_items.len() {
-        emsg("E710: List value has more items than target");
+        // vim 9.2 errors.h `e_list_value_has_more_items_than_targets`.
+        emsg("E710: List value has more items than targets");
         return FAIL;
     }
     let too_few = if empty_idx2 {
@@ -527,7 +528,8 @@ pub fn tv_list_assign_range(
         idx != idx2
     };
     if too_few {
-        emsg("E711: List value has not enough items");
+        // vim 9.2 errors.h `e_list_value_does_not_have_enough_items`.
+        emsg("E711: List value does not have enough items");
         return FAIL;
     }
     OK

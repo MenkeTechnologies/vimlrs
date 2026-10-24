@@ -452,6 +452,7 @@ pub(crate) static options: LazyLock<Vec<vimoption_T>> = LazyLock::new(|| {
         n("winwidth", "wiw", 20),
         n("wrapmargin", "wm", 0),
         n("writedelay", "wd", 0),
+        n("verbose", "vbs", 0),
         s("clipboard", "cb", ""),
         s("keymodel", "km", ""),
         s("langmap", "lmap", ""),
@@ -479,6 +480,9 @@ thread_local! {
     /// buffer copies the global defaults) and a global-local one reads its
     /// "unset" value, which sends `get_varp()` to the global value.
     static option_values_local: RefCell<HashMap<OptIndex, OptVal>> = RefCell::new(HashMap::new());
+    /// C global `p_verbose` (`option.h`) — the 'verbose' level, kept in step
+    /// with the option by [`set_option`] for the message path to read cheaply.
+    pub static p_verbose: std::cell::Cell<OptInt> = const { std::cell::Cell::new(0) };
 }
 
 // ── option.c ports ───────────────────────────────────────────────────────────
@@ -820,6 +824,23 @@ pub fn set_option(opt_idx: OptIndex, value: OptVal, opt_flags: i32) -> Option<St
         return None;
     }
     store(get_varp_scope(opt_idx, opt_flags), value.clone());
+    match (options[opt_idx].fullname, &value.data) {
+        ("verbose", OptValData::number(n)) => p_verbose.with(|v| v.set(*n)),
+        // c: did_set_string_option() → do_spelllang_source() (vim
+        // optionstr.c:5513): source `spell/{lang}.vim` for the first name of
+        // 'spelllang' (after a leading "cjk,"), up to its `_region`/`.encoding`.
+        ("spelllang", OptValData::string(spl)) => {
+            let q = spl.strip_prefix("cjk,").unwrap_or(spl);
+            let lang: String = q
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .collect();
+            if !lang.is_empty() {
+                crate::fusevm_bridge::do_runtime(true, &format!("spell/{lang}.vim"));
+            }
+        }
+        _ => {}
+    }
     if both && has_local {
         store(OptVarp::Global, value);
     }

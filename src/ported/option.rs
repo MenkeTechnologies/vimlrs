@@ -18,7 +18,6 @@ use crate::ported::option_optval::{
     optval_from_varp, set_option, OptValData, OptVarp, TriState, BOOLEAN_OPTVAL, NUMBER_OPTVAL,
     OPT_LOCAL, STRING_OPTVAL, TRISTATE_FROM_INT,
 };
-#[cfg(test)]
 use std::collections::HashMap;
 
 /// Option kind, for parsing `:set` values.
@@ -207,6 +206,7 @@ const OPTIONS: &[(&str, &str, Kind, varnumber_T, &str)] = &[
     ("winwidth", "wiw", Kind::Number, 20, ""),
     ("wrapmargin", "wm", Kind::Number, 0, ""),
     ("writedelay", "wd", Kind::Number, 0, ""),
+    ("verbose", "vbs", Kind::Number, 0, ""),
     ("clipboard", "cb", Kind::String, 0, ""),
     ("keymodel", "km", Kind::String, 0, ""),
     ("langmap", "lmap", Kind::String, 0, ""),
@@ -329,6 +329,29 @@ const VIM_OPTION_NAMES: &[&str] = &[
     "wrapmargin", "wrapscan", "write", "writeany", "writebackup", "writedelay", "ws", "wse", "wst",
     "wtm", "ww", "xtermcodes",
 ];
+
+/// The two bytes after `t_` of every termcap OPTION in vim 9.2's `options[]`
+/// (`optiondefs.h`'s `p_term()` rows), sorted bytewise. Any other `t_xx` is a
+/// key code (`find_key_option`).
+#[rustfmt::skip]
+const P_TERM_CODES: &[&[u8]] = &[
+    b"8b", b"8f", b"8u", b"AB", b"AF", b"AL", b"AU", b"BD", b"BE", b"BS", b"CF", b"CS", b"CV",
+    b"Ce", b"Co", b"Cs", b"DL", b"Ds", b"EC", b"EI", b"ES", b"GP", b"IE", b"IS", b"RB", b"RC",
+    b"RF", b"RI", b"RK", b"RS", b"RT", b"RV", b"Ri", b"SC", b"SH", b"SI", b"SR", b"ST", b"Sb",
+    b"Sf", b"Si", b"TE", b"TI", b"Te", b"Ts", b"Us", b"VS", b"WP", b"WS", b"XM", b"ZH", b"ZR",
+    b"al", b"bc", b"cd", b"ce", b"cl", b"cm", b"cs", b"da", b"db", b"dl", b"ds", b"fd", b"fe",
+    b"fs", b"ke", b"ks", b"le", b"mb", b"md", b"me", b"mr", b"ms", b"nd", b"op", b"se", b"so",
+    b"sr", b"te", b"ti", b"ts", b"u7", b"ue", b"us", b"ut", b"vb", b"ve", b"vi", b"vs", b"xn",
+    b"xo", b"xs",
+];
+
+thread_local! {
+    /// The `t_xx` values `:set` stored, by the two bytes after `t_` — the
+    /// termcap options' values and the key codes `add_termcode()` adds. Silent
+    /// Ex mode starts with none.
+    static TERM_CODES: std::cell::RefCell<HashMap<Vec<u8>, Vec<u8>>> =
+        std::cell::RefCell::new(HashMap::new());
+}
 
 /// Port of `findoption()` (`option.c`) — resolve an option name or abbreviation
 /// to its `OPTIONS` row.
@@ -639,8 +662,66 @@ pub fn do_set(args: &str, opt_flags: i32) {
     };
     // c: `do_set_option()` — one argument, `arg` running to the end of the line.
     // The `opt?` values the argument being processed showed (c: `did_show`).
-    let shown: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+    let shown: std::cell::RefCell<Vec<(String, bool)>> = std::cell::RefCell::new(Vec::new());
     let mut did_show = false;
+    // c: do_set_option() for a `t_xx` name `findoption()` does not hold here: a
+    // termcap option (`t_AB`, a string option with no value in silent Ex mode)
+    // or a key code (`TERMCAP2KEY` of the two bytes, `find_key_option`). Asking
+    // for a key code that is not set is `E846`; `t_xx=value` sets either
+    // (`add_termcode`). `value` is the text after `=`/`:`, when there is one.
+    let set_term_code = |name: &[u8], value: Option<&[u8]>, query: bool| -> Option<String> {
+        let termcap_opt = P_TERM_CODES.binary_search(&name).is_ok();
+        if let Some(v) = value {
+            // c: stropt_copy_value() — up to a blank, a backslash escaping the
+            // next character.
+            let mut val: Vec<u8> = Vec::new();
+            let mut k = 0;
+            while k < v.len() && v[k] != b' ' && v[k] != b'\t' {
+                if v[k] == b'\\' && k + 1 < v.len() {
+                    k += 1;
+                }
+                val.push(v[k]);
+                k += 1;
+            }
+            // An empty key code is none: after `set t_xy=`, asking for it is E846
+            // (measured on vim 9.2).
+            TERM_CODES.with(|t| {
+                let mut t = t.borrow_mut();
+                if val.is_empty() && !termcap_opt {
+                    t.remove(name);
+                } else {
+                    t.insert(name.to_vec(), val);
+                }
+            });
+            return None;
+        }
+        if !query {
+            return None;
+        }
+        let code = TERM_CODES.with(|t| t.borrow().get(name).cloned());
+        let shown_code = |c: &[u8]| {
+            let mut out = crate::vimstr::VimStr::new();
+            crate::ported::message::msg_outtrans(c, &mut out);
+            String::from_utf8_lossy(out.as_bytes()).into_owned()
+        };
+        let label = String::from_utf8_lossy(name);
+        if termcap_opt {
+            // c: showoneopt() of the string option.
+            let text = format!("  t_{label}={}", shown_code(code.as_deref().unwrap_or(b"")));
+            shown.borrow_mut().push((text, true));
+            return None;
+        }
+        let Some(code) = code else {
+            return Some("E846: Key code not set".to_string());
+        };
+        // c: show_one_termcode() — `t_xx`, the key's `<Name>` (not modelled:
+        // only names `get_special_key_name()` has none for are shown right),
+        // padded to 17 columns, then the code. Not an informative message, so
+        // it is written at once rather than buffered.
+        let text = format!("{:<17}{}", format!("t_{label} "), shown_code(&code));
+        shown.borrow_mut().push((text, false));
+        None
+    };
     let do_set_option = |arg: &str| -> Option<String> {
         const E474: &str = "E474: Invalid argument";
         const E488: &str = "E488: Trailing characters";
@@ -687,10 +768,30 @@ pub fn do_set(args: &str, opt_flags: i32) {
             _ => 0,
         };
         let nextchar = at(s, len);
-        let Some((canon, _, kind, _, _)) = findoption(&arg[..name_len]) else {
+        // c: a `t_xx` name is four BYTES, the two after `t_` anything — so it can
+        // end inside a multibyte character (`t_aé`), which no table here holds.
+        let found = arg
+            .get(..name_len)
+            .and_then(findoption)
+            .filter(|_| arg.is_char_boundary(name_len));
+        let Some((canon, _, kind, _, _)) = found else {
+            if s.starts_with(b"t_") && name_len == 4 {
+                if prefix != 0 {
+                    return Some(E474.to_string());
+                }
+                let value = matches!(nextchar, b'=' | b':').then(|| &s[len + 1..]);
+                let query = nextchar == b'?' || !b"=:&<!".contains(&nextchar);
+                if let Some(e) = set_term_code(&s[2..4], value, query) {
+                    return Some(e);
+                }
+                if query && nextchar != b'?' && nextchar != 0 && !white(afterchar) {
+                    return Some(E488.to_string());
+                }
+                return None;
+            }
             let name = &arg[..name_len];
-            if name.starts_with("t_") || VIM_OPTION_NAMES.binary_search(&name).is_err() {
-                return (!name.starts_with("t_")).then(|| "E518: Unknown option".to_string());
+            if VIM_OPTION_NAMES.binary_search(&name).is_err() {
+                return Some("E518: Unknown option".to_string());
             }
             // c: "hidden option: skip" — 'w300', 'w1200' and 'w9600' have no
             // value in any build; only asking for one is an error.
@@ -718,7 +819,7 @@ pub fn do_set(args: &str, opt_flags: i32) {
             // `set ts!` displays `tabstop=8` and then reports E488.
             shown
                 .borrow_mut()
-                .push(showoneopt(canon, *kind, opt_idx, varp, opt_flags));
+                .push((showoneopt(canon, *kind, opt_idx, varp, opt_flags), true));
             if nextchar != b'?' && nextchar != 0 && !white(afterchar) {
                 return Some(E488.to_string());
             }
@@ -898,8 +999,8 @@ pub fn do_set(args: &str, opt_flags: i32) {
         let errmsg = do_set_option(&args[i..]);
         // c: each value goes on the message line as it is shown — the first
         // after `gotocmdline()`, each next one after `msg_putchar('\n')`.
-        for text in shown.borrow_mut().drain(..) {
-            crate::fusevm_bridge::set_show_option(&text, !did_show);
+        for (text, buffered) in shown.borrow_mut().drain(..) {
+            crate::fusevm_bridge::set_show_option(&text, !did_show, buffered);
             did_show = true;
         }
         // c: "Advance to next argument: skip until a blank found, taking care of

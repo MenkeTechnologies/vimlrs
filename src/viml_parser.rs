@@ -1383,8 +1383,22 @@ impl Lines {
         // parsed as its own line. Blank/comment lines are kept whole.
         let mut lines: Vec<(u32, String)> = Vec::new();
         let mut tails: Vec<Option<String>> = Vec::new();
+        // How many `:function`/`:def` bodies the line is in — a `:return`
+        // outside one ends the line (see below).
+        let mut func_depth = 0usize;
         for (lineno, text) in joined {
             let trimmed = text.trim();
+            let word = block_cmd_word(trimmed);
+            let wrest = trimmed
+                .get(trimmed.find(word).map_or(0, |i| i + word.len())..)
+                .unwrap_or("");
+            match canon_block_kw(word) {
+                // c: only a definition (a name and `(`) opens a body; `:function`
+                // alone or with a bare name lists.
+                "function" | "def" if wrest.contains('(') => func_depth += 1,
+                "endfunction" | "enddef" => func_depth = func_depth.saturating_sub(1),
+                _ => {}
+            }
             if trimmed.is_empty() || trimmed.starts_with('"') {
                 lines.push((lineno, text));
                 tails.push(None);
@@ -1411,7 +1425,16 @@ impl Lines {
                     // command itself, after the expression; when the expression
                     // fails to parse, nothing after it on the line is a command
                     // (`if nosuch ) | endif` leaves the `:if` open).
-                    if expr_cmd_swallows_line(seg) {
+                    // c: ex_return() outside a function reports E133 and returns
+                    // before reading its argument — even in a skipped branch —
+                    // so no next command is found (`if 0 | return | endif`
+                    // leaves the `:if` open).
+                    let top_return = func_depth == 0
+                        && matches!(
+                            cmd_word(strip_command_modifiers(seg.trim())).0,
+                            "retu" | "retur" | "return"
+                        );
+                    if top_return || expr_cmd_swallows_line(seg) {
                         lines.push((lineno, tail.to_string()));
                         tails.push(Some(tail.to_string()));
                         break;
@@ -3500,8 +3523,8 @@ pub(crate) fn is_curly_name(name: &str) -> bool {
     matches!(find_name_end(name, FNE_CHECK_START), (end, Some(_), _) if end == name.len())
 }
 
-/// The current value of a compound-assignment target, as an expression. List
-/// unpack targets cannot take a compound operator (`E734`).
+/// The current value of a compound-assignment target, as an expression. A List
+/// unpack target cannot take a compound operator (`E734`).
 pub(crate) fn let_target_expr(target: &LetTarget) -> Result<Expr, VimlError> {
     Ok(match target {
         LetTarget::Var(n) => Expr::Var(n.clone()),
@@ -3514,9 +3537,18 @@ pub(crate) fn let_target_expr(target: &LetTarget) -> Result<Expr, VimlError> {
             index: index.clone(),
             mid_expr: false,
         },
-        LetTarget::List { .. } | LetTarget::Range { .. } => {
-            return Err(VimlError::msg("E734: Wrong variable type for +="))
-        }
+        // c: a compound operator on `l[i:j]` goes to `list_assign_range()` item
+        // by item; the compiler hands it the right-hand side alone, so this read
+        // only marks the statement as compound.
+        LetTarget::Range {
+            base, idx1, idx2, ..
+        } => Expr::Slice {
+            base: base.clone(),
+            from: idx1.clone(),
+            to: idx2.clone(),
+            mid_expr: false,
+        },
+        LetTarget::List { .. } => return Err(VimlError::msg("E734: Wrong variable type for +=")),
     })
 }
 
@@ -3669,6 +3701,32 @@ impl Parser {
     fn rest(&self) -> &str {
         let at = self.peek_span().unwrap_or(self.src.len());
         self.src.get(at..).unwrap_or("")
+    }
+
+    /// [`Parser::rest`] continued to the end of the SOURCE line: vim parses the
+    /// whole line, so text past the `|` that bar-splitting cut off is still in
+    /// front of it (`echo [1 | echo 4` is `E696: Missing comma in List: | echo 4`).
+    fn rest_to_eol(&self) -> String {
+        let rest = self.rest();
+        let in_cmd = text_to_eol(rest);
+        if in_cmd != rest.trim() {
+            return in_cmd;
+        }
+        // The text being parsed is often a copy of the command's END (its
+        // argument, a trailing comment stripped); map the position through that.
+        CMD_TAIL.with(|t| {
+            let Some((_, len, tail)) = &*t.borrow() else {
+                return in_cmd.clone();
+            };
+            let cmd = tail.get(..*len).unwrap_or("").trim_end();
+            let src = self.src.trim_end();
+            if !cmd.ends_with(src) {
+                return in_cmd.clone();
+            }
+            let pos = (cmd.len() - src.len() + self.src.len() - rest.len()).min(tail.len());
+            tail.get(pos..)
+                .map_or(in_cmd.clone(), |r| r.trim().to_string())
+        })
     }
 
     /// The source from `at` to the end of the expression buffer — the text a
@@ -4869,9 +4927,18 @@ impl Parser {
             if !had_comma {
                 return Err(VimlError::msg(format!(
                     "E696: Missing comma in List: {}",
-                    self.rest()
+                    self.rest_to_eol()
                 )));
             }
+        }
+        // c: the loop runs out at the end of the LINE: with a `|` and more after
+        // the text, the next item is read from there and is `E15` over it
+        // (`echo [1, | echo 3`).
+        let tail = self.rest_to_eol();
+        if matches!(self.peek(), Tok::Eof) && self.lex_err.is_none() && !tail.is_empty() {
+            return Err(VimlError::msg(format!(
+                "E15: Invalid expression: \"{tail}\""
+            )));
         }
         if *self.peek() != Tok::RBracket {
             return Err(VimlError::msg(format!(
@@ -5166,7 +5233,7 @@ impl Parser {
                 _ => {
                     return Err(VimlError::msg(format!(
                         "E722: Missing comma in Dictionary: {}",
-                        self.rest()
+                        self.rest_to_eol()
                     )))
                 }
             }
@@ -5221,7 +5288,7 @@ impl Parser {
                 _ => {
                     return Err(VimlError::msg(format!(
                         "E722: Missing comma in Dictionary: {}",
-                        self.rest()
+                        self.rest_to_eol()
                     )))
                 }
             }
