@@ -1,0 +1,21 @@
+1
+a bc
+g:z                   #1
+
+  tabstop=8  shiftwidth=8
+
+^@a bc^@quiet^@^@g:z                   #1^@  tabstop=8^@  shiftwidth=8^@
+post
+pre^@post ^@inner
+local
+^@local 1
+reg
+app
+^@reg^@app
+to file
+appended
+['', 'to file', 'appended']
+E474: Invalid argument
+E475: Invalid argument: foo
+E475: Invalid argument: @ab
+E488: Trailing characters:  y

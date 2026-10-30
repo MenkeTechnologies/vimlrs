@@ -8607,3 +8607,72 @@ base. Recorded in `tests/parity_cases/lambda_failed_residue_more.vim`.
   block-command errors report); vimlrs reports nothing there (R67-3 covers only
   a loop's normal exit).
 - `{-> {}.a}()` is `{}` in vim (the member read cleared its Dict); vimlrs -1.
+
+## R68 — `:redir`, subscripts after a call and without `]`, recursive `typename()`
+
+Oracle: `/opt/homebrew/Cellar/vim/9.2.1250/bin/vim` (9.2, patches 1-1250),
+`-es -u NONE -i NONE -N -c 'verbose source CASE'`. C read from vim's git master.
+
+### R68-1. `:redir` did nothing — ✅ FIXED
+`redir => var` / `redir @r` / `redir > file` were accepted as no-ops, so
+`redir => x | echo 1 | redir END | echo x` was `E121: Undefined variable: x`.
+Ported `ex_redir()` (`ex_docmd.c:9027`), `close_redir()` (`ex_docmd.c:9283`),
+`redir_write()` (`message.c:3981`) and `var_redir_start()`/`var_redir_str()`/
+`var_redir_stop()` (`evalvars.c:4935-5069`): every message write (`:echo`,
+`:echon`, `msg()`, `:let` listings, `:set opt?`, errors, `:silent!` errors)
+also reaches the active target, with the `\n` `msg_start()` writes before each
+message, whatever `:silent` says; `execute()` shadows it (`redir_execute`), and
+`:redir` inside `execute()` is `E930`. A variable is set to `''` (or appended
+to, `=>>`) when the redirection starts and gets the text with `.=` at `END`, its
+name read in the scope of the command running (a function body's bare name is
+`l:`). Recorded in `tests/parity_cases/redir_targets.vim`.
+
+### R68-2. `echo F() [1]` did not index — ✅ FIXED
+`get_func_tv()` ends with `*arg = skipwhite(argp)` (`userfunc.c:2221`) and the
+`[` arm of `handle_subscript()` has no whitespace test, so after a call's `)` a
+spaced `[` is still a subscript (`echo toupper('xy') [1]` is `Y`); R24-4's rule
+(a spaced `[` starts a new expression) holds for every other base. Recorded in
+`tests/parity_cases/subscript_after_call_space.vim`.
+
+### R68-3. `typename()` of a self-containing List/Dict overflowed the stack — ✅ FIXED
+`let l = [1] | call add(l, l) | echo typename(l)` aborted the process.
+`list_typval2type()`/`dict_typval2type()` (`vim9type.c:585,705`) stamp the
+container with the walk's `copyID` and answer `list<any>`/`dict<any>` when they
+reach it again; the port now keeps the same path guard. Recorded in
+`tests/parity_cases/typename_recursive_container.vim`.
+
+### R68-4. A subscript with no `]` was `E15` — ✅ FIXED
+`echo l[0 1]`, `echo [1, 2][9, 8]`, `echo l[0` reported `E15: Invalid expression`
+quoting the rest of the line; `eval_index()` reports `E111: Missing ']'` when
+the index or slice was read and no `]` follows (a subscript whose expression
+fails, `l[` or `l[0:`, keeps the `E15`). Recorded in
+`tests/parity_cases/subscript_missing_bracket.vim`.
+
+### R68-O. Measured this round, still open
+- `typename()` folds a container's member types by comparing their rendered
+  names; vim uses `common_type()` (`vim9type.c:2444`), which recurses into
+  List/Dict members and Funcref signatures: `typename([[1], ['a']])` is
+  `list<list<any>>`, `typename([[], [1]])` `list<list<number>>`,
+  `typename([{x -> x}, {y -> y}])` `list<func(any): unknown>`,
+  `typename([function('len'), function('add')])` `list<func(...): any>`;
+  vimlrs gives `list<any>`, `list<any>`, `list<func(any): [unknown]>` and
+  `list<any>`. A faithful port needs vim9type.c's
+  `typval2type`/`common_type`/`type_name` family under `src/ported/`, whose
+  names are not in the vendored Neovim tree, so it waits on an allowlist
+  decision (`tests/data/fake_fn_allowlist.txt`).
+- A `:redir` capture holds no `Error detected while processing …:` / `line N:`
+  preamble for an error, which vim writes into it (as into an `execute()`
+  capture, the existing behaviour there).
+- `redir => d.x` with no `d` (and any target whose `get_lval()` fails) reports
+  the lvalue's error but not the `E475: Invalid argument: d.x` vim adds.
+- `try | call add(1, 2) | catch | … | endtry` on one line: a builtin's error
+  makes `aborting()` true before the exception is thrown (`update_force_abort()`
+  after `call_internal_func`, `userfunc.c:4204`), so `ex_call()` does not set the
+  next command (`userfunc.c:7013`) and the `:catch` is never read; vim leaves
+  the `:try` open and the exception uncaught. vimlrs catches it (R67-O's
+  `:try` case).
+- `exists('##Event')` is 0 for every event and `exists('#Group')` /
+  `exists('#Group#Event')` never see a group: the autocommand layer has no event
+  table or group index to answer from (`au_exists()`, `autocmd.c`).
+- An error message quoting a line with trailing white space drops it
+  (`E15: Invalid expression: "1e20) "` prints without the final space).

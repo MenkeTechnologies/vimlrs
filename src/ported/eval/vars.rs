@@ -1854,28 +1854,66 @@ pub fn get_user_var_name(_idx: i32) -> Option<String> {
 }
 
 // ── :redir => var capture (vars.c) ──
-//
-// RUST-PORT NOTE: `:redir` is not handled by the carve-out command layer, and
-// `var_redir_start` would need the stubbed lvalue machinery (`get_lval`/
-// `set_var_lval`), so the redir-to-variable subsystem is inactive — no redirect
-// is ever active. These two are therefore faithful no-ops.
+
+thread_local! {
+    /// c: `redir_varname` — the `:redir =>` target, while one is active.
+    static redir_varname: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// c: `redir_ga` — the output collected until the redirection ends.
+    static redir_ga: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
 
 /// Port of `var_redir_start()` from `Src/eval/vars.c:3414` — begin a `:redir =>`
-/// capture by resolving the target lvalue. RUST-PORT NOTE: the lvalue machinery
-/// (`get_lval`/`set_var_lval`) is stubbed and no command layer drives this, so a
-/// redirect can never be set up → returns `FAIL` (the cluster stays inactive,
-/// keeping [`var_redir_str`]/[`var_redir_stop`] genuine no-ops).
-pub fn var_redir_start(_name: &str, _append: bool) -> i32 {
-    crate::ported::eval_h::FAIL
+/// capture: check the target and set it to (or append) an empty string.
+///
+/// RUST-PORT NOTE: the C parses the target with `get_lval()` and assigns
+/// through `set_var_lval()`; here that is one nested `:let`
+/// ([`crate::fusevm_bridge::redir_let`]), which parses the same lvalue in the
+/// running command's scope. When `get_lval()` itself fails (an undefined Dict,
+/// an index out of range) the C adds `E475: Invalid argument: {var}` after the
+/// lvalue's own error; this port reports the lvalue's error alone.
+pub fn var_redir_start(name: &str, append: bool) -> i32 {
+    use crate::ported::eval::{find_name_end, FNE_CHECK_START, FNE_INCL_BR};
+    // c: "Catch a bad name early." — `if (!eval_isnamec1(*name))`.
+    if !name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') {
+        crate::ported::message::emsg("E474: Invalid argument");
+        return crate::ported::eval_h::FAIL;
+    }
+    // c: `*redir_endp != NUL` — "Trailing characters are present after the
+    // variable name".
+    let (end, _, _) = find_name_end(name, FNE_INCL_BR | FNE_CHECK_START);
+    if end < name.len() {
+        crate::ported::message::semsg(&format!("E488: Trailing characters: {}", &name[end..]));
+        return crate::ported::eval_h::FAIL;
+    }
+    // c: "check if we can write to the variable: set it to or append an empty
+    // string".
+    if !crate::fusevm_bridge::redir_let(name, if append { ".=" } else { "=" }, b"") {
+        return crate::ported::eval_h::FAIL;
+    }
+    redir_varname.with(|v| *v.borrow_mut() = Some(name.to_string()));
+    redir_ga.with(|g| g.borrow_mut().clear());
+    crate::ported::eval_h::OK
 }
 
 /// Port of `var_redir_str()` from `Src/eval/vars.c:3475` — append redirected
-/// command output to the capture buffer; no active redirect, no-op.
-pub fn var_redir_str(_value: &str, _value_len: i32) {}
+/// output to the capture; the assignment waits for [`var_redir_stop`].
+pub fn var_redir_str(value: &[u8]) {
+    if redir_varname.with(|v| v.borrow().is_none()) {
+        return;
+    }
+    redir_ga.with(|g| g.borrow_mut().extend_from_slice(value));
+}
 
-/// Port of `var_redir_stop()` from `Src/eval/vars.c:3495` — finish a `:redir =>`
-/// capture and assign it to the target variable; no active redirect, no-op.
-pub fn var_redir_stop() {}
+/// Port of `var_redir_stop()` from `Src/eval/vars.c:3495` — append the collected
+/// text to the target with `.=`, the name read again ("if it's inside a Dict or
+/// List it may have changed") in the scope of the command that ends it.
+pub fn var_redir_stop() {
+    let Some(name) = redir_varname.with(|v| v.borrow_mut().take()) else {
+        return;
+    };
+    let text = redir_ga.with(|g| std::mem::take(&mut *g.borrow_mut()));
+    crate::fusevm_bridge::redir_let(&name, ".=", &text);
+}
 
 /// Port of `reset_v_option_vars()` from `Src/eval/vars.c:3349`.
 ///

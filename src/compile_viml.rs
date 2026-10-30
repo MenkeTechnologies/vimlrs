@@ -1805,7 +1805,10 @@ impl Compiler {
             }
             Stmt::ExCmd(line) => {
                 self.load_str(line);
-                self.emit(Op::CallBuiltin(h::VIML_EXCMD, 1));
+                // Whether the line runs in a function body: a command that names
+                // a variable (`:redir => var`) resolves a bare name to `l:` there.
+                self.emit(Op::LoadInt((self.in_function || self.func_cmdline) as i64));
+                self.emit(Op::CallBuiltin(h::VIML_EXCMD, 2));
                 self.emit(Op::Pop);
                 Ok(())
             }

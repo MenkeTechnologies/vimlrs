@@ -3778,6 +3778,13 @@ fn echo_impl(vm: &mut VM, argc: u8, newline: bool) {
 /// `:echon` never does, and neither appends a trailing newline. The line the run
 /// ends on is closed by [`msg_flush_line`].
 fn msg_put(body: &[u8], newline: bool) {
+    // c: `msg_start()` writes the line break into the redirection and the text
+    // follows (`msg_puts_attr_len` → `redir_write`), both before the
+    // `msg_silent` test: `silent echo` is still redirected.
+    if newline {
+        redir_write(b"\n");
+    }
+    redir_write(body);
     // c: `msg_silent` — while `:silent` is in effect nothing is shown, so the
     // message never reaches the column either.
     if message::msg_silent.with(|m| m.get()) != 0 {
@@ -3874,6 +3881,10 @@ pub fn msg_emsg(s: &str, multiline: bool) {
             echo_write(&line);
         }
     }
+    // c: `msg_start()` + `msg_puts` reach `redir_write` (a no-op inside
+    // `execute()`, whose capture was written above).
+    redir_write(b"\n");
+    redir_write(shown);
     if MSG_COL.with(|c| c.get()) {
         display_write(b"\n");
         MSG_COL.with(|c| c.set(false));
@@ -3892,15 +3903,186 @@ pub fn msg_emsg(s: &str, multiline: bool) {
 /// screen is still written into an `execute()` capture (`message.c:817-834`),
 /// unless `emsg_noredir` is set. Nothing is displayed and the column is untouched.
 pub fn redir_silenced_emsg(s: &str) {
-    if EXECUTE_DEPTH.with(|d| d.get()) == 0
-        || EMSG_NOREDIR.with(|n| n.get())
-        || ECHO_SINK.with(|s| s.borrow().is_none())
-    {
+    if EMSG_NOREDIR.with(|n| n.get()) {
+        return;
+    }
+    // c:817-834 — `msg_start()` then `redir_write(s)`: a `:redir` that is not
+    // shadowed by `execute()` records the silenced error too.
+    if EXECUTE_DEPTH.with(|d| d.get()) == 0 {
+        redir_write(b"\n");
+        redir_write(s.as_bytes());
+        return;
+    }
+    if ECHO_SINK.with(|s| s.borrow().is_none()) {
         return;
     }
     let mut line = b"\n".to_vec();
     line.extend_from_slice(s.as_bytes());
     echo_write(&line);
+}
+
+// ── :redir (ex_docmd.c `ex_redir`, message.c `redir_write`, evalvars.c
+// `var_redir_*`) ──
+
+/// Where `:redir` sends messages — c: `redir_fd`, `redir_reg`, `redir_vname`
+/// (`globals.h`). At most one is active; starting another closes the first.
+enum Redir {
+    /// `:redir > {file}` / `>> {file}` — c: `redir_fd`.
+    File(std::fs::File),
+    /// `:redir @{reg}` — c: `redir_reg`. Each message is appended as written.
+    Reg(char),
+    /// `:redir => {var}` — c: `redir_vname`; the name and the collected text
+    /// are kept by `var_redir_start()` (`ported::eval::vars`).
+    Var,
+}
+
+thread_local! {
+    static REDIR: RefCell<Option<Redir>> = const { RefCell::new(None) };
+    /// Set by `VIML_EXCMD` while an Ex command compiled in a function body runs,
+    /// so a variable it names (`:redir => var`) is read in that function's scope.
+    static EXCMD_IN_FUNCTION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Port of `redir_write()` (`message.c:3981`) — the redirection half of every
+/// message write. `execute()` takes precedence (c: `redir_execute` is tested
+/// first), so nothing reaches `:redir` while one runs; its capture is
+/// [`ECHO_SINK`]. Written whatever `msg_silent` says: `silent echo` is still
+/// redirected.
+///
+/// RUST-PORT NOTE: the C pads with spaces up to `msg_col` when a message does
+/// not start at column 0; this port's message column is only "is there text on
+/// the line" ([`MSG_COL`]), so no padding is written.
+fn redir_write(s: &[u8]) {
+    if s.is_empty() || EXECUTE_DEPTH.with(|d| d.get()) > 0 {
+        return;
+    }
+    REDIR.with(|r| match r.borrow_mut().as_mut() {
+        None => {}
+        Some(Redir::File(f)) => {
+            use std::io::Write;
+            let _ = f.write_all(s);
+        }
+        // c: `write_reg_contents(redir_reg, s, maxlen, TRUE)` — always appended.
+        Some(Redir::Reg(c)) => crate::ported::ops::write_reg_contents_ex(
+            *c as i32, s, true, None, 0,
+        ),
+        Some(Redir::Var) => crate::ported::eval::vars::var_redir_str(s),
+    });
+}
+
+/// Run one `:let` for a `:redir => {var}` target, in the scope of the Ex
+/// command running now (a function body reads a bare name as `l:`). Returns
+/// whether it raised no error.
+///
+/// RUST-PORT NOTE: stands in for the C's `get_lval()` + `set_var_lval()` pair,
+/// which this port has no frame-aware form of; the nested `:let` parses the
+/// same lvalue and assigns through the same path.
+pub fn redir_let(name: &str, op: &str, value: &[u8]) -> bool {
+    let in_function = EXCMD_IN_FUNCTION.with(|c| c.get());
+    // The value as a double-quoted literal of `\x` escapes: a redirected
+    // message is bytes and need not be valid UTF-8.
+    let mut lit = String::with_capacity(value.len() * 4 + 2);
+    lit.push('"');
+    for &b in value {
+        lit.push_str(&format!("\\x{b:02x}"));
+    }
+    lit.push('"');
+    let before = message::err_count.with(|c| c.get());
+    EXEC_IN_FUNCTION.with(|c| c.set(in_function));
+    let _ = run_cmdline_nested(&format!("let {name} {op} {lit}"));
+    EXEC_IN_FUNCTION.with(|c| c.set(false));
+    message::err_count.with(|c| c.get()) == before
+}
+
+/// Port of `close_redir()` (`ex_docmd.c:9283`). Dropping a file target closes
+/// it; a variable target is assigned by `var_redir_stop()`.
+fn close_redir() {
+    if let Some(Redir::Var) = REDIR.with(|r| r.borrow_mut().take()) {
+        crate::ported::eval::vars::var_redir_stop();
+    }
+}
+
+/// Port of `ex_redir()` (`ex_docmd.c:9027`) — `:redi[r][!] {target}`.
+pub fn ex_redir(arg: &str, forceit: bool) {
+    // c: `if (redir_execute)` — the capture of `execute()` cannot be redirected.
+    if EXECUTE_DEPTH.with(|d| d.get()) > 0 {
+        message::emsg("E930: Cannot use :redir inside execute()");
+        return;
+    }
+    if arg.eq_ignore_ascii_case("END") {
+        close_redir();
+        return;
+    }
+    let bytes = arg.as_bytes();
+    if let Some(rest) = arg.strip_prefix('>') {
+        let (append, rest) = match rest.strip_prefix('>') {
+            Some(r) => (true, r),
+            None => (false, rest),
+        };
+        close_redir();
+        // c: `expand_env_save(arg)` — environment variables and "~/".
+        let fname = crate::ported::eval::fs::expand_env(rest.trim_start());
+        // c: `open_exfile()` (`ex_docmd.c:9318`).
+        let path = std::path::Path::new(&fname);
+        if path.is_dir() {
+            message::semsg(&format!("E17: \"{fname}\" is a directory"));
+            return;
+        }
+        if !forceit && !append && path.exists() {
+            message::semsg(&format!("E189: \"{fname}\" exists (add ! to override)"));
+            return;
+        }
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .append(append)
+            .truncate(!append)
+            .open(path);
+        match file {
+            Ok(f) => REDIR.with(|r| *r.borrow_mut() = Some(Redir::File(f))),
+            Err(_) => message::semsg(&format!("E190: Cannot open \"{fname}\" for writing")),
+        }
+    } else if bytes.first() == Some(&b'@') {
+        // c: "redirect to a register a-z (resp. A-Z for appending)"
+        close_redir();
+        let mut i = 1;
+        let mut reg = None;
+        if let Some(&c) = bytes.get(1).filter(|c| c.is_ascii_alphabetic() || **c == b'"') {
+            reg = Some(c as char);
+            i = 2;
+            if bytes[i..].starts_with(b">>") {
+                i += 2;
+            } else {
+                // c: "Can use both "@a" and "@a>"."
+                if bytes.get(i) == Some(&b'>') {
+                    i += 1;
+                }
+                // c: "Make register empty when not using @A-@Z and the command
+                // is valid."
+                if i == bytes.len() && !c.is_ascii_uppercase() {
+                    crate::ported::ops::write_reg_contents_ex(c as i32, b"", false, None, 0);
+                }
+            }
+        }
+        match reg {
+            Some(c) if i == bytes.len() => REDIR.with(|r| *r.borrow_mut() = Some(Redir::Reg(c))),
+            _ => message::semsg(&format!("E475: Invalid argument: {arg}")),
+        }
+    } else if let Some(rest) = arg.strip_prefix("=>") {
+        // c: "redirect to a variable"
+        close_redir();
+        let (append, rest) = match rest.strip_prefix('>') {
+            Some(r) => (true, r),
+            None => (false, rest),
+        };
+        if crate::ported::eval::vars::var_redir_start(rest.trim_start(), append)
+            == crate::ported::eval_h::OK
+        {
+            REDIR.with(|r| *r.borrow_mut() = Some(Redir::Var));
+        }
+    } else {
+        message::semsg(&format!("E475: Invalid argument: {arg}"));
+    }
 }
 
 thread_local! {
@@ -3922,6 +4104,11 @@ thread_local! {
 /// `a`, `\n`, `\n`, `  tabstop=8  shiftwidth=8`, `\n`. Only the plain display
 /// path shows it; a capture (`execute()`, an embedding host) sees nothing.
 pub fn set_show_option(text: &str, first: bool, buffered: bool) {
+    // c: `gotocmdline()` (`msg_start()`) or `msg_putchar('\n')`, then
+    // `showoneopt()`'s `msg_puts` — each reaches `redir_write` whatever
+    // `msg_silent` says.
+    redir_write(b"\n");
+    redir_write(text.as_bytes());
     if message::msg_silent.with(|m| m.get()) != 0
         || ECHO_SINK.with(|s| s.borrow().is_some())
         || EXECUTE_DEPTH.with(|d| d.get()) > 0
@@ -3948,6 +4135,8 @@ pub fn set_show_option(text: &str, first: bool, buffered: bool) {
 /// are written. The message line still counts as written on, so the next `:echo`
 /// starts a new line.
 pub fn set_show_end() {
+    // c: the `msg_putchar('\n')` is redirected too.
+    redir_write(b"\n");
     if !SET_SHOWN.with(|s| s.replace(false)) {
         return;
     }
@@ -6766,9 +6955,12 @@ fn exec_ex_or_stmt(line: &str) {
 }
 
 /// `:[range]cmd` statement: pop the raw line and run it against the buffer.
-fn b_excmd(vm: &mut VM, _: u8) -> Value {
+fn b_excmd(vm: &mut VM, argc: u8) -> Value {
+    let in_function = argc > 1 && tv_get_number_chk(&pop_tv(vm), None) != 0;
     let line = tv_get_string(&pop_tv(vm));
+    let saved = EXCMD_IN_FUNCTION.with(|c| c.replace(in_function));
     exec_ex_or_stmt(&line);
+    EXCMD_IN_FUNCTION.with(|c| c.set(saved));
     Value::Undef
 }
 

@@ -123,6 +123,14 @@ pub fn f_typename(argvars: &[typval_T], rettv: &mut typval_T) {
     *rettv = typval_T::from(type_name_of(&argvars[0]));
 }
 
+thread_local! {
+    /// The Lists and Dicts [`type_name_of`] is inside of — c: the `copyID` that
+    /// `list_typval2type()` / `dict_typval2type()` stamp on a container while
+    /// they walk it and reset afterwards.
+    static TYPENAME_WALK: std::cell::RefCell<Vec<*const ()>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// The vim9 type name of one value — see [`f_typename`].
 ///
 /// A Funcref's answer depends on WHICH kind of callee it names, and every rule
@@ -218,17 +226,40 @@ fn type_name_of(tv: &typval_T) -> String {
                 Err(_) => "func(...): any".into(),
             }
         }
+        // c: `list_typval2type()` / `dict_typval2type()` (`vim9type.c`) mark the
+        // container with the walk's `copyID` while its items are read and
+        // answer `list<any>` / `dict<any>` when they meet it again — "avoid
+        // recursion" — so `l = [1]; add(l, l)` is `list<any>`, not a stack
+        // overflow.
         (VAR_LIST, v_list(l)) => {
             let m = l.as_ref().map_or_else(
                 || "any".to_string(),
-                |l| member_of(l.borrow().lv_items.iter().map(|i| &i.li_tv)),
+                |l| {
+                    let id = std::rc::Rc::as_ptr(l) as *const ();
+                    if TYPENAME_WALK.with(|w| w.borrow().contains(&id)) {
+                        return "any".to_string();
+                    }
+                    TYPENAME_WALK.with(|w| w.borrow_mut().push(id));
+                    let m = member_of(l.borrow().lv_items.iter().map(|i| &i.li_tv));
+                    TYPENAME_WALK.with(|w| w.borrow_mut().pop());
+                    m
+                },
             );
             format!("list<{m}>")
         }
         (VAR_DICT, v_dict(d)) => {
             let m = d.as_ref().map_or_else(
                 || "any".to_string(),
-                |d| member_of(d.borrow().dv_hashtab.values()),
+                |d| {
+                    let id = std::rc::Rc::as_ptr(d) as *const ();
+                    if TYPENAME_WALK.with(|w| w.borrow().contains(&id)) {
+                        return "any".to_string();
+                    }
+                    TYPENAME_WALK.with(|w| w.borrow_mut().push(id));
+                    let m = member_of(d.borrow().dv_hashtab.values());
+                    TYPENAME_WALK.with(|w| w.borrow_mut().pop());
+                    m
+                },
             );
             format!("dict<{m}>")
         }
@@ -10806,11 +10837,17 @@ pub fn do_excmd(line: &str) -> ExCmdResult {
         }
         // Screen/session commands with no observable effect on an editor-less
         // config load: `:redraw[!]`/`:redrawstatus`/`:redrawtabline` (repaint)
-        // and `:redir` (message redirection — no message UI here). Recognized as
-        // no-ops so a function body using them still defines instead of the line
-        // aborting the `:function`.
-        "redraw" | "redr" | "redra" | "redraws" | "redrawstatus" | "redrawt" | "redrawtabline"
-        | "redir" | "redi" => ExCmdResult::Handled,
+        // are recognized as no-ops so a function body using them still defines
+        // instead of the line aborting the `:function`.
+        "redraw" | "redr" | "redra" | "redraws" | "redrawstatus" | "redrawt" | "redrawtabline" => {
+            ExCmdResult::Handled
+        }
+        // `:redi[r]` (`ex_docmd.c` → `ex_redir`): messages to a file, a register
+        // or a variable.
+        "redir" | "redi" => {
+            crate::fusevm_bridge::ex_redir(args, bang);
+            ExCmdResult::Handled
+        }
         // `:noh[lsearch]` (`ex_docmd.c` → `ex_nohlsearch`) turns off the current
         // search-match highlighting until the next search. There is no highlight
         // state editor-less, so it is a no-op — recognized so a config/syntax

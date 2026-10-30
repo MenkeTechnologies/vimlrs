@@ -601,7 +601,7 @@ fn finish_write_reg(name: i32, old_y_previous: Option<usize>) {
 /// RUST-PORT NOTE: the `'/'` (search pattern), `'#'` (altfile) and `'='` (expr
 /// register) sinks have no substrate in the standalone interpreter and are
 /// honest-stubbed (no-op).
-fn write_reg_contents_ex(
+pub(crate) fn write_reg_contents_ex(
     name: i32,
     str: &[u8],
     must_append: bool,
