@@ -4934,6 +4934,22 @@ impl Parser {
             && self.toks[i].span == self.toks[i - 1].end
     }
 
+    /// True when the base just parsed is a function call (`F()`, `d.f()`,
+    /// `expr()`, `expr->m()`, `a{b}()`) and the token before the cursor is its
+    /// closing `)` — the call skipped the white space after it, so a `[` there
+    /// is still a subscript. See the `Tok::LBracket` arm of [`Self::postfix`].
+    fn follows_call_paren(&self, base: &Expr) -> bool {
+        matches!(
+            base,
+            Expr::Call { .. }
+                | Expr::CurlyCall { .. }
+                | Expr::MemberCall { .. }
+                | Expr::CallExpr { .. }
+                | Expr::Method { .. }
+        ) && self.i > 0
+            && self.toks[self.i - 1].kind == Tok::RParen
+    }
+
     /// True when the token at the cursor is a `{` written directly against the
     /// token before it — the `{expr}` continuation of a name (`a{n}b`), as
     /// opposed to a Dict literal after a space (`echo x {}`).
@@ -5043,8 +5059,12 @@ impl Parser {
                 continue;
             }
             match self.peek() {
-                // Only when the `[` abuts the base — see [`Self::lbracket_abuts_prev`].
-                Tok::LBracket if self.lbracket_abuts_prev() => {
+                // Only when the `[` abuts the base — see [`Self::lbracket_abuts_prev`] —
+                // or follows a call's `)`: c: `get_func_tv()` ends with
+                // `*arg = skipwhite(argp)` (`userfunc.c:2221`), and the `[` arm of
+                // `handle_subscript()` has no whitespace test, so `echo F() [1]`
+                // indexes what `F()` returned.
+                Tok::LBracket if self.lbracket_abuts_prev() || self.follows_call_paren(&base) => {
                     self.advance();
                     base = self.subscript(base)?;
                 }
@@ -5103,6 +5123,8 @@ impl Parser {
         Ok(base)
     }
 
+    /// c: `eval_index()` (`eval.c`) — an index or slice read without a `]` after
+    /// it is `E111: Missing ']'`, not the caller's `E15`.
     fn subscript(&mut self, base: Expr) -> Result<Expr, VimlError> {
         if matches!(self.peek(), Tok::Colon) {
             self.advance();
@@ -5111,7 +5133,7 @@ impl Parser {
             } else {
                 Some(Box::new(self.eval1()?))
             };
-            self.eat(&Tok::RBracket)?;
+            self.eat_or(&Tok::RBracket, "E111: Missing ']'")?;
             return Ok(Expr::Slice {
                 base: Box::new(base),
                 from: None,
@@ -5127,7 +5149,7 @@ impl Parser {
             } else {
                 Some(Box::new(self.eval1()?))
             };
-            self.eat(&Tok::RBracket)?;
+            self.eat_or(&Tok::RBracket, "E111: Missing ']'")?;
             Ok(Expr::Slice {
                 base: Box::new(base),
                 from: Some(Box::new(first)),
@@ -5135,7 +5157,7 @@ impl Parser {
                 mid_expr: !self.call_tail_is_end(),
             })
         } else {
-            self.eat(&Tok::RBracket)?;
+            self.eat_or(&Tok::RBracket, "E111: Missing ']'")?;
             Ok(Expr::Index {
                 base: Box::new(base),
                 index: Box::new(first),
