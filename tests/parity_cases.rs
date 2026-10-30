@@ -5,7 +5,8 @@
 //! the first line, then the output (stdout and stderr merged, in the order they
 //! were written). Those files are produced only by `bash scripts/parity.sh -r`,
 //! which runs vim and nothing else, so a case cannot be made to pass by changing
-//! vimlrs — only by matching vim.
+//! vimlrs — only by matching vim. Where vim's answer depends on the OS it was
+//! built for, `<name>.expected.<os>` holds that OS's record (see [`record_path`]).
 //!
 //! This test runs the same scripts through the built `viml` and requires the two
 //! to be byte-identical. It needs no editor installed, which is what makes the
@@ -62,6 +63,24 @@ fn pinned_env(mut cmd: Command) -> Command {
     cmd
 }
 
+/// The record `case` is compared against on this OS: `<name>.expected.<os>`
+/// (`std::env::consts::OS`) when there is one, else `<name>.expected`.
+///
+/// vim's own answer is platform-conditional in a few places — mbyte.c's
+/// `enc_alias_table` maps `japan` to `cp932` under `MACOS_X`/`MSWIN` and to
+/// `euc-jp` elsewhere — so one record cannot hold it for every OS. A per-OS
+/// record is vim's output on that OS, recorded there with `scripts/parity.sh -r`
+/// by the same vim version `ORACLE` names; the plain `.expected` stays the
+/// macOS record the rest of the corpus is taken on.
+fn record_path(case: &Path) -> PathBuf {
+    let per_os = case.with_extension(format!("expected.{}", std::env::consts::OS));
+    if per_os.is_file() {
+        per_os
+    } else {
+        case.with_extension("expected")
+    }
+}
+
 /// Sorted list of `tests/parity_cases/*.vim`.
 fn cases(dir: &Path) -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = fs::read_dir(dir)
@@ -84,7 +103,7 @@ fn parity_cases_match_vim() {
     let mut failures: Vec<String> = Vec::new();
 
     for case in cases(&dir) {
-        let expected_path = case.with_extension("expected");
+        let expected_path = record_path(&case);
         let expected = match fs::read(&expected_path) {
             Ok(s) => s,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => panic!(
