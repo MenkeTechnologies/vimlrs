@@ -3963,9 +3963,9 @@ fn redir_write(s: &[u8]) {
             let _ = f.write_all(s);
         }
         // c: `write_reg_contents(redir_reg, s, maxlen, TRUE)` — always appended.
-        Some(Redir::Reg(c)) => crate::ported::ops::write_reg_contents_ex(
-            *c as i32, s, true, None, 0,
-        ),
+        Some(Redir::Reg(c)) => {
+            crate::ported::ops::write_reg_contents_ex(*c as i32, s, true, None, 0)
+        }
         Some(Redir::Var) => crate::ported::eval::vars::var_redir_str(s),
     });
 }
@@ -4047,7 +4047,10 @@ pub fn ex_redir(arg: &str, forceit: bool) {
         close_redir();
         let mut i = 1;
         let mut reg = None;
-        if let Some(&c) = bytes.get(1).filter(|c| c.is_ascii_alphabetic() || **c == b'"') {
+        if let Some(&c) = bytes
+            .get(1)
+            .filter(|c| c.is_ascii_alphabetic() || **c == b'"')
+        {
             reg = Some(c as char);
             i = 2;
             if bytes[i..].starts_with(b">>") {
