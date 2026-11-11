@@ -7,18 +7,7 @@ use std::process::ExitCode;
 use vimlrs::aot;
 use vimlrs::fusevm_bridge::eval_source;
 use vimlrs::ported::message::ex_exitval;
-
-/// Worker-thread stack size. The parser, bytecode compiler and value `Drop` all
-/// walk the expression tree recursively, so a pathologically deep-but-valid
-/// script (`let x = ` + 500000 `-`, which real vim evaluates without error) would
-/// overflow the default 8 MiB main-thread stack and abort with SIGABRT. Vim
-/// tolerates such depth because its C frames are tiny; a debug Rust build's
-/// frames are far larger, so give the worker a 1 GiB stack (virtual reservation,
-/// pages commit only when touched). This keeps vimlrs matching vim's behaviour —
-/// succeed on deep linear chains, and raise `E1169` on deep *bracket* nesting via
-/// the parser's depth guard — instead of crashing. Verified: 500000 nested `-`
-/// now succeed; 1000 nested `(` raise E1169 like vim.
-const WORKER_STACK: usize = 1 << 30;
+use vimlrs::WORKER_STACK;
 
 /// Run, then close the message line. `:echo` under Vim's message-column model
 /// puts the newline *before* the text, so the last line of a run has none yet

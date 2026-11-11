@@ -159,6 +159,36 @@ property queries, utf8proc is not a dependency of this crate, and the parity
 oracle is vim — so vim's own tables are the spec, checked against it codepoint
 by codepoint rather than assumed.
 
+## Embedding
+
+The library crate is `vimlrs`. One function runs a script from Rust and
+returns its output:
+
+```rust
+pub fn run_program(src: &str, input: &str) -> Result<String, String>
+```
+
+- `src` is sourced as `viml FILE` sources a file: a legacy script, every line
+  an Ex command, under `:verbose`. Each call runs on a thread of its own with
+  a fresh interpreter, so nothing one call defines is visible to the next, and
+  concurrent calls do not share output.
+- `input` is what `input()`, `inputlist()` and `confirm()` read, a line at a
+  time; the process stdin is not read.
+- Returns the script's output: `:echo` messages one per line, each ending in
+  `\n`, plus the prompts of those input builtins and `:print` lines. Nothing is
+  written to the process stdout.
+- A parse error, or an error the script did not catch (the condition on which
+  `viml FILE` exits 1), returns `Err` with the message (`v:errmsg` for a
+  runtime error). Error messages also go to stderr, as in the CLI. A panic in
+  the interpreter is returned as `Err`.
+- Unlike `viml FILE`, a line that does not parse fails the call instead of
+  being skipped.
+
+```rust
+let out = vimlrs::run_program("let n = input('name? ')\necho 'hello, ' .. n", "world\n")?;
+assert_eq!(out, "name? hello, world\n");
+```
+
 ## Parity testing
 
 Parity with real Vim is checked four ways.

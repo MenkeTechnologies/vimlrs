@@ -5818,18 +5818,16 @@ pub fn f_getcharsearch(_argvars: &[typval_T], rettv: &mut typval_T) {
 /// is the editable default returned on an empty line / EOF; for `inputdialog`
 /// `argvars[2]` is the value returned when the read is cancelled (EOF).
 fn get_user_input(argvars: &[typval_T], rettv: &mut typval_T, dialog: bool, _secret: bool) {
-    use std::io::Write;
     let prompt = tv_get_string(&argvars[0]);
     let default = if argvars.len() > 1 {
         tv_get_string(&argvars[1])
     } else {
         String::new()
     };
-    print!("{prompt}");
-    let _ = std::io::stdout().flush();
+    crate::fusevm_bridge::screen_write(prompt.as_bytes());
 
     let mut line = String::new();
-    match std::io::stdin().read_line(&mut line) {
+    match crate::fusevm_bridge::read_input_line(&mut line) {
         // EOF: the command line was cancelled.
         Ok(0) => {
             let cancel = if dialog && argvars.len() > 2 {
@@ -5884,7 +5882,6 @@ pub fn f_inputrestore(_argvars: &[typval_T], rettv: &mut typval_T) {
 /// first being a header) and read the selected 1-based index from stdin,
 /// returning 0 when the input is empty or not a number.
 pub fn f_inputlist(argvars: &[typval_T], rettv: &mut typval_T) {
-    use std::io::Write;
     if argvars[0].v_type != VAR_LIST {
         // c: semsg(_(e_listarg), "inputlist()");
         emsg("E686: Argument of inputlist() must be a List");
@@ -5892,12 +5889,12 @@ pub fn f_inputlist(argvars: &[typval_T], rettv: &mut typval_T) {
     }
     if let v_list(Some(l)) = &argvars[0].vval {
         for it in &l.borrow().lv_items {
-            println!("{}", tv_get_string(&it.li_tv));
+            let text = tv_get_string(&it.li_tv);
+            crate::fusevm_bridge::screen_write(format!("{text}\n").as_bytes());
         }
     }
-    let _ = std::io::stdout().flush();
     let mut line = String::new();
-    let n = match std::io::stdin().read_line(&mut line) {
+    let n = match crate::fusevm_bridge::read_input_line(&mut line) {
         Ok(n) if n > 0 => line.trim().parse::<varnumber_T>().unwrap_or(0),
         _ => 0,
     };
@@ -5909,7 +5906,6 @@ pub fn f_inputlist(argvars: &[typval_T], rettv: &mut typval_T) {
 /// from stdin. Empty input returns the `{default}` button (`argvars[2]`, default
 /// 1); EOF returns 0 (cancelled), as the editor's dialog does.
 pub fn f_confirm(argvars: &[typval_T], rettv: &mut typval_T) {
-    use std::io::Write;
     let message = tv_get_string(&argvars[0]);
     let buttons = if argvars.len() > 1 && argvars[1].v_type != VAR_UNKNOWN {
         tv_get_string(&argvars[1])
@@ -5921,17 +5917,17 @@ pub fn f_confirm(argvars: &[typval_T], rettv: &mut typval_T) {
     } else {
         1
     };
-    println!("{message}");
+    let mut shown = format!("{message}\n");
     for (i, b) in buttons.split('\n').enumerate() {
         // Drop the '&' accelerator markers (c: drops them from the label).
         let label: String = b.chars().filter(|&c| c != '&').collect();
-        println!("{}) {}", i + 1, label);
+        shown.push_str(&format!("{}) {}\n", i + 1, label));
     }
-    print!("Type number and <Enter> (default {def}): ");
-    let _ = std::io::stdout().flush();
+    shown.push_str(&format!("Type number and <Enter> (default {def}): "));
+    crate::fusevm_bridge::screen_write(shown.as_bytes());
 
     let mut line = String::new();
-    match std::io::stdin().read_line(&mut line) {
+    match crate::fusevm_bridge::read_input_line(&mut line) {
         Ok(0) | Err(_) => *rettv = typval_T::from(0 as varnumber_T), // cancelled
         Ok(_) => {
             let t = line.trim();
@@ -10889,9 +10885,9 @@ pub fn do_excmd(line: &str) -> ExCmdResult {
                     .next()
                     .unwrap_or_default();
                 if numbered {
-                    println!("{lnum:>3} {l}");
+                    crate::fusevm_bridge::screen_write(format!("{lnum:>3} {l}\n").as_bytes());
                 } else {
-                    println!("{l}");
+                    crate::fusevm_bridge::screen_write(format!("{l}\n").as_bytes());
                 }
             }
             ExCmdResult::Handled

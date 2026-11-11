@@ -16,6 +16,14 @@ use crate::ported::eval::typval::tv_get_string;
 use crate::ported::eval::typval_defs_h::{typval_T, typval_vval_union::v_number, varnumber_T};
 use std::cell::RefCell;
 
+// `println!` through [`crate::fusevm_bridge::screen_write`], so an embedding
+// host's capture receives `:Intercept` output instead of the process stdout.
+macro_rules! outln {
+    ($($arg:tt)*) => {
+        crate::fusevm_bridge::screen_write(format!("{}\n", format_args!($($arg)*)).as_bytes())
+    };
+}
+
 /// AOP advice type — before, after, or around.
 ///
 /// zshrs-original / vimlrs-original — no Vim (and no C zsh) counterpart.
@@ -124,12 +132,12 @@ pub fn list() -> i32 {
     INTERCEPTS.with(|v| {
         let v = v.borrow();
         if v.is_empty() {
-            println!("no intercepts registered");
+            outln!("no intercepts registered");
             return 0;
         }
         let bold = |s: &str| format!("\x1b[1m{s}\x1b[0m");
         let cyan = |s: &str| format!("\x1b[36m{s}\x1b[0m");
-        println!(
+        outln!(
             "{:>4}  {:<8}  {:<20}  {}",
             bold("ID"),
             bold("KIND"),
@@ -142,7 +150,7 @@ pub fn list() -> i32 {
             } else {
                 i.code.clone()
             };
-            println!(
+            outln!(
                 "{:>4}  {:<8}  {:<20}  {}",
                 cyan(&i.id.to_string()),
                 kind_str(&i.kind),
@@ -162,7 +170,7 @@ pub fn remove(id: u32) -> i32 {
         let before = v.len();
         v.retain(|i| i.id != id);
         if v.len() < before {
-            println!("removed intercept {id}");
+            outln!("removed intercept {id}");
             0
         } else {
             eprintln!("vimlrs:Intercept:1: no intercept with ID {id}");
@@ -178,7 +186,7 @@ pub fn clear() -> i32 {
         let mut v = v.borrow_mut();
         let count = v.len();
         v.clear();
-        println!("cleared {count} intercepts");
+        outln!("cleared {count} intercepts");
         0
     })
 }
@@ -225,8 +233,8 @@ pub fn ex_intercept(args: &str) -> i32 {
     use crate::ported::message::{emsg, semsg};
     let args = args.trim();
     if args.is_empty() {
-        println!("Usage: :Intercept <before|after|around> <pattern> {{ code }}");
-        println!("       :Intercept list | remove <id> | clear | proceed");
+        outln!("Usage: :Intercept <before|after|around> <pattern> {{ code }}");
+        outln!("       :Intercept list | remove <id> | clear | proceed");
         return 0;
     }
     let mut it = args.splitn(2, char::is_whitespace);
@@ -271,7 +279,7 @@ pub fn ex_intercept(args: &str) -> i32 {
                 code = code[1..code.len() - 1].trim().to_string();
             }
             let id = register(kind, pattern, code);
-            println!("intercept #{id} registered");
+            outln!("intercept #{id} registered");
             0
         }
         _ => {

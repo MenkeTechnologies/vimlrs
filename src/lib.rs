@@ -39,6 +39,7 @@ pub mod dap;
 // rustdoc resolve that block's links against the crate root; the module
 // documents itself.
 pub mod dap_client;
+pub mod embed;
 pub mod fusevm_bridge;
 pub mod fusevm_disasm;
 /// Rust map API over the ported `hashtab_T` (see the module docs: the C has no
@@ -63,5 +64,19 @@ pub mod viml_regex;
 pub mod vim_funcs;
 pub mod vimstr;
 
+pub use embed::run_program;
 pub use fusevm_bridge::{eval_expr, eval_source};
 pub use ported::eval::typval_defs_h::typval_T;
+
+/// Interpreter-thread stack size. The parser, bytecode compiler and value `Drop`
+/// all walk the expression tree recursively, so a pathologically deep-but-valid
+/// script (`let x = ` + 500000 `-`, which real vim evaluates without error) would
+/// overflow the default 8 MiB main-thread stack and abort with SIGABRT. Vim
+/// tolerates such depth because its C frames are tiny; a debug Rust build's
+/// frames are far larger, so the interpreter runs on a thread with a 1 GiB stack
+/// (virtual reservation, pages commit only when touched). This keeps vimlrs
+/// matching vim's behaviour — succeed on deep linear chains, and raise `E1169` on
+/// deep *bracket* nesting via the parser's depth guard — instead of crashing.
+/// Verified: 500000 nested `-` succeed; 1000 nested `(` raise E1169 like vim.
+/// Used by the binary's worker thread and by [`run_program`].
+pub const WORKER_STACK: usize = 1 << 30;

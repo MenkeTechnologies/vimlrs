@@ -5875,6 +5875,7 @@ fn execute_impl(vm: &mut VM, argc: u8) -> Value {
     // Redirect output into a fresh capture buffer, run, then restore the sink.
     // EXECUTE_DEPTH switches `:echo` to the leading-newline capture convention.
     let saved = ECHO_SINK.with(|s| s.borrow_mut().replace(Vec::new()));
+    SAVED_SINKS.with(|s| s.borrow_mut().push(saved));
     EXECUTE_DEPTH.with(|d| d.set(d.get() + 1));
     // A HARD failure abandons the command line it was parsed on, and the line
     // `execute()` runs is a NESTED one — `do_cmdline` recursing, not this
@@ -5913,6 +5914,7 @@ fn execute_impl(vm: &mut VM, argc: u8) -> Value {
     // `:echo` still starts a new line.
     EXECUTE_DEPTH.with(|d| d.set(d.get() - 1));
     let out = ECHO_SINK.with(|s| s.borrow_mut().take().unwrap_or_default());
+    let saved = SAVED_SINKS.with(|s| s.borrow_mut().pop()).flatten();
     ECHO_SINK.with(|s| *s.borrow_mut() = saved);
     tv_to_value(tv_str(out))
 }
@@ -7497,17 +7499,19 @@ fn slice_value(base: &typval_T, from: &typval_T, to: &typval_T) -> typval_T {
 // ── echo sink + per-run lifecycle (carve-out) ──
 
 fn echo_write(s: &[u8]) {
-    ECHO_SINK.with(|sink| {
+    // A capture is active (`execute()`, `:redir`): the text is collected
+    // whatever `msg_silent` says. `:silent` suppresses the *display* of a
+    // message, not its existence — which is exactly why
+    // `execute('silent echo "x"')` still returns "\nx" in Vim.
+    let captured = ECHO_SINK.with(|sink| {
         let mut sink = sink.borrow_mut();
-        match sink.as_mut() {
-            // A capture is active (`execute()`, `:redir`): the text is collected
-            // whatever `msg_silent` says. `:silent` suppresses the *display* of a
-            // message, not its existence — which is exactly why
-            // `execute('silent echo "x"')` still returns "\nx" in Vim.
-            Some(buf) => buf.extend_from_slice(s),
-            None => display_write(s),
-        }
+        sink.as_mut().map(|buf| buf.extend_from_slice(s)).is_some()
     });
+    // Outside the borrow: `display_write` reaches [`screen_write`], which
+    // looks at [`ECHO_SINK`] again.
+    if !captured {
+        display_write(s);
+    }
 }
 
 /// Write to the screen (stdout) whether or not a capture is active — the display
@@ -7526,8 +7530,57 @@ fn display_write_raw(s: &[u8]) {
     if message::msg_silent.with(|m| m.get()) != 0 {
         return;
     }
-    use std::io::Write;
-    let _ = std::io::stdout().lock().write_all(s);
+    screen_write(s);
+}
+
+thread_local! {
+    /// The capture sinks `execute()` set aside while its own capture runs,
+    /// outermost first. Element 0 is what [`ECHO_SINK`] held before the
+    /// outermost `execute()`: an embedding host's capture, or `None` for stdout.
+    static SAVED_SINKS: RefCell<Vec<Option<Vec<u8>>>> = const { RefCell::new(Vec::new()) };
+    /// Stdin for `input()`, `inputlist()` and `confirm()` — see [`read_input_line`].
+    static INPUT: RefCell<Option<std::io::Cursor<Vec<u8>>>> = const { RefCell::new(None) };
+}
+
+/// Write `s` to the screen: the host's capture when [`capture_begin`] is active
+/// (also from inside `execute()`, whose own capture does not take screen
+/// output), else stdout. No `:silent` gate; [`display_write`] applies those.
+/// The output of `:print`, and the prompts of `input()` and `confirm()`, go here.
+pub fn screen_write(s: &[u8]) {
+    let captured = SAVED_SINKS.with(|saved| {
+        let mut saved = saved.borrow_mut();
+        let host = match saved.first_mut() {
+            Some(outer) => outer.as_mut().map(|buf| buf.extend_from_slice(s)),
+            None => ECHO_SINK.with(|sink| {
+                sink.borrow_mut()
+                    .as_mut()
+                    .map(|buf| buf.extend_from_slice(s))
+            }),
+        };
+        host.is_some()
+    });
+    if !captured {
+        use std::io::Write;
+        let mut out = std::io::stdout().lock();
+        let _ = out.write_all(s);
+        let _ = out.flush();
+    }
+}
+
+/// Feed `text` to the script as its stdin (`Some`), or read the process stdin
+/// again (`None`, the default).
+pub fn set_input(text: Option<&str>) {
+    let cursor = text.map(|t| std::io::Cursor::new(t.as_bytes().to_vec()));
+    INPUT.with(|i| *i.borrow_mut() = cursor);
+}
+
+/// Read one line, newline included, from the stdin [`set_input`] selected;
+/// `Ok(0)` at end of input.
+pub fn read_input_line(line: &mut String) -> std::io::Result<usize> {
+    INPUT.with(|i| match i.borrow_mut().as_mut() {
+        Some(text) => std::io::BufRead::read_line(text, line),
+        None => std::io::stdin().read_line(line),
+    })
 }
 
 thread_local! {
@@ -9088,6 +9141,17 @@ pub fn eval_file(path: &std::path::Path) -> Result<(), VimlError> {
     let r = eval_file_inner(path);
     set_script_version(saved_version);
     crate::ported::eval::fs::pop_sourcing_name();
+    r
+}
+
+/// Source `src` as [`eval_file`] sources a file's text — as a legacy script,
+/// every line an Ex command — except that a parse error is returned instead of
+/// falling back to statement-by-statement sourcing, and nothing is cached.
+pub fn source_text(src: &str) -> Result<(), VimlError> {
+    let saved_version = set_script_version(crate::ported::eval::userfunc::SCRIPT_VERSION_LEGACY);
+    let r = crate::viml_parser::with_ex_lines(|| crate::viml_parser::parse_program(src))
+        .and_then(|stmts| run_program(&stmts));
+    set_script_version(saved_version);
     r
 }
 
